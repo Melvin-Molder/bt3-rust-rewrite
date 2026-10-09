@@ -1,1 +1,14 @@
-rom/*
+*
+!/.gitignore
+!/Cargo.toml
+!/Cargo.lock
+!/README.md
+!/bt3-format-research.md
+!/crates/
+/crates/*
+!/crates/bt3_data/
+!/crates/bt3_data/Cargo.toml
+!/crates/bt3_data/src/
+/crates/bt3_data/src/*
+!/crates/bt3_data/src/lib.rs
+!/crates/bt3_data/src/main.rs

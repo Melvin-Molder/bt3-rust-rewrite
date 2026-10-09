@@ -1,0 +1,11 @@
+[package]
+name = "bt3-data"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bt3_data"
+
+[[bin]]
+name = "bt3-inspect"
+path = "src/main.rs"

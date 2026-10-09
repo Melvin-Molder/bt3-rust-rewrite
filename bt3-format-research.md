@@ -18,4 +18,8 @@ There is meaningful community tooling and research, so the game's executable is 
 
 The existing public material is enough to begin with archive/member inventory and focused map or animation inspection without installing a disassembler. Map section extraction and animation swapping are concretely supported. Character model structures, skeletal/animation encoding details, and a unified end-to-end asset specification remain incomplete or need validation against the precise regional/platform build. The local workspace is PS2 USA-oriented according to its existing project notes; tools should be checked for region/version compatibility before use.
 
-No tools or dependencies were installed, no Ghidra analysis was performed, and no game executable or ISO data was read during this research.
+During the initial public-source research, no tools or dependencies were installed, no Ghidra analysis was performed, and no game executable or ISO data was read.
+
+## Local ISO Read Check
+
+The workspace's ignored PS2 USA ISO was read-only probed to verify the boot path for the first Rust loader. Its ISO9660 primary volume descriptor is at sector 16 and has the `CD001` signature. The volume ID is `SLUS_21678`; the root contains `SYSTEM.CNF`, whose contents name `cdrom0:\SLUS_216.78;1` as `BOOT2`, and the `SLUS_216.78` executable. No asset files or executable contents were copied into the repository.
