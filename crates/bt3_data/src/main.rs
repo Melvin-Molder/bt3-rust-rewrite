@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use bt3_data::Iso9660;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
 use bt3_data::bpe;
+use bt3_data::tex::TextureResource;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image_path = std::env::args_os()
@@ -28,14 +29,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let entry = archive.entry(&mut image, location.index)?;
         let packed = archive.read_entry(&mut image, location.index)?;
         let decoded = bpe::decode(&packed)?;
+        let resource = TextureResource::parse(&decoded)?;
 
         println!(
-            "Loading-screen type {screen_type}, file ID 0x{file_id:X}: partition {}, entry {} of {} ({} packed bytes -> {} decoded bytes)",
+            "Loading-screen type {screen_type}, file ID 0x{file_id:X}: partition {}, entry {} of {} ({} packed -> {} decoded bytes; {} textures)",
             location.partition,
             location.index,
             archive.entry_count(),
             entry.size,
-            decoded.len()
+            decoded.len(),
+            resource.entries.len()
         );
     }
 

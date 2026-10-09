@@ -4,6 +4,7 @@ use std::path::Path;
 
 pub mod afs;
 pub mod bpe;
+pub mod tex;
 
 const SECTOR_SIZE: u64 = 2048;
 const PRIMARY_VOLUME_DESCRIPTOR_LBA: u64 = 16;

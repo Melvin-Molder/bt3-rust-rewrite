@@ -4,7 +4,7 @@ An original Rust implementation intended to read data from a user-provided copy 
 
 ## Data-loading proof
 
-The `bt3-data` crate reads the ISO9660 primary volume descriptor and root `SYSTEM.CNF`, then locates and BPE-decodes all three loading-screen resources (global file IDs `0x3C1`–`0x3C3`) from `DATA/PZS3US1.AFS`. Run it from the workspace root:
+The `bt3-data` crate reads the ISO9660 primary volume descriptor and root `SYSTEM.CNF`, then locates and BPE-decodes all three loading-screen resources (global file IDs `0x3C1`–`0x3C3`) from `DATA/PZS3US1.AFS`. It parses their relative texture tables and validates pixel/CLUT ranges. Run it from the workspace root:
 
 ```powershell
 cargo run -p bt3-data --bin bt3-inspect
