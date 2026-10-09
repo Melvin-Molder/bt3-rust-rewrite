@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use bt3_data::Iso9660;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
 use bt3_data::bpe;
+use bt3_data::gs::decode_sprite_texture;
 use bt3_data::tex::TextureResource;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let resource = TextureResource::parse(&decoded)?;
 
         println!(
-            "Loading-screen type {screen_type}, file ID 0x{file_id:X}: partition {}, entry {} of {} ({} packed -> {} decoded bytes; {} textures)",
+            "Loading-screen type {screen_type}, file ID 0x{file_id:X}: partition {}, entry {} of {} ({} packed -> {} decoded bytes; {} RGBA textures)",
             location.partition,
             location.index,
             archive.entry_count(),
@@ -40,6 +41,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             decoded.len(),
             resource.entries.len()
         );
+        for (texture_index, texture) in resource.entries.iter().enumerate() {
+            let rgba = decode_sprite_texture(texture)?;
+            println!(
+                "  texture {texture_index}: {}x{} RGBA ({} pixels with alpha)",
+                rgba.width,
+                rgba.height,
+                rgba.pixels
+                    .chunks_exact(4)
+                    .filter(|pixel| pixel[3] != 0)
+                    .count()
+            );
+        }
     }
 
     Ok(())

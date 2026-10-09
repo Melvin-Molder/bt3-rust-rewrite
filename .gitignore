@@ -15,3 +15,9 @@
 !/crates/bt3_data/src/afs.rs
 !/crates/bt3_data/src/bpe.rs
 !/crates/bt3_data/src/tex.rs
+!/crates/bt3_data/src/gs.rs
+!/crates/bt3_game/
+!/crates/bt3_game/Cargo.toml
+!/crates/bt3_game/src/
+/crates/bt3_game/src/*
+!/crates/bt3_game/src/main.rs

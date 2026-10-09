@@ -4,13 +4,15 @@ An original Rust implementation intended to read data from a user-provided copy 
 
 ## Data-loading proof
 
-The `bt3-data` crate reads the ISO9660 primary volume descriptor and root `SYSTEM.CNF`, then locates and BPE-decodes all three loading-screen resources (global file IDs `0x3C1`–`0x3C3`) from `DATA/PZS3US1.AFS`. It parses their relative texture tables and validates pixel/CLUT ranges. Run it from the workspace root:
+The `bt3-data` crate reads the ISO9660 primary volume descriptor and root `SYSTEM.CNF`, then locates, BPE-decodes, and converts the three loading-screen resources (global file IDs `0x3C1`–`0x3C3`) from `DATA/PZS3US1.AFS` into in-memory RGBA textures. Run it from the workspace root:
 
 ```powershell
 cargo run -p bt3-data --bin bt3-inspect
 ```
 
-By default it reads `rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso`; pass another ISO path as the first argument to override it. The ISO path reader resolves nested directories, and the AFS reader seeks directly to the requested entry rather than loading the 1.46 GB archive. The global file-ID mapping and loading-screen file/decompression behavior are grounded in the decomp sources listed below. Packed and decoded bytes stay in memory and are not extracted to disk.
+By default it reads `rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso`; pass another ISO path as the first argument to override it. The ISO path reader resolves nested directories, and the AFS reader seeks directly to requested entries rather than loading the 1.46 GB archive. The global file-ID mapping, loading-screen behavior, and asset layouts are grounded in the decomp sources listed below. Packed data, decoded resources, and RGBA textures stay in memory and are not extracted to disk.
+
+Run the Bevy loading-screen prototype with `cargo run -p bt3-game`; it accepts the ISO path as its first argument as well. This prototype displays loading-screen type 0 at native 512x448 resolution and advances its original two-frame animation/counter. Space or Enter counts as the original action button for now.
 
 ## Sources and credit
 

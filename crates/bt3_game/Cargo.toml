@@ -1,0 +1,8 @@
+[package]
+name = "bt3-game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.19.1", default-features = false, features = ["2d"] }
+bt3-data = { path = "../bt3_data" }
