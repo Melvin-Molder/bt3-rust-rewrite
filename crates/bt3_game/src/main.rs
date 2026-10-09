@@ -13,7 +13,7 @@ use bt3_data::tex::TextureResource;
 
 const SCREEN_WIDTH: u32 = 512;
 const SCREEN_HEIGHT: u32 = 448;
-const TYPE_ZERO_FILE_ID: u32 = 0x3C1;
+const FIRST_LOADING_FILE_ID: u32 = 0x3C1;
 const FRAME_SECONDS: f32 = 1.0 / 30.0;
 
 #[derive(Resource)]
@@ -21,29 +21,56 @@ struct ScreenImages(Vec<RgbaTexture>);
 
 #[derive(Resource)]
 struct LoadingState {
+    screen_type: u8,
     frame_accumulator: f32,
     frame: u8,
     animation_timer: u16,
+    period: u16,
     cycle_count: u8,
     counter: u16,
     presses: u8,
+    pulse_size: f32,
+    pulse_angle: f32,
 }
 
-impl Default for LoadingState {
-    fn default() -> Self {
+impl LoadingState {
+    fn new(screen_type: u8) -> Self {
+        let (period, cycle_count, presses) = if screen_type == 0 {
+            (12, 3, 1)
+        } else {
+            (0, 1, 2)
+        };
         Self {
+            screen_type,
             frame_accumulator: 0.0,
             frame: 0,
             animation_timer: 0,
-            cycle_count: 3,
+            period,
+            cycle_count,
             counter: 0,
-            presses: 1,
+            presses,
+            pulse_size: 0.0,
+            pulse_angle: 0.0,
         }
     }
 }
 
 #[derive(Component)]
-struct AnimatedBanner;
+struct AnimatedTexture {
+    images: [Handle<Image>; 2],
+    rects: [Rect; 2],
+}
+
+#[derive(Component)]
+struct CounterDigit {
+    position: usize,
+    base_x: f32,
+}
+
+#[derive(Component)]
+struct PulseSprite {
+    base_size: Vec2,
+}
 
 #[derive(Component)]
 struct CounterPip {
@@ -52,13 +79,29 @@ struct CounterPip {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image_path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from("rom").join("Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso")
-        });
-    let textures = load_type_zero_textures(&image_path)?;
+    let mut image_path =
+        PathBuf::from("rom").join("Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+    let mut screen_type = 0u8;
+    let mut arguments = std::env::args_os().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--screen" {
+            let value = arguments
+                .next()
+                .ok_or("--screen requires a value of 0 or 1")?;
+            screen_type = value
+                .to_string_lossy()
+                .parse::<u8>()
+                .map_err(|_| "--screen requires a value of 0 or 1")?;
+        } else {
+            image_path = PathBuf::from(argument);
+        }
+    }
+    if screen_type > 1 {
+        return Err("--screen requires a value of 0 or 1".into());
+    }
+
+    let textures = load_screen_textures(&image_path, screen_type)?;
+    let title = format!("Budokai Tenkaichi 3 - Loading Screen {screen_type}");
 
     App::new()
         .add_plugins(
@@ -66,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "Budokai Tenkaichi 3 - Loading Screen 0".to_owned(),
+                        title,
                         resolution: WindowResolution::new(SCREEN_WIDTH, SCREEN_HEIGHT)
                             .with_scale_factor_override(1.0),
                         resizable: false,
@@ -76,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
         )
         .insert_resource(ScreenImages(textures))
-        .init_resource::<LoadingState>()
+        .insert_resource(LoadingState::new(screen_type))
         .add_systems(Startup, setup_screen)
         .add_systems(Update, update_loading_screen)
         .run();
@@ -84,9 +127,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn load_type_zero_textures(path: &PathBuf) -> Result<Vec<RgbaTexture>, Box<dyn std::error::Error>> {
+fn load_screen_textures(
+    path: &PathBuf,
+    screen_type: u8,
+) -> Result<Vec<RgbaTexture>, Box<dyn std::error::Error>> {
     let mut image = Iso9660::open(path)?;
-    let location = partition_entry_for_id(TYPE_ZERO_FILE_ID);
+    let location = partition_entry_for_id(FIRST_LOADING_FILE_ID + u32::from(screen_type));
     let archive_path = format!("DATA/PZS3US{}.AFS", location.partition);
     let archive = AfsArchive::open(&mut image, archive_path)?;
     let packed = archive.read_entry(&mut image, location.index)?;
@@ -104,6 +150,7 @@ fn setup_screen(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     screen_images: Res<ScreenImages>,
+    state: Res<LoadingState>,
 ) {
     let handles = screen_images
         .0
@@ -128,7 +175,11 @@ fn setup_screen(
     commands.spawn(Camera2d);
     spawn_solid_sprite(
         &mut commands,
-        Color::srgba_u8(0x22, 0x49, 0x68, 0x80),
+        if state.screen_type == 0 {
+            Color::srgb_u8(0x22, 0x49, 0x68)
+        } else {
+            Color::srgb_u8(0x46, 0x10, 0x12)
+        },
         0.0,
         0.0,
         SCREEN_WIDTH as f32,
@@ -136,23 +187,38 @@ fn setup_screen(
         0.0,
     );
 
-    spawn_texture_sprite(
-        &mut commands,
-        handles[1].clone(),
+    if state.screen_type == 0 {
+        setup_counter_screen(&mut commands, &handles);
+    } else {
+        setup_pulse_screen(&mut commands, &handles);
+    }
+}
+
+fn setup_counter_screen(commands: &mut Commands, handles: &[Handle<Image>]) {
+    let banner = handles[1].clone();
+    let sprite = spawn_texture_sprite(
+        commands,
+        banner.clone(),
         Rect::new(0.0, 0.0, 64.0, 128.0),
         [45.0, 265.0, 109.0, 393.0],
         1.0,
         Color::WHITE,
-        Some(AnimatedBanner),
     );
+    commands.entity(sprite).insert(AnimatedTexture {
+        images: [banner.clone(), banner],
+        rects: [
+            Rect::new(0.0, 0.0, 64.0, 128.0),
+            Rect::new(64.0, 0.0, 128.0, 128.0),
+        ],
+    });
+
     spawn_texture_sprite(
-        &mut commands,
+        commands,
         handles[0].clone(),
         Rect::new(0.0, 21.0, 128.0, 128.0),
         [19.0, 318.0, 147.0, 425.0],
         2.0,
         Color::WHITE,
-        None,
     );
 
     for decade in 0..=10u8 {
@@ -176,7 +242,7 @@ fn setup_screen(
                 )
             };
             let sprite = spawn_texture_sprite(
-                &mut commands,
+                commands,
                 handles[0].clone(),
                 source_rect,
                 [
@@ -187,10 +253,60 @@ fn setup_screen(
                 ],
                 3.0 + f32::from(decade) * 10.0 + f32::from(index) * 0.01,
                 Color::WHITE,
-                None,
             );
             commands.entity(sprite).insert(CounterPip { decade, index });
         }
+    }
+}
+
+fn setup_pulse_screen(commands: &mut Commands, handles: &[Handle<Image>]) {
+    let first_image = handles[0].clone();
+    let second_image = handles[1].clone();
+    let main = spawn_texture_sprite(
+        commands,
+        first_image.clone(),
+        Rect::new(0.0, 0.0, 128.0, 128.0),
+        [26.0, 297.0, 154.0, 425.0],
+        1.0,
+        Color::WHITE,
+    );
+    commands.entity(main).insert(AnimatedTexture {
+        images: [first_image, second_image],
+        rects: [
+            Rect::new(0.0, 0.0, 128.0, 128.0),
+            Rect::new(0.0, 0.0, 128.0, 128.0),
+        ],
+    });
+
+    let pulse = spawn_texture_sprite(
+        commands,
+        handles[2].clone(),
+        Rect::new(0.0, 64.0, 67.0, 127.0),
+        [121.0, 321.0, 188.0, 384.0],
+        2.0,
+        Color::WHITE,
+    );
+    commands.entity(pulse).insert(PulseSprite {
+        base_size: Vec2::new(67.0, 63.0),
+    });
+
+    for position in 0..3usize {
+        let x = 139.0 + position as f32 * 12.0;
+        let digit = spawn_texture_sprite(
+            commands,
+            handles[2].clone(),
+            Rect::new(32.0, 28.0, 48.0, 56.0),
+            [x, 337.0, x + 16.0, 365.0],
+            3.0 + position as f32 * 0.01,
+            Color::WHITE,
+        );
+        commands.entity(digit).insert((
+            CounterDigit {
+                position,
+                base_x: x,
+            },
+            Visibility::Hidden,
+        ));
     }
 }
 
@@ -198,51 +314,133 @@ fn update_loading_screen(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<LoadingState>,
-    mut animated: Query<&mut Sprite, With<AnimatedBanner>>,
-    mut pips: Query<(&CounterPip, &mut Visibility)>,
+    mut animated: Query<
+        (&AnimatedTexture, &mut Sprite),
+        (Without<PulseSprite>, Without<CounterDigit>),
+    >,
+    mut pips: Query<(&CounterPip, &mut Visibility), Without<CounterDigit>>,
+    mut digits: Query<
+        (&CounterDigit, &mut Sprite, &mut Transform, &mut Visibility),
+        (
+            Without<CounterPip>,
+            Without<PulseSprite>,
+            Without<AnimatedTexture>,
+        ),
+    >,
+    mut pulses: Query<
+        (&PulseSprite, &mut Sprite),
+        (Without<AnimatedTexture>, Without<CounterDigit>),
+    >,
 ) {
     state.frame_accumulator += time.delta_secs();
     while state.frame_accumulator >= FRAME_SECONDS {
         state.frame_accumulator -= FRAME_SECONDS;
-        if state.animation_timer > 12 || state.presses == 0 {
-            state.presses = 1;
-            state.frame ^= 1;
-            state.animation_timer = 0;
-            if state.frame == 0 {
-                state.cycle_count -= 1;
-                if state.cycle_count == 0 {
-                    if state.counter < 100 {
-                        state.counter += 1;
+        if state.screen_type == 0 {
+            if state.period < state.animation_timer || state.presses == 0 {
+                state.presses = 1;
+                state.frame ^= 1;
+                state.animation_timer = 0;
+                if state.frame == 0 {
+                    state.cycle_count -= 1;
+                    if state.cycle_count == 0 {
+                        state.counter = (state.counter + 1).min(100);
+                        state.cycle_count = 3;
                     }
-                    state.cycle_count = 3;
                 }
+            }
+        } else {
+            if state.presses == 0 {
+                state.frame ^= 1;
+                state.presses = state.frame + 2;
+                if state.frame == 0 {
+                    state.cycle_count -= 1;
+                    if state.cycle_count == 0 {
+                        state.counter = (state.counter + 1).min(999);
+                        state.cycle_count = 1;
+                    }
+                }
+            }
+            state.pulse_size += state.pulse_angle.sin() * 0.5;
+            state.pulse_angle += 0.2;
+            if state.pulse_angle >= std::f32::consts::PI {
+                state.pulse_angle -= std::f32::consts::TAU;
             }
         }
         state.animation_timer += 1;
     }
 
-    if let Ok(mut sprite) = animated.single_mut() {
-        let u0 = f32::from(state.frame) * 64.0;
-        sprite.rect = Some(Rect::new(u0, 0.0, u0 + 64.0, 128.0));
+    for (animation, mut sprite) in &mut animated {
+        sprite.image = animation.images[usize::from(state.frame)].clone();
+        sprite.rect = Some(animation.rects[usize::from(state.frame)]);
     }
 
-    let visible_partial = (state.counter % 10) as u8;
-    let full_decades = (state.counter / 10) as u8;
-    for (pip, mut visibility) in &mut pips {
-        let visible = if pip.decade == 0 {
-            pip.index < visible_partial
+    if state.screen_type == 0 {
+        let visible_partial = (state.counter % 10) as u8;
+        let full_decades = (state.counter / 10) as u8;
+        for (pip, mut visibility) in &mut pips {
+            let visible = if pip.decade == 0 {
+                pip.index < visible_partial
+            } else {
+                pip.decade <= full_decades
+            };
+            *visibility = if visible {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
+    } else {
+        let glyphs = decimal_glyphs(state.counter);
+        let count_digits = if state.counter >= 100 {
+            3
+        } else if state.counter >= 10 {
+            2
         } else {
-            pip.decade <= full_decades
+            1
         };
-        *visibility = if visible {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
+        let offset = match count_digits {
+            1 => -14.0,
+            2 => -7.0,
+            _ => 0.0,
         };
+        for (digit, mut sprite, mut transform, mut visibility) in &mut digits {
+            let value = glyphs[digit.position];
+            transform.translation.x = digit.base_x + offset - 256.0;
+            if state.counter != 0 && value < 10 {
+                let u = f32::from(value & 7) * 16.0;
+                let v = f32::from(value >> 3) * 28.0;
+                sprite.rect = Some(Rect::new(u, v, u + 16.0, v + 28.0));
+                *visibility = Visibility::Visible;
+            } else {
+                *visibility = Visibility::Hidden;
+            }
+        }
+        for (pulse, mut sprite) in &mut pulses {
+            sprite.custom_size = Some(Vec2::new(
+                pulse.base_size.x + state.pulse_size * 2.0,
+                pulse.base_size.y + state.pulse_size * 2.0,
+            ));
+        }
     }
 
-    if keyboard.just_pressed(KeyCode::Space) || keyboard.just_pressed(KeyCode::Enter) {
-        state.presses = 0;
+    let presses = u8::from(keyboard.just_pressed(KeyCode::Space))
+        + u8::from(keyboard.just_pressed(KeyCode::Enter));
+    state.presses = state.presses.saturating_sub(presses);
+}
+
+fn decimal_glyphs(value: u16) -> [u8; 3] {
+    if value == 0 {
+        [10, 10, 0]
+    } else if value < 10 {
+        [10, 10, value as u8]
+    } else if value < 100 {
+        [10, (value / 10) as u8, (value % 10) as u8]
+    } else {
+        [
+            (value / 100) as u8,
+            ((value / 10) % 10) as u8,
+            (value % 10) as u8,
+        ]
     }
 }
 
@@ -270,7 +468,6 @@ fn spawn_texture_sprite(
     screen_rect: [f32; 4],
     z: f32,
     color: Color,
-    marker: Option<AnimatedBanner>,
 ) -> Entity {
     let [x0, y0, x1, y1] = screen_rect;
     let size = Vec2::new(x1 - x0, y1 - y0);
@@ -280,11 +477,7 @@ fn spawn_texture_sprite(
     sprite.rect = Some(rect);
     sprite.color = color;
 
-    let entity = commands
+    commands
         .spawn((sprite, Transform::from_translation(position)))
-        .id();
-    if let Some(marker) = marker {
-        commands.entity(entity).insert(marker);
-    }
-    entity
+        .id()
 }

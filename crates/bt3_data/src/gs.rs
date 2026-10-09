@@ -23,10 +23,16 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
         .ok_or_else(|| invalid_data("sprite texture has no CLUT packet"))?;
 
     let texture_psm = ((entry.texture_register >> 20) & 0x3f) as u8;
+    let texture_alpha = ((entry.texture_register >> 34) & 1) as u8;
     let clut_psm = ((entry.texture_register >> 51) & 0xf) as u8;
     let clut_mode = ((entry.texture_register >> 55) & 1) as u8;
     let clut_offset = ((entry.texture_register >> 56) & 0x1f) as u8;
-    if texture_psm != 0x14 || clut_psm != 0 || clut_mode != 0 || clut_offset != 0 {
+    if texture_psm != 0x14
+        || texture_alpha != 0
+        || clut_psm != 0
+        || clut_mode != 0
+        || clut_offset != 0
+    {
         return Err(invalid_data("unsupported sprite texture or CLUT mode"));
     }
 
@@ -112,6 +118,16 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
         .map_err(|_| io::Error::other("could not allocate RGBA texture"))?;
     pixels.resize(output_len, 0);
 
+    let mut palette_memory = [0u8; 64];
+    for palette_y in 0..2 {
+        for palette_x in 0..8 {
+            let source = (palette_y * 8 + palette_x) * 4;
+            let destination = psmct32_byte_offset(palette_x, palette_y);
+            palette_memory[destination..destination + 4]
+                .copy_from_slice(&clut_transfer.image[source..source + 4]);
+        }
+    }
+
     for y in 0..height {
         for x in 0..width {
             let (index_byte, index_shift) = psmt4_location(x, y, target_pages_wide);
@@ -124,7 +140,7 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
             let color_index = (local_memory[index_byte] >> index_shift) & 0x0f;
             let palette_index = csm1_t32_i4_index(color_index);
             let palette_start = palette_index * 4;
-            let rgba = &clut_transfer.image[palette_start..palette_start + 4];
+            let rgba = &palette_memory[palette_start..palette_start + 4];
             let output = (y * width + x) * 4;
             pixels[output] = rgba[0];
             pixels[output + 1] = rgba[1];
@@ -259,8 +275,8 @@ fn psmct32_byte_offset(x: usize, y: usize) -> usize {
     let pixel = (pixel_x & 1)
         | ((pixel_y & 1) << 1)
         | ((pixel_x & 2) << 1)
-        | ((pixel_y & 2) << 2)
-        | ((pixel_x & 4) << 2)
+        | ((pixel_y & 2) << 3)
+        | ((pixel_x & 4) << 1)
         | ((pixel_y & 4) << 3);
     block * 256 + pixel * 4
 }
@@ -320,6 +336,11 @@ mod tests {
         assert_eq!(psmct32_byte_offset(0, 0), 0);
         assert_eq!(psmct32_byte_offset(8, 0), 256);
         assert_eq!(psmct32_byte_offset(0, 8), 512);
+        assert_eq!(psmct32_byte_offset(1, 0), 4);
+        assert_eq!(psmct32_byte_offset(2, 0), 16);
+        assert_eq!(psmct32_byte_offset(4, 0), 32);
+        assert_eq!(psmct32_byte_offset(0, 1), 8);
+        assert_eq!(psmct32_byte_offset(0, 2), 64);
 
         let mut addresses = Vec::new();
         for y in 0..PSMCT32_PAGE_HEIGHT {
@@ -356,6 +377,18 @@ mod tests {
     }
 
     #[test]
+    fn palette_upload_and_csm1_lookup_preserve_transfer_order() {
+        for index in 0u8..16 {
+            let upload_x = usize::from(index % 8);
+            let upload_y = usize::from(index / 8);
+            assert_eq!(
+                psmct32_byte_offset(upload_x, upload_y),
+                csm1_t32_i4_index(index) * 4
+            );
+        }
+    }
+
+    #[test]
     fn decodes_one_gs_page_and_its_csm1_palette() {
         let pixel_image = vec![0x21; GS_PAGE_BYTES];
         let mut palette_image = vec![0; 16 * 4];
@@ -365,7 +398,7 @@ mod tests {
                 color_index * 10,
                 30,
                 200 - color_index * 5,
-                128,
+                if index == 2 { 0 } else { 128 },
             ]);
         }
         let pixel_packet = image_packet(64, 32, &pixel_image);
@@ -385,7 +418,7 @@ mod tests {
         assert_eq!(decoded.width, 128);
         assert_eq!(decoded.height, 128);
         assert_eq!(pixel_at(&decoded, 0, 0), [10, 30, 195, 255]);
-        assert_eq!(pixel_at(&decoded, 0, 2), [40, 30, 180, 255]);
+        assert_eq!(pixel_at(&decoded, 0, 2), [20, 30, 190, 0]);
     }
 
     fn image_packet(width: usize, height: usize, image: &[u8]) -> Vec<u8> {

@@ -4,7 +4,7 @@ An original Rust implementation intended to read data from a user-provided copy 
 
 ## Data-loading proof
 
-The `bt3-data` crate reads the ISO9660 primary volume descriptor and root `SYSTEM.CNF`, then locates, BPE-decodes, and converts the three loading-screen resources (global file IDs `0x3C1`–`0x3C3`) from `DATA/PZS3US1.AFS` into in-memory RGBA textures. Run it from the workspace root:
+The `bt3-data` crate reads the ISO9660 primary volume descriptor and root `SYSTEM.CNF`, then locates, BPE-decodes, and converts the three loading-screen resources (global file IDs `0x3C1`–`0x3C3`) from `DATA/PZS3US1.AFS` into in-memory RGBA textures. Run its inspector from the workspace root:
 
 ```powershell
 cargo run -p bt3-data --bin bt3-inspect
@@ -12,7 +12,7 @@ cargo run -p bt3-data --bin bt3-inspect
 
 By default it reads `rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso`; pass another ISO path as the first argument to override it. The ISO path reader resolves nested directories, and the AFS reader seeks directly to requested entries rather than loading the 1.46 GB archive. The global file-ID mapping, loading-screen behavior, and asset layouts are grounded in the decomp sources listed below. Packed data, decoded resources, and RGBA textures stay in memory and are not extracted to disk.
 
-Run the Bevy loading-screen prototype with `cargo run -p bt3-game`; it accepts the ISO path as its first argument as well. This prototype displays loading-screen type 0 at native 512x448 resolution and advances its original two-frame animation/counter. Space or Enter counts as the original action button for now.
+Run the Bevy loading-screen prototype with `cargo run -p bt3-game`; it accepts the ISO path as its first argument as well. It displays loading-screen type 0 by default, or type 1 with `cargo run -p bt3-game -- --screen 1`, at native 512x448 resolution. Space and Enter count as the original action button.
 
 ## Sources and credit
 
