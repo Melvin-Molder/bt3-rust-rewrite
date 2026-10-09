@@ -12,3 +12,4 @@
 /crates/bt3_data/src/*
 !/crates/bt3_data/src/lib.rs
 !/crates/bt3_data/src/main.rs
+!/crates/bt3_data/src/afs.rs

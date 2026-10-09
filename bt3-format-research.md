@@ -23,3 +23,9 @@ During the initial public-source research, no tools or dependencies were install
 ## Local ISO Read Check
 
 The workspace's ignored PS2 USA ISO was read-only probed to verify the boot path for the first Rust loader. Its ISO9660 primary volume descriptor is at sector 16 and has the `CD001` signature. The volume ID is `SLUS_21678`; the root contains `SYSTEM.CNF`, whose contents name `cdrom0:\SLUS_216.78;1` as `BOOT2`, and the `SLUS_216.78` executable. No asset files or executable contents were copied into the repository.
+
+## Decomp-Grounded File Loading
+
+The local read-only reference at `C:\Users\User\.code\BT3-Decompiled` documents the file ID mapping in `docs/systems/files_and_assets.md` and implements it in `src/sys/file.c` (`File_OpenById`): ID 0 maps to partition 0 entry 0; IDs 1 through `0xD47` map to partition 1 entries `id - 1`; IDs from `0xD48` map to partition 2 entries `id - 0xD48`. The same system note identifies files 2, 3, 4, and 5 as common files loaded at boot.
+
+The actual USA ISO's `DATA/PZS3US1.AFS` is 1,462,016,000 bytes. Its header declares 3,399 (`0xD47`) entries. Thus global ID 2 resolves to AFS1 entry 1; the observed little-endian table row gives offset `0x9800` and size `0x15B00`, which is in bounds. The first 16 bytes were read in memory for the loader proof, not written to the repository. The AFS table shape follows the community format writeup linked above; this implementation bounds-checks its archive and table reads and does not attempt to decode the entry payload.

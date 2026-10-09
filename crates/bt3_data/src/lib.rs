@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+pub mod afs;
+
 const SECTOR_SIZE: u64 = 2048;
 const PRIMARY_VOLUME_DESCRIPTOR_LBA: u64 = 16;
 
@@ -64,8 +66,65 @@ impl Iso9660 {
         self.volume_blocks
     }
 
-    pub fn read_root_file(&mut self, requested_name: &str) -> io::Result<Vec<u8>> {
-        let directory = self.read_extent(self.root_extent, self.root_size)?;
+    pub fn read_file(&mut self, path: &str) -> io::Result<Vec<u8>> {
+        let record = self.resolve_file(path)?;
+        self.read_extent(record.extent, record.size)
+    }
+
+    pub fn file_size(&mut self, path: &str) -> io::Result<u64> {
+        Ok(u64::from(self.resolve_file(path)?.size))
+    }
+
+    pub fn read_file_range(&mut self, path: &str, offset: u64, size: usize) -> io::Result<Vec<u8>> {
+        let record = self.resolve_file(path)?;
+        let end = offset
+            .checked_add(u64::try_from(size).map_err(|_| invalid_data("range is too large"))?)
+            .filter(|end| *end <= u64::from(record.size))
+            .ok_or_else(|| invalid_data("requested range exceeds ISO9660 file"))?;
+        let _ = end;
+        let base = u64::from(record.extent)
+            .checked_mul(u64::from(self.block_size))
+            .ok_or_else(|| invalid_data("ISO9660 extent offset overflow"))?;
+        let absolute_offset = base
+            .checked_add(offset)
+            .ok_or_else(|| invalid_data("ISO9660 file offset overflow"))?;
+        read_at(&mut self.file, absolute_offset, size, self.file_size)
+    }
+
+    fn resolve_file(&mut self, path: &str) -> io::Result<DirectoryRecord> {
+        let components: Vec<_> = path.split('/').filter(|part| !part.is_empty()).collect();
+        if components.is_empty() {
+            return Err(invalid_data("ISO9660 path is empty"));
+        }
+
+        let mut parent_extent = self.root_extent;
+        let mut parent_size = self.root_size;
+        for (index, component) in components.iter().enumerate() {
+            let record = self.find_child(parent_extent, parent_size, component)?;
+            let is_last = index + 1 == components.len();
+            if is_last {
+                if record.flags & 0x02 != 0 {
+                    return Err(invalid_data("ISO9660 path resolves to a directory"));
+                }
+                return Ok(record);
+            }
+            if record.flags & 0x02 == 0 {
+                return Err(invalid_data("ISO9660 path component is not a directory"));
+            }
+            parent_extent = record.extent;
+            parent_size = record.size;
+        }
+
+        Err(invalid_data("invalid ISO9660 path"))
+    }
+
+    fn find_child(
+        &mut self,
+        directory_extent: u32,
+        directory_size: u32,
+        requested_name: &str,
+    ) -> io::Result<DirectoryRecord> {
+        let directory = self.read_extent(directory_extent, directory_size)?;
         let mut offset = 0usize;
 
         while offset < directory.len() {
@@ -83,11 +142,11 @@ impl Iso9660 {
                 .ok_or_else(|| invalid_data("ISO9660 directory record exceeds directory"))?;
             let record = parse_directory_record(&directory[offset..end])?;
 
-            if record.flags & 0x02 == 0 && iso_name_matches(&record.name, requested_name) {
+            if iso_name_matches(&record.name, requested_name) {
                 if record.flags & 0x80 != 0 {
-                    return Err(invalid_data("multi-extent ISO9660 files are unsupported"));
+                    return Err(invalid_data("multi-extent ISO9660 entries are unsupported"));
                 }
-                return self.read_extent(record.extent, record.size);
+                return Ok(record);
             }
 
             offset = end;
@@ -95,7 +154,7 @@ impl Iso9660 {
 
         Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("{requested_name} was not found in the ISO9660 root directory"),
+            format!("{requested_name} was not found in the ISO9660 directory"),
         ))
     }
 
@@ -172,11 +231,10 @@ fn iso_name_matches(identifier: &[u8], requested_name: &str) -> bool {
 }
 
 fn read_at(file: &mut File, offset: u64, size: usize, file_size: u64) -> io::Result<Vec<u8>> {
-    let end = offset
-        .checked_add(size as u64)
+    offset
+        .checked_add(u64::try_from(size).map_err(|_| invalid_data("read is too large"))?)
         .filter(|end| *end <= file_size)
         .ok_or_else(|| invalid_data("ISO9660 extent is outside the image"))?;
-    let _ = end;
 
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = vec![0; size];
