@@ -81,6 +81,13 @@ impl AfsArchive {
         Ok(entry)
     }
 
+    pub fn read_entry(&self, iso: &mut Iso9660, index: u32) -> io::Result<Vec<u8>> {
+        let entry = self.entry(iso, index)?;
+        let size = usize::try_from(entry.size)
+            .map_err(|_| invalid_data("AFS entry is too large for this platform"))?;
+        iso.read_file_range(&self.path, u64::from(entry.offset), size)
+    }
+
     pub fn read_entry_prefix(
         &self,
         iso: &mut Iso9660,
