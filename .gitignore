@@ -22,6 +22,7 @@
 !/crates/bt3_data/src/font.rs
 !/crates/bt3_data/src/snd.rs
 !/crates/bt3_data/src/model.rs
+!/crates/bt3_data/src/motion.rs
 !/crates/bt3_game/
 !/crates/bt3_game/Cargo.toml
 !/crates/bt3_game/src/

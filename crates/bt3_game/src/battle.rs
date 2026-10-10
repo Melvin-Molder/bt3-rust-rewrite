@@ -1,9 +1,9 @@
-//! `Battle_Main` (src/battle/battle.c) up to its first frames: `Battle_Load` reads the fighters' model files
-//! behind the loading screen, then each frame the two fighters are drawn the way `BtlObjDraw_DrawModel` and VU1
-//! program 0 draw them, seen through side 0's fighter camera (`ChrCam_CalcLockOn`).
+//! `Battle_Main` (src/battle/battle.c) up to its first frames: `Battle_Load` reads the fighters' model and motion
+//! files behind the loading screen, then each frame the fighters loop their idle motion and are drawn the way
+//! `BtlObjDraw_DrawModel` and VU1 program 0 draw them, seen through side 0's fighter camera (`ChrCam_CalcLockOn`).
 //!
-//! Not ported yet: the skeleton and animations (the fighters stand in their bind pose at the stage's starting
-//! places), the stage itself, the intro camera, the HUD and everything the fighters do.
+//! Not ported yet: the fighters' actions (they stand at the stage's starting places), the hair / cloth chains,
+//! the face animation, the stage itself, the intro camera and the HUD.
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -12,6 +12,7 @@ use bt3_data::gs::{
     RgbaTexture, decode_clut256_upload, decode_sprite_texture, psmt8_row_from_upload,
 };
 use bt3_data::model::{CharaModel, ModelPart, TEXTURE_SECTION, tex0_cbp, tex0_tbp};
+use bt3_data::motion::{Motion, NODE_MAX};
 use bt3_data::pack_section;
 use bt3_data::stage::StageResource;
 use bt3_data::tex::TextureResource;
@@ -20,6 +21,12 @@ use crate::char_select::BattleSetup;
 
 /// `BTL_FILE_CHARA`: `0x590 + chara * 10 + costume`.
 pub const CHARA_FILE: u32 = 0x590;
+/// The character's motion table (`slot->file[1]`): `0x598 + chara * 10`.
+const MOTION_FILE: u32 = 0x598;
+/// `BtlAct_GetIdleMotion` on the ground at full health.
+const IDLE_MOTION: usize = 0;
+/// `BtlObj_GetDefaultAnimStep`: frames per update.
+const ANIM_STEP: f32 = 2.0;
 /// `BTL_FILE_STAGE`: `0x171 + stage`.
 pub const STAGE_FILE: u32 = 0x171;
 /// `Battle_ResetWork`: `Bgm_Play(Battle_GetBgm() + 0x10B16)`.
@@ -59,6 +66,7 @@ struct FighterModel {
     model: CharaModel,
     /// Per part, per batch: the material texture and the shading row.
     batch_textures: Vec<Vec<[usize; 2]>>,
+    idle: Motion,
 }
 
 /// Reads what the battle draws so far. `read` returns a file of the AFS archives by id.
@@ -87,11 +95,29 @@ pub fn load(
     for side in setup.sides {
         let file_id = CHARA_FILE + side.chara.max(0) as u32 * 10 + side.costume.max(0) as u32;
         let file = read(file_id)?;
-        let fighter = load_fighter(&file, &ramp, &mut assets)
+        let mut fighter = load_fighter(&file, &ramp, &mut assets)
             .map_err(|e| format!("character file 0x{file_id:X}: {e}"))?;
+        let motions = read(MOTION_FILE + side.chara.max(0) as u32 * 10)?;
+        let packed = pack_section(&motions, IDLE_MOTION + 1).map_err(error)?;
+        let mut idle =
+            Motion::parse(&bt3_data::bpe::decode(packed).map_err(error)?).map_err(error)?;
+        // BtlAnim_Play: BtlAnim_ApplyTableFlags and BtlAnim_HideModelNodes.
+        idle.apply_table_flags(motion_flags(&common, IDLE_MOTION));
+        idle.hide_model_nodes(side.chara);
+        fighter.idle = idle;
         assets.fighters.push(fighter);
     }
     Ok(assets)
+}
+
+/// `BtlAnim_GetFlags`: the roster's motion flag table is the table at header word 3 of common file 2.
+fn motion_flags(common: &[u8], motion: usize) -> u32 {
+    let word = |o: usize| {
+        common
+            .get(o..o + 4)
+            .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    word((word(12) as usize & !3) + motion * 4)
 }
 
 /// `BtlObjMdl_BindFiles` and `ObjDraw_UploadTextures`: a batch's TEX0_1 is its material texture at
@@ -170,6 +196,10 @@ fn load_fighter(
     Ok(FighterModel {
         model,
         batch_textures,
+        idle: Motion {
+            length: 0,
+            tracks: Vec::new(),
+        },
     })
 }
 
@@ -195,6 +225,9 @@ pub struct ModelBatch {
 struct Fighter {
     pos: [f32; 3],
     yaw: f32,
+    /// `anim.frame` and layer 0's per-node key cursors.
+    frame: f32,
+    cursors: [u16; NODE_MAX],
 }
 
 /// The battle as far as it is ported.
@@ -214,6 +247,8 @@ impl Battle {
             Fighter {
                 pos,
                 yaw: (target[0] - pos[0]).atan2(target[2] - pos[2]),
+                frame: 0.0,
+                cursors: [0; NODE_MAX],
             }
         });
         // BtlObj_UpdateAll: BtlObjLight_SetDir(BtlStage_GetLightVecB), which normalises it.
@@ -225,17 +260,47 @@ impl Battle {
         }
     }
 
-    /// One battle frame's object draw: side 0's view (`BtlCam_GetDefaultView` outside split screen), every
-    /// enabled part of both fighters through program 0.
+    /// One battle frame: each fighter advances its idle loop (`BtlAnim_AdvanceLoop`), its pose is sampled and its
+    /// node matrices built, then the object draw: side 0's view (`BtlCam_GetDefaultView` outside split screen),
+    /// every enabled part of both fighters through program 0.
     pub fn run_frame(&mut self) -> Vec<ModelBatch> {
-        let view = self.camera_view(0);
-        let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
-        for (side, fighter) in self.fighters.iter().enumerate() {
+        let mut poses = Vec::with_capacity(2);
+        for (side, fighter) in self.fighters.iter_mut().enumerate() {
             let model = &self.assets.fighters[side];
-            let world = object_matrix(fighter);
-            for (part, textures) in model.model.parts.iter().zip(&model.batch_textures) {
+            fighter.frame += ANIM_STEP;
+            if fighter.frame >= f32::from(model.idle.length) - 0.1 {
+                fighter.frame = 0.0;
+            }
+            let object = object_matrix(fighter);
+            poses.push(pose(
+                &model.model,
+                &model.idle,
+                fighter.frame,
+                &mut fighter.cursors,
+                &object,
+            ));
+        }
+        let view = self.camera_view(0, &poses[0]);
+        let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
+        for (side, nodes) in poses.iter().enumerate() {
+            let model = &self.assets.fighters[side];
+            let parts = model
+                .model
+                .parts
+                .iter()
+                .zip(&model.batch_textures)
+                .zip(nodes);
+            for ((part, textures), (mtx_a, mtx_b)) in parts {
                 if part.enabled && node_shown(model.model.header.flags, part.node) {
-                    draw_part(part, textures, &world, self.light_dir, &view, &mut groups);
+                    draw_part(
+                        part,
+                        textures,
+                        mtx_a,
+                        mtx_b,
+                        self.light_dir,
+                        &view,
+                        &mut groups,
+                    );
                 }
             }
         }
@@ -249,7 +314,7 @@ impl Battle {
 
     /// `ChrCam_Update` with the lock-on camera (`ChrCam_CalcLockOn`) of a fighter standing still and facing its
     /// opponent: `cam->yaw` has reached the opponent's direction and `cam->side` is still 0. No shake, no bob.
-    fn camera_view(&self, side: usize) -> View {
+    fn camera_view(&self, side: usize, own_pose: &[(Mtx, Mtx)]) -> View {
         let own = self.fighters[side];
         let opp = self.fighters[side ^ 1];
         let own_model = &self.assets.fighters[side].model;
@@ -276,12 +341,9 @@ impl Battle {
                 point[2] *= k;
             }
         }
-        // ChrCam_KeepBehindHead: the bind pose puts node 0x30 at its part's pivot.
-        if let Some(part) = own_model.parts.iter().find(|p| p.node == HEAD_NODE) {
-            let head = apply(
-                &object_matrix(&own),
-                [part.offset_a[0], part.offset_a[1], part.offset_a[2], 1.0],
-            );
+        // ChrCam_KeepBehindHead: node 0x30's world position.
+        if let Some(index) = own_model.parts.iter().position(|p| p.node == HEAD_NODE) {
+            let head = own_pose[index].0[3];
             keep_behind_head([head[0], head[1], head[2]], height, &mut eye, rot);
         }
         View::new(eye, rot)
@@ -315,6 +377,69 @@ fn node_shown(model_flags: u32, node: u16) -> bool {
     } else {
         !matches!(node, 0x40 | 0x41 | 0x6F)
     }
+}
+
+/// `BtlObjAnim_SamplePose` (layer 0 only, no blend) and `BtlObjPose_CalcMatrices`: per mesh record, the node's
+/// world matrix and its parent's (what `ObjDraw_DrawParts` hands program 0 as bones A and B). The records are
+/// the skeleton in parent-first order; each pushes the current matrix and pops `pop` after itself.
+fn pose(
+    model: &CharaModel,
+    motion: &Motion,
+    frame: f32,
+    cursors: &mut [u16; NODE_MAX],
+    object: &Mtx,
+) -> Vec<(Mtx, Mtx)> {
+    let mut stack = Vec::new();
+    let mut current = *object;
+    let mut nodes = Vec::with_capacity(model.parts.len());
+    for part in &model.parts {
+        let id = usize::from(part.node);
+        let rest = [part.rest[0], part.rest[1], part.rest[2]];
+        let track = motion.tracks.get(id).and_then(Option::as_ref);
+        let (pos, rot) = match track {
+            Some(track) if id < NODE_MAX => {
+                let (pos, rot) = track.sample(&mut cursors[id], frame);
+                (pos.unwrap_or(rest), rot)
+            }
+            _ => (rest, [0.0, 0.0, 0.0, 1.0]),
+        };
+        let mut local = quat_to_mtx(rot);
+        local[3] = [pos[0], pos[1], pos[2], 1.0];
+        stack.push(current);
+        let parent = current;
+        current = mul(&local, &parent);
+        nodes.push((current, parent));
+        for _ in 0..part.pop {
+            current = stack.pop().unwrap_or(*object);
+        }
+    }
+    nodes
+}
+
+/// `Quat_ToMtx`.
+fn quat_to_mtx([x, y, z, w]: [f32; 4]) -> Mtx {
+    let (xx, yy, zz) = (x * x, y * y, z * z);
+    [
+        [
+            1.0 - 2.0 * yy - 2.0 * zz,
+            2.0 * x * y + 2.0 * w * z,
+            2.0 * x * z - 2.0 * w * y,
+            0.0,
+        ],
+        [
+            2.0 * x * y - 2.0 * w * z,
+            1.0 - 2.0 * xx - 2.0 * zz,
+            2.0 * y * z + 2.0 * w * x,
+            0.0,
+        ],
+        [
+            2.0 * x * z + 2.0 * w * y,
+            2.0 * y * z - 2.0 * w * x,
+            1.0 - 2.0 * xx - 2.0 * yy,
+            0.0,
+        ],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
 }
 
 /// What `ChrCam_CalcLockOn` reads.
@@ -496,23 +621,17 @@ fn projection() -> (Mtx, Mtx) {
     (mul(&persp, &screen), mul(&clip, &shift))
 }
 
-/// `ObjDraw_DrawParts` mode 0 for one part and VU1 program 0 on its batches. In the bind pose both bone matrices
-/// are the object matrix after a move to the bone's pivot, so `A * (pos - ofsA)` is the object matrix applied to
-/// the position.
+/// `ObjDraw_DrawParts` mode 0 for one part and VU1 program 0 on its batches: bone A is the part's node, bone B
+/// its parent; `offset_a` / `offset_b` are their rest positions in model space.
 fn draw_part(
     part: &ModelPart,
     textures: &[[usize; 2]],
-    world: &Mtx,
+    mtx_a: &Mtx,
+    mtx_b: &Mtx,
     light_dir: [f32; 3],
     view: &View,
     groups: &mut HashMap<[usize; 2], Vec<ScreenVertex>>,
 ) {
-    let translate = |ofs: [f32; 4]| {
-        let mut m = IDENTITY;
-        m[3] = [ofs[0], ofs[1], ofs[2], 1.0];
-        mul(&m, world)
-    };
-    let (mtx_a, mtx_b) = (translate(part.offset_a), translate(part.offset_b));
     // Mtx_MakeNormalLight(light, lightDir, 0, 0): x of light * n is -L . n; Vec3_Normalize clears w.
     let neg_light = scale3(normalize(light_dir), -1.0);
     for (batch, &tex) in part.batches.iter().zip(textures) {
@@ -697,6 +816,7 @@ mod tests {
         setup.stage = 0;
         let assets = load(&mut read, &setup).unwrap();
         let mut battle = Battle::new(assets);
+        assert_eq!(battle.assets.fighters[0].idle.length, 67);
         let batches = battle.run_frame();
         let vertices: Vec<_> = batches.iter().flat_map(|b| &b.vertices).collect();
         assert!(vertices.len() > 3000);
@@ -708,5 +828,22 @@ mod tests {
             })
             .count();
         assert!(on_screen * 2 > vertices.len());
+        // The idle stance: ankles (node 11) on the ground, hips (node 2) lowered, the head (node 0x30) above them
+        // and leaning forward (-Z is the model's front); y points down.
+        let fighter = &battle.assets.fighters[0];
+        let mut cursors = [0; NODE_MAX];
+        let nodes = pose(&fighter.model, &fighter.idle, 10.0, &mut cursors, &IDENTITY);
+        let at = |id: u16| {
+            let i = fighter
+                .model
+                .parts
+                .iter()
+                .position(|p| p.node == id)
+                .unwrap();
+            nodes[i].0[3]
+        };
+        assert!((at(11)[1] + 1.2).abs() < 0.5);
+        assert!(at(2)[1] > -8.0 && at(2)[1] < -5.0);
+        assert!(at(HEAD_NODE)[1] < at(2)[1] - 3.0 && at(HEAD_NODE)[2] < -2.0);
     }
 }

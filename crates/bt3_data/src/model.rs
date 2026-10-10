@@ -59,12 +59,16 @@ pub struct Vertex {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPart {
     pub node: u16,
+    /// Matrices `BtlObjPose_CalcMatrices` pops after this node (the branches it closes).
+    pub pop: u16,
     pub enabled: bool,
     /// Bit 0: drawn by the fade pass.
     pub flags: u16,
     /// Pivots of bones A and B.
     pub offset_a: [f32; 4],
     pub offset_b: [f32; 4],
+    /// Translation from the parent node in the rest pose (`BobjBone.rest`).
+    pub rest: [f32; 4],
     pub batches: Vec<Batch>,
 }
 
@@ -103,7 +107,7 @@ impl CharaModel {
         let mut offset = u32_at(model, 0x6C) as usize;
         loop {
             let record = model
-                .get(offset..offset + 0x30)
+                .get(offset..offset + 0x40)
                 .ok_or_else(|| invalid_data("mesh record outside the model"))?;
             let next = u32_at(record, 0) as usize;
             let last = u16_at(record, 6) != 0;
@@ -121,10 +125,12 @@ impl CharaModel {
             };
             parts.push(ModelPart {
                 node: u16_at(record, 0xA),
+                pop: u16_at(record, 4),
                 enabled,
                 flags: u16_at(record, 0xC),
                 offset_a: vec4(0x10),
                 offset_b: vec4(0x20),
+                rest: vec4(0x30),
                 batches,
             });
             if last {

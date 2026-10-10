@@ -631,6 +631,14 @@ fn probe_chara_models(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Err
             model.parts.iter().filter(|p| p.enabled).count(),
             batches.len(),
         );
+        if chara == 0 {
+            for p in &model.parts {
+                println!(
+                    "    node {:3} pop {} en {} origin {:?} b {:?} rest {:?}",
+                    p.node, p.pop, p.enabled, p.offset_a, p.offset_b, p.rest
+                );
+            }
+        }
     }
     // BtlObjLight_Init: section 1 of common file 2 is the light's texture file; texture 0 is the ramp that
     // BtlObjLight_FindRes0 uploads to block 0x3D40.
@@ -638,6 +646,44 @@ fn probe_chara_models(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Err
     let light = TextureResource::parse(pack_section(&common, 1)?)?;
     let ramp = psmt8_row_from_upload(&light.entries[0], 4, 0, 256)?;
     println!("  light ramp indices: {ramp:?}");
+    // BtlChar_AllocAll: header word 3 of common file 2 is the motion flag table (one word per motion id).
+    let word = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let flags_at = word(&common, 12) as usize & !3;
+    println!(
+        "  motion flags 0 {:08X}, 1 {:08X}, 0x26 {:08X}",
+        word(&common, flags_at),
+        word(&common, flags_at + 4),
+        word(&common, flags_at + 0x26 * 4)
+    );
+    // BtlObj_BindTables: anims[i] = section i + 1 of file 0x598 + chara * 10, BPE-packed (BtlObjAnim_Load).
+    let motions = archive.read_entry(image, partition_entry_for_id(0x598).index)?;
+    println!(
+        "  motion file 0x598: {} bytes, {} sections",
+        motions.len(),
+        word(&motions, 0)
+    );
+    for id in [0usize, 0x26] {
+        let anim = bpe::decode(pack_section(&motions, id + 1)?)?;
+        let length = u16::from_le_bytes([anim[2], anim[3]]);
+        let tracks: Vec<(usize, u16, u16)> = (0..71)
+            .filter_map(|node| {
+                let ofs =
+                    usize::from(u16::from_le_bytes([anim[6 + node * 2], anim[7 + node * 2]])) * 4;
+                (ofs != 0).then(|| {
+                    (
+                        node,
+                        u16::from_le_bytes([anim[ofs], anim[ofs + 1]]),
+                        u16::from_le_bytes([anim[ofs + 2], anim[ofs + 3]]),
+                    )
+                })
+            })
+            .collect();
+        println!(
+            "  motion {id:#X}: {} bytes, events {}, length {length}, tracks (node, flags, keys) {tracks:?}",
+            anim.len(),
+            anim[1]
+        );
+    }
     Ok(())
 }
 

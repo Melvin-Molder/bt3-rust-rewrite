@@ -9,6 +9,7 @@ pub mod fod;
 pub mod font;
 pub mod gs;
 pub mod model;
+pub mod motion;
 pub mod snd;
 pub mod stage;
 pub mod tex;
