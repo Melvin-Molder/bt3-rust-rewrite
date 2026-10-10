@@ -1,3 +1,11 @@
 [workspace]
 members = ["crates/bt3_data", "crates/bt3_game"]
 resolver = "3"
+
+# Debug builds run the game's per-pixel and per-vertex emulation every frame: optimise a little, and the
+# dependencies (Bevy) fully.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

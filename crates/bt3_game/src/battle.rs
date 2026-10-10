@@ -538,12 +538,14 @@ impl Battle {
     /// One iteration of `Battle_Loop`: `Gfx_BeginFrame` (the fade), `BtlChars_CheckStart`, the sequence's
     /// preUpdate, `Battle_Update` (the fighters' actions, the cameras with the demo camera last, the poses), the
     /// sequence's update, then `Battle_Draw`: the stage, the fighters, the HUD, the overlay pass and the fade.
-    /// `start` is START going down on a pad; `voice_stat` the voice player's status.
+    /// `start` is START going down on a pad; `voice_stat` the voice player's status; `shown` whether the frame is
+    /// the one presented (an unseen frame skips the HUD's pixels).
     pub fn run_frame(
         &mut self,
         start: bool,
         voice_stat: i32,
         libc: &mut LibcRandom,
+        shown: bool,
     ) -> BattleFrame {
         let mut sounds = Vec::new();
         let mut input = SeqInput {
@@ -628,7 +630,7 @@ impl Battle {
             .map(|(textures, vertices)| ModelBatch { textures, vertices })
             .collect();
         batches.sort_by_key(|batch| batch.textures);
-        let hud = self.hud.draw(libc);
+        let hud = self.hud.draw(libc, shown);
         let (capture, xfade_alpha) = self.xfade.draw_pass();
         BattleFrame {
             stage,
@@ -1174,7 +1176,7 @@ mod tests {
         assert_eq!(battle.assets.fighters[0].motions[&IDLE_MOTION].length, 67);
         let mut libc = LibcRandom::new(1);
         // Mode 0 opens on the stage intro: cut 0 films the stage through the demo camera, under the fade-in.
-        let frame = battle.run_frame(false, 0, &mut libc);
+        let frame = battle.run_frame(false, 0, &mut libc, true);
         assert_eq!(battle.seq.state, SeqState::StageIntro);
         assert!(battle.demo.is_active());
         assert_eq!(frame.quads.len(), 1);
@@ -1183,7 +1185,7 @@ mod tests {
         // Mode 5 starts at Ready, in side 0's camera.
         setup.mode = 5;
         let mut battle = Battle::new(load(&mut read, &setup).unwrap());
-        let frame = battle.run_frame(false, 0, &mut libc);
+        let frame = battle.run_frame(false, 0, &mut libc, true);
         assert_eq!(battle.seq.state, SeqState::Ready);
         assert!(!battle.demo.is_active());
         // Stage 0's ground, sky and buildings are in view behind the fighters.
@@ -1231,7 +1233,7 @@ mod tests {
         let mut hud_frames = 0;
         let mut gauges = false;
         for _ in 0..40 {
-            let frame = battle.run_frame(false, 0, &mut libc);
+            let frame = battle.run_frame(false, 0, &mut libc, true);
             sounds.extend(frame.sounds);
             if frame.hud.prims.iter().any(|p| p.texture.is_some()) {
                 hud_frames += 1;
@@ -1248,7 +1250,19 @@ mod tests {
         // Goku: 40000 health, 40000 ki, 6 blast stocks; Hud_ShowAll(1) came with Ready.
         assert_eq!(battle.assets.fighters[0].gauge.hp, 40000);
         assert_eq!(battle.assets.fighters[0].gauge.blast_max, 600000);
-        let layer = battle.run_frame(false, 0, &mut libc).hud.layer.unwrap();
+        // An unseen frame updates the HUD but draws nothing.
+        assert!(
+            battle
+                .run_frame(false, 0, &mut libc, false)
+                .hud
+                .layer
+                .is_none()
+        );
+        let layer = battle
+            .run_frame(false, 0, &mut libc, true)
+            .hud
+            .layer
+            .unwrap();
         let covered = |x0: usize, x1: usize, y0: usize, y1: usize| {
             (y0..y1)
                 .flat_map(|y| (x0..x1).map(move |x| (y * 512 + x) * 4 + 3))

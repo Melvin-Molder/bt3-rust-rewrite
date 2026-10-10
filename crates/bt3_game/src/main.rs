@@ -67,6 +67,8 @@ use title::{TextureLayout, TitleAssets, TitleData, TitleResult, TitleScreen, Tit
 
 const SCREEN_WIDTH: u32 = 512;
 const SCREEN_HEIGHT: u32 = 448;
+/// Game frames one update may run to catch up.
+const MAX_CATCH_UP: f32 = 2.0;
 const FIRST_LOADING_FILE_ID: u32 = 0x3C1;
 // gProgress->baseFile (0x1C1) + 0x19: menu archive 0, loaded by FirstRun_Main.
 const LOGO_ARCHIVE_FILE_ID: u32 = 0x1C1 + 0x19;
@@ -226,6 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut skip_to_title = false;
     let mut skip_to_menu = false;
     let mut skip_to_battle = false;
+    let mut log_fps = false;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--title" {
@@ -233,6 +236,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if argument == "--menu" {
             skip_to_title = true;
             skip_to_menu = true;
+        } else if argument == "--fps" {
+            log_fps = true;
         } else if argument == "--battle" {
             skip_to_title = true;
             skip_to_battle = true;
@@ -400,6 +405,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .chain(),
         );
     model_draw::add_to(&mut app);
+    if log_fps {
+        app.add_plugins((
+            bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+            bevy::diagnostic::LogDiagnosticsPlugin::default(),
+        ));
+    }
     app.run();
 
     Ok(())
@@ -631,9 +642,13 @@ fn run_frames(
             start_title(&mut game, &mut commands, &mut audio);
         }
     }
-    game.accumulator += time.delta_secs();
+    // A frame that runs late slows the game down like the PS2's would instead of piling up catch-up frames.
+    let frame_seconds = game.scene.frame_seconds();
+    game.accumulator = (game.accumulator + time.delta_secs()).min(MAX_CATCH_UP * frame_seconds);
     while game.accumulator >= game.scene.frame_seconds() {
         game.accumulator -= game.scene.frame_seconds();
+        // Only the last frame of this update is presented.
+        let shown = game.accumulator < game.scene.frame_seconds();
         let pressed = std::mem::take(&mut game.pressed_latch);
         let cross = pressed & title::PAD_CROSS != 0;
         let start = pressed & title::PAD_START != 0;
@@ -767,7 +782,7 @@ fn run_frames(
                 }
             }
             Scene::Battle(battle) => {
-                let frame = battle.run_frame(start, stat, &mut game.libc_random);
+                let frame = battle.run_frame(start, stat, &mut game.libc_random, shown);
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
                 game.quads = into_screen(frame.quads);

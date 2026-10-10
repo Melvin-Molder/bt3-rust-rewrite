@@ -11,7 +11,7 @@ use bt3_data::gs::RgbaTexture;
 
 use crate::battle_seq::Ramp;
 use crate::hud::{HudSheet, Sprite};
-use crate::hud_gs::{ENV, GsLayer, GsSprite};
+use crate::hud_gs::{GsLayer, GsSprite};
 use crate::rng::LibcRandom;
 
 const HP_BAR: i32 = 10000;
@@ -1069,23 +1069,23 @@ impl TimerPart {
 }
 
 /// `Hud_Draw` for the gauges and the timer: `HudGfx_SetEnv`, then per side `HudGfx_ClearAlpha` and the gauge
-/// tree, then the clock.
+/// tree, then the clock. With `shown` false the parts update but nothing is drawn.
 pub(crate) fn draw_gauges(
+    layer: &mut GsLayer,
+    shown: bool,
     gauge: Option<&mut GaugePart>,
     timer: Option<&mut TimerPart>,
     textures: &HudTextures,
     libc: &mut LibcRandom,
-) -> GsLayer {
-    let mut layer = GsLayer::new();
-    layer.ctx = [ENV; 2];
+) {
+    layer.begin(shown);
     if let Some(gauge) = gauge {
         for side in 0..2 {
             layer.clear_alpha();
-            gauge.run(side, &mut layer, textures, libc);
+            gauge.run(side, layer, textures, libc);
         }
     }
     if let Some(timer) = timer {
-        timer.run(&mut layer, textures);
+        timer.run(layer, textures);
     }
-    layer
 }

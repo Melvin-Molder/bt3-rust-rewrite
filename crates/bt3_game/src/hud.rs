@@ -9,6 +9,7 @@
 
 use crate::battle_seq::Ramp;
 use crate::hud_gauge::{GaugePart, HudTextures, SideGauge, TimerPart, draw_gauges};
+use crate::hud_gs::GsLayer;
 use crate::rng::LibcRandom;
 use crate::title::TitleSound;
 
@@ -625,6 +626,7 @@ pub(crate) struct Hud {
     timer: TimerPart,
     notice: NoticePart,
     textures: HudTextures,
+    layer: GsLayer,
     announcer: i32,
 }
 
@@ -645,6 +647,7 @@ impl Hud {
             gauge: GaugePart::new(sheet0),
             notice: NoticePart::new(sheets.get(NOTICE_SHEET).cloned().unwrap_or_default()),
             textures,
+            layer: GsLayer::new(),
             announcer,
         }
     }
@@ -675,17 +678,20 @@ impl Hud {
     }
 
     /// `Hud_Draw`: each part that is switched on updates, then draws: the gauges of both sides, the clock, the
-    /// notice. (The team panel stays hidden without reserve members.)
-    pub(crate) fn draw(&mut self, libc: &mut LibcRandom) -> HudFrame {
+    /// notice. (The team panel stays hidden without reserve members.) A frame that is not `shown` runs the
+    /// updates and draws nothing.
+    pub(crate) fn draw(&mut self, libc: &mut LibcRandom, shown: bool) -> HudFrame {
         let mut layer = None;
         if self.flags & (SHOW_GAUGES | SHOW_TIMER) != 0 {
-            let gs = draw_gauges(
+            draw_gauges(
+                &mut self.layer,
+                shown,
                 (self.flags & SHOW_GAUGES != 0).then_some(&mut self.gauge),
                 (self.flags & SHOW_TIMER != 0).then_some(&mut self.timer),
                 &self.textures,
                 libc,
             );
-            layer = (!gs.is_empty()).then(|| gs.to_rgba());
+            layer = (!self.layer.is_empty()).then(|| self.layer.to_rgba());
         }
         let mut prims = Vec::new();
         if self.flags & SHOW_NOTICE != 0 {
@@ -722,20 +728,20 @@ mod tests {
         let mut hud = Hud::new(&[HudSheet::default(), sheet()], HudTextures::default(), 2);
         let mut libc = LibcRandom::new(1);
         let mut sounds = Vec::new();
-        assert!(hud.draw(&mut libc).prims.is_empty());
+        assert!(hud.draw(&mut libc, true).prims.is_empty());
         hud.show_all(true);
         hud.show_notice(0, &mut sounds);
         assert_eq!(sounds, [TitleSound::StreamSe(0x10B6C + 14)]);
         // First frame: a 4-pixel line of the band, 512 x 64 word behind it.
-        let prims = hud.draw(&mut libc).prims;
+        let prims = hud.draw(&mut libc, true).prims;
         assert_eq!(prims.len(), 1);
         let ys: Vec<f32> = prims[0].vertices.iter().map(|v| v.pos[1]).collect();
         assert!(ys.iter().all(|y| (222.0..=226.0).contains(y)), "{ys:?}");
         // 0.2 s + 0.36 s later the band is 128 high and has turned half a turn: the whole word shows.
         for _ in 0..17 {
-            hud.draw(&mut libc);
+            hud.draw(&mut libc, true);
         }
-        let prims = hud.draw(&mut libc).prims;
+        let prims = hud.draw(&mut libc, true).prims;
         let xs: Vec<f32> = prims[0].vertices.iter().map(|v| v.pos[0]).collect();
         let ys: Vec<f32> = prims[0].vertices.iter().map(|v| v.pos[1]).collect();
         let span = |v: &[f32]| {
@@ -745,9 +751,9 @@ mod tests {
         assert_eq!(prims[0].texture, Some(10));
         // Then 1.1 s of hold and 0.43 s of fading: the announcement is gone after about 2.1 s.
         for _ in 0..50 {
-            hud.draw(&mut libc);
+            hud.draw(&mut libc, true);
         }
-        assert!(hud.draw(&mut libc).prims.is_empty());
+        assert!(hud.draw(&mut libc, true).prims.is_empty());
     }
 
     #[test]
@@ -761,7 +767,7 @@ mod tests {
         let mut streaks = 0;
         let mut frames = 0;
         while frames < 120 {
-            let prims = hud.draw(&mut libc).prims;
+            let prims = hud.draw(&mut libc, true).prims;
             frames += 1;
             if prims.is_empty() {
                 break;

@@ -45,6 +45,8 @@ pub(crate) struct GsLayer {
     cover: Vec<f32>,
     alpha: Vec<u8>,
     dirty: Option<[usize; 4]>,
+    /// The frame is not shown: nothing is drawn (the parts' updates still run).
+    skip: bool,
     pub(crate) ctx: [Context; 2],
 }
 
@@ -55,8 +57,22 @@ impl GsLayer {
             cover: vec![0.0; WIDTH * HEIGHT],
             alpha: vec![0; WIDTH * HEIGHT],
             dirty: None,
+            skip: false,
             ctx: [ENV; 2],
         }
+    }
+
+    /// A new frame: what was drawn is cleared, the state is `HudGfx_SetEnv`'s.
+    pub(crate) fn begin(&mut self, shown: bool) {
+        if let Some([x0, x1, y0, y1]) = self.dirty.take() {
+            for y in y0..y1 {
+                self.p[y * WIDTH + x0..y * WIDTH + x1].fill([0.0; 3]);
+                self.cover[y * WIDTH + x0..y * WIDTH + x1].fill(0.0);
+            }
+        }
+        self.alpha.fill(0);
+        self.skip = !shown;
+        self.ctx = [ENV; 2];
     }
 
     /// Whether anything was drawn in colour.
@@ -85,6 +101,9 @@ impl GsLayer {
     /// A rectangle in colour 0, alpha 0 through context 1. Under ALPHA 0x44 with no tests that only writes the
     /// alpha plane.
     fn clear_rect(&mut self, x: [i32; 2], y: [i32; 2]) {
+        if self.skip {
+            return;
+        }
         let c = self.ctx[0];
         if c.alpha != 0x44 || c.test & 0x4001 != 0 || c.fbmsk >> 24 == 0xFF {
             self.draw(
@@ -130,6 +149,9 @@ impl GsLayer {
     /// One sprite through context `ctx` (0 or 1): DATE, the texture function (MODULATE, TCC), the alpha test,
     /// the blend, the colour clamp, FBA and the write mask, per covered pixel.
     pub(crate) fn draw(&mut self, spr: &GsSprite, ctx: usize) {
+        if self.skip {
+            return;
+        }
         let c = self.ctx[ctx];
         let (x_lo, x_hi) = (spr.x[0].min(spr.x[1]), spr.x[0].max(spr.x[1]));
         let (y_lo, y_hi) = (spr.y[0].min(spr.y[1]), spr.y[0].max(spr.y[1]));
