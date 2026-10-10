@@ -127,6 +127,77 @@ pub fn decode_font_texture(entry: &TextureEntry<'_>, cluts: usize) -> io::Result
         .collect()
 }
 
+/// A 16 x 16 PSMCT32 picture uploaded to a block and read back as a 256-colour CSM1 CLUT (the battle models'
+/// shading CLUTs, `TexFile_UploadRange` to `clutTbp`).
+pub fn decode_clut256_upload(entry: &TextureEntry<'_>) -> io::Result<Vec<[u8; 4]>> {
+    let packet = entry
+        .pixel_data
+        .ok_or_else(|| invalid_data("CLUT picture has no pixel packet"))?;
+    let transfer = find_image_transfer(packet)?;
+    if transfer.direction != 0
+        || transfer.width != 16
+        || transfer.height != 16
+        || transfer.destination_x != 0
+        || transfer.destination_y != 0
+        || transfer.image.len() != 16 * 16 * 4
+    {
+        return Err(invalid_data("unexpected 16x16 PSMCT32 CLUT picture"));
+    }
+    Ok((0..=255u8)
+        .map(|i| {
+            let index = csm1_t32_i8_transfer_index(i) * 4;
+            transfer.image[index..index + 4].try_into().unwrap()
+        })
+        .collect())
+}
+
+/// Row `y` of a PSMCT32 upload read back as PSMT8 texels with buffer width `tbw` (64-texel units), as a
+/// texture at the upload's own block reads it (the battle light ramp: a 128 x 2 picture at block 0x3D40
+/// read as a 256-wide PSMT8 texture).
+pub fn psmt8_row_from_upload(
+    entry: &TextureEntry<'_>,
+    tbw: usize,
+    y: usize,
+    width: usize,
+) -> io::Result<Vec<u8>> {
+    let packet = entry
+        .pixel_data
+        .ok_or_else(|| invalid_data("ramp texture has no pixel packet"))?;
+    let transfer = find_image_transfer(packet)?;
+    let dbw = (entry.pixel_blt & 0x3f) as usize;
+    if transfer.direction != 0
+        || ((entry.pixel_blt >> 8) & 0x3f) != 0
+        || dbw == 0
+        || transfer.destination_x != 0
+        || transfer.destination_y != 0
+        || transfer.width > dbw * PSMCT32_PAGE_WIDTH
+        || transfer.image.len() != transfer.width * transfer.height * 4
+    {
+        return Err(invalid_data("unexpected PSMCT32 ramp upload"));
+    }
+    let pages_high = transfer.height.div_ceil(PSMCT32_PAGE_HEIGHT);
+    let mut memory = vec![0u8; dbw * pages_high * GS_PAGE_BYTES];
+    for row in 0..transfer.height {
+        for x in 0..transfer.width {
+            let page = (row / PSMCT32_PAGE_HEIGHT) * dbw + x / PSMCT32_PAGE_WIDTH;
+            let destination = page * GS_PAGE_BYTES
+                + psmct32_byte_offset(x % PSMCT32_PAGE_WIDTH, row % PSMCT32_PAGE_HEIGHT);
+            let source = (row * transfer.width + x) * 4;
+            memory[destination..destination + 4]
+                .copy_from_slice(&transfer.image[source..source + 4]);
+        }
+    }
+    let pages_wide = (tbw / 2).max(1);
+    (0..width)
+        .map(|x| {
+            memory
+                .get(psmt8_location(x, y, pages_wide))
+                .copied()
+                .ok_or_else(texel_outside)
+        })
+        .collect()
+}
+
 /// CLUT indices of an indexed texture, read back from its simulated PSMCT32 upload.
 struct TexelIndices {
     width: usize,
@@ -563,6 +634,8 @@ mod tests {
             clut_size: clut_packet.len() as i32,
             pixel_blt: 1,
             clut_blt: 0,
+            tbp_offset: 0,
+            cbp_offset: 0,
             texture_register: (2 << 14) | (0x14 << 20) | (7 << 26) | (7 << 30),
         };
 

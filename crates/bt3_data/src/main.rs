@@ -4,7 +4,8 @@ use bt3_data::Iso9660;
 use bt3_data::adx;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
 use bt3_data::bpe;
-use bt3_data::gs::decode_sprite_texture;
+use bt3_data::gs::{decode_sprite_texture, psmt8_row_from_upload};
+use bt3_data::model::{CharaModel, TEXTURE_SECTION, tex0_cbp, tex0_tbp};
 use bt3_data::pack_section;
 use bt3_data::stage::StageResource;
 use bt3_data::tex::TextureResource;
@@ -536,6 +537,7 @@ fn probe_main_menu(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>
         },
     )?;
     // CharSel_Run(2): section 2 of archive 5.
+    probe_chara_models(image)?;
     for (what, file_id) in [
         ("portrait", 0x2F9u32),
         ("portrait", 0x2F9 + 0x10),
@@ -580,6 +582,63 @@ fn probe_main_menu(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>
             texts: &[43, 44],
         },
     )
+}
+
+/// Character model files (`0x590 + chara * 10 + costume`): the parts and batches `CharaModel` reads, and whether
+/// every TEX0 of the parts finds its texture entry (`tbpOfs` / `cbpOfs` after `MdlTex_RebaseChain`) and every
+/// shading TEX0 its CLUT in the `clutFirst` range.
+fn probe_chara_models(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
+    let archive = AfsArchive::open(image, "DATA/PZS3US1.AFS")?;
+    for chara in [0u32, 1, 10, 50, 100, 160] {
+        let file_id = 0x590 + chara * 10;
+        let data = archive.read_entry(image, partition_entry_for_id(file_id).index)?;
+        let model = match CharaModel::from_file(&data) {
+            Ok(model) => model,
+            Err(error) => {
+                println!("\nmodel file 0x{file_id:X}: {error}");
+                continue;
+            }
+        };
+        let textures = TextureResource::parse(pack_section(&data, TEXTURE_SECTION)?)?;
+        let h = &model.header;
+        let batches: Vec<_> = model.parts.iter().flat_map(|p| &p.batches).collect();
+        let vertices: usize = batches.iter().map(|b| b.vertices.len()).sum();
+        let mut missing = 0;
+        for batch in &batches {
+            let (tbp, cbp) = (
+                tex0_tbp(batch.tex0[0]) - model.min_tbp,
+                tex0_cbp(batch.tex0[0]) - model.min_cbp,
+            );
+            let base = (h.tex_first..h.tex_first + h.tex_count).any(|i| {
+                let e = &textures.entries[usize::from(i)];
+                e.tbp_offset as u32 == tbp && e.cbp_offset as u32 == cbp
+            });
+            let shade = (h.clut_first..h.clut_first + h.clut_count).any(|i| {
+                textures.entries[usize::from(i)].tbp_offset as u32 == tex0_cbp(batch.tex0[1])
+            });
+            missing += usize::from(!base) + usize::from(!shade);
+        }
+        println!(
+            "\nmodel file 0x{file_id:X}: size {:?}, tex {}+{}, clut {}+{}, face {}, seams +{:X}; {} parts ({} enabled), {} batches, {vertices} vertices, {missing} unmatched TEX0",
+            h.size,
+            h.tex_first,
+            h.tex_count,
+            h.clut_first,
+            h.clut_count,
+            h.face_tex,
+            h.seam_offset,
+            model.parts.len(),
+            model.parts.iter().filter(|p| p.enabled).count(),
+            batches.len(),
+        );
+    }
+    // BtlObjLight_Init: section 1 of common file 2 is the light's texture file; texture 0 is the ramp that
+    // BtlObjLight_FindRes0 uploads to block 0x3D40.
+    let common = archive.read_entry(image, partition_entry_for_id(2).index)?;
+    let light = TextureResource::parse(pack_section(&common, 1)?)?;
+    let ramp = psmt8_row_from_upload(&light.entries[0], 4, 0, 256)?;
+    println!("  light ramp indices: {ramp:?}");
+    Ok(())
 }
 
 fn file_id_for_partition_entry(partition: u8, index: u32) -> u32 {
@@ -757,6 +816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "  stage header reports ID {}, flags 0x{:X}, water level {:?}",
         stage.stage_id, stage.flags, stage.water_level
     );
+    println!("  object light direction {:?}", stage.light_dir);
     for (index, placement) in stage.starting_placements.iter().enumerate() {
         println!(
             "  start {index}: position {:?}, target {:?}",

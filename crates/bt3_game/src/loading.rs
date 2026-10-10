@@ -102,6 +102,9 @@ pub struct LoadingScreen {
     pulse: Pulse,
     sprites: [Sprite; SPRITE_COUNT],
     fade: Fade,
+    /// `Load_RunBlocking`'s `busy` (the jobs still run) and `done` (they ended and the fade-out finished).
+    busy: bool,
+    done: bool,
     game_random: GameRandom,
     libc_random: LibcRandom,
 }
@@ -142,6 +145,8 @@ impl LoadingScreen {
             pulse: Pulse::default(),
             sprites: [Sprite::default(); SPRITE_COUNT],
             fade: Fade::start_in(1.0),
+            busy: true,
+            done: false,
             game_random,
             libc_random,
         };
@@ -162,6 +167,37 @@ impl LoadingScreen {
         quads.extend(self.fade.quad());
         self.read_input(pad_pressed);
         quads
+    }
+
+    /// One iteration of the `Load_RunBlocking` loop while jobs run: `busy` is what `Job_Run` returned this frame.
+    /// When it turns false the screen fades out over one second, and the loop ends after the frame in which
+    /// that fade finished.
+    pub fn run_job_frame(&mut self, pad_pressed: [bool; 2], busy: bool) -> Vec<Quad> {
+        self.fade.update();
+        if self.busy != busy {
+            self.fade = Fade::start_out(1.0);
+        }
+        self.busy = busy;
+        if !busy && self.fade.is_done() {
+            self.done = true;
+        }
+        self.update();
+        let mut quads = self.draw();
+        quads.extend(self.fade.quad());
+        if !self.done {
+            self.read_input(pad_pressed);
+        }
+        quads
+    }
+
+    /// The loop has ended.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// The generators the screen drew from, for the code after it.
+    pub fn into_random(self) -> (GameRandom, LibcRandom) {
+        (self.game_random, self.libc_random)
     }
 
     fn build_sprites(&mut self) {
@@ -672,5 +708,23 @@ mod tests {
         assert_eq!(alphas[0], Some(123));
         assert_eq!(alphas[28], Some(4));
         assert_eq!(alphas[29], None);
+    }
+
+    #[test]
+    fn jobs_ending_fade_out_over_one_second_then_end_the_loop() {
+        let mut screen = screen(0);
+        for _ in 0..40 {
+            screen.run_job_frame([false, false], true);
+        }
+        assert!(!screen.is_done());
+        let frames = (1..)
+            .find(|_| {
+                screen.run_job_frame([false, false], false);
+                screen.is_done()
+            })
+            .unwrap();
+        assert_eq!(frames, 30);
+        // FadeSlot_Update's alpha trails its ramp by one step, so the last frame is not fully black yet.
+        assert_eq!(screen.fade.quad().map(|quad| quad.rgba[3]), Some(123));
     }
 }

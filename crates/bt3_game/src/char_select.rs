@@ -303,7 +303,7 @@ pub struct CharSelProgress {
 }
 
 /// One side of the battle as `BattleSetup_SetSide` / `BattleSetup_SetMember` get it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SideSetup {
     /// 0 a pad, 2 the computer.
     pub control: i32,
@@ -316,7 +316,7 @@ pub struct SideSetup {
 }
 
 /// What `CharSel_Run` hands to the battle (`BattleSetup_SetRule` and the two sides).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BattleSetup {
     pub screen_mode: i32,
     pub mode: i32,

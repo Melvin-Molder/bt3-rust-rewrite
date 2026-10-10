@@ -16,6 +16,10 @@ pub struct StageResource {
     pub bounds: StageBounds,
     pub starting_placements: Vec<StagePlacement>,
     pub alternate_starting_placements: Vec<StagePlacement>,
+    /// `StgLight.dir` of the first light record (`BtlStage_GetLightVecB`, with `BtlStage_Relocate`'s y / z sign
+    /// flip): the direction `BtlObj_UpdateAll` gives the battle objects' light every frame. `None` when the
+    /// stage has no light.
+    pub light_dir: Option<[f32; 3]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,6 +77,19 @@ impl StageResource {
             parse_placements(bytes, data_offset, 0x28, 0x2C, "stage placements")?;
         let alternate_starting_placements =
             parse_placements(bytes, data_offset, 0x30, 0x34, "alternate stage placements")?;
+        let light_count = read_count(bytes, data_offset + 0x18, "stage light")?;
+        let light_dir = if light_count == 0 {
+            None
+        } else {
+            let light = resolve_relative(
+                bytes,
+                data_offset,
+                read_u32(bytes, data_offset + 0x1C)?,
+                0x20,
+                "stage light",
+            )?;
+            Some(read_game_position(bytes, light + 0x10)?)
+        };
 
         Ok(Self {
             stage_id,
@@ -83,6 +100,7 @@ impl StageResource {
             bounds,
             starting_placements,
             alternate_starting_placements,
+            light_dir,
         })
     }
 }

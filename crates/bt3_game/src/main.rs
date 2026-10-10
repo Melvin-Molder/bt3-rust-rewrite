@@ -1,4 +1,5 @@
 mod anim;
+mod battle;
 mod char_select;
 mod dialog;
 mod draw;
@@ -11,6 +12,7 @@ mod logo;
 mod main_menu;
 mod mcflow;
 mod menu_res;
+mod model_draw;
 mod movie;
 mod rng;
 mod save;
@@ -43,7 +45,8 @@ use bt3_data::pack_section;
 use bt3_data::tex::TextureResource;
 
 use char_select::{
-    CharSelAssets, CharSelData, CharSelLayout, CharSelProgress, CharSelResult, CharSelScreen,
+    BattleSetup, CharSelAssets, CharSelData, CharSelLayout, CharSelProgress, CharSelResult,
+    CharSelScreen,
 };
 use draw::ScreenQuad;
 use duel_menu::{
@@ -53,7 +56,7 @@ use loading::LoadingScreen;
 use logo::LogoSequence;
 use main_menu::{MainMenuAssets, MainMenuData, MainMenuLayout, MainMenuResult, MainMenuScreen};
 use movie::{MoviePlayer, VideoStream};
-use rng::GameRandom;
+use rng::{GameRandom, LibcRandom};
 use title::{TextureLayout, TitleAssets, TitleData, TitleResult, TitleScreen, TitleSound};
 
 const SCREEN_WIDTH: u32 = 512;
@@ -77,6 +80,18 @@ enum Scene {
     CharSelect(Box<CharSelScreen>),
     Black,
     Loading(LoadingScreen),
+    /// `Battle_Load`: the loading screen while the battle's files are read.
+    BattleLoad(Box<BattleLoad>),
+    Battle(Box<battle::Battle>),
+}
+
+/// `Load_RunBlocking` inside `Battle_Load`.
+struct BattleLoad {
+    screen: LoadingScreen,
+    /// Where the loading screen's textures start.
+    texture_base: usize,
+    job: Option<JoinHandle<Result<battle::BattleAssets, String>>>,
+    setup: BattleSetup,
 }
 
 impl Scene {
@@ -90,7 +105,9 @@ impl Scene {
             | Scene::DuelMenu(_)
             | Scene::CharSelect(_)
             | Scene::Black => VBLANK_SECONDS,
-            Scene::Movie(..) | Scene::Loading(_) => 2.0 * VBLANK_SECONDS,
+            Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
+                2.0 * VBLANK_SECONDS
+            }
         }
     }
 }
@@ -125,6 +142,13 @@ struct Game {
     quads: Vec<ScreenQuad>,
     iso_path: PathBuf,
     random: GameRandom,
+    /// newlib `rand()`, behind `Rand_IntRange`.
+    libc_random: LibcRandom,
+    /// The loading screen type shown last (`Load_InitScreen` avoids repeating it).
+    last_loading_type: Option<u16>,
+    /// The battle's model textures (material, shading rows) and this frame's model triangles.
+    model_textures: (Vec<RgbaTexture>, Vec<RgbaTexture>),
+    model_batches: Vec<battle::ModelBatch>,
     demo_count: u32,
     movie_texture: Option<usize>,
     soundtrack: Option<Decoding>,
@@ -163,6 +187,8 @@ struct Game {
     skip_to_title: bool,
     /// `--menu`: start at Progress_Main mode 4.
     skip_to_menu: bool,
+    /// `--battle`: start straight at `Battle_Main` with characters 0 and 1 on stage 0.
+    skip_to_battle: bool,
     se: se::SoundEffects,
     font: font::Font,
 }
@@ -179,6 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut forced_type = None;
     let mut skip_to_title = false;
     let mut skip_to_menu = false;
+    let mut skip_to_battle = false;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--title" {
@@ -186,6 +213,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if argument == "--menu" {
             skip_to_title = true;
             skip_to_menu = true;
+        } else if argument == "--battle" {
+            skip_to_title = true;
+            skip_to_battle = true;
         } else if argument == "--screen" {
             let value = arguments
                 .next()
@@ -202,7 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer = SystemTime::now().duration_since(UNIX_EPOCH)?.subsec_nanos();
     let (game_random, libc_random) = rng::init_from_timer(timer);
     let mut image = Iso9660::open(&image_path)?;
-    let (scene, mut textures, title, random) = match forced_type {
+    let (scene, mut textures, title, random, libc_random) = match forced_type {
         Some(_) => {
             let screen = LoadingScreen::new(game_random, libc_random, None, forced_type);
             let textures = load_screen_textures(&mut image, screen.screen_type())?;
@@ -216,6 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 textures,
                 title,
                 GameRandom::from_key(&[0]),
+                LibcRandom::new(0),
             )
         }
         None if skip_to_title => (
@@ -223,12 +254,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec::new(),
             "Budokai Tenkaichi 3".to_owned(),
             game_random,
+            libc_random,
         ),
         None => (
             Scene::Logos(LogoSequence::new()),
             load_logo_textures(&mut image)?,
             "Budokai Tenkaichi 3".to_owned(),
             game_random,
+            libc_random,
         ),
     };
     let boot = forced_type.is_none();
@@ -260,8 +293,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         se::LoadedBank::parse(&read_file(&mut image, COMMON_SE_BANK_FILE_ID)?)?,
     );
 
-    App::new()
-        .insert_resource(ClearColor(Color::BLACK))
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::BLACK))
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -285,6 +318,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             quads: Vec::new(),
             iso_path: image_path,
             random,
+            libc_random,
+            last_loading_type: None,
+            model_textures: (Vec::new(), Vec::new()),
+            model_batches: Vec::new(),
             demo_count: 0,
             movie_texture,
             soundtrack,
@@ -312,6 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             picture: None,
             skip_to_title,
             skip_to_menu,
+            skip_to_battle,
             se: effects,
             font,
         })
@@ -319,8 +357,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_audio_source::<se::SeOutput>()
         .init_resource::<Textures>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (run_frames, sync_quads, apply_volumes).chain())
-        .run();
+        .add_systems(
+            Update,
+            (
+                run_frames,
+                sync_quads,
+                model_draw::sync_models,
+                apply_volumes,
+            )
+                .chain(),
+        );
+    model_draw::add_to(&mut app);
+    app.run();
 
     Ok(())
 }
@@ -532,7 +580,11 @@ fn run_frames(
     start_pending_bgm(&mut game, &mut commands, &mut audio);
     let pad2 = gamepads.iter().count() >= 2;
     if std::mem::take(&mut game.skip_to_title) {
-        if game.skip_to_menu {
+        if game.skip_to_battle {
+            let mut setup = BattleSetup::default();
+            setup.sides[1].chara = 1;
+            start_battle(&mut game, setup);
+        } else if game.skip_to_menu {
             load_menu_bank(&mut game);
             game.save_loaded = true;
             start_main_menu(&mut game, &mut commands, &mut audio);
@@ -660,17 +712,98 @@ fn run_frames(
                     stop_all(game, &mut commands);
                     match result {
                         CharSelResult::Back => start_duel_menu(game, &mut commands),
-                        CharSelResult::Battle(setup) => {
-                            info!("battle setup {setup:?}; the battle is not ported yet");
-                            game.scene = Scene::Black;
-                        }
+                        CharSelResult::Battle(setup) => start_battle(game, setup),
                     }
                 }
             }
             Scene::Black => game.quads.clear(),
             Scene::Loading(screen) => game.quads = into_screen(screen.run_frame([cross, false])),
+            Scene::BattleLoad(load) => {
+                // Battle_Load: Load_RunBlocking runs the jobs (here the reader thread) under the loading screen.
+                let busy = load.job.as_ref().is_some_and(|job| !job.is_finished());
+                let quads = load.screen.run_job_frame([cross, false], busy);
+                game.quads = into_screen_at(quads, load.texture_base);
+                if load.screen.is_done() {
+                    finish_battle_load(game, &mut commands);
+                }
+            }
+            Scene::Battle(battle) => {
+                game.quads.clear();
+                game.model_batches = battle.run_frame();
+            }
         }
     }
+}
+
+fn into_screen_at(quads: Vec<loading::Quad>, texture_base: usize) -> Vec<ScreenQuad> {
+    quads
+        .into_iter()
+        .map(|mut quad| {
+            quad.texture = quad.texture.map(|index| index + texture_base);
+            ScreenQuad::from(quad)
+        })
+        .collect()
+}
+
+/// `Battle_Main` from `Battle_Init`: `Battle_Load` shows the loading screen (it takes over the shared generators)
+/// while the files are read.
+fn start_battle(game: &mut Game, setup: BattleSetup) {
+    info!("battle setup {setup:?}");
+    let game_random = std::mem::replace(&mut game.random, GameRandom::from_key(&[0]));
+    let libc_random = std::mem::replace(&mut game.libc_random, LibcRandom::new(0));
+    let screen = LoadingScreen::new(game_random, libc_random, game.last_loading_type, None);
+    game.last_loading_type = Some(screen.screen_type());
+    let texture_base = game.textures.len();
+    let textures = Iso9660::open(&game.iso_path)
+        .map_err(Into::into)
+        .and_then(|mut image| load_screen_textures(&mut image, screen.screen_type()));
+    match textures {
+        Ok(textures) => {
+            for texture in textures {
+                push_texture(game, texture, Sampling::Nearest);
+            }
+        }
+        Err(error) => error!("cannot load the loading screen: {error}"),
+    }
+    let iso_path = game.iso_path.clone();
+    let job = std::thread::spawn(move || {
+        let mut image = Iso9660::open(&iso_path).map_err(|e| e.to_string())?;
+        let mut read = |id: u32| read_file(&mut image, id).map_err(|e| e.to_string());
+        battle::load(&mut read, &setup)
+    });
+    game.model_batches.clear();
+    game.scene = Scene::BattleLoad(Box::new(BattleLoad {
+        screen,
+        texture_base,
+        job: Some(job),
+        setup,
+    }));
+}
+
+/// After `Load_RunBlocking`: the generators go back, the objects are created and `Battle_ResetWork` starts the
+/// music.
+fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
+    let Scene::BattleLoad(load) = std::mem::replace(&mut game.scene, Scene::Black) else {
+        return;
+    };
+    let BattleLoad {
+        screen, job, setup, ..
+    } = *load;
+    (game.random, game.libc_random) = screen.into_random();
+    let assets = match job.map(JoinHandle::join) {
+        Some(Ok(Ok(assets))) => assets,
+        Some(Ok(Err(error))) => {
+            error!("cannot load the battle: {error}");
+            return;
+        }
+        _ => {
+            error!("the battle loader stopped");
+            return;
+        }
+    };
+    game.model_textures = (assets.base_textures.clone(), assets.shade_textures.clone());
+    game.scene = Scene::Battle(Box::new(battle::Battle::new(assets)));
+    play_bgm(game, commands, battle::BGM_FIRST + setup.bgm.max(0) as u32);
 }
 
 fn into_screen(quads: Vec<loading::Quad>) -> Vec<ScreenQuad> {

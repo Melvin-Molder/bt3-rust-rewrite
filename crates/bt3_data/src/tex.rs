@@ -14,6 +14,9 @@ pub struct TextureEntry<'a> {
     pub clut_size: i32,
     pub pixel_blt: u32,
     pub clut_blt: u32,
+    /// `tbpOfs` / `cbpOfs`: block offsets of the pixels / CLUT from the file's first texture.
+    pub tbp_offset: i32,
+    pub cbp_offset: i32,
     pub texture_register: u64,
 }
 
@@ -55,6 +58,8 @@ impl<'a> TextureResource<'a> {
                 clut_size,
                 pixel_blt: read_u32(entry, 24)?,
                 clut_blt: read_u32(entry, 28)?,
+                tbp_offset: read_i32(entry, 32)?,
+                cbp_offset: read_i32(entry, 36)?,
                 texture_register: read_u64(entry, 48)?,
             });
         }
