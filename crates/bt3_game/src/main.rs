@@ -18,6 +18,7 @@ mod rng;
 mod save;
 mod se;
 mod sound;
+mod stage_draw;
 mod title;
 mod windows;
 
@@ -149,6 +150,9 @@ struct Game {
     /// The battle's model textures (material, shading rows) and this frame's model triangles.
     model_textures: (Vec<RgbaTexture>, Vec<RgbaTexture>),
     model_batches: Vec<battle::ModelBatch>,
+    /// The stage texture file and this frame's stage triangles.
+    stage_textures: Vec<RgbaTexture>,
+    stage_batches: Vec<stage_draw::StageBatch>,
     demo_count: u32,
     movie_texture: Option<usize>,
     soundtrack: Option<Decoding>,
@@ -322,6 +326,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_loading_type: None,
             model_textures: (Vec::new(), Vec::new()),
             model_batches: Vec::new(),
+            stage_textures: Vec::new(),
+            stage_batches: Vec::new(),
             demo_count: 0,
             movie_texture,
             soundtrack,
@@ -363,6 +369,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 run_frames,
                 sync_quads,
                 model_draw::sync_models,
+                model_draw::sync_stage,
                 apply_volumes,
             )
                 .chain(),
@@ -729,7 +736,9 @@ fn run_frames(
             }
             Scene::Battle(battle) => {
                 game.quads.clear();
-                game.model_batches = battle.run_frame();
+                let frame = battle.run_frame();
+                game.model_batches = frame.models;
+                game.stage_batches = frame.stage;
             }
         }
     }
@@ -772,6 +781,7 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
         battle::load(&mut read, &setup)
     });
     game.model_batches.clear();
+    game.stage_batches.clear();
     game.scene = Scene::BattleLoad(Box::new(BattleLoad {
         screen,
         texture_base,
@@ -802,6 +812,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
         }
     };
     game.model_textures = (assets.base_textures.clone(), assets.shade_textures.clone());
+    game.stage_textures = assets.stage_textures.clone();
     game.scene = Scene::Battle(Box::new(battle::Battle::new(assets)));
     play_bgm(game, commands, battle::BGM_FIRST + setup.bgm.max(0) as u32);
 }

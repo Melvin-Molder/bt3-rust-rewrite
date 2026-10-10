@@ -22,12 +22,18 @@ pub struct TextureEntry<'a> {
 
 impl<'a> TextureResource<'a> {
     pub fn parse(bytes: &'a [u8]) -> io::Result<Self> {
-        if bytes.len() < FILE_HEADER_SIZE {
+        Self::parse_at(bytes, 0)
+    }
+
+    /// A texture file whose header sits at `header` while its offsets count from the start of `bytes`
+    /// (`Res_RelocateOffsets` with a separate base, as the stage file uses it).
+    pub fn parse_at(bytes: &'a [u8], header: usize) -> io::Result<Self> {
+        if bytes.len() < header + FILE_HEADER_SIZE {
             return Err(invalid_data("texture resource header is truncated"));
         }
 
-        let count = read_u32(bytes, 0)? as usize;
-        let entries_offset = (read_u32(bytes, 4)? as usize)
+        let count = read_u32(bytes, header)? as usize;
+        let entries_offset = (read_u32(bytes, header + 4)? as usize)
             .checked_mul(4)
             .ok_or_else(|| invalid_data("texture entry offset overflow"))?;
         let entries_size = count

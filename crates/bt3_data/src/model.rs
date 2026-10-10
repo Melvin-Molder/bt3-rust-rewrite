@@ -174,6 +174,19 @@ pub fn tex0_cbp(tex0: u64) -> u32 {
 /// program 0 sees it (TOPS-relative), and takes a batch at every MSCAL / MSCNT.
 fn parse_vif(stream: &[u8]) -> io::Result<Vec<Batch>> {
     let mut batches = Vec::new();
+    walk_vif(stream, |memory| {
+        batches.push(take_batch(memory)?);
+        Ok(())
+    })?;
+    Ok(batches)
+}
+
+/// Walks a DMA chain of VIF codes the way the VIF1 does, keeping VU1 memory TOPS-relative, and hands that memory
+/// to `kick` at every MSCAL / MSCALF / MSCNT (each run of the microprogram).
+pub fn walk_vif(
+    stream: &[u8],
+    mut kick: impl FnMut(&[[u32; 4]]) -> io::Result<()>,
+) -> io::Result<()> {
     let mut memory = vec![[0u32; 4]; 0x400];
     let (mut cl, mut wl) = (1usize, 1usize);
     let mut at = 0usize;
@@ -199,7 +212,7 @@ fn parse_vif(stream: &[u8]) -> io::Result<Vec<Batch>> {
                     cl = imm & 0xFF;
                     wl = (imm >> 8) & 0xFF;
                 }
-                0x14 | 0x15 | 0x17 => batches.push(take_batch(&memory)?),
+                0x14 | 0x15 | 0x17 => kick(&memory)?,
                 0x20 => p += 4,
                 0x30 | 0x31 => p += 16,
                 0x4A => p += if num == 0 { 256 } else { num } * 8,
@@ -236,7 +249,7 @@ fn parse_vif(stream: &[u8]) -> io::Result<Vec<Batch>> {
             break;
         }
     }
-    Ok(batches)
+    Ok(())
 }
 
 /// The batch program 0 reads at TOP: header at +0..+4, n = tag(+3) & 0x7FFF vertices of three quadwords at +5.

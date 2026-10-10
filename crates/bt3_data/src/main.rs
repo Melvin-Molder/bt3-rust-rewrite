@@ -8,6 +8,7 @@ use bt3_data::gs::{decode_sprite_texture, psmt8_row_from_upload};
 use bt3_data::model::{CharaModel, TEXTURE_SECTION, tex0_cbp, tex0_tbp};
 use bt3_data::pack_section;
 use bt3_data::stage::StageResource;
+use bt3_data::stage_model::StageModel;
 use bt3_data::tex::TextureResource;
 
 #[derive(Clone, Debug)]
@@ -687,6 +688,63 @@ fn probe_chara_models(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// The stage's drawable model (`StageModel`): meshes per draw group, how many `StgModel_Cull` can reach after
+/// `BtlStage_Reset`, the vertex extent, and the stage texture file (offsets from the stage object).
+fn probe_stage_model(file: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let object = StageModel::object(file)?;
+    let model = StageModel::parse(object)?;
+    for (g, materials) in model.groups.iter().enumerate() {
+        let meshes: Vec<_> = materials.iter().flat_map(|m| &m.meshes).collect();
+        let drawn = meshes
+            .iter()
+            .filter(|m| model.drawable[usize::from(m.vis)])
+            .count();
+        let strips: usize = meshes.iter().map(|m| m.strips.len()).sum();
+        let vertices: Vec<_> = meshes
+            .iter()
+            .flat_map(|m| m.strips.iter().flatten())
+            .collect();
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in &vertices {
+            for k in 0..3 {
+                lo[k] = lo[k].min(v.position[k]);
+                hi[k] = hi[k].max(v.position[k]);
+            }
+        }
+        let sample = vertices.first().map(|v| (v.position, v.color, v.stq));
+        println!(
+            "  group {g}: {} materials, {} meshes ({drawn} drawable), {strips} strips, {} vertices, extent {lo:?}..{hi:?}, first {sample:?}, animated {}",
+            materials.len(),
+            meshes.len(),
+            vertices.len(),
+            materials.iter().filter(|m| m.anim.is_some()).count()
+        );
+    }
+    let textures = TextureResource::parse_at(object, model.texture_header)?;
+    let formats: Vec<String> = textures
+        .entries
+        .iter()
+        .map(|t| {
+            let tex0 = t.texture_register;
+            format!(
+                "{}x{}/psm{:X}{}",
+                1u32 << ((tex0 >> 26) & 0xF),
+                1u32 << ((tex0 >> 30) & 0xF),
+                (tex0 >> 20) & 0x3F,
+                decode_sprite_texture(t)
+                    .err()
+                    .map_or(String::new(), |e| format!("/{e}"))
+            )
+        })
+        .collect();
+    println!(
+        "  stage textures ({}): {}",
+        formats.len(),
+        formats.join(" ")
+    );
+    Ok(())
+}
+
 fn file_id_for_partition_entry(partition: u8, index: u32) -> u32 {
     match partition {
         0 => index,
@@ -863,6 +921,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stage.stage_id, stage.flags, stage.water_level
     );
     println!("  object light direction {:?}", stage.light_dir);
+    probe_stage_model(&stage_bytes)?;
     for (index, placement) in stage.starting_placements.iter().enumerate() {
         println!(
             "  start {index}: position {:?}, target {:?}",

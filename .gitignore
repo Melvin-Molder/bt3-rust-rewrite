@@ -23,6 +23,7 @@
 !/crates/bt3_data/src/snd.rs
 !/crates/bt3_data/src/model.rs
 !/crates/bt3_data/src/motion.rs
+!/crates/bt3_data/src/stage_model.rs
 !/crates/bt3_game/
 !/crates/bt3_game/Cargo.toml
 !/crates/bt3_game/src/
@@ -51,3 +52,5 @@
 !/crates/bt3_game/src/battle.rs
 !/crates/bt3_game/src/model_draw.rs
 !/crates/bt3_game/src/gs_model.wgsl
+!/crates/bt3_game/src/stage_draw.rs
+!/crates/bt3_game/src/gs_stage.wgsl

@@ -15,9 +15,11 @@ use bt3_data::model::{CharaModel, ModelPart, TEXTURE_SECTION, tex0_cbp, tex0_tbp
 use bt3_data::motion::{Motion, NODE_MAX};
 use bt3_data::pack_section;
 use bt3_data::stage::StageResource;
+use bt3_data::stage_model::StageModel;
 use bt3_data::tex::TextureResource;
 
 use crate::char_select::BattleSetup;
+use crate::stage_draw::{StageBatch, draw_stage};
 
 /// `BTL_FILE_CHARA`: `0x590 + chara * 10 + costume`.
 pub const CHARA_FILE: u32 = 0x590;
@@ -43,7 +45,7 @@ const OFFSET_X: f32 = 2048.0 - 256.0;
 const OFFSET_Y: f32 = 2048.0 - 224.0;
 
 /// A PS2 matrix: four rows, applied to row vectors (`v.x * m[0] + v.y * m[1] + v.z * m[2] + v.w * m[3]`).
-type Mtx = [[f32; 4]; 4];
+pub(crate) type Mtx = [[f32; 4]; 4];
 
 const IDENTITY: Mtx = [
     [1.0, 0.0, 0.0, 0.0],
@@ -58,8 +60,12 @@ pub struct BattleAssets {
     pub base_textures: Vec<RgbaTexture>,
     /// One 256 x 1 row per shading CLUT: the light ramp looked up through it (bilinear, clamped: CLAMP_2 5).
     pub shade_textures: Vec<RgbaTexture>,
+    /// The stage texture file, decoded (`StgModel_SetTexture` uploads one at a time to block 0x2A00).
+    pub stage_textures: Vec<RgbaTexture>,
     fighters: Vec<FighterModel>,
     stage: StageResource,
+    stage_model: StageModel,
+    stage_id: i32,
 }
 
 struct FighterModel {
@@ -84,13 +90,25 @@ pub fn load(
         .first()
         .ok_or("the light file has no textures")?;
     let ramp = psmt8_row_from_upload(ramp_entry, 4, 0, 256).map_err(error)?;
-    let stage =
-        StageResource::parse(&read(STAGE_FILE + setup.stage.max(0) as u32)?).map_err(error)?;
+    let stage_file = read(STAGE_FILE + setup.stage.max(0) as u32)?;
+    let stage = StageResource::parse(&stage_file).map_err(error)?;
+    let object = StageModel::object(&stage_file).map_err(error)?;
+    let stage_model = StageModel::parse(object).map_err(error)?;
+    let stage_textures = TextureResource::parse_at(object, stage_model.texture_header)
+        .map_err(error)?
+        .entries
+        .iter()
+        .map(decode_sprite_texture)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
     let mut assets = BattleAssets {
         base_textures: Vec::new(),
         shade_textures: Vec::new(),
+        stage_textures,
         fighters: Vec::new(),
         stage,
+        stage_model,
+        stage_id: setup.stage,
     };
     for side in setup.sides {
         let file_id = CHARA_FILE + side.chara.max(0) as u32 * 10 + side.costume.max(0) as u32;
@@ -220,6 +238,12 @@ pub struct ModelBatch {
     pub vertices: Vec<ScreenVertex>,
 }
 
+/// What one battle frame draws, in `Battle_Draw`'s order: the stage, then the fighters.
+pub struct BattleFrame {
+    pub stage: Vec<StageBatch>,
+    pub models: Vec<ModelBatch>,
+}
+
 /// A fighter object as far as the draw needs it.
 #[derive(Clone, Copy, Debug)]
 struct Fighter {
@@ -261,9 +285,10 @@ impl Battle {
     }
 
     /// One battle frame: each fighter advances its idle loop (`BtlAnim_AdvanceLoop`), its pose is sampled and its
-    /// node matrices built, then the object draw: side 0's view (`BtlCam_GetDefaultView` outside split screen),
-    /// every enabled part of both fighters through program 0.
-    pub fn run_frame(&mut self) -> Vec<ModelBatch> {
+    /// node matrices built, then `Battle_Draw`: the stage (`StgModel_Cull` / `StgModel_Draw`) and the object draw
+    /// in side 0's view (`BtlCam_GetDefaultView` outside split screen), every enabled part of both fighters
+    /// through program 0.
+    pub fn run_frame(&mut self) -> BattleFrame {
         let mut poses = Vec::with_capacity(2);
         for (side, fighter) in self.fighters.iter_mut().enumerate() {
             let model = &self.assets.fighters[side];
@@ -281,6 +306,7 @@ impl Battle {
             ));
         }
         let view = self.camera_view(0, &poses[0]);
+        let stage = draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view);
         let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
         for (side, nodes) in poses.iter().enumerate() {
             let model = &self.assets.fighters[side];
@@ -309,7 +335,10 @@ impl Battle {
             .map(|(textures, vertices)| ModelBatch { textures, vertices })
             .collect();
         batches.sort_by_key(|batch| batch.textures);
-        batches
+        BattleFrame {
+            stage,
+            models: batches,
+        }
     }
 
     /// `ChrCam_Update` with the lock-on camera (`ChrCam_CalcLockOn`) of a fighter standing still and facing its
@@ -541,18 +570,21 @@ fn keep_behind_head(node: [f32; 3], height: f32, eye: &mut [f32; 3], rot: [f32; 
 }
 
 /// `View_SetTransform` + `View_UpdateMatrices` with `View_InitLayout(VIEW_LAYOUT_FULL)`'s projection.
-struct View {
-    world2screen: Mtx,
-    world2clip: Mtx,
+pub(crate) struct View {
+    pub(crate) world2screen: Mtx,
+    pub(crate) world2clip: Mtx,
+    /// `view->clip2screen` (+0x100), what `StgModel_Draw` loads program 4 with.
+    pub(crate) clip2screen: Mtx,
 }
 
 impl View {
     fn new(pos: [f32; 3], rot: [f32; 3]) -> Self {
         let world2view = view_matrix(pos, rot);
-        let (view2screen, view2clip) = projection();
+        let (view2screen, view2clip, clip2screen) = projection();
         Self {
             world2screen: mul(&world2view, &view2screen),
             world2clip: mul(&world2view, &view2clip),
+            clip2screen,
         }
     }
 }
@@ -585,7 +617,7 @@ fn lerp_rows(a: [f32; 4], ka: f32, b: [f32; 4], kb: f32) -> [f32; 4] {
 
 /// `View_BuildProjection` for the full-screen layout: screen size 2047, distance 433, aspect (1 / 1.1666667, 1),
 /// centre 2048, Z from 10877000 (near 0.3) to 1 (far 65536), scale 1.
-fn projection() -> (Mtx, Mtx) {
+fn projection() -> (Mtx, Mtx, Mtx) {
     let (size, dist, scale) = (2047.0f32, 433.0f32, 1.0f32);
     let (ax, ay) = (1.0 / 1.166_666_7f32, 1.0f32);
     let (center_x, center_y) = (2048.0f32, 2048.0f32);
@@ -618,7 +650,12 @@ fn projection() -> (Mtx, Mtx) {
     let mut shift = IDENTITY;
     shift[3][0] = ox;
     shift[3][1] = oy;
-    (mul(&persp, &screen), mul(&clip, &shift))
+    let mut clip2screen = IDENTITY;
+    clip2screen[0][0] = dist * ax * hw / near;
+    clip2screen[1][1] = dist * ay * hh / near;
+    clip2screen[2][2] = (z_min - z_max) * 0.5;
+    clip2screen[3] = [2048.0, 2048.0, (z_max + z_min) * 0.5, 1.0];
+    (mul(&persp, &screen), mul(&clip, &shift), clip2screen)
 }
 
 /// `ObjDraw_DrawParts` mode 0 for one part and VU1 program 0 on its batches: bone A is the part's node, bone B
@@ -689,7 +726,7 @@ fn draw_part(
     }
 }
 
-fn apply(m: &Mtx, v: [f32; 4]) -> [f32; 4] {
+pub(crate) fn apply(m: &Mtx, v: [f32; 4]) -> [f32; 4] {
     std::array::from_fn(|k| v[0] * m[0][k] + v[1] * m[1][k] + v[2] * m[2][k] + v[3] * m[3][k])
 }
 
@@ -756,7 +793,7 @@ mod tests {
 
     #[test]
     fn projection_puts_the_view_axis_at_the_screen_centre_and_near_at_z_max() {
-        let (screen, _) = projection();
+        let (screen, _, _) = projection();
         let s = apply(&screen, [0.0, 0.0, 0.3, 1.0]);
         assert_eq!(s[0] / s[3], 2048.0);
         assert_eq!(s[1] / s[3], 2048.0);
@@ -817,7 +854,14 @@ mod tests {
         let assets = load(&mut read, &setup).unwrap();
         let mut battle = Battle::new(assets);
         assert_eq!(battle.assets.fighters[0].idle.length, 67);
-        let batches = battle.run_frame();
+        let frame = battle.run_frame();
+        // Stage 0's ground, sky and buildings are in view behind the fighters.
+        let stage_vertices: usize = frame.stage.iter().map(|b| b.vertices.len()).sum();
+        assert!(stage_vertices > 3000, "{stage_vertices} stage vertices");
+        assert!(
+            frame.stage.iter().any(|b| b.group == 0) && frame.stage.iter().any(|b| b.group == 2)
+        );
+        let batches = frame.models;
         let vertices: Vec<_> = batches.iter().flat_map(|b| &b.vertices).collect();
         assert!(vertices.len() > 3000);
         // The two fighters stand in front of the camera: most of what is drawn is on screen.

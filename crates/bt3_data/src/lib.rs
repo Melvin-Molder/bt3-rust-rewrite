@@ -12,6 +12,7 @@ pub mod model;
 pub mod motion;
 pub mod snd;
 pub mod stage;
+pub mod stage_model;
 pub mod tex;
 
 const SECTOR_SIZE: u64 = 2048;
