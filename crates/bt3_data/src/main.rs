@@ -450,46 +450,136 @@ fn utf16_line(table: &[u8], i: usize) -> String {
         .unwrap_or_else(|e| e.to_string())
 }
 
-/// `MainMenu_Init(2)`: section 2 of archive baseFile + 1.
-fn probe_main_menu(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
-    let location = partition_entry_for_id(0x1C1 + 1);
+/// Sections of an unpacked menu screen pack and how to read them.
+struct MenuSections<'a> {
+    fods: &'a [usize],
+    packs: &'a [usize],
+    lips: &'a [usize],
+    texts: &'a [usize],
+}
+
+/// A menu screen's `*_Init(section)`: section `section` of archive `file_id`, BPE-packed.
+fn probe_menu(
+    image: &mut Iso9660,
+    name: &str,
+    file_id: u32,
+    section: usize,
+    kinds: MenuSections<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let location = partition_entry_for_id(file_id);
     let archive = AfsArchive::open(image, format!("DATA/PZS3US{}.AFS", location.partition))?;
     let pack = archive.read_entry(image, location.index)?;
-    let res = bpe::decode(pack_section(&pack, 2)?)?;
+    let res = bpe::decode(pack_section(&pack, section)?)?;
     let count = u32::from_le_bytes(res[0..4].try_into()?) as usize;
     println!(
-        "\nMain menu (archive section 2): {} bytes, {count} sections",
+        "\n{name} (file 0x{file_id:X} section {section}): {} bytes, {count} sections",
         res.len()
     );
     for section in 1..=count {
         let data = pack_section(&res, section)?;
-        match section {
-            20 => println!("  {section}: FOD {}", describe_fod(data)),
-            21 | 22 => {
-                println!(
-                    "  {section}: pack, part 1 {}",
-                    describe_textures(pack_section(data, 1)?)
-                );
-                println!("      part 2 FOD {}", describe_fod(pack_section(data, 2)?));
-            }
-            27 => {
-                let words: Vec<u32> = data[..0x40.min(data.len())]
-                    .chunks_exact(4)
-                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-                    .collect();
-                println!("  {section}: {} bytes, head {words:X?}", data.len());
-            }
-            28 => {
-                let n = bt3_data::font::message_count(data)?;
-                println!("  {section}: text, {n} lines");
-                for i in 0..n {
-                    println!("    {i:02X}: {:?}", utf16_line(data, i));
+        if kinds.fods.contains(&section) {
+            println!("  {section}: FOD {}", describe_fod(data));
+        } else if kinds.packs.contains(&section) {
+            let parts = u32::from_le_bytes(data[0..4].try_into()?) as usize;
+            for part in 1..=parts {
+                let part_data = pack_section(data, part)?;
+                let fod = describe_fod(part_data);
+                if fod != "not a FOD" {
+                    println!("  {section}.{part}: FOD {fod}");
+                } else {
+                    println!("  {section}.{part}: {}", describe_textures(part_data));
                 }
             }
-            _ => println!("  {section}: {}", describe_textures(data)),
+        } else if kinds.lips.contains(&section) {
+            let words: Vec<u32> = data[..0x40.min(data.len())]
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            println!("  {section}: {} bytes, head {words:X?}", data.len());
+        } else if kinds.texts.contains(&section) {
+            let n = bt3_data::font::message_count(data)?;
+            println!("  {section}: text, {n} lines");
+            for i in 0..n {
+                println!("    {i:02X}: {:?}", utf16_line(data, i));
+            }
+        } else {
+            println!("  {section}: {}", describe_textures(data));
         }
     }
     Ok(())
+}
+
+fn probe_main_menu(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
+    probe_menu(
+        image,
+        "Main menu",
+        0x1C1 + 1,
+        2,
+        MenuSections {
+            fods: &[20],
+            packs: &[21, 22],
+            lips: &[27],
+            texts: &[28],
+        },
+    )?;
+    // DuelMenu_Run(1): section 1 of archive 5 (file baseFile).
+    probe_menu(
+        image,
+        "Duel menu",
+        0x1C1,
+        1,
+        MenuSections {
+            fods: &[19],
+            packs: &[22, 23, 25],
+            lips: &[26],
+            texts: &[21, 27],
+        },
+    )?;
+    // CharSel_Run(2): section 2 of archive 5.
+    for (what, file_id) in [
+        ("portrait", 0x2F9u32),
+        ("portrait", 0x2F9 + 0x10),
+        ("stage", 0x39D),
+        ("stage", 0x39D + 5),
+    ] {
+        let location = partition_entry_for_id(file_id);
+        let archive = AfsArchive::open(image, format!("DATA/PZS3US{}.AFS", location.partition))?;
+        let data = archive.read_entry(image, location.index)?;
+        let unpacked = bpe::decode(&data)?;
+        println!(
+            "\n{what} file 0x{file_id:X}: {} packed, {} unpacked: {}",
+            data.len(),
+            unpacked.len(),
+            describe_textures(&unpacked)
+        );
+    }
+    let location = partition_entry_for_id(4);
+    let archive = AfsArchive::open(image, format!("DATA/PZS3US{}.AFS", location.partition))?;
+    let table = archive.read_entry(image, location.index)?;
+    let words: Vec<u32> = table[..16]
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let chara = (words[1] & !3) as usize;
+    let costumes: Vec<u16> = (0..0xA1)
+        .map(|i| u16::from_le_bytes([table[chara + i * 0x3C + 0xA], table[chara + i * 0x3C + 0xB]]))
+        .collect();
+    println!(
+        "\ncommon file 4: {} bytes, head {words:X?}, costumes {costumes:?}",
+        table.len()
+    );
+    probe_menu(
+        image,
+        "Character select",
+        0x1C1,
+        2,
+        MenuSections {
+            fods: &[15, 24, 25, 32, 33],
+            packs: &[51, 53, 54],
+            lips: &[39, 42, 56],
+            texts: &[43, 44],
+        },
+    )
 }
 
 fn file_id_for_partition_entry(partition: u8, index: u32) -> u32 {

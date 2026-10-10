@@ -6,17 +6,133 @@ use std::error::Error;
 use bt3_data::font::message;
 
 use crate::draw::ScreenQuad;
-use crate::flash::{DrawOver, Flash, screen_quad};
+use crate::flash::{ClipRef, DrawOver, Flash, screen_quad};
 use crate::font::{Font, rgba};
+
+/// A text box style (`TextBox_Init` presets, src/ui/menu_util_1.c).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TextBox {
+    align: i32,
+    x: i32,
+    y: i32,
+    /// `TEXTBOX_FLAG_COLOR`: RGBA, the alpha scaled by the clip's.
+    color: Option<[u8; 4]>,
+    /// `TEXTBOX_FLAG_MAX_W`: a wider line is shrunk horizontally.
+    max_w: Option<i32>,
+    /// `TEXTBOX_FLAG_LINE_Y`: extra y for texts of one to five rows.
+    line_y: Option<[i32; 5]>,
+}
+
+impl TextBox {
+    pub fn preset(preset: u32) -> Self {
+        let yellow = Some([0xFF, 0xFF, 0x00, 0x80]);
+        match preset {
+            1 => Self {
+                align: 2,
+                x: 0x100,
+                max_w: Some(0xE1),
+                ..Self::default()
+            },
+            2 => Self {
+                max_w: Some(0xE1),
+                ..Self::default()
+            },
+            3 => Self {
+                align: 2,
+                x: 0x100,
+                color: yellow,
+                max_w: Some(0xD4),
+                ..Self::default()
+            },
+            4 => Self {
+                color: yellow,
+                max_w: Some(0xD4),
+                ..Self::default()
+            },
+            5 => Self {
+                line_y: Some([0x20, 0x14, 0xA, 0, 0]),
+                ..Self::default()
+            },
+            6 => Self {
+                max_w: Some(0x160),
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+
+    /// `TextBox_AttachLine(flash, clip, 0, 0, line, box)`: hangs line `line` of `text` on the clip as `tag`. A negative
+    /// line or a missing clip takes the text off the clip.
+    pub fn attach_line(
+        &self,
+        flash: &mut Flash,
+        clip: ClipRef,
+        tag: u32,
+        text: &[u8],
+        line: i32,
+        font: &Font,
+    ) -> Option<TextDraw> {
+        let text = (line >= 0 && clip.found())
+            .then(|| message(text, line as usize).ok())
+            .flatten();
+        let Some(text) = text else {
+            flash.clip_set_draw_over(clip, None);
+            return None;
+        };
+        let alpha = flash.clip_get_alpha(clip);
+        let scale_x = match self.max_w {
+            Some(max) => {
+                let width = font.width(&text);
+                if max < width {
+                    max as f32 / width as f32
+                } else {
+                    1.0
+                }
+            }
+            None => 1.0,
+        };
+        let row_y = match (self.line_y, Font::count_lines(&text)) {
+            (Some(rows), n @ 1..=5) => rows[n as usize - 1],
+            _ => 0,
+        };
+        let color = match self.color {
+            Some(c) => [c[0], c[1], c[2], (f32::from(c[3]) * alpha) as u32 as u8],
+            None => [0xFF, 0xFF, 0xFF, (alpha * 128.0) as u32 as u8],
+        };
+        flash.clip_set_draw_over(clip, Some(tag));
+        Some(TextDraw {
+            tag,
+            x: self.x,
+            y: self.y + row_y,
+            align: self.align,
+            scale_x,
+            color: color.map(i32::from),
+            shadow: [0x20, 0x20, 0x20, i32::from((alpha * 64.0) as u32 as u8)],
+            text,
+        })
+    }
+}
 
 /// What `TextBox_AttachLine` hands to its clip callback (`TextBoxDraw`).
 #[derive(Clone, Debug)]
-struct TextDraw {
+pub struct TextDraw {
+    tag: u32,
     x: i32,
     y: i32,
+    align: i32,
+    scale_x: f32,
     color: [i32; 4],
     shadow: [i32; 4],
     text: Vec<u16>,
+}
+
+/// `TextBox_DrawClip` for every `drawOver` call whose tag has a text.
+pub fn draw_texts(texts: &[TextDraw], overs: &[DrawOver], font: &mut Font) {
+    for over in overs {
+        for draw in texts.iter().filter(|d| d.tag == over.tag) {
+            draw_clip(draw, over, font);
+        }
+    }
 }
 
 /// `TextBox_DrawClip`: moves the text by the clip's position and tints it with the clip's colour transform.
@@ -32,8 +148,8 @@ fn draw_clip(draw: &TextDraw, over: &DrawOver, font: &mut Font) {
         return;
     }
     font.push_style();
-    font.style.align = 0;
-    font.style.scale_x = 1.0;
+    font.style.align = draw.align;
+    font.style.scale_x = draw.scale_x;
     font.style.scale_y = 1.0;
     font.style.color = rgba(color[0], color[1], color[2], color[3]);
     font.style.shadow_mode = 2;
@@ -79,6 +195,11 @@ impl MsgWin {
         self.flash.goto_label(label, true);
     }
 
+    /// `MsgWin_SetText`.
+    pub fn set_text(&mut self, text: Vec<u8>) {
+        self.text = text;
+    }
+
     pub fn close(&mut self) {
         let label = if self.right { "fl_r_out" } else { "fl_l_out" };
         self.flash.goto_label(label, true);
@@ -88,44 +209,14 @@ impl MsgWin {
     pub fn draw(&mut self, line: i32, font: &mut Font, quads: &mut Vec<ScreenQuad>) {
         self.flash.advance();
         let clip = self.flash.find(None, "mc_message_text");
-        self.attach_line(clip, line);
+        self.draw =
+            TextBox::preset(5).attach_line(&mut self.flash, clip, 0, &self.text, line, font);
         let textures = &self.textures;
         let has_texture = |image: usize| textures.get(image).is_some_and(Option::is_some);
         let (flash_quads, overs) = self.flash.draw_with_overs(&has_texture);
         quads.extend(flash_quads.iter().map(|q| screen_quad(q, textures)));
-        if let Some(draw) = &self.draw {
-            for over in &overs {
-                draw_clip(draw, over, font);
-            }
-        }
+        draw_texts(self.draw.as_slice(), &overs, font);
         font.flush(quads);
-    }
-
-    /// `TextBox_AttachLine(flash, ref, 0, 0, line, box)` with preset 5: left aligned, rows offset by 0x20, 0x14, 0xA.
-    fn attach_line(&mut self, clip: crate::flash::ClipRef, line: i32) {
-        let text = (line >= 0)
-            .then(|| message(&self.text, line as usize).ok())
-            .flatten();
-        let Some(text) = text.filter(|_| clip.found()) else {
-            self.flash.clip_set_draw_over(clip, None);
-            self.draw = None;
-            return;
-        };
-        let alpha = self.flash.clip_get_alpha(clip);
-        let y = match Font::count_lines(&text) {
-            1 => 0x20,
-            2 => 0x14,
-            3 => 0xA,
-            _ => 0,
-        };
-        self.draw = Some(TextDraw {
-            x: 0,
-            y,
-            color: [0xFF, 0xFF, 0xFF, i32::from((alpha * 128.0) as u32 as u8)],
-            shadow: [0x20, 0x20, 0x20, i32::from((alpha * 64.0) as u32 as u8)],
-            text,
-        });
-        self.flash.clip_set_draw_over(clip, Some(0));
     }
 }
 
@@ -148,6 +239,13 @@ impl IconWin {
 
     pub fn close(&mut self) {
         self.flash.goto_label("fl_out", true);
+    }
+
+    /// Replaces the texture of one image (`IconWin_SetIcon` swaps image 4).
+    pub fn set_texture(&mut self, image: usize, texture: Option<usize>) {
+        if let Some(slot) = self.textures.get_mut(image) {
+            *slot = texture;
+        }
     }
 
     pub fn draw(&mut self, quads: &mut Vec<ScreenQuad>) {

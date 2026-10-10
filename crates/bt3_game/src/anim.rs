@@ -3,6 +3,28 @@
 
 use crate::flash::{ClipRef, Flash, PROP_REPEAT, PROP_VISIBLE, Uv};
 use crate::rng::GameRandom;
+use crate::title::TitleSound;
+
+/// `VOICE_LANG2_OFFSET`: a fresh save has flag bit 0 set, so menu voices take the second language's files.
+const VOICE_LANG2_OFFSET: u32 = 0x55C;
+
+/// `Voice_PlayWithSubtitle(pack, base, line)`: the voice file and the line's mouth keys (pack word `line * 2 + 2`).
+pub fn play_with_subtitle(
+    lips: &[u8],
+    base: u32,
+    line: i32,
+    lip: &mut LipSync,
+    sounds: &mut Vec<TitleSound>,
+) {
+    sounds.push(TitleSound::Voice(base + line as u32 + VOICE_LANG2_OFFSET));
+    let i = line as usize * 2 + 2;
+    let ofs = lips
+        .get(i * 4..i * 4 + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize & !3);
+    if let Some(data) = ofs.and_then(|ofs| lips.get(ofs..)) {
+        lip.start(data);
+    }
+}
 
 /// `ADXT_STAT_PLAYING` and `ADXT_STAT_PLAYEND` of `Voice_GetStat`.
 pub const VOICE_PLAYING: i32 = 3;
@@ -137,6 +159,28 @@ pub fn scroll(flash: &mut Flash, r: ClipRef, uv: Uv, x: &mut f32, dx: f32) {
     flash.clip_set_uv(r, cell);
 }
 
+/// `FlashAnim_Scroll` along y: the rectangle moves by `*y`, which advances by `dy` and wraps at `uv.v1`.
+pub fn scroll_y(flash: &mut Flash, r: ClipRef, uv: Uv, y: &mut f32, dy: f32) {
+    if !r.found() {
+        return;
+    }
+    let cell = Uv {
+        v0: uv.v0 + *y as i32,
+        v1: uv.v1 + *y as i32,
+        ..uv
+    };
+    *y += dy;
+    if dy < 0.0 {
+        if *y < 0.0 {
+            *y += uv.v1 as f32;
+        }
+    } else if uv.v1 as f32 <= *y {
+        *y -= uv.v1 as f32;
+    }
+    flash.clip_set_flags(r, PROP_REPEAT, true);
+    flash.clip_set_uv(r, cell);
+}
+
 /// `gLipSync` with `gLipSyncOpen` / `gLipSyncWaiting`: (start frame, open) keys of a voice line.
 #[derive(Clone, Debug, Default)]
 pub struct LipSync {
@@ -150,6 +194,13 @@ pub struct LipSync {
 }
 
 impl LipSync {
+    /// `LipSync_Clear`.
+    pub fn clear(&mut self) {
+        let (open, waiting) = (self.open, self.waiting);
+        *self = Self::default();
+        (self.open, self.waiting) = (open, waiting);
+    }
+
     /// `LipSync_Start`: count at +8, four-byte keys from +0x10; the last key's frame is the length.
     pub fn start(&mut self, data: &[u8]) {
         *self = Self::default();

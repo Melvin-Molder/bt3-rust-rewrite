@@ -42,3 +42,7 @@
 !/crates/bt3_game/src/anim.rs
 !/crates/bt3_game/src/windows.rs
 !/crates/bt3_game/src/main_menu.rs
+!/crates/bt3_game/src/menu_res.rs
+!/crates/bt3_game/src/duel_menu.rs
+!/crates/bt3_game/src/char_select.rs
+!/crates/bt3_game/src/save.rs

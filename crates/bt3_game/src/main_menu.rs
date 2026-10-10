@@ -1,18 +1,17 @@
 //! The main menu (`MainMenu_Run(2)`, src/menu/main_menu.c): a ring of mode plates, four guide characters of whom one
 //! talks about the item under the cursor, and the seven dragon balls of the save.
 
-use std::collections::BTreeMap;
 use std::error::Error;
 
-use bt3_data::gs::{RgbaTexture, decode_sprite_texture};
+use bt3_data::gs::RgbaTexture;
 use bt3_data::pack_section;
-use bt3_data::tex::TextureResource;
 
 use crate::anim::{self, LipSync, VOICE_PLAYEND};
 use crate::draw::ScreenQuad;
 use crate::flash::{FLASH_PAD, Flash, PROP_VISIBLE, Uv, screen_quad};
 use crate::font::Font;
-use crate::logo::{ColorFade, TILES_PER_PICTURE, picture_quads};
+use crate::logo::{ColorFade, picture_quads};
+use crate::menu_res::{FileKey, ImageTexture, decode_files, decode_picture, tex};
 use crate::rng::GameRandom;
 use crate::title::{PAD_CROSS, PAD_DOWN, PAD_TRIANGLE, PAD_UP, PadRepeat, TitleFrame, TitleSound};
 use crate::windows::{IconWin, MsgWin};
@@ -20,8 +19,6 @@ use crate::windows::{IconWin, MsgWin};
 /// `MainMenu_Run(2)` unpacks section 2 of gMenuArc1.
 pub const ARCHIVE_SECTION: usize = 2;
 const VOICE_BASE: u32 = 0x86F9;
-/// `VOICE_LANG2_OFFSET`: a fresh save has flag bit 0 set.
-const VOICE_LANG2_OFFSET: u32 = 0x55C;
 const ITEM_MAX: i32 = 11;
 const ROWS: i32 = 4;
 const FADE_FRAMES: i32 = 0x14;
@@ -30,9 +27,6 @@ const FLAG_CHOSEN: u32 = 1;
 const FLAG_LEAVING: u32 = 2;
 const FLAG_STARTED: u32 = 4;
 const FLAG_GREETED: u32 = 8;
-
-/// A texture file of the unpacked section: (section, part of its pack or 0 for the section itself).
-type FileKey = (usize, usize);
 
 /// `gMainMenu->tex[n]` of `MainMenu_Init`: (section, entry) per movie image.
 const FLASH_TEXTURES: [(usize, usize); 50] = [
@@ -88,14 +82,14 @@ const FLASH_TEXTURES: [(usize, usize); 50] = [
     (12, 5),
 ];
 /// `MsgWin_Init(MPACK_AT(res, 21), …)`: entries 0 and 1 of its part 1; image 2 is the text anchor.
-const MSG_TEXTURES: [Option<(FileKey, usize)>; 3] = [Some(((21, 1), 0)), Some(((21, 1), 1)), None];
+const MSG_TEXTURES: [ImageTexture; 3] = [Some(((21, 1), 0)), Some(((21, 1), 1)), None];
 /// `IconWin_Init(MPACK_AT(res, 22), res 23)`.
-const ICON_TEXTURES: [Option<(FileKey, usize)>; 5] = [
+const ICON_TEXTURES: [ImageTexture; 5] = [
     Some(((22, 1), 1)),
     Some(((22, 1), 0)),
-    Some(((23, 0), 0)),
+    tex(23, 0),
     Some(((22, 1), 2)),
-    Some(((23, 0), 1)),
+    tex(23, 1),
 ];
 
 /// What `MainMenu_Init` reads from its unpacked section.
@@ -147,31 +141,9 @@ impl MainMenuLayout {
 
 impl MainMenuAssets {
     pub fn parse(res: &[u8]) -> Result<Self, Box<dyn Error>> {
-        let mut keys: Vec<FileKey> = FLASH_TEXTURES.iter().map(|&(s, _)| (s, 0)).collect();
-        keys.extend(
-            MSG_TEXTURES
-                .iter()
-                .chain(&ICON_TEXTURES)
-                .flatten()
-                .map(|t| t.0),
-        );
-        let mut files = BTreeMap::new();
-        for key in keys {
-            if files.contains_key(&key) {
-                continue;
-            }
-            let section = pack_section(res, key.0)?;
-            let file = if key.1 == 0 {
-                section
-            } else {
-                pack_section(section, key.1)?
-            };
-            files.insert(key, decode_file(file)?);
-        }
-        let background = decode_file(pack_section(res, 1)?)?;
-        if background.len() != TILES_PER_PICTURE {
-            return Err(format!("main menu picture has {} tiles", background.len()).into());
-        }
+        let flash: Vec<ImageTexture> = FLASH_TEXTURES.iter().map(|&(s, e)| tex(s, e)).collect();
+        let files = decode_files(res, [&flash[..], &MSG_TEXTURES, &ICON_TEXTURES])?;
+        let background = decode_picture(res, 1)?;
         Ok(Self {
             data: MainMenuData {
                 fod: pack_section(res, 20)?.to_vec(),
@@ -182,17 +154,9 @@ impl MainMenuAssets {
                 layout: MainMenuLayout::default(),
             },
             background,
-            files: files.into_iter().collect(),
+            files,
         })
     }
-}
-
-fn decode_file(data: &[u8]) -> Result<Vec<RgbaTexture>, Box<dyn Error>> {
-    Ok(TextureResource::parse(data)?
-        .entries
-        .iter()
-        .map(decode_sprite_texture)
-        .collect::<Result<Vec<_>, _>>()?)
 }
 
 /// How `MainMenu_Run` ended.
@@ -318,21 +282,9 @@ impl MainMenuScreen {
         self.items[((self.top + self.cursor + 1) % self.count()) as usize]
     }
 
-    /// `Voice_PlayWithSubtitle(subtitles, MAINMENU_VOICE_BASE, line)` with save flag bit 0 set.
+    /// `Voice_PlayWithSubtitle(subtitles, MAINMENU_VOICE_BASE, line)`.
     fn play_voice(&mut self, line: i32, sounds: &mut Vec<TitleSound>) {
-        sounds.push(TitleSound::Voice(
-            VOICE_BASE + line as u32 + VOICE_LANG2_OFFSET,
-        ));
-        let word = |i: usize| {
-            self.lips
-                .get(i * 4..i * 4 + 4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize & !3)
-        };
-        if let Some(ofs) = word(line as usize * 2 + 2)
-            && let Some(data) = self.lips.get(ofs..)
-        {
-            self.lip.start(data);
-        }
+        anim::play_with_subtitle(&self.lips, VOICE_BASE, line, &mut self.lip, sounds);
     }
 
     /// One frame of the `MainMenu_Run` loop; `voice_stat` is `Voice_GetStat(0)` at its start.

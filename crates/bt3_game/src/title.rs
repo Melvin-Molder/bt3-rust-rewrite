@@ -186,6 +186,12 @@ pub enum TitleResult {
 pub enum TitleSound {
     /// `Voice_Play(0, id, 0x80, 0)`.
     Voice(u32),
+    /// `Voice_Stop(0)`.
+    VoiceStop,
+    /// `Bgm_Play(id)`.
+    Bgm(u32),
+    /// `Bgm_FadeOutStep()` alone.
+    BgmFadeOutStep,
     /// `Voice_FadeOutStep(0)` and `Bgm_FadeOutStep()`.
     FadeOutStep,
     /// `Snd_PlaySe(bank, id)`.

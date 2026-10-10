@@ -33,6 +33,53 @@ pub fn screen_quad(quad: &DrawQuad, textures: &[Option<usize>]) -> ScreenQuad {
     }
 }
 
+/// `Flash_Draw`'s quads for the renderer. A `FLASH_QUAD_MASK_SET` quad only writes the frame buffer's alpha plane and
+/// `FLASH_QUAD_MASK` quads are drawn through it; here a mask is the rectangle of the last mask writer, and masked
+/// quads are cut to it (axis-aligned quads only).
+pub fn screen_quads(quads: &[DrawQuad], textures: &[Option<usize>]) -> Vec<ScreenQuad> {
+    let mut mask: Option<[f32; 4]> = None;
+    let mut out = Vec::new();
+    for quad in quads {
+        if quad.flags & QUAD_MASK_SET != 0 {
+            let xs = quad.pt.map(|p| p[0]);
+            let ys = quad.pt.map(|p| p[1]);
+            let min = |v: [f32; 4]| v.into_iter().fold(f32::INFINITY, f32::min);
+            let max = |v: [f32; 4]| v.into_iter().fold(f32::NEG_INFINITY, f32::max);
+            mask = Some([min(xs), min(ys), max(xs), max(ys)]);
+            continue;
+        }
+        let screen = screen_quad(quad, textures);
+        match (quad.flags & QUAD_MASK != 0, mask) {
+            (true, Some(rect)) => out.extend(clip_quad(screen, rect)),
+            (true, None) => {}
+            (false, _) => out.push(screen),
+        }
+    }
+    out
+}
+
+/// The part of an axis-aligned quad inside `[x0, y0, x1, y1]`, with its texture rectangle cut to match.
+fn clip_quad(mut q: ScreenQuad, [x0, y0, x1, y1]: [f32; 4]) -> Option<ScreenQuad> {
+    let [tl, tr, bl, _] = q.pt;
+    if tl[1] != tr[1] || tl[0] != bl[0] {
+        return Some(q);
+    }
+    let (qx0, qy0, qx1, qy1) = (tl[0], tl[1], tr[0], bl[1]);
+    let (cx0, cy0, cx1, cy1) = (qx0.max(x0), qy0.max(y0), qx1.min(x1), qy1.min(y1));
+    if cx0 >= cx1 || cy0 >= cy1 {
+        return None;
+    }
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let (tx0, tx1) = ((cx0 - qx0) / (qx1 - qx0), (cx1 - qx0) / (qx1 - qx0));
+    let (ty0, ty1) = ((cy0 - qy0) / (qy1 - qy0), (cy1 - qy0) / (qy1 - qy0));
+    let [[u0, v0], [u1, _], [_, v1], _] = q.uv;
+    let (nu0, nu1) = (lerp(u0, u1, tx0), lerp(u0, u1, tx1));
+    let (nv0, nv1) = (lerp(v0, v1, ty0), lerp(v0, v1, ty1));
+    q.pt = [[cx0, cy0], [cx1, cy0], [cx0, cy1], [cx1, cy1]];
+    q.uv = [[nu0, nv0], [nu1, nv0], [nu0, nv1], [nu1, nv1]];
+    Some(q)
+}
+
 // FlashTl.state
 const TL_PLAY: u8 = 0x01;
 const TL_HOLD: u8 = 0x02;
@@ -79,6 +126,8 @@ pub const QUAD_MASK_SET: u32 = 0x40;
 /// Flash_ClipSetFlags `props` bits.
 pub const PROP_PLAY: u32 = 0x001;
 pub const PROP_VISIBLE: u32 = 0x002;
+pub const PROP_MASK: u32 = 0x080;
+pub const PROP_MASK_SET: u32 = 0x100;
 pub const PROP_REPEAT: u32 = 0x200;
 
 /// `FlashUv`: a texture rectangle in texels and a texture index within the image's entry table.
@@ -474,7 +523,8 @@ impl Flash {
         }
     }
 
-    /// `Flash_ClipSetFlags` for the property bits the ported screens use.
+    /// `Flash_ClipSetFlags`: 1 playing, 2 visible, 4 / 8 flip, 0x10 no screen offset, 0x20 additive, 0x40
+    /// subtractive, 0x80 masked, 0x100 mask writer, 0x200 repeat, 0x400 free running.
     pub fn clip_set_flags(&mut self, r: ClipRef, props: u32, on: bool) {
         for index in self.refs(r) {
             let clip = &mut self.clips[index];
@@ -484,10 +534,46 @@ impl Flash {
             if props & PROP_VISIBLE != 0 {
                 set_bits(&mut clip.flags, CLIP_VISIBLE, on);
             }
-            if props & PROP_REPEAT != 0 {
-                set_bits(&mut clip.prop.flags, OV_REPEAT, on);
+            if props & 0x400 != 0 {
+                set_bits(&mut clip.flags, CLIP_FREE_RUN, on);
+            }
+            for (prop, ov) in [
+                (0x004, OV_FLIPX),
+                (0x008, OV_FLIPY),
+                (0x010, OV_NO_OFS),
+                (0x020, OV_ADD),
+                (0x040, OV_SUB),
+                (PROP_MASK, OV_MASK),
+                (PROP_MASK_SET, OV_MASK_SET),
+                (PROP_REPEAT, OV_REPEAT),
+            ] {
+                if props & prop != 0 {
+                    set_bits(&mut clip.prop.flags, ov, on);
+                }
             }
         }
+    }
+
+    /// `Flash_ClipSetAlpha`: clamped to 0..1.
+    pub fn clip_set_alpha(&mut self, r: ClipRef, alpha: f32) {
+        for index in self.refs(r) {
+            self.clips[index].prop.alpha = alpha.clamp(0.0, 1.0);
+            self.clips[index].prop.flags |= OV_ALPHA;
+        }
+    }
+
+    /// `Flash_ClipSetOffset`.
+    pub fn clip_set_offset(&mut self, r: ClipRef, x: i32, y: i32) {
+        for index in self.refs(r) {
+            let prop = &mut self.clips[index].prop;
+            (prop.x, prop.y) = (x as f32, y as f32);
+            prop.flags |= OV_POS;
+        }
+    }
+
+    /// Bits set by "trig" GetURL actions during the last `advance`.
+    pub fn trig(&self) -> u32 {
+        self.trig
     }
 
     /// `FlashClipList_GetPos`: the clip's own translation plus its position override.

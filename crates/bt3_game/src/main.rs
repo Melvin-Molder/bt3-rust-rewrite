@@ -1,6 +1,8 @@
 mod anim;
+mod char_select;
 mod dialog;
 mod draw;
+mod duel_menu;
 mod fade;
 mod flash;
 mod font;
@@ -8,13 +10,16 @@ mod loading;
 mod logo;
 mod main_menu;
 mod mcflow;
+mod menu_res;
 mod movie;
 mod rng;
+mod save;
 mod se;
 mod sound;
 mod title;
 mod windows;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -37,7 +42,13 @@ use bt3_data::gs::{RgbaTexture, decode_font_texture, decode_sprite_texture};
 use bt3_data::pack_section;
 use bt3_data::tex::TextureResource;
 
+use char_select::{
+    CharSelAssets, CharSelData, CharSelLayout, CharSelProgress, CharSelResult, CharSelScreen,
+};
 use draw::ScreenQuad;
+use duel_menu::{
+    DuelMenuAssets, DuelMenuData, DuelMenuLayout, DuelMenuResult, DuelMenuScreen, DuelProgress,
+};
 use loading::LoadingScreen;
 use logo::LogoSequence;
 use main_menu::{MainMenuAssets, MainMenuData, MainMenuLayout, MainMenuResult, MainMenuScreen};
@@ -62,6 +73,8 @@ enum Scene {
     Movie(MoviePlayer, VideoStream),
     Title(Box<TitleScreen>),
     MainMenu(Box<MainMenuScreen>),
+    DuelMenu(Box<DuelMenuScreen>),
+    CharSelect(Box<CharSelScreen>),
     Black,
     Loading(LoadingScreen),
 }
@@ -71,7 +84,12 @@ impl Scene {
     /// `Load_RunBlocking` use 2.
     fn frame_seconds(&self) -> f32 {
         match self {
-            Scene::Logos(_) | Scene::Title(_) | Scene::MainMenu(_) | Scene::Black => VBLANK_SECONDS,
+            Scene::Logos(_)
+            | Scene::Title(_)
+            | Scene::MainMenu(_)
+            | Scene::DuelMenu(_)
+            | Scene::CharSelect(_)
+            | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) => 2.0 * VBLANK_SECONDS,
         }
     }
@@ -115,6 +133,20 @@ struct Game {
     music_source: Option<Handle<AudioSource>>,
     title: Option<TitleData>,
     main_menu: Option<MainMenuData>,
+    duel_menu: Option<DuelMenuData>,
+    /// The duel fields of `gProgress`.
+    duel: DuelProgress,
+    char_select: Option<CharSelData>,
+    /// The character select's fields of `gProgress`.
+    char_progress: CharSelProgress,
+    /// `ChrTbl_WrapCostume`'s table (common file 4): costumes per character id.
+    costumes: Vec<i32>,
+    /// Portraits and stage pictures by file: their first texture.
+    pictures: HashMap<u32, usize>,
+    save: save::SaveData,
+    /// Menu music by file, once decoded, and the file being decoded.
+    bgm_sources: HashMap<u32, Handle<AudioSource>>,
+    pending_bgm: Option<(u32, Decoding)>,
     /// `gProgress->flags & MPROG_SAVE_LOADED`: set once the title was left for the main menu.
     save_loaded: bool,
     /// `gProgress->mainMenuItem`.
@@ -261,6 +293,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             music_source: None,
             title: None,
             main_menu: None,
+            duel_menu: None,
+            duel: DuelProgress::default(),
+            char_select: None,
+            char_progress: CharSelProgress::default(),
+            costumes: Vec::new(),
+            pictures: HashMap::new(),
+            save: save::SaveData::default(),
+            bgm_sources: HashMap::new(),
+            pending_bgm: None,
             save_loaded: false,
             main_menu_item: 0,
             bgm: None,
@@ -430,6 +471,7 @@ fn stop_all(game: &mut Game, commands: &mut Commands) {
     stop_player(&mut game.bgm, commands);
     stop_player(&mut game.voice, commands);
     game.pending_voice = None;
+    game.pending_bgm = None;
     game.voice_ended = false;
 }
 
@@ -442,8 +484,23 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 game.voice_ended = false;
                 game.pending_voice = Some(decode_adx_file(game.iso_path.clone(), file_id));
             }
+            TitleSound::VoiceStop => {
+                stop_player(&mut game.voice, commands);
+                game.pending_voice = None;
+                game.voice_ended = false;
+            }
             TitleSound::FadeOutStep => {
                 for player in [&mut game.voice, &mut game.bgm].into_iter().flatten() {
+                    player.level = sound::fade_out_step(player.level);
+                }
+            }
+            TitleSound::Bgm(file_id) => {
+                stop_player(&mut game.bgm, commands);
+                game.pending_bgm = None;
+                play_bgm(game, commands, file_id);
+            }
+            TitleSound::BgmFadeOutStep => {
+                if let Some(player) = &mut game.bgm {
                     player.level = sound::fade_out_step(player.level);
                 }
             }
@@ -472,6 +529,8 @@ fn run_frames(
     }
     game.voice_fresh = false;
     start_pending_voice(&mut game, &mut commands, &mut audio);
+    start_pending_bgm(&mut game, &mut commands, &mut audio);
+    let pad2 = gamepads.iter().count() >= 2;
     if std::mem::take(&mut game.skip_to_title) {
         if game.skip_to_menu {
             load_menu_bank(&mut game);
@@ -550,8 +609,59 @@ fn run_frames(
                     stop_all(game, &mut commands);
                     match result {
                         MainMenuResult::Title => start_title(game, &mut commands, &mut audio),
+                        MainMenuResult::Mode(38) => start_duel_menu(game, &mut commands),
                         MainMenuResult::Mode(mode) => {
                             info!("progress mode {mode} is not ported yet");
+                            game.scene = Scene::Black;
+                        }
+                    }
+                }
+            }
+            Scene::DuelMenu(screen) => {
+                let frame =
+                    screen.run_frame(held, pressed, pad2, stat, &mut game.random, &mut game.font);
+                let result = screen.result();
+                game.duel = screen.progress();
+                game.save.rules = screen.rules();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    stop_all(game, &mut commands);
+                    match result {
+                        DuelMenuResult::Back => start_main_menu(game, &mut commands, &mut audio),
+                        DuelMenuResult::Select(39) => start_char_select(game, &mut commands),
+                        DuelMenuResult::Select(mode) => {
+                            info!("progress mode {mode} (team select) is not ported yet");
+                            game.scene = Scene::Black;
+                        }
+                    }
+                }
+            }
+            Scene::CharSelect(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    [(pressed, held), (0, 0)],
+                    &mut loader,
+                    &game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                game.char_progress = screen.progress();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Duel_Main: Adx_StopAll after CharSel_Run.
+                    stop_all(game, &mut commands);
+                    match result {
+                        CharSelResult::Back => start_duel_menu(game, &mut commands),
+                        CharSelResult::Battle(setup) => {
+                            info!("battle setup {setup:?}; the battle is not ported yet");
                             game.scene = Scene::Black;
                         }
                     }
@@ -710,27 +820,8 @@ fn start_main_menu(game: &mut Game, commands: &mut Commands, audio: &mut Assets<
         match load_main_menu_assets(&game.iso_path) {
             Ok(assets) => {
                 let mut data = assets.data;
-                let mut push = |texture: RgbaTexture, sampling: Sampling| {
-                    game.textures.push(texture);
-                    game.samplers.push(sampling);
-                    game.textures.len() - 1
-                };
-                let background = assets
-                    .background
-                    .into_iter()
-                    .map(|texture| push(texture, Sampling::Nearest))
-                    .min()
-                    .expect("a picture has tiles");
-                let mut firsts = std::collections::HashMap::new();
-                for (key, textures) in assets.files {
-                    let mut first = None;
-                    for texture in textures {
-                        let index = push(texture.clone(), Sampling::Linear);
-                        push(texture, Sampling::LinearRepeat);
-                        first.get_or_insert(index);
-                    }
-                    firsts.insert(key, first.unwrap_or(0));
-                }
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
                 data.layout = MainMenuLayout::new(background, |key| firsts[&key]);
                 game.main_menu = Some(data);
             }
@@ -763,6 +854,283 @@ fn load_main_menu_assets(iso_path: &Path) -> Result<MainMenuAssets, Box<dyn std:
     let archive = read_file(&mut image, title::ARCHIVE_FILE_ID)?;
     let res = bpe::decode(pack_section(&archive, main_menu::ARCHIVE_SECTION)?)?;
     MainMenuAssets::parse(&res)
+}
+
+/// Progress_Main mode 38: `Duel_Main` plays `DUEL_BGM`, then `DuelMenu_Run(1)`.
+fn start_duel_menu(game: &mut Game, commands: &mut Commands) {
+    if game.duel_menu.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, duel_menu::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    duel_menu::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| DuelMenuAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout = DuelMenuLayout::new(background, dialog, |key| firsts[&key]);
+                game.duel_menu = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the duel menu: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .duel_menu
+        .as_ref()
+        .expect("duel menu assets are loaded");
+    match DuelMenuScreen::new(data, game.duel, game.save.rules, &mut game.random) {
+        Ok(screen) => {
+            play_bgm(game, commands, duel_menu::BGM_FILE_ID);
+            game.scene = Scene::DuelMenu(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the duel menu: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Bgm_Play(id)` for a file other than the title music: decoded in the background, looped over all of its samples.
+fn play_bgm(game: &mut Game, commands: &mut Commands, file_id: u32) {
+    if let Some(source) = game.bgm_sources.get(&file_id).cloned() {
+        spawn_bgm(game, commands, source);
+    } else {
+        game.pending_bgm = Some((file_id, decode_adx_file(game.iso_path.clone(), file_id)));
+    }
+}
+
+fn spawn_bgm(game: &mut Game, commands: &mut Commands, source: Handle<AudioSource>) {
+    let level = sound::out_volume(sound::CH_BGM, 0x40);
+    let settings = PlaybackSettings::LOOP.with_volume(sound::volume(level));
+    let entity = commands.spawn((AudioPlayer(source), settings)).id();
+    game.bgm = Some(Player { entity, level });
+}
+
+fn start_pending_bgm(game: &mut Game, commands: &mut Commands, audio: &mut Assets<AudioSource>) {
+    if !game
+        .pending_bgm
+        .as_ref()
+        .is_some_and(|(_, handle)| handle.is_finished())
+    {
+        return;
+    }
+    let (file_id, handle) = game.pending_bgm.take().expect("checked above");
+    let (mut decoding, mut source) = (Some(handle), None);
+    finish_decoding(&mut decoding, &mut source, audio, "menu music");
+    if let Some(source) = source {
+        game.bgm_sources.insert(file_id, source.clone());
+        spawn_bgm(game, commands, source);
+    }
+}
+
+fn push_texture(game: &mut Game, texture: RgbaTexture, sampling: Sampling) -> usize {
+    push_to(&mut game.textures, &mut game.samplers, texture, sampling)
+}
+
+fn push_to(
+    textures: &mut Vec<RgbaTexture>,
+    samplers: &mut Vec<Sampling>,
+    texture: RgbaTexture,
+    sampling: Sampling,
+) -> usize {
+    textures.push(texture);
+    samplers.push(sampling);
+    textures.len() - 1
+}
+
+/// The character select's streamed pictures, read from the ISO once and kept.
+struct Pictures<'a> {
+    iso_path: &'a Path,
+    textures: &'a mut Vec<RgbaTexture>,
+    samplers: &'a mut Vec<Sampling>,
+    cache: &'a mut HashMap<u32, usize>,
+}
+
+impl Pictures<'_> {
+    /// `File_LoadSync` + `Sprite_Unpack`: the file's texture resource, decoded.
+    fn load(&mut self, file_id: u32) -> Option<Vec<RgbaTexture>> {
+        let loaded = Iso9660::open(self.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, file_id))
+            .and_then(|file| Ok(bpe::decode(&file)?))
+            .and_then(|res| decode_textures(&res));
+        match loaded {
+            Ok(textures) => Some(textures),
+            Err(error) => {
+                error!("cannot load file 0x{file_id:X}: {error}");
+                None
+            }
+        }
+    }
+}
+
+impl char_select::PictureLoader for Pictures<'_> {
+    fn portrait(&mut self, file_id: u32) -> Option<usize> {
+        if let Some(&index) = self.cache.get(&file_id) {
+            return Some(index);
+        }
+        let texture = self.load(file_id)?.into_iter().next()?;
+        let index = push_to(
+            self.textures,
+            self.samplers,
+            texture.clone(),
+            Sampling::Linear,
+        );
+        push_to(
+            self.textures,
+            self.samplers,
+            texture,
+            Sampling::LinearRepeat,
+        );
+        self.cache.insert(file_id, index);
+        Some(index)
+    }
+
+    fn picture(&mut self, file_id: u32) -> Option<usize> {
+        if let Some(&index) = self.cache.get(&file_id) {
+            return Some(index);
+        }
+        let tiles = self.load(file_id)?;
+        if tiles.len() != logo::TILES_PER_PICTURE {
+            error!("file 0x{file_id:X} has {} tiles", tiles.len());
+            return None;
+        }
+        let first = self.textures.len();
+        for tile in tiles {
+            push_to(self.textures, self.samplers, tile, Sampling::Nearest);
+        }
+        self.cache.insert(file_id, first);
+        Some(first)
+    }
+}
+
+/// Progress_Main mode 39: `CharSel_Run(2)` (it starts its own music).
+fn start_char_select(game: &mut Game, commands: &mut Commands) {
+    if game.costumes.is_empty() {
+        // Common file 4: word 1 is the byte offset of the 0x3C-byte character entries; +0xA the costume count.
+        match Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, 4))
+        {
+            Ok(file) => {
+                let base = file.get(4..8).map_or(0, |b| {
+                    u32::from_le_bytes(b.try_into().unwrap()) as usize & !3
+                });
+                game.costumes = (0..0xA1)
+                    .map(|id| {
+                        let at = base + id * 0x3C + 0xA;
+                        file.get(at..at + 2)
+                            .map_or(1, |b| i32::from(u16::from_le_bytes([b[0], b[1]])))
+                    })
+                    .collect();
+            }
+            Err(error) => error!("cannot read the character table: {error}"),
+        }
+    }
+    if game.char_select.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, duel_menu::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    char_select::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| CharSelAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let firsts = register_files(game, assets.files);
+                data.layout = CharSelLayout::new(|key| firsts[&key]);
+                game.char_select = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the character select: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .char_select
+        .as_ref()
+        .expect("character select assets are loaded");
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    let mut sounds = Vec::new();
+    match CharSelScreen::new(
+        data,
+        game.duel.players,
+        game.char_progress,
+        &game.save,
+        game.costumes.clone(),
+        &mut loader,
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            game.scene = Scene::CharSelect(Box::new(screen));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start the character select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// A `Sprite_DrawPicture` picture: its first tile's index.
+fn register_picture(game: &mut Game, tiles: Vec<RgbaTexture>) -> usize {
+    tiles
+        .into_iter()
+        .map(|texture| push_texture(game, texture, Sampling::Nearest))
+        .min()
+        .expect("a picture has tiles")
+}
+
+/// Flash textures: each one clamped, then wrapping.
+fn register_pairs(game: &mut Game, textures: Vec<Option<RgbaTexture>>) -> Vec<Option<usize>> {
+    textures
+        .into_iter()
+        .map(|texture| {
+            texture.map(|texture| {
+                let index = push_texture(game, texture.clone(), Sampling::Linear);
+                push_texture(game, texture, Sampling::LinearRepeat);
+                index
+            })
+        })
+        .collect()
+}
+
+/// Whole texture files as Flash texture pairs: where entry 0 of each went.
+fn register_files(
+    game: &mut Game,
+    files: Vec<(menu_res::FileKey, Vec<RgbaTexture>)>,
+) -> HashMap<menu_res::FileKey, usize> {
+    files
+        .into_iter()
+        .map(|(key, textures)| {
+            let first = game.textures.len();
+            register_pairs(game, textures.into_iter().map(Some).collect());
+            (key, first)
+        })
+        .collect()
 }
 
 fn register_title_textures(game: &mut Game, assets: TitleAssets) -> TextureLayout {
