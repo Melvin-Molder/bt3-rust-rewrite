@@ -6,7 +6,9 @@ pub mod adx;
 pub mod afs;
 pub mod bpe;
 pub mod fod;
+pub mod font;
 pub mod gs;
+pub mod snd;
 pub mod stage;
 pub mod tex;
 

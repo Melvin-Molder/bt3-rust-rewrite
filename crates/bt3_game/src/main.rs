@@ -1,19 +1,24 @@
+mod dialog;
 mod draw;
 mod fade;
 mod flash;
+mod font;
 mod loading;
 mod logo;
+mod mcflow;
 mod movie;
 mod rng;
+mod se;
 mod sound;
 mod title;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::asset::RenderAssetUsages;
-use bevy::audio::Volume;
+use bevy::audio::{AddAudioSource, Volume};
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -24,7 +29,8 @@ use bt3_data::Iso9660;
 use bt3_data::adx;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
 use bt3_data::bpe;
-use bt3_data::gs::{RgbaTexture, decode_sprite_texture};
+use bt3_data::font::FontFile;
+use bt3_data::gs::{RgbaTexture, decode_font_texture, decode_sprite_texture};
 use bt3_data::pack_section;
 use bt3_data::tex::TextureResource;
 
@@ -33,13 +39,17 @@ use loading::LoadingScreen;
 use logo::LogoSequence;
 use movie::{MoviePlayer, VideoStream};
 use rng::GameRandom;
-use title::{TextureLayout, TitleAssets, TitleResult, TitleScreen, TitleSound};
+use title::{TextureLayout, TitleAssets, TitleData, TitleResult, TitleScreen, TitleSound};
 
 const SCREEN_WIDTH: u32 = 512;
 const SCREEN_HEIGHT: u32 = 448;
 const FIRST_LOADING_FILE_ID: u32 = 0x3C1;
 // gProgress->baseFile (0x1C1) + 0x19: menu archive 0, loaded by FirstRun_Main.
 const LOGO_ARCHIVE_FILE_ID: u32 = 0x1C1 + 0x19;
+const COMMON_SE_BANK_FILE_ID: u32 = 0x14B;
+const MENU_SE_BANK_FILE_ID: u32 = 0x14C;
+/// `COMMON_FILE_BOOT`: the two fonts and the text icons.
+const BOOT_FILE_ID: u32 = 5;
 // NTSC: one vertical blank is 1001/60000 s.
 const VBLANK_SECONDS: f32 = 1001.0 / 60000.0;
 
@@ -97,13 +107,15 @@ struct Game {
     soundtrack_source: Option<Handle<AudioSource>>,
     music: Option<Decoding>,
     music_source: Option<Handle<AudioSource>>,
-    title: Option<(Vec<u8>, TextureLayout)>,
+    title: Option<TitleData>,
     bgm: Option<Player>,
     voice: Option<Player>,
     pending_voice: Option<Decoding>,
     picture: Option<Vec<u8>>,
     /// `--title`: start at Progress_Main mode 1 instead of FirstRun_Main.
     skip_to_title: bool,
+    se: se::SoundEffects,
+    font: font::Font,
 }
 
 #[derive(Resource, Default)]
@@ -175,6 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         textures.len() - 1
     });
+    let font = load_fonts(&mut image, &mut textures)?;
     let samplers = vec![Sampling::Nearest; textures.len()];
     let soundtrack = boot.then(|| {
         let path = image_path.clone();
@@ -186,6 +199,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     });
     let music = boot.then(|| decode_adx_file(image_path.clone(), title::MUSIC_FILE_ID));
+    let engine = Arc::new(Mutex::new(se::Engine::default()));
+    let mut effects = se::SoundEffects::new(engine.clone());
+    // Snd_Init: the common bank (file 0x14B) goes to slot 0 at boot.
+    effects.load_bank(
+        1,
+        se::LoadedBank::parse(&read_file(&mut image, COMMON_SE_BANK_FILE_ID)?)?,
+    );
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
@@ -224,7 +244,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pending_voice: None,
             picture: None,
             skip_to_title,
+            se: effects,
+            font,
         })
+        .insert_resource(SeStream(engine))
+        .add_audio_source::<se::SeOutput>()
         .init_resource::<Textures>()
         .add_systems(Startup, setup)
         .add_systems(Update, (run_frames, sync_quads, apply_volumes).chain())
@@ -263,6 +287,40 @@ fn read_file(image: &mut Iso9660, file_id: u32) -> Result<Vec<u8>, Box<dyn std::
     Ok(archive.read_entry(image, location.index)?)
 }
 
+/// `Font_InitEx`: fonts 0 and 1 of the boot file (header words 1 and 2 are their byte offsets), one texture per
+/// CLUT the glyphs use. GS sprites without TEX1 filtering sample point-wise.
+fn load_fonts(
+    image: &mut Iso9660,
+    textures: &mut Vec<RgbaTexture>,
+) -> Result<font::Font, Box<dyn std::error::Error>> {
+    let boot = read_file(image, BOOT_FILE_ID)?;
+    let word = |i: usize| -> Result<usize, Box<dyn std::error::Error>> {
+        let bytes = boot
+            .get(i * 4..i * 4 + 4)
+            .ok_or("the boot file is too short")?;
+        Ok(u32::from_le_bytes(bytes.try_into()?) as usize)
+    };
+    let mut slots = Vec::new();
+    let mut line_height = 0;
+    for slot in 1..=2 {
+        let data = boot
+            .get(word(slot)?..)
+            .ok_or("font offset is outside the boot file")?;
+        let file = FontFile::parse(data)?;
+        let cluts = file.glyphs.iter().map(|g| g.clut() + 1).max().unwrap_or(1);
+        let indices = decode_font_texture(&file.texture, cluts)?
+            .into_iter()
+            .map(|texture| {
+                textures.push(texture);
+                textures.len() - 1
+            })
+            .collect();
+        slots.push(font::FontSlot::new(&file, indices));
+        line_height = file.line_height;
+    }
+    Ok(font::Font::new(slots, line_height))
+}
+
 /// `Title_Init`: section 1 of gMenuArc1, BPE-packed.
 fn load_title_assets(iso_path: &Path) -> Result<TitleAssets, Box<dyn std::error::Error>> {
     let mut image = Iso9660::open(iso_path)?;
@@ -298,12 +356,24 @@ fn decode_textures(resource: &[u8]) -> Result<Vec<RgbaTexture>, Box<dyn std::err
         .map_err(Into::into)
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, stream: Res<SeStream>, mut outputs: ResMut<Assets<se::SeOutput>>) {
     commands.spawn(Camera2d);
+    let output = outputs.add(se::SeOutput(stream.0.clone()));
+    commands.spawn(AudioPlayer(output));
 }
 
+/// The SPU2 the sound effects play on.
+#[derive(Resource)]
+struct SeStream(Arc<Mutex<se::Engine>>);
+
 /// Pad 0 game buttons: arrows or the d-pad, Space or South (Cross), Enter or Start.
-const BUTTONS: [(KeyCode, GamepadButton, u32); 4] = [
+const BUTTONS: [(KeyCode, GamepadButton, u32); 6] = [
+    (KeyCode::ArrowLeft, GamepadButton::DPadLeft, title::PAD_LEFT),
+    (
+        KeyCode::ArrowRight,
+        GamepadButton::DPadRight,
+        title::PAD_RIGHT,
+    ),
     (KeyCode::ArrowUp, GamepadButton::DPadUp, title::PAD_UP),
     (KeyCode::ArrowDown, GamepadButton::DPadDown, title::PAD_DOWN),
     (KeyCode::Space, GamepadButton::South, title::PAD_CROSS),
@@ -337,6 +407,8 @@ fn run_frames(
         let pressed = std::mem::take(&mut game.pressed_latch);
         let cross = pressed & title::PAD_CROSS != 0;
         let start = pressed & title::PAD_START != 0;
+        // Snd_Update at the top of every frame loop sends what the last frame queued.
+        game.se.update();
         let game = &mut *game;
         match &mut game.scene {
             Scene::Logos(logos) => {
@@ -358,7 +430,13 @@ fn run_frames(
                 }
             }
             Scene::Title(screen) => {
-                let frame = screen.run_frame(held, pressed, &mut game.demo_count, &mut game.random);
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    &mut game.demo_count,
+                    &mut game.random,
+                    &mut game.font,
+                );
                 let result = screen.result();
                 game.quads = frame.quads;
                 for sound in frame.sounds {
@@ -373,8 +451,7 @@ fn run_frames(
                                 player.level = sound::fade_out_step(player.level);
                             }
                         }
-                        // The sound effect banks (Snd_LoadBankFile) are not ported yet.
-                        TitleSound::Effect(..) => {}
+                        TitleSound::Effect(bank, id) => game.se.play_se(bank, id),
                     }
                 }
                 if let Some(result) = result {
@@ -480,12 +557,28 @@ fn start_opening_movie(game: &mut Game, commands: &mut Commands, audio: &mut Ass
 
 /// Progress_Main mode 1: `Bgm_Play(MENU_BGM_TITLE)`, then `Title_Run(1)`.
 fn start_title(game: &mut Game, commands: &mut Commands, audio: &mut Assets<AudioSource>) {
+    // Progress_Main: Snd_LoadBankFile(2, 0x14C) before the mode loop (a loaded slot is left as it is).
+    match Iso9660::open(&game.iso_path)
+        .map_err(Into::into)
+        .and_then(|mut image| read_file(&mut image, MENU_SE_BANK_FILE_ID))
+        .and_then(|file| Ok(se::LoadedBank::parse(&file)?))
+    {
+        Ok(bank) => game.se.load_bank(2, bank),
+        Err(error) => error!("cannot load the menu sound bank: {error}"),
+    }
     if game.title.is_none() {
         match load_title_assets(&game.iso_path) {
             Ok(assets) => {
                 let fod = assets.fod.clone();
+                let dialog_fod = assets.dialog.fod.clone();
+                let dialog_titles = assets.dialog.titles.clone();
                 let layout = register_title_textures(game, assets);
-                game.title = Some((fod, layout));
+                game.title = Some(TitleData {
+                    fod,
+                    dialog_fod,
+                    dialog_titles,
+                    layout,
+                });
             }
             Err(error) => {
                 error!("cannot load the title screen: {error}");
@@ -494,8 +587,8 @@ fn start_title(game: &mut Game, commands: &mut Commands, audio: &mut Assets<Audi
             }
         }
     }
-    let (fod, layout) = game.title.clone().expect("title assets are loaded");
-    let screen = match TitleScreen::new(&fod, layout, &mut game.random) {
+    let data = game.title.as_ref().expect("title assets are loaded");
+    let screen = match TitleScreen::new(data, &mut game.random) {
         Ok(screen) => screen,
         Err(error) => {
             error!("cannot start the title movie: {error}");
@@ -546,10 +639,23 @@ fn register_title_textures(game: &mut Game, assets: TitleAssets) -> TextureLayou
             })
         })
         .collect();
+    let dialog = assets
+        .dialog
+        .textures
+        .into_iter()
+        .map(|texture| {
+            texture.map(|texture| {
+                let index = push(texture.clone(), Sampling::Linear);
+                push(texture, Sampling::LinearRepeat);
+                index
+            })
+        })
+        .collect();
     TextureLayout {
         background: background.expect("a picture has tiles"),
         logo: logo.expect("a picture has tiles"),
         flash,
+        dialog,
     }
 }
 

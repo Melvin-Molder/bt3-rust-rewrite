@@ -20,9 +20,6 @@ pub struct RgbaTexture {
 }
 
 pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture> {
-    let pixel_packet = entry
-        .pixel_data
-        .ok_or_else(|| invalid_data("sprite texture has no pixel packet"))?;
     let clut_packet = entry
         .clut_data
         .ok_or_else(|| invalid_data("sprite texture has no CLUT packet"))?;
@@ -40,11 +37,144 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
     {
         return Err(invalid_data("unsupported sprite texture or CLUT mode"));
     }
+    let texels = decode_texel_indices(entry)?;
+
+    let (clut_width, clut_height, colors) = if texture_psm == PSM_T4 {
+        (8, 2, 16)
+    } else {
+        (16, 16, 256)
+    };
+    let clut_transfer = find_image_transfer(clut_packet)?;
+    if clut_transfer.direction != 0
+        || clut_transfer.source_x != 0
+        || clut_transfer.source_y != 0
+        || clut_transfer.destination_x != 0
+        || clut_transfer.destination_y != 0
+        || clut_transfer.width != clut_width
+        || clut_transfer.height != clut_height
+        || clut_transfer.image.len() != colors * 4
+    {
+        return Err(invalid_data("unexpected PSMCT32 sprite CLUT transfer"));
+    }
+    let palette: Vec<[u8; 4]> = (0..colors)
+        .map(|i| {
+            let index = if texture_psm == PSM_T4 {
+                i
+            } else {
+                csm1_t32_i8_transfer_index(i as u8)
+            };
+            clut_transfer.image[index * 4..index * 4 + 4]
+                .try_into()
+                .unwrap()
+        })
+        .collect();
+    Ok(texels.with_palette(&palette))
+}
+
+/// A font sheet (`Font_MakeTex0`): a PSMT4 texture whose glyphs pick the 16-colour CSM1 CLUT at block
+/// `cbp + n` of the uploaded colours; returns the sheet once per CLUT.
+pub fn decode_font_texture(entry: &TextureEntry<'_>, cluts: usize) -> io::Result<Vec<RgbaTexture>> {
+    let clut_packet = entry
+        .clut_data
+        .ok_or_else(|| invalid_data("font texture has no CLUT packet"))?;
+    if ((entry.texture_register >> 20) & 0x3f) as u8 != PSM_T4
+        || ((entry.texture_register >> 51) & 0xf) != 0
+        || ((entry.texture_register >> 55) & 1) != 0
+    {
+        return Err(invalid_data("unsupported font texture or CLUT mode"));
+    }
+    let texels = decode_texel_indices(entry)?;
+    let clut_transfer = find_image_transfer(clut_packet)?;
+    let clut_dbw = (entry.clut_blt & 0x3f) as usize;
+    if clut_transfer.direction != 0
+        || clut_dbw == 0
+        || clut_transfer.width > clut_dbw * PSMCT32_PAGE_WIDTH
+        || clut_transfer.height > PSMCT32_PAGE_HEIGHT
+        || clut_transfer.image.len() != clut_transfer.width * clut_transfer.height * 4
+    {
+        return Err(invalid_data("unexpected PSMCT32 font CLUT transfer"));
+    }
+    let mut memory = vec![0u8; GS_PAGE_BYTES];
+    for y in 0..clut_transfer.height {
+        for x in 0..clut_transfer.width {
+            let (dx, dy) = (
+                x + clut_transfer.destination_x,
+                y + clut_transfer.destination_y,
+            );
+            if dx >= PSMCT32_PAGE_WIDTH || dy >= PSMCT32_PAGE_HEIGHT {
+                return Err(invalid_data("font CLUT leaves its first page"));
+            }
+            let source = (y * clut_transfer.width + x) * 4;
+            let destination = psmct32_byte_offset(dx, dy);
+            memory[destination..destination + 4]
+                .copy_from_slice(&clut_transfer.image[source..source + 4]);
+        }
+    }
+    (0..cluts)
+        .map(|n| {
+            if n >= 32 {
+                return Err(invalid_data("font CLUT block is outside the first page"));
+            }
+            // CSM1 reads a 16-colour CLUT as the first two 8-texel rows of its block.
+            let palette: Vec<[u8; 4]> = (0..16)
+                .map(|i| {
+                    let byte = n * 256 + psmct32_byte_offset(i & 7, i >> 3);
+                    memory[byte..byte + 4].try_into().unwrap()
+                })
+                .collect();
+            Ok(texels.with_palette(&palette))
+        })
+        .collect()
+}
+
+/// CLUT indices of an indexed texture, read back from its simulated PSMCT32 upload.
+struct TexelIndices {
+    width: usize,
+    height: usize,
+    indices: Vec<u8>,
+}
+
+impl TexelIndices {
+    fn with_palette(&self, palette: &[[u8; 4]]) -> RgbaTexture {
+        let mut pixels = Vec::with_capacity(self.indices.len() * 4);
+        for &index in &self.indices {
+            let rgba = palette[usize::from(index)];
+            pixels.extend_from_slice(&[
+                rgba[0],
+                rgba[1],
+                rgba[2],
+                (u16::from(rgba[3]) * 2).min(255) as u8,
+            ]);
+        }
+        RgbaTexture {
+            width: self.width as u32,
+            height: self.height as u32,
+            pixels,
+        }
+    }
+}
+
+fn decode_texel_indices(entry: &TextureEntry<'_>) -> io::Result<TexelIndices> {
+    let pixel_packet = entry
+        .pixel_data
+        .ok_or_else(|| invalid_data("sprite texture has no pixel packet"))?;
+    let texture_psm = ((entry.texture_register >> 20) & 0x3f) as u8;
 
     let width = 1usize << ((entry.texture_register >> 26) & 0xf);
     let height = 1usize << ((entry.texture_register >> 30) & 0xf);
     let target_buffer_width = ((entry.texture_register >> 14) & 0x3f) as usize;
-    if target_buffer_width < 2 || target_buffer_width % 2 != 0 || width > target_buffer_width * 64 {
+    let (page_width, page_height) = if texture_psm == PSM_T4 {
+        (PSMT4_PAGE_WIDTH, PSMT4_PAGE_HEIGHT)
+    } else {
+        (PSMT8_PAGE_WIDTH, PSMT8_PAGE_HEIGHT)
+    };
+    // Inside one page the buffer width never enters the address (the dialog's 32x32 sheet has TBW 0).
+    let single_page = width <= page_width && height <= page_height;
+    if !single_page
+        && (target_buffer_width < 2
+            || target_buffer_width % 2 != 0
+            || width > target_buffer_width * 64)
+    {
         return Err(invalid_data(
             "unsupported indexed texture dimensions or stride",
         ));
@@ -53,6 +183,13 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
     let pixel_transfer = find_image_transfer(pixel_packet)?;
     let pixel_dbw = (entry.pixel_blt & 0x3f) as usize;
     let pixel_psm = ((entry.pixel_blt >> 8) & 0x3f) as u8;
+    let upload_in_one_page =
+        pixel_transfer.width <= PSMCT32_PAGE_WIDTH && pixel_transfer.height <= PSMCT32_PAGE_HEIGHT;
+    let pixel_dbw = if single_page && upload_in_one_page {
+        pixel_dbw.max(1)
+    } else {
+        pixel_dbw
+    };
     if pixel_psm != 0 || pixel_dbw == 0 || pixel_transfer.direction != 0 {
         return Err(invalid_data(
             "sprite pixels are not a GIF-to-PSMCT32 transfer",
@@ -74,24 +211,6 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
         return Err(invalid_data("unexpected PSMCT32 sprite transfer geometry"));
     }
 
-    let (clut_width, clut_height, colors) = if texture_psm == PSM_T4 {
-        (8, 2, 16)
-    } else {
-        (16, 16, 256)
-    };
-    let clut_transfer = find_image_transfer(clut_packet)?;
-    if clut_transfer.direction != 0
-        || clut_transfer.source_x != 0
-        || clut_transfer.source_y != 0
-        || clut_transfer.destination_x != 0
-        || clut_transfer.destination_y != 0
-        || clut_transfer.width != clut_width
-        || clut_transfer.height != clut_height
-        || clut_transfer.image.len() != colors * 4
-    {
-        return Err(invalid_data("unexpected PSMCT32 sprite CLUT transfer"));
-    }
-
     let source_pages_wide = pixel_dbw;
     let source_pages_high = pixel_transfer.height.div_ceil(PSMCT32_PAGE_HEIGHT);
     let mut local_memory = vec![0; source_pages_wide * source_pages_high * GS_PAGE_BYTES];
@@ -107,44 +226,30 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
         }
     }
 
-    let target_pages_wide = target_buffer_width / 2;
-    if target_pages_wide != source_pages_wide {
+    let target_pages_wide = (target_buffer_width / 2).max(1);
+    if target_pages_wide != source_pages_wide && !(single_page && upload_in_one_page) {
         return Err(invalid_data("texture and upload page widths differ"));
     }
-    let output_len = width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| invalid_data("decoded texture size overflow"))?;
-    let mut pixels = Vec::new();
-    pixels
-        .try_reserve_exact(output_len)
-        .map_err(|_| io::Error::other("could not allocate RGBA texture"))?;
-    pixels.resize(output_len, 0);
-
+    let mut indices = Vec::new();
+    indices
+        .try_reserve_exact(width * height)
+        .map_err(|_| io::Error::other("could not allocate texel indices"))?;
     for y in 0..height {
         for x in 0..width {
-            let palette_index = if texture_psm == PSM_T4 {
+            indices.push(if texture_psm == PSM_T4 {
                 let (byte, shift) = psmt4_location(x, y, target_pages_wide);
-                usize::from((*local_memory.get(byte).ok_or_else(texel_outside)? >> shift) & 0x0f)
+                (*local_memory.get(byte).ok_or_else(texel_outside)? >> shift) & 0x0f
             } else {
-                let index = *local_memory
+                *local_memory
                     .get(psmt8_location(x, y, target_pages_wide))
-                    .ok_or_else(texel_outside)?;
-                csm1_t32_i8_transfer_index(index)
-            };
-            let rgba = &clut_transfer.image[palette_index * 4..palette_index * 4 + 4];
-            let output = (y * width + x) * 4;
-            pixels[output] = rgba[0];
-            pixels[output + 1] = rgba[1];
-            pixels[output + 2] = rgba[2];
-            pixels[output + 3] = (u16::from(rgba[3]) * 2).min(255) as u8;
+                    .ok_or_else(texel_outside)?
+            });
         }
     }
-
-    Ok(RgbaTexture {
-        width: width as u32,
-        height: height as u32,
-        pixels,
+    Ok(TexelIndices {
+        width,
+        height,
+        indices,
     })
 }
 

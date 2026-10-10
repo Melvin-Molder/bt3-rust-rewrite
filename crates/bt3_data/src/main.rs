@@ -21,6 +21,139 @@ struct TextureCandidate {
     alpha_pixels: usize,
 }
 
+/// A `Snd_LoadBankFile` bank: five words, then the sample body, the HD header and the SE sequences.
+fn probe_se_bank(image: &mut Iso9660, file_id: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let location = partition_entry_for_id(file_id);
+    let archive = AfsArchive::open(image, format!("DATA/PZS3US{}.AFS", location.partition))?;
+    let bank = archive.read_entry(image, location.index)?;
+    let word = |o: usize| u32::from_le_bytes(bank[o..o + 4].try_into().unwrap()) as usize;
+    let header: Vec<usize> = (0..5).map(|i| word(i * 4)).collect();
+    println!(
+        "\nSE bank 0x{file_id:X}: {} bytes, header {header:X?}",
+        bank.len()
+    );
+    let parsed = bt3_data::snd::SeBank::parse(&bank)?;
+    let mut features = std::collections::BTreeSet::new();
+    for set in parsed.timbre_sets.iter().flatten() {
+        for timbre in set.iter().flatten() {
+            for tone in &timbre.tones {
+                features.insert(format!(
+                    "curve {:02X} semi {} fine {} group {} pan_mode {} mix {:02X} lfo {:02X} adsr {:04X}/{:04X}",
+                    tone.velocity_curve,
+                    tone.semitone,
+                    tone.fine,
+                    tone.exclusive_group,
+                    tone.pan_mode,
+                    tone.mix,
+                    tone.lfo_mode,
+                    tone.adsr1,
+                    tone.adsr2
+                ));
+            }
+        }
+    }
+    let rates: std::collections::BTreeSet<_> = parsed.vags.iter().map(|v| v.sample_rate).collect();
+    let mut opcodes = std::collections::BTreeSet::new();
+    for set in parsed.sesq.sets.iter().flatten() {
+        for seq in set.sequences.iter().flatten() {
+            opcodes.insert(format!("{:02X?}", &seq.data[..seq.data.len().min(12)]));
+        }
+    }
+    println!("  {} vags, rates {rates:?}; tone kinds:", parsed.vags.len());
+    for feature in &features {
+        println!("    {feature}");
+    }
+    println!("  sequence heads: {opcodes:?}");
+    for (name, start, end) in [
+        ("body", header[1], header[2]),
+        ("hd", header[2], header[3]),
+        ("seq", header[3], header[4]),
+    ] {
+        println!("  {name} 0x{start:X}..0x{end:X} ({} bytes)", end - start);
+        if name == "body" {
+            println!("    {:02X?}", &bank[start..start + 32]);
+            continue;
+        }
+        let dump_all = std::env::var_os("BT3_SE_DUMP").is_some();
+        let mut ofs = start;
+        while ofs + 16 <= end.min(if dump_all { end } else { start + 0x100 }) {
+            let row = &bank[ofs..ofs + 16];
+            let text: String = row
+                .iter()
+                .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+                .collect();
+            println!("    +{:04X} {row:02X?} {text}", ofs - start);
+            ofs += 16;
+        }
+    }
+    Ok(())
+}
+
+/// `Font_InitEx`: the two fonts are at byte offsets boot[1] and boot[2] of common file 5.
+fn probe_fonts(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
+    let location = partition_entry_for_id(5);
+    let archive = AfsArchive::open(image, format!("DATA/PZS3US{}.AFS", location.partition))?;
+    let boot = archive.read_entry(image, location.index)?;
+    let word = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as usize;
+    let header: Vec<usize> = (0..10).map(|i| word(&boot, i * 4)).collect();
+    println!("\nBoot file 5: {} bytes, header {header:X?}", boot.len());
+    for slot in 1..=2 {
+        let font = &boot[header[slot]..];
+        let tex = word(font, 0xC);
+        let glyphs = word(font, 0x14);
+        let count = word(font, 0x18);
+        println!(
+            "  font {slot}: head {:02X?} tex +{tex:X} glyphs +{glyphs:X} count {count} unk1C {:X} line height {}",
+            &font[..0x24],
+            word(font, 0x1C),
+            word(font, 0x20)
+        );
+        let t = &font[tex..tex + 0x40];
+        let tex0 = u64::from_le_bytes(t[0x30..0x38].try_into().unwrap());
+        println!(
+            "    tex: pixels +{:X} clut +{:X} sizes {:X}/{:X} blt {:08X}/{:08X} tex0 {tex0:016X} (psm {:X} tw {} th {} tbw {})",
+            word(t, 0),
+            word(t, 4),
+            word(t, 8),
+            word(t, 12),
+            word(t, 24),
+            word(t, 28),
+            (tex0 >> 20) & 0x3F,
+            1 << ((tex0 >> 26) & 0xF),
+            1 << ((tex0 >> 30) & 0xF),
+            (tex0 >> 14) & 0x3F
+        );
+        let mut cluts = std::collections::BTreeSet::new();
+        let mut sizes = std::collections::BTreeSet::new();
+        for g in 0..count {
+            let e = glyphs + g * 6;
+            let (u, v) = (
+                u16::from_le_bytes([font[e + 2], font[e + 3]]),
+                u16::from_le_bytes([font[e + 4], font[e + 5]]),
+            );
+            cluts.insert(((v >> 15) << 1) | (u >> 15));
+            sizes.insert(((u >> 10) & 0x1F, (v >> 10) & 0x1F));
+        }
+        let sample: Vec<String> = (0..count.min(6))
+            .map(|g| {
+                let e = glyphs + g * 6;
+                format!(
+                    "{:04X}:{:04X}/{:04X}",
+                    u16::from_le_bytes([font[e], font[e + 1]]),
+                    u16::from_le_bytes([font[e + 2], font[e + 3]]),
+                    u16::from_le_bytes([font[e + 4], font[e + 5]])
+                )
+            })
+            .collect();
+        println!(
+            "    glyph cluts {cluts:?}, {} sizes (first {:?}), first glyphs {sample:?}",
+            sizes.len(),
+            sizes.iter().next()
+        );
+    }
+    Ok(())
+}
+
 fn probe_title(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
     use bt3_data::fod::{self, Action, Fod, FrameTag};
 
@@ -83,6 +216,57 @@ fn probe_title(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
         ofs += 8 + tag.size as usize;
     }
     println!("  section 11 FOD tags (code x records): {}", tags.join(" "));
+
+    // Dialog_Init(MPACK_AT(res, 12)): parts 1-4 textures, 5 the window movie, 6 the message table.
+    let dialog = pack_section(&res, 12)?;
+    for part in 1..=4 {
+        let textures = TextureResource::parse(pack_section(dialog, part)?)?;
+        let summary: Vec<String> = textures
+            .entries
+            .iter()
+            .map(|t| {
+                format!(
+                    "pix {:X} clut {:X} blt {:08X}/{:08X} tex0 {:016X} {}",
+                    t.pixel_size,
+                    t.clut_size,
+                    t.pixel_blt,
+                    t.clut_blt,
+                    t.texture_register,
+                    match decode_sprite_texture(t) {
+                        Ok(rgba) => format!("{}x{}", rgba.width, rgba.height),
+                        Err(error) => error.to_string(),
+                    }
+                )
+            })
+            .collect();
+        println!("  dialog part {part}: {summary:?}");
+    }
+    let window = Fod::parse(pack_section(dialog, 5)?)?;
+    let images: Vec<String> = (0..window.record_count(3)?)
+        .map(|i| {
+            let rec = window.record(3, i).unwrap();
+            let data = window.bytes();
+            format!(
+                "{}x{}",
+                fod::u16_at(data, rec + 8).unwrap(),
+                fod::u16_at(data, rec + 10).unwrap()
+            )
+        })
+        .collect();
+    println!("  dialog movie images {images:?}");
+    let table = pack_section(dialog, 6)?;
+    let count = u32::from_le_bytes(table[0..4].try_into()?) as usize;
+    println!("  dialog messages: {count}");
+    for i in 0..count.min(0x40) {
+        let ofs = (u32::from_le_bytes(table[4 + i * 4..8 + i * 4].try_into()?) as usize) & !3;
+        let text: String = table[ofs..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&c| c != 0)
+            .map(|c| char::from_u32(u32::from(c)).unwrap_or('?'))
+            .collect();
+        println!("    {i:02X}: {:?}", text);
+    }
     for index in 0..movie.record_count(3)? {
         let rec = movie.record(3, index)?;
         print!(
@@ -184,6 +368,121 @@ fn probe_title(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  GetURL commands: {urls:?}");
     println!("  labels: {}", labels.join(" "));
+    Ok(())
+}
+
+fn describe_textures(data: &[u8]) -> String {
+    match TextureResource::parse(data) {
+        Ok(res) => res
+            .entries
+            .iter()
+            .map(|t| {
+                let tex0 = t.texture_register;
+                format!(
+                    "{}x{}/psm{:X}{}",
+                    1u32 << ((tex0 >> 26) & 0xF),
+                    1u32 << ((tex0 >> 30) & 0xF),
+                    (tex0 >> 20) & 0x3F,
+                    if t.pixel_data.is_none() {
+                        "/clut-only".to_owned()
+                    } else {
+                        match decode_sprite_texture(t) {
+                            Ok(_) => String::new(),
+                            Err(error) => format!("/{error}"),
+                        }
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        Err(error) => format!("not textures: {error}"),
+    }
+}
+
+fn describe_fod(data: &[u8]) -> String {
+    use bt3_data::fod::{Fod, FrameTag};
+
+    let Ok(movie) = Fod::parse(data) else {
+        return "not a FOD".to_owned();
+    };
+    let bytes = movie.bytes();
+    let images: Vec<String> = (0..movie.record_count(3).unwrap_or(0))
+        .map(|i| {
+            let rec = movie.record(3, i).unwrap();
+            format!(
+                "{}x{}",
+                bt3_data::fod::u16_at(bytes, rec + 8).unwrap(),
+                bt3_data::fod::u16_at(bytes, rec + 10).unwrap()
+            )
+        })
+        .collect();
+    let mut labels = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
+    let mut timelines = vec![movie.record(7, 0).unwrap()];
+    for index in 0..movie.record_count(6).unwrap_or(0) {
+        timelines.push(movie.record(6, index).unwrap());
+    }
+    for rec in timelines {
+        let mut block = rec + 8;
+        while let Ok(Some(frame)) = bt3_data::fod::parse_frame(bytes, block) {
+            if !frame.label.is_empty() {
+                labels.insert(String::from_utf8_lossy(&frame.label).into_owned());
+            }
+            for tag in &frame.tags {
+                if let FrameTag::Place { name, .. } | FrameTag::PlaceNew { name, .. } = tag
+                    && !name.is_empty()
+                {
+                    names.insert(String::from_utf8_lossy(name).into_owned());
+                }
+            }
+            if frame.size == 0 {
+                break;
+            }
+            block += frame.size as usize;
+        }
+    }
+    format!("images {images:?}\n      labels {labels:?}\n      clips {names:?}")
+}
+
+fn utf16_line(table: &[u8], i: usize) -> String {
+    bt3_data::font::message(table, i)
+        .map(|t| String::from_utf16_lossy(&t))
+        .unwrap_or_else(|e| e.to_string())
+}
+
+/// `MainMenu_Init(2)`: section 2 of archive baseFile + 1.
+fn probe_main_menu(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
+    let location = partition_entry_for_id(0x1C1 + 1);
+    let archive = AfsArchive::open(image, format!("DATA/PZS3US{}.AFS", location.partition))?;
+    let pack = archive.read_entry(image, location.index)?;
+    let res = bpe::decode(pack_section(&pack, 2)?)?;
+    let count = u32::from_le_bytes(res[0..4].try_into()?) as usize;
+    println!("\nMain menu (archive section 2): {} bytes, {count} sections", res.len());
+    for section in 1..=count {
+        let data = pack_section(&res, section)?;
+        match section {
+            20 => println!("  {section}: FOD {}", describe_fod(data)),
+            21 | 22 => {
+                println!("  {section}: pack, part 1 {}", describe_textures(pack_section(data, 1)?));
+                println!("      part 2 FOD {}", describe_fod(pack_section(data, 2)?));
+            }
+            27 => {
+                let words: Vec<u32> = data[..0x40.min(data.len())]
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                println!("  {section}: {} bytes, head {words:X?}", data.len());
+            }
+            28 => {
+                let n = bt3_data::font::message_count(data)?;
+                println!("  {section}: text, {n} lines");
+                for i in 0..n {
+                    println!("    {i:02X}: {:?}", utf16_line(data, i));
+                }
+            }
+            _ => println!("  {section}: {}", describe_textures(data)),
+        }
+    }
     Ok(())
 }
 
@@ -468,6 +767,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     print!("{}", String::from_utf8_lossy(&output.stdout));
 
     probe_title(&mut image)?;
+    for file_id in [0x14B, 0x14C] {
+        probe_se_bank(&mut image, file_id)?;
+    }
+    probe_fonts(&mut image)?;
+    probe_main_menu(&mut image)?;
 
     println!("\nTexture-resource candidates from real AFS data:");
     let candidates = scan_texture_candidates(&mut image)?;

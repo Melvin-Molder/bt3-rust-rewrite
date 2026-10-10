@@ -4,11 +4,12 @@ use bt3_data::gs::{RgbaTexture, decode_sprite_texture};
 use bt3_data::pack_section;
 use bt3_data::tex::TextureResource;
 
+use crate::dialog::{Dialog, DialogAssets, Pad};
 use crate::draw::ScreenQuad;
-use crate::flash::{
-    DrawQuad, FLASH_PAD, Flash, PROP_REPEAT, QUAD_FLIPX, QUAD_FLIPY, QUAD_REPEAT, Uv,
-};
+use crate::flash::{FLASH_PAD, Flash, PROP_REPEAT, Uv, screen_quad};
+use crate::font::Font;
 use crate::logo::{ColorFade, TILES_PER_PICTURE, picture_quads};
+use crate::mcflow::{self, McFlow};
 use crate::rng::GameRandom;
 
 /// `gProgress->baseFile + 1` (gMenuArc1); `Title_Run(1)` unpacks its section 1.
@@ -23,6 +24,8 @@ const LOGO_WAIT: i32 = 300;
 const FADE_FRAMES: i32 = 0x14;
 const LEAVE_FRAMES: i32 = 15;
 
+pub const PAD_LEFT: u32 = 0x0001;
+pub const PAD_RIGHT: u32 = 0x0002;
 pub const PAD_DOWN: u32 = 0x0004;
 pub const PAD_UP: u32 = 0x0008;
 pub const PAD_CROSS: u32 = 0x0200;
@@ -70,6 +73,8 @@ pub struct TitleAssets {
     pub logo: Vec<RgbaTexture>,
     /// The movie's textures by image index.
     pub flash: Vec<Option<RgbaTexture>>,
+    /// Section 12, `Dialog_Init`'s file.
+    pub dialog: DialogAssets,
 }
 
 impl TitleAssets {
@@ -105,6 +110,7 @@ impl TitleAssets {
             background: picture(1)?,
             logo: picture(14)?,
             flash,
+            dialog: DialogAssets::parse(pack_section(res, 12)?)?,
         })
     }
 }
@@ -124,6 +130,17 @@ pub struct TextureLayout {
     pub logo: usize,
     /// Per image: a clamped texture, followed by the same texture with wrapping (`FLASH_QUAD_REPEAT`).
     pub flash: Vec<Option<usize>>,
+    /// The dialog movie's textures, the same way.
+    pub dialog: Vec<Option<usize>>,
+}
+
+/// What a `Title_Run` starts from once the archive is loaded.
+#[derive(Clone, Debug)]
+pub struct TitleData {
+    pub fod: Vec<u8>,
+    pub dialog_fod: Vec<u8>,
+    pub dialog_titles: Vec<u8>,
+    pub layout: TextureLayout,
 }
 
 /// `Pad_CalcRepeat` with `gPad[0]`'s timer and last buttons.
@@ -208,19 +225,26 @@ pub struct TitleScreen {
     result: TitleResult,
     cloud: [f32; 2],
     pad: PadRepeat,
+    dialog: Dialog,
+    mcflow: McFlow,
+    mc_state: i32,
 }
 
 impl TitleScreen {
     /// `Title_Init` without a loaded save, then the first `ColorFade_StartIn`.
-    pub fn new(
-        fod: &[u8],
-        layout: TextureLayout,
-        random: &mut GameRandom,
-    ) -> Result<Self, Box<dyn Error>> {
-        let mut flash = Flash::create(fod)?;
+    pub fn new(data: &TitleData, random: &mut GameRandom) -> Result<Self, Box<dyn Error>> {
+        let mut flash = Flash::create(&data.fod)?;
         flash.play(1);
+        // Dialog_Init(MPACK_AT(res, 12), NULL, 0); McFlow_Init only loads the save icons.
+        let dialog = Dialog::new(
+            &data.dialog_fod,
+            data.dialog_titles.clone(),
+            data.layout.dialog.clone(),
+            None,
+            0,
+        )?;
         Ok(Self {
-            layout,
+            layout: data.layout.clone(),
             flash,
             fade: ColorFade::start_in(true, FADE_FRAMES),
             phase: Phase::Logo { wait: 0 },
@@ -236,6 +260,9 @@ impl TitleScreen {
             result: TitleResult::Demo,
             cloud: [0.0; 2],
             pad: PadRepeat::default(),
+            dialog,
+            mcflow: McFlow::default(),
+            mc_state: 0,
         })
     }
 
@@ -253,6 +280,7 @@ impl TitleScreen {
         pressed: u32,
         demo_count: &mut u32,
         random: &mut GameRandom,
+        font: &mut Font,
     ) -> TitleFrame {
         let mut frame = TitleFrame {
             quads: Vec::new(),
@@ -295,6 +323,31 @@ impl TitleScreen {
                     frame.sounds.push(TitleSound::Effect(2, 0x37));
                 }
                 self.draw(&mut frame.quads);
+                let mut effects = Vec::new();
+                let (state, done) = self.mcflow.update(
+                    &mut self.dialog,
+                    font,
+                    false,
+                    Pad { pressed, repeat },
+                    &mut effects,
+                    &mut frame.quads,
+                );
+                self.mc_state = state;
+                match done {
+                    // Title_OnCardDone.
+                    Some(mcflow::Done::Done) => {
+                        self.result = TitleResult::MainMenu;
+                        self.leave();
+                    }
+                    // Title_OnCardCancel.
+                    Some(mcflow::Done::NotDone) => self.clip_goto(2, "fl_on_start"),
+                    _ => {}
+                }
+                frame.sounds.extend(
+                    effects
+                        .into_iter()
+                        .map(|(bank, id)| TitleSound::Effect(bank, id)),
+                );
                 frame.quads.extend(self.fade.quad().map(ScreenQuad::from));
                 if self.fade.is_fading_out() {
                     frame.sounds.push(TitleSound::FadeOutStep);
@@ -309,7 +362,7 @@ impl TitleScreen {
                     if self.timer == -1 {
                         self.fade = ColorFade::start_out(true, FADE_FRAMES);
                     }
-                } else {
+                } else if self.mc_state == 0 {
                     self.input(pressed, repeat, demo_count, random, &mut frame.sounds);
                 }
             }
@@ -352,7 +405,7 @@ impl TitleScreen {
         }
     }
 
-    /// `Title_Input` (`mcState` is always 0: the memory card flow is not ported).
+    /// `Title_Input`.
     fn input(
         &mut self,
         pressed: u32,
@@ -421,10 +474,13 @@ impl TitleScreen {
                 } else if pressed & PAD_CROSS != 0 {
                     self.idle = 0;
                     self.clip_goto(2, "fl_ok");
-                    // Cursor 0 starts McFlow_Start(3), whose done callback leaves with result 0; the memory card
-                    // flow is not ported, so both items leave for the main menu at once.
-                    self.result = TitleResult::MainMenu;
-                    self.leave();
+                    if self.cursor == 0 {
+                        // McFlow_Start(3) with Title_OnCardDone / Title_OnCardCancel.
+                        self.mcflow.start(mcflow::MODE_NEW_SAVE);
+                    } else {
+                        self.result = TitleResult::MainMenu;
+                        self.leave();
+                    }
                     sounds.push(TitleSound::Effect(1, 1));
                 } else {
                     self.idle(demo_count);
@@ -481,7 +537,7 @@ impl TitleScreen {
         let layout = &self.layout;
         let has_texture = |image: usize| layout.flash.get(image).is_some_and(Option::is_some);
         for quad in self.flash.draw(&has_texture) {
-            quads.push(flash_quad(&quad, layout));
+            quads.push(screen_quad(&quad, &layout.flash));
         }
     }
 
@@ -509,29 +565,6 @@ impl TitleScreen {
     }
 }
 
-/// `FlashDraw_PutSprite`: the texture rectangle shrinks by one texel on each side unless flipped.
-fn flash_quad(quad: &DrawQuad, layout: &TextureLayout) -> ScreenQuad {
-    let texture = quad
-        .image
-        .and_then(|image| layout.flash.get(image).copied().flatten())
-        .map(|index| index + usize::from(quad.flags & QUAD_REPEAT != 0));
-    let uv = quad.uv;
-    let (mut u0, mut u1, mut v0, mut v1) = (uv.u0 + 1, uv.u1 - 1, uv.v0 + 1, uv.v1 - 1);
-    if quad.flags & QUAD_FLIPX != 0 {
-        (u0, u1) = (uv.u1, uv.u0);
-    }
-    if quad.flags & QUAD_FLIPY != 0 {
-        (v0, v1) = (uv.v1, uv.v0);
-    }
-    let [u0, u1, v0, v1] = [u0, u1, v0, v1].map(|v| v as f32);
-    ScreenQuad {
-        texture,
-        pt: quad.pt,
-        uv: [[u0, v0], [u1, v0], [u0, v1], [u1, v1]],
-        rgba: quad.rgba.map(|c| c.clamp(0, 255) as u8),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::PadRepeat;
@@ -540,8 +573,8 @@ mod tests {
     #[test]
     fn real_title_reaches_press_start_and_opens_the_menu() {
         use super::{
-            ARCHIVE_FILE_ID, ARCHIVE_SECTION, PAD_START, Phase, TextureLayout, TitleAssets,
-            TitleScreen,
+            ARCHIVE_FILE_ID, ARCHIVE_SECTION, PAD_CROSS, PAD_LEFT, PAD_START, Phase, TextureLayout,
+            TitleAssets, TitleData, TitleResult, TitleScreen,
         };
         use bt3_data::afs::{AfsArchive, partition_entry_for_id};
         use bt3_data::{Iso9660, bpe, pack_section};
@@ -569,23 +602,37 @@ mod tests {
                 })
             })
             .collect();
+        let dialog = assets
+            .dialog
+            .textures
+            .iter()
+            .map(|t| t.as_ref().map(|_| 0))
+            .collect();
         let layout = TextureLayout {
             background: 0,
             logo: 8,
             flash,
+            dialog,
         };
+        let data = TitleData {
+            fod: assets.fod.clone(),
+            dialog_fod: assets.dialog.fod.clone(),
+            dialog_titles: assets.dialog.titles.clone(),
+            layout,
+        };
+        let mut font = crate::font::Font::new(Vec::new(), 20);
         let mut random = crate::rng::GameRandom::from_key(&[1, 2, 3, 4]);
-        let mut title = TitleScreen::new(&assets.fod, layout, &mut random).unwrap();
+        let mut title = TitleScreen::new(&data, &mut random).unwrap();
         let mut demo = 0;
         let mut frames = 0;
         while matches!(title.phase, Phase::Logo { .. }) {
-            title.run_frame(0, 0, &mut demo, &mut random);
+            title.run_frame(0, 0, &mut demo, &mut random, &mut font);
             frames += 1;
         }
         println!("logo loop: {frames} frames");
         let mut pad_at = None;
         for frame in 0..1000 {
-            let out = title.run_frame(0, 0, &mut demo, &mut random);
+            let out = title.run_frame(0, 0, &mut demo, &mut random, &mut font);
             if frame % 50 == 0 || (pad_at.is_none() && title.started) {
                 let xs: Vec<f32> = out
                     .quads
@@ -605,13 +652,13 @@ mod tests {
             }
         }
         assert!(pad_at.is_some(), "the movie never enabled the pad");
-        let out = title.run_frame(PAD_START, PAD_START, &mut demo, &mut random);
+        let out = title.run_frame(PAD_START, PAD_START, &mut demo, &mut random, &mut font);
         assert_eq!(title.state, 2);
         println!("after start: {:?}", out.sounds);
         for _ in 0..120 {
-            title.run_frame(0, 0, &mut demo, &mut random);
+            title.run_frame(0, 0, &mut demo, &mut random, &mut font);
         }
-        let out = title.run_frame(0, 0, &mut demo, &mut random);
+        let out = title.run_frame(0, 0, &mut demo, &mut random, &mut font);
         println!("menu open: {} quads", out.quads.len());
         for q in out
             .quads
@@ -623,6 +670,55 @@ mod tests {
                 q.texture, q.pt, q.uv, q.rgba
             );
         }
+
+        // New Game with no memory card: create a save? Yes; no card; start without saving? Yes.
+        macro_rules! step {
+            ($bits:expr) => {
+                title
+                    .run_frame($bits, $bits, &mut demo, &mut random, &mut font)
+                    .sounds
+            };
+        }
+        println!("cross: {:?}", step!(PAD_CROSS));
+        let mut opened = None;
+        for frame in 0..300 {
+            if title.dialog.is_open() {
+                opened = Some(frame);
+                break;
+            }
+            step!(0);
+        }
+        println!("dialog open after {opened:?} frames");
+        assert!(opened.is_some(), "the dialog never opened");
+        assert_eq!(title.mc_state, 0xA);
+        println!("left: {:?}", step!(PAD_LEFT));
+        println!("cross: {:?}", step!(PAD_CROSS));
+        for _ in 0..13 {
+            step!(0);
+        }
+        assert_eq!(title.mc_state, 3);
+        for _ in 0..120 {
+            step!(0);
+        }
+        assert_eq!(title.mc_state, 0x1B);
+        step!(PAD_CROSS);
+        assert_eq!(title.mc_state, 9);
+        step!(PAD_LEFT);
+        step!(PAD_CROSS);
+        let mut closed_at = None;
+        for frame in 0..300 {
+            let sounds = step!(0);
+            if !sounds.is_empty() {
+                println!("frame {frame}: {sounds:?}");
+            }
+            if title.mc_state == 0 {
+                closed_at = Some(frame);
+                break;
+            }
+        }
+        println!("closed after {closed_at:?} frames");
+        assert!(title.leaving);
+        assert_eq!(title.result, TitleResult::MainMenu);
     }
 
     #[test]

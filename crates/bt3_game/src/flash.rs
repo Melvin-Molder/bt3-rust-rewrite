@@ -4,6 +4,32 @@ use bt3_data::fod::{
     self, Action, CXFORM_IDENTITY, Cxform, Fod, Frame, FrameTag, IDENTITY, Matrix,
 };
 
+use crate::draw::ScreenQuad;
+
+/// `FlashDraw_PutSprite`: the texture rectangle shrinks by one texel on each side unless flipped. `textures` maps a
+/// movie image to its clamped texture; the repeating sampler is the next texture.
+pub fn screen_quad(quad: &DrawQuad, textures: &[Option<usize>]) -> ScreenQuad {
+    let texture = quad
+        .image
+        .and_then(|image| textures.get(image).copied().flatten())
+        .map(|index| index + usize::from(quad.flags & QUAD_REPEAT != 0));
+    let uv = quad.uv;
+    let (mut u0, mut u1, mut v0, mut v1) = (uv.u0 + 1, uv.u1 - 1, uv.v0 + 1, uv.v1 - 1);
+    if quad.flags & QUAD_FLIPX != 0 {
+        (u0, u1) = (uv.u1, uv.u0);
+    }
+    if quad.flags & QUAD_FLIPY != 0 {
+        (v0, v1) = (uv.v1, uv.v0);
+    }
+    let [u0, u1, v0, v1] = [u0, u1, v0, v1].map(|v| v as f32);
+    ScreenQuad {
+        texture,
+        pt: quad.pt,
+        uv: [[u0, v0], [u1, v0], [u0, v1], [u1, v1]],
+        rgba: quad.rgba.map(|c| c.clamp(0, 255) as u8),
+    }
+}
+
 // FlashTl.state
 const TL_PLAY: u8 = 0x01;
 const TL_HOLD: u8 = 0x02;
@@ -429,6 +455,34 @@ impl Flash {
             if props & PROP_REPEAT != 0 {
                 set_bits(&mut clip.prop.flags, OV_REPEAT, on);
             }
+        }
+    }
+
+    /// `FlashClipList_GetPos`: the clip's own translation plus its position override.
+    pub fn clip_get_pos(&self, r: ClipRef) -> Option<(i32, i32)> {
+        let prop = &self.clips.get(usize::try_from(r.index).ok()?)?.prop;
+        let (mut x, mut y) = (prop.mtx[2] as i32, prop.mtx[5] as i32);
+        if prop.flags & OV_POS != 0 {
+            x += prop.x as i32;
+            y += prop.y as i32;
+        }
+        Some((x, y))
+    }
+
+    /// `FlashClipList_GetAlpha`: colour-transform alpha (0..255) times the override, over 128; 0 without a clip.
+    pub fn clip_get_alpha(&self, r: ClipRef) -> f32 {
+        let Some(clip) = usize::try_from(r.index)
+            .ok()
+            .and_then(|i| self.clips.get(i))
+        else {
+            return 0.0;
+        };
+        let prop = &clip.prop;
+        let a = ((prop.cx.mul[3] * 128.0) as i32 + i32::from(prop.cx.add[3])).clamp(0, 255) as f32;
+        if prop.flags & OV_ALPHA != 0 {
+            a * prop.alpha * 0.0078125
+        } else {
+            a * 0.0078125
         }
     }
 
