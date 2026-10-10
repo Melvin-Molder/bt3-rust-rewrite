@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 
 use bevy::asset::{RenderAssetUsages, load_internal_asset, uuid_handle};
+use bevy::camera::RenderTarget;
+use bevy::camera::visibility::RenderLayers;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::prelude::*;
@@ -174,7 +176,108 @@ pub fn add_to(app: &mut App) {
         Material2dPlugin::<GsStageMaterial>::default(),
     ))
     .init_resource::<ModelTextures>()
-    .init_resource::<StageTextures>();
+    .init_resource::<StageTextures>()
+    .add_systems(Startup, spawn_cameras);
+}
+
+/// The 2D layer shown on the window: the frame buffers and the quads.
+pub const DISPLAY_LAYER: usize = 1;
+
+/// The two frame buffers the 3D passes draw into: one is drawn to, the other keeps the frame `ScrXfade_PostDraw`
+/// captured last.
+#[derive(Resource)]
+pub struct FrameBuffers {
+    images: [Handle<Image>; 2],
+    current: usize,
+    captures: u32,
+    swap: bool,
+}
+
+#[derive(Component)]
+pub struct SceneCamera;
+
+#[derive(Component)]
+pub struct LiveFrame;
+
+#[derive(Component)]
+pub struct KeptFrame;
+
+fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let images: [Handle<Image>; 2] = std::array::from_fn(|_| {
+        images.add(Image::new_target_texture(
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+            TextureFormat::Rgba8UnormSrgb,
+            None,
+        ))
+    });
+    commands.spawn((Camera2d, SceneCamera, RenderTarget::from(images[0].clone())));
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: 1,
+            ..default()
+        },
+        RenderLayers::layer(DISPLAY_LAYER),
+    ));
+    commands.spawn((
+        Sprite::from_image(images[0].clone()),
+        Transform::from_xyz(0.0, 0.0, -990.0),
+        RenderLayers::layer(DISPLAY_LAYER),
+        LiveFrame,
+    ));
+    commands.spawn((
+        Sprite::from_image(images[1].clone()),
+        Transform::from_xyz(0.0, 0.0, -980.0),
+        RenderLayers::layer(DISPLAY_LAYER),
+        Visibility::Hidden,
+        KeptFrame,
+    ));
+    commands.insert_resource(FrameBuffers {
+        images,
+        current: 0,
+        captures: 0,
+        swap: false,
+    });
+}
+
+/// `ScrXfade`: a captured frame stays in its buffer and is drawn over the following frames at `alpha / 128`
+/// while the 3D passes go on in the other buffer.
+pub fn sync_frame_buffers(
+    game: Res<Game>,
+    mut buffers: ResMut<FrameBuffers>,
+    mut camera: Query<&mut RenderTarget, With<SceneCamera>>,
+    mut live: Query<&mut Sprite, (With<LiveFrame>, Without<KeptFrame>)>,
+    mut kept: Query<(&mut Sprite, &mut Visibility), With<KeptFrame>>,
+) {
+    // The frame captured last update was drawn into the current buffer: keep it, draw on in the other.
+    if std::mem::take(&mut buffers.swap) {
+        buffers.current ^= 1;
+        let image = buffers.images[buffers.current].clone();
+        for mut target in &mut camera {
+            *target = RenderTarget::from(image.clone());
+        }
+        for mut sprite in &mut live {
+            sprite.image = image.clone();
+        }
+    }
+    if game.xfade_captures != buffers.captures {
+        buffers.captures = game.xfade_captures;
+        buffers.swap = true;
+        let image = buffers.images[buffers.current].clone();
+        for (mut sprite, _) in &mut kept {
+            sprite.image = image.clone();
+        }
+    }
+    for (mut sprite, mut visibility) in &mut kept {
+        let alpha = game.xfade_alpha.clamp(0, 128) as f32 / 128.0;
+        sprite.color = Color::WHITE.with_alpha(alpha);
+        *visibility = if alpha > 0.0 {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
 }
 
 /// Runs after the frame logic, like `sync_quads`.

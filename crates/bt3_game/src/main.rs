@@ -1,5 +1,6 @@
 mod anim;
 mod battle;
+mod battle_seq;
 mod char_select;
 mod dialog;
 mod draw;
@@ -30,6 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::{AddAudioSource, Volume};
+use bevy::camera::visibility::RenderLayers;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -153,6 +155,9 @@ struct Game {
     /// The stage texture file and this frame's stage triangles.
     stage_textures: Vec<RgbaTexture>,
     stage_batches: Vec<stage_draw::StageBatch>,
+    /// `ScrXfade`: frames captured so far, and the captured frame's alpha (0..128) over this one.
+    xfade_captures: u32,
+    xfade_alpha: i32,
     demo_count: u32,
     movie_texture: Option<usize>,
     soundtrack: Option<Decoding>,
@@ -328,6 +333,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model_batches: Vec::new(),
             stage_textures: Vec::new(),
             stage_batches: Vec::new(),
+            xfade_captures: 0,
+            xfade_alpha: 0,
             demo_count: 0,
             movie_texture,
             soundtrack,
@@ -370,6 +377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_quads,
                 model_draw::sync_models,
                 model_draw::sync_stage,
+                model_draw::sync_frame_buffers,
                 apply_volumes,
             )
                 .chain(),
@@ -480,7 +488,7 @@ fn decode_textures(resource: &[u8]) -> Result<Vec<RgbaTexture>, Box<dyn std::err
 }
 
 fn setup(mut commands: Commands, stream: Res<SeStream>, mut outputs: ResMut<Assets<se::SeOutput>>) {
-    commands.spawn(Camera2d);
+    // The cameras are model_draw's: the 3D passes go to a frame buffer, the window shows it and the quads.
     let output = outputs.add(se::SeOutput(stream.0.clone()));
     commands.spawn(AudioPlayer(output));
 }
@@ -735,10 +743,15 @@ fn run_frames(
                 }
             }
             Scene::Battle(battle) => {
-                game.quads.clear();
-                let frame = battle.run_frame();
+                let frame = battle.run_frame(start, stat, &mut game.libc_random);
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
+                game.quads = into_screen(frame.quads);
+                if frame.capture {
+                    game.xfade_captures += 1;
+                }
+                game.xfade_alpha = frame.xfade_alpha;
+                play_sounds(game, &mut commands, frame.sounds);
             }
         }
     }
@@ -1427,6 +1440,7 @@ fn sync_quads(
             Mesh2d(meshes.add(mesh)),
             MeshMaterial2d(materials.add(material)),
             Transform::from_xyz(0.0, 0.0, index as f32 * 0.001),
+            RenderLayers::layer(model_draw::DISPLAY_LAYER),
         ));
     }
 }

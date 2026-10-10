@@ -5,6 +5,7 @@ use std::path::Path;
 pub mod adx;
 pub mod afs;
 pub mod bpe;
+pub mod cam_anim;
 pub mod fod;
 pub mod font;
 pub mod gs;

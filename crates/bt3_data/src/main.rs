@@ -4,6 +4,7 @@ use bt3_data::Iso9660;
 use bt3_data::adx;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
 use bt3_data::bpe;
+use bt3_data::cam_anim::CamAnim;
 use bt3_data::gs::{decode_sprite_texture, psmt8_row_from_upload};
 use bt3_data::model::{CharaModel, TEXTURE_SECTION, tex0_cbp, tex0_tbp};
 use bt3_data::pack_section;
@@ -745,6 +746,12 @@ fn probe_stage_model(file: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn archive_read(image: &mut Iso9660, file_id: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let location = partition_entry_for_id(file_id);
+    let archive = AfsArchive::open(image, format!("DATA/PZS3US{}.AFS", location.partition))?;
+    Ok(archive.read_entry(image, location.index)?)
+}
+
 fn file_id_for_partition_entry(partition: u8, index: u32) -> u32 {
     match partition {
         0 => index,
@@ -922,6 +929,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  object light direction {:?}", stage.light_dir);
     probe_stage_model(&stage_bytes)?;
+    // DemoCam_PlayStageAnim(0..2): BtlStage_GetFileMember(idx) = stage file section idx + 3.
+    for cut in 0..3 {
+        match pack_section(&stage_bytes, cut + 3).map(CamAnim::parse) {
+            Ok(Ok(anim)) => println!(
+                "  stage cut {cut}: length {}, defaults {:?}, channels {:?}",
+                anim.length,
+                anim.defaults,
+                anim.channels
+                    .iter()
+                    .map(|c| (
+                        c.index,
+                        c.keys.len(),
+                        c.keys.first().map(|k| (k.time, k.value))
+                    ))
+                    .collect::<Vec<_>>()
+            ),
+            other => println!("  stage cut {cut}: {other:?}"),
+        }
+    }
+    {
+        let chara = archive_read(&mut image, 0x590)?;
+        let anim = CamAnim::parse(pack_section(&chara, 0x29)?)?;
+        println!(
+            "  chara 0x590 entrance cut: length {}, channels {:?}",
+            anim.length,
+            anim.channels
+                .iter()
+                .map(|c| (c.index, c.keys.len()))
+                .collect::<Vec<_>>()
+        );
+        let talk = pack_section(&chara, 0x16)?;
+        println!(
+            "  talk table ({} bytes): {:02X?}",
+            talk.len(),
+            &talk[..talk.len().min(64)]
+        );
+        let motions = archive_read(&mut image, 0x598)?;
+        for id in [0x180usize, 0x181] {
+            let anim = bpe::decode(pack_section(&motions, id + 1)?)?;
+            println!(
+                "  motion {id:#X}: length {}",
+                u16::from_le_bytes([anim[2], anim[3]])
+            );
+        }
+    }
     for (index, placement) in stage.starting_placements.iter().enumerate() {
         println!(
             "  start {index}: position {:?}, target {:?}",

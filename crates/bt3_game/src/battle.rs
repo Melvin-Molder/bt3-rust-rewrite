@@ -1,13 +1,16 @@
-//! `Battle_Main` (src/battle/battle.c) up to its first frames: `Battle_Load` reads the fighters' model and motion
-//! files behind the loading screen, then each frame the fighters loop their idle motion and are drawn the way
-//! `BtlObjDraw_DrawModel` and VU1 program 0 draw them, seen through side 0's fighter camera (`ChrCam_CalcLockOn`).
+//! `Battle_Main` (src/battle/battle.c) up to the fight: `Battle_Load` reads the fighters' model and motion files
+//! behind the loading screen, then the battle sequence (battle_seq.rs) runs the stage intro cuts, the entrance
+//! poses with their lines and the ready wait. Each frame the fighters are posed and drawn the way
+//! `BtlObjDraw_DrawModel` and VU1 program 0 draw them, after the stage, seen through the demo camera or side 0's
+//! fighter camera (`ChrCam_CalcLockOn`).
 //!
-//! Not ported yet: the fighters' actions (they stand at the stage's starting places), the hair / cloth chains,
-//! the face animation, the stage itself, the intro camera and the HUD.
+//! Not ported yet: the fighters' actions in the fight, the hair / cloth chains, the face animation, animated stage
+//! objects and the HUD.
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
 
+use bt3_data::cam_anim::CamAnim;
 use bt3_data::gs::{
     RgbaTexture, decode_clut256_upload, decode_sprite_texture, psmt8_row_from_upload,
 };
@@ -18,15 +21,29 @@ use bt3_data::stage::StageResource;
 use bt3_data::stage_model::StageModel;
 use bt3_data::tex::TextureResource;
 
+use crate::battle_seq::{DemoCam, ScrXfade, Seq, SeqInput, SeqState};
 use crate::char_select::BattleSetup;
+use crate::fade::Fade;
+use crate::loading::Quad;
+use crate::rng::LibcRandom;
 use crate::stage_draw::{StageBatch, draw_stage};
+use crate::title::TitleSound;
 
 /// `BTL_FILE_CHARA`: `0x590 + chara * 10 + costume`.
 pub const CHARA_FILE: u32 = 0x590;
 /// The character's motion table (`slot->file[1]`): `0x598 + chara * 10`.
 const MOTION_FILE: u32 = 0x598;
 /// `BtlAct_GetIdleMotion` on the ground at full health.
-const IDLE_MOTION: usize = 0;
+pub(crate) const IDLE_MOTION: usize = 0;
+/// Action 1 (the entrance pose): motion 0x180, then 0x181 looping.
+pub(crate) const ENTRANCE_MOTION: usize = 0x180;
+pub(crate) const ENTRANCE_LOOP_MOTION: usize = 0x181;
+/// `BtlObj_BindTables`: `mdl.camAnims[0]` (character file section 0x29) and `mdl.unk924`, the talk table
+/// (section 0x16, read as `BtlSeqObj.talkTbl`).
+const ENTRANCE_CUT_SECTION: usize = 0x29;
+const TALK_TABLE_SECTION: usize = 0x16;
+/// `BtlStage_GetFileMember(idx)`: the stage's intro cuts are stage file sections 3..5.
+const STAGE_CUT_SECTION: usize = 3;
 /// `BtlObj_GetDefaultAnimStep`: frames per update.
 const ANIM_STEP: f32 = 2.0;
 /// `BTL_FILE_STAGE`: `0x171 + stage`.
@@ -47,7 +64,7 @@ const OFFSET_Y: f32 = 2048.0 - 224.0;
 /// A PS2 matrix: four rows, applied to row vectors (`v.x * m[0] + v.y * m[1] + v.z * m[2] + v.w * m[3]`).
 pub(crate) type Mtx = [[f32; 4]; 4];
 
-const IDENTITY: Mtx = [
+pub(crate) const IDENTITY: Mtx = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0],
     [0.0, 0.0, 1.0, 0.0],
@@ -62,17 +79,24 @@ pub struct BattleAssets {
     pub shade_textures: Vec<RgbaTexture>,
     /// The stage texture file, decoded (`StgModel_SetTexture` uploads one at a time to block 0x2A00).
     pub stage_textures: Vec<RgbaTexture>,
-    fighters: Vec<FighterModel>,
+    pub(crate) fighters: Vec<FighterModel>,
     stage: StageResource,
     stage_model: StageModel,
     stage_id: i32,
+    pub(crate) stage_cuts: Vec<Option<CamAnim>>,
+    /// `Battle_GetMode`.
+    pub(crate) mode: i32,
 }
 
-struct FighterModel {
+pub(crate) struct FighterModel {
+    pub(crate) chara: i32,
     model: CharaModel,
     /// Per part, per batch: the material texture and the shading row.
     batch_textures: Vec<Vec<[usize; 2]>>,
-    idle: Motion,
+    /// The motions played so far, by id, with `BtlAnim_Play`'s table flags applied.
+    motions: HashMap<usize, Motion>,
+    pub(crate) entrance_cut: Option<CamAnim>,
+    pub(crate) talk: Vec<u8>,
 }
 
 /// Reads what the battle draws so far. `read` returns a file of the AFS archives by id.
@@ -101,6 +125,16 @@ pub fn load(
         .map(decode_sprite_texture)
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
+    let stage_cuts = (0..3)
+        .map(|i| {
+            pack_section(&stage_file, STAGE_CUT_SECTION + i)
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(CamAnim::parse)
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
     let mut assets = BattleAssets {
         base_textures: Vec::new(),
         shade_textures: Vec::new(),
@@ -109,20 +143,34 @@ pub fn load(
         stage,
         stage_model,
         stage_id: setup.stage,
+        stage_cuts,
+        mode: setup.mode,
     };
     for side in setup.sides {
         let file_id = CHARA_FILE + side.chara.max(0) as u32 * 10 + side.costume.max(0) as u32;
         let file = read(file_id)?;
         let mut fighter = load_fighter(&file, &ramp, &mut assets)
             .map_err(|e| format!("character file 0x{file_id:X}: {e}"))?;
+        fighter.chara = side.chara;
+        fighter.entrance_cut = pack_section(&file, ENTRANCE_CUT_SECTION)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(CamAnim::parse)
+            .transpose()
+            .map_err(error)?;
+        fighter.talk = pack_section(&file, TALK_TABLE_SECTION)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
         let motions = read(MOTION_FILE + side.chara.max(0) as u32 * 10)?;
-        let packed = pack_section(&motions, IDLE_MOTION + 1).map_err(error)?;
-        let mut idle =
-            Motion::parse(&bt3_data::bpe::decode(packed).map_err(error)?).map_err(error)?;
-        // BtlAnim_Play: BtlAnim_ApplyTableFlags and BtlAnim_HideModelNodes.
-        idle.apply_table_flags(motion_flags(&common, IDLE_MOTION));
-        idle.hide_model_nodes(side.chara);
-        fighter.idle = idle;
+        for id in [IDLE_MOTION, ENTRANCE_MOTION, ENTRANCE_LOOP_MOTION] {
+            let packed = pack_section(&motions, id + 1).map_err(error)?;
+            let mut motion =
+                Motion::parse(&bt3_data::bpe::decode(packed).map_err(error)?).map_err(error)?;
+            // BtlAnim_Play: BtlAnim_ApplyTableFlags and BtlAnim_HideModelNodes.
+            motion.apply_table_flags(motion_flags(&common, id));
+            motion.hide_model_nodes(side.chara);
+            fighter.motions.insert(id, motion);
+        }
         assets.fighters.push(fighter);
     }
     Ok(assets)
@@ -212,12 +260,12 @@ fn load_fighter(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(FighterModel {
+        chara: 0,
         model,
         batch_textures,
-        idle: Motion {
-            length: 0,
-            tracks: Vec::new(),
-        },
+        motions: HashMap::new(),
+        entrance_cut: None,
+        talk: Vec::new(),
     })
 }
 
@@ -238,74 +286,207 @@ pub struct ModelBatch {
     pub vertices: Vec<ScreenVertex>,
 }
 
-/// What one battle frame draws, in `Battle_Draw`'s order: the stage, then the fighters.
+/// What one battle frame draws, in `Battle_Draw`'s order: the stage, then the fighters, then the overlay pass
+/// (the cross-fade) and the fade slot.
 pub struct BattleFrame {
     pub stage: Vec<StageBatch>,
     pub models: Vec<ModelBatch>,
+    /// `ScrXfade_PostDraw`: keep this frame to fade it out over the next ones.
+    pub capture: bool,
+    /// Alpha (0..128) of the kept frame over this one.
+    pub xfade_alpha: i32,
+    /// `Fade_DrawScreen` (slot 0).
+    pub quads: Vec<Quad>,
+    pub sounds: Vec<TitleSound>,
+}
+
+/// The fighter's action as far as the intro needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    /// Action 0xB: the idle motion looping.
+    Neutral,
+    /// Action 1: motion 0x180 once, then 0x181 looping, until flag 0xF0.
+    Entrance,
 }
 
 /// A fighter object as far as the draw needs it.
 #[derive(Clone, Copy, Debug)]
-struct Fighter {
+pub(crate) struct Fighter {
     pos: [f32; 3],
     yaw: f32,
-    /// `anim.frame` and layer 0's per-node key cursors.
+    /// The stage's starting place (`BtlChar_PlaceAtStart`).
+    start: ([f32; 3], f32),
+    action: Action,
+    /// `anim.cur`, `anim.frame` and layer 0's per-node key cursors.
+    motion: usize,
     frame: f32,
     cursors: [u16; NODE_MAX],
+}
+
+impl Fighter {
+    fn new(pos: [f32; 3], yaw: f32) -> Self {
+        let mut fighter = Self {
+            pos,
+            yaw,
+            start: (pos, yaw),
+            action: Action::Neutral,
+            motion: IDLE_MOTION,
+            frame: 0.0,
+            cursors: [0; NODE_MAX],
+        };
+        fighter.reset();
+        fighter
+    }
+
+    /// `BtlChar_Reset`: back at the starting place with the idle motion from frame 0.
+    fn reset(&mut self) {
+        (self.pos, self.yaw) = self.start;
+        self.action = Action::Neutral;
+        self.play(IDLE_MOTION);
+    }
+
+    /// `BtlObjAnim_Play(obj, 0, motion, 1)`.
+    fn play(&mut self, motion: usize) {
+        self.motion = motion;
+        self.frame = 0.0;
+        self.cursors = [0; NODE_MAX];
+    }
+
+    /// `BtlCtrl_StartEntrance`: flag 0xEF forces action 1, which plays motion 0x180.
+    pub(crate) fn start_entrance(&mut self) {
+        self.action = Action::Entrance;
+        self.play(ENTRANCE_MOTION);
+    }
+
+    /// `BtlCtrl_EndEntrance`: flag 0xF0 sends action 1 to the neutral state, which plays the idle motion.
+    pub(crate) fn end_entrance(&mut self) {
+        if self.action == Action::Entrance {
+            self.action = Action::Neutral;
+            self.play(IDLE_MOTION);
+        }
+    }
+
+    /// `BtlCtrl_IsPoseReached` for the entrance: motion 0x181 is playing.
+    pub(crate) fn pose_reached(&self) -> bool {
+        self.motion == ENTRANCE_LOOP_MOTION
+    }
+
+    /// The action's run phase: `BtlAnim_AdvanceThen` / `BtlAnim_AdvanceLoop` by the default step.
+    fn advance(&mut self, length: f32) {
+        self.frame += ANIM_STEP;
+        if self.frame >= length - 0.1 {
+            if self.motion == ENTRANCE_MOTION {
+                self.play(ENTRANCE_LOOP_MOTION);
+            } else {
+                self.frame = 0.0;
+            }
+        }
+    }
 }
 
 /// The battle as far as it is ported.
 pub struct Battle {
     pub assets: BattleAssets,
-    fighters: [Fighter; 2],
+    pub(crate) fighters: [Fighter; 2],
     light_dir: [f32; 3],
+    pub(crate) seq: Seq,
+    pub(crate) demo: DemoCam,
+    pub(crate) xfade: ScrXfade,
+    /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
+    fade: Fade,
+    /// Node 0's world matrix of each fighter from the last pose (`DemoCam_SetBase` reads it before the new pose).
+    roots: [Mtx; 2],
+    started: bool,
 }
 
 impl Battle {
     pub fn new(assets: BattleAssets) -> Self {
         // The stage's starting places (`StgDataA.starts`, one per player): each fighter faces its target.
-        let fighters = std::array::from_fn(|side| {
+        let fighters: [Fighter; 2] = std::array::from_fn(|side| {
             let place = assets.stage.starting_placements.get(side);
             let pos = place.map_or([0.0; 3], |p| p.position);
             let target = place.map_or([0.0, 0.0, 1.0], |p| p.target);
-            Fighter {
-                pos,
-                yaw: (target[0] - pos[0]).atan2(target[2] - pos[2]),
-                frame: 0.0,
-                cursors: [0; NODE_MAX],
-            }
+            Fighter::new(pos, (target[0] - pos[0]).atan2(target[2] - pos[2]))
         });
         // BtlObj_UpdateAll: BtlObjLight_SetDir(BtlStage_GetLightVecB), which normalises it.
         let light_dir = normalize(assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
+        let roots = std::array::from_fn(|side| object_matrix(&fighters[side]));
+        let seq = Seq::new(assets.mode);
         Self {
             assets,
             fighters,
             light_dir,
+            seq,
+            demo: DemoCam::default(),
+            xfade: ScrXfade::default(),
+            fade: Fade::start_in(1.0),
+            roots,
+            started: false,
         }
     }
 
-    /// One battle frame: each fighter advances its idle loop (`BtlAnim_AdvanceLoop`), its pose is sampled and its
-    /// node matrices built, then `Battle_Draw`: the stage (`StgModel_Cull` / `StgModel_Draw`) and the object draw
-    /// in side 0's view (`BtlCam_GetDefaultView` outside split screen), every enabled part of both fighters
-    /// through program 0.
-    pub fn run_frame(&mut self) -> BattleFrame {
+    /// One iteration of `Battle_Loop`: `Gfx_BeginFrame` (the fade), `BtlChars_CheckStart`, the sequence's
+    /// preUpdate, `Battle_Update` (the fighters' actions, the cameras with the demo camera last, the poses), the
+    /// sequence's update, then `Battle_Draw`: the stage, the fighters, the overlay pass and the fade.
+    /// `start` is START going down on a pad; `voice_stat` the voice player's status.
+    pub fn run_frame(
+        &mut self,
+        start: bool,
+        voice_stat: i32,
+        libc: &mut LibcRandom,
+    ) -> BattleFrame {
+        let mut sounds = Vec::new();
+        let mut input = SeqInput {
+            start,
+            voice_stat,
+            libc,
+            sounds: &mut sounds,
+        };
+        if !std::mem::replace(&mut self.started, true) {
+            self.seq_start(&mut input);
+        }
+        self.fade.update();
+        if matches!(self.seq.state, SeqState::Ready | SeqState::Fight)
+            && !std::mem::replace(&mut self.seq.started, true)
+            && self.assets.mode != 1
+        {
+            for fighter in &mut self.fighters {
+                fighter.reset();
+            }
+        }
+        self.seq_pre_update(&mut input);
         let mut poses = Vec::with_capacity(2);
         for (side, fighter) in self.fighters.iter_mut().enumerate() {
             let model = &self.assets.fighters[side];
-            fighter.frame += ANIM_STEP;
-            if fighter.frame >= f32::from(model.idle.length) - 0.1 {
-                fighter.frame = 0.0;
-            }
+            let length = model.motions.get(&fighter.motion).map_or(0, |m| m.length);
+            fighter.advance(f32::from(length));
             let object = object_matrix(fighter);
+            let empty = Motion {
+                length: 0,
+                tracks: Vec::new(),
+            };
             poses.push(pose(
                 &model.model,
-                &model.idle,
+                model.motions.get(&fighter.motion).unwrap_or(&empty),
                 fighter.frame,
                 &mut fighter.cursors,
                 &object,
             ));
         }
-        let view = self.camera_view(0, &poses[0]);
+        let mut view = self.camera_view(0, &poses[0]);
+        if self.demo.is_active() {
+            let base = self.demo.attached().map(|side| self.roots[side]);
+            if let Some(demo) = self.demo.update(base) {
+                view = demo;
+            }
+        }
+        for (side, nodes) in poses.iter().enumerate() {
+            let parts = &self.assets.fighters[side].model.parts;
+            if let Some(i) = parts.iter().position(|p| p.node == 0) {
+                self.roots[side] = nodes[i].0;
+            }
+        }
+        self.seq_update(&mut input);
         let stage = draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view);
         let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
         for (side, nodes) in poses.iter().enumerate() {
@@ -335,9 +516,14 @@ impl Battle {
             .map(|(textures, vertices)| ModelBatch { textures, vertices })
             .collect();
         batches.sort_by_key(|batch| batch.textures);
+        let (capture, xfade_alpha) = self.xfade.draw_pass();
         BattleFrame {
             stage,
             models: batches,
+            capture,
+            xfade_alpha,
+            quads: self.fade.quad().into_iter().collect(),
+            sounds,
         }
     }
 
@@ -579,7 +765,11 @@ pub(crate) struct View {
 
 impl View {
     fn new(pos: [f32; 3], rot: [f32; 3]) -> Self {
-        let world2view = view_matrix(pos, rot);
+        Self::from_world_to_view(view_matrix(pos, rot))
+    }
+
+    /// `View_UpdateMatrices` for a given world-to-view matrix, with the full-screen projection.
+    pub(crate) fn from_world_to_view(world2view: Mtx) -> Self {
         let (view2screen, view2clip, clip2screen) = projection();
         Self {
             world2screen: mul(&world2view, &view2screen),
@@ -587,6 +777,20 @@ impl View {
             clip2screen,
         }
     }
+}
+
+/// `Mtx_InverseRT`: the inverse of a rotation + translation matrix.
+pub(crate) fn inverse_rt(m: &Mtx) -> Mtx {
+    let mut out = IDENTITY;
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = m[j][i];
+        }
+    }
+    for k in 0..3 {
+        out[3][k] = -(m[3][0] * out[0][k] + m[3][1] * out[1][k] + m[3][2] * out[2][k]);
+    }
+    out
 }
 
 /// `Vu0View_SetRotTrans(rot, -pos)`: rotation about X, then Z, then Y (inverse angles), translation first.
@@ -735,7 +939,7 @@ fn rotate(m: &Mtx, v: [f32; 3]) -> [f32; 3] {
 }
 
 /// `a` then `b` for row vectors.
-fn mul(a: &Mtx, b: &Mtx) -> Mtx {
+pub(crate) fn mul(a: &Mtx, b: &Mtx) -> Mtx {
     std::array::from_fn(|i| apply(b, a[i]))
 }
 
@@ -853,8 +1057,21 @@ mod tests {
         setup.stage = 0;
         let assets = load(&mut read, &setup).unwrap();
         let mut battle = Battle::new(assets);
-        assert_eq!(battle.assets.fighters[0].idle.length, 67);
-        let frame = battle.run_frame();
+        assert_eq!(battle.assets.fighters[0].motions[&IDLE_MOTION].length, 67);
+        let mut libc = LibcRandom::new(1);
+        // Mode 0 opens on the stage intro: cut 0 films the stage through the demo camera, under the fade-in.
+        let frame = battle.run_frame(false, 0, &mut libc);
+        assert_eq!(battle.seq.state, SeqState::StageIntro);
+        assert!(battle.demo.is_active());
+        assert_eq!(frame.quads.len(), 1);
+        let stage_vertices: usize = frame.stage.iter().map(|b| b.vertices.len()).sum();
+        assert!(stage_vertices > 1000, "{stage_vertices} stage vertices");
+        // Mode 5 starts at Ready, in side 0's camera.
+        setup.mode = 5;
+        let mut battle = Battle::new(load(&mut read, &setup).unwrap());
+        let frame = battle.run_frame(false, 0, &mut libc);
+        assert_eq!(battle.seq.state, SeqState::Ready);
+        assert!(!battle.demo.is_active());
         // Stage 0's ground, sky and buildings are in view behind the fighters.
         let stage_vertices: usize = frame.stage.iter().map(|b| b.vertices.len()).sum();
         assert!(stage_vertices > 3000, "{stage_vertices} stage vertices");
@@ -876,7 +1093,13 @@ mod tests {
         // and leaning forward (-Z is the model's front); y points down.
         let fighter = &battle.assets.fighters[0];
         let mut cursors = [0; NODE_MAX];
-        let nodes = pose(&fighter.model, &fighter.idle, 10.0, &mut cursors, &IDENTITY);
+        let nodes = pose(
+            &fighter.model,
+            &fighter.motions[&IDLE_MOTION],
+            10.0,
+            &mut cursors,
+            &IDENTITY,
+        );
         let at = |id: u16| {
             let i = fighter
                 .model
