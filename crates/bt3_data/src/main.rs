@@ -949,29 +949,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     {
+        // gBattleTimeLimitTbl (0x2C3480, s16[8]) through the ELF's program headers.
+        let elf = image.read_file("SLUS_216.78")?;
+        let u32_at = |o: usize| u32::from_le_bytes(elf[o..o + 4].try_into().unwrap());
+        let (phoff, phnum) = (
+            u32_at(0x1C) as usize,
+            u16::from_le_bytes([elf[0x2C], elf[0x2D]]),
+        );
+        for i in 0..usize::from(phnum) {
+            let ph = phoff + i * 32;
+            let (offset, vaddr, filesz) = (u32_at(ph + 4), u32_at(ph + 8), u32_at(ph + 16));
+            if (vaddr..vaddr + filesz).contains(&0x2C3480) {
+                let at = (offset + 0x2C3480 - vaddr) as usize;
+                let table: Vec<i16> = (0..8)
+                    .map(|k| i16::from_le_bytes([elf[at + k * 2], elf[at + k * 2 + 1]]))
+                    .collect();
+                println!("\ngBattleTimeLimitTbl: {table:?}");
+            }
+        }
+    }
+    {
+        // BtlChar_AllocAll: gBtlChars->tbl[4] = table at header word 8 of common file 2 (BtlMemberParam, 16 bytes).
+        let common = archive_read(&mut image, 2)?;
+        let word = |o: usize| u32::from_le_bytes(common[o..o + 4].try_into().unwrap());
+        let table = (word(8 * 4) & !3) as usize;
+        let params: Vec<[i32; 4]> = (0..6)
+            .map(|c| std::array::from_fn(|i| word(table + c * 16 + i * 4) as i32))
+            .collect();
+        println!("\nCharacter parameters (health max, ki start, ?, blast stocks): {params:?}");
+        // BtlObj_BindTables: mdl->unk38 (object + 0x50, the HUD face) is character file section 1.
         let chara = archive_read(&mut image, 0x590)?;
-        let anim = CamAnim::parse(pack_section(&chara, 0x29)?)?;
-        println!(
-            "  chara 0x590 entrance cut: length {}, channels {:?}",
-            anim.length,
-            anim.channels
-                .iter()
-                .map(|c| (c.index, c.keys.len()))
-                .collect::<Vec<_>>()
-        );
-        let talk = pack_section(&chara, 0x16)?;
-        println!(
-            "  talk table ({} bytes): {:02X?}",
-            talk.len(),
-            &talk[..talk.len().min(64)]
-        );
-        let motions = archive_read(&mut image, 0x598)?;
-        for id in [0x180usize, 0x181] {
-            let anim = bpe::decode(pack_section(&motions, id + 1)?)?;
+        let faces = TextureResource::parse(pack_section(&chara, 1)?)?;
+        for t in &faces.entries {
+            let tex0 = t.texture_register;
             println!(
-                "  motion {id:#X}: length {}",
-                u16::from_le_bytes([anim[2], anim[3]])
+                "  face {}x{} psm {:#X} decodes {}",
+                1 << ((tex0 >> 26) & 0xF),
+                1 << ((tex0 >> 30) & 0xF),
+                (tex0 >> 20) & 0x3F,
+                decode_sprite_texture(t).is_ok()
             );
+        }
+    }
+    {
+        // Hud_Init: file 6 + gProgress->unk0[0]; header words 1, 4, 5, 2, 3 are the byte offsets of sheets 0..4.
+        let hud = archive_read(&mut image, 6)?;
+        let words: Vec<u32> = hud
+            .chunks_exact(4)
+            .take(8)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .collect();
+        println!("\nHUD file 6: {} bytes, header {words:X?}", hud.len());
+        for (sheet, word) in [1usize, 4, 5, 2, 3].into_iter().enumerate() {
+            let start = (words[word] & !3) as usize;
+            match TextureResource::parse(&hud[start..]) {
+                Ok(res) => {
+                    let sizes: Vec<String> = res
+                        .entries
+                        .iter()
+                        .map(|t| {
+                            let w = 1 << ((t.texture_register >> 26) & 0xF);
+                            let h = 1 << ((t.texture_register >> 30) & 0xF);
+                            let psm = (t.texture_register >> 20) & 0x3F;
+                            let ok = decode_sprite_texture(t).is_ok();
+                            format!("{w}x{h}/psm{psm:#X}/{ok}")
+                        })
+                        .collect();
+                    println!("  sheet {sheet} at {start:#X}: {sizes:?}");
+                }
+                Err(error) => println!("  sheet {sheet} at {start:#X}: {error}"),
+            }
         }
     }
     for (index, placement) in stage.starting_placements.iter().enumerate() {

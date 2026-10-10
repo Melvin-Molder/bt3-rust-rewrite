@@ -56,3 +56,7 @@
 !/crates/bt3_game/src/stage_draw.rs
 !/crates/bt3_game/src/gs_stage.wgsl
 !/crates/bt3_game/src/battle_seq.rs
+!/crates/bt3_game/src/hud.rs
+!/crates/bt3_game/src/hud_gauge.rs
+!/crates/bt3_game/src/hud_gs.rs
+!/crates/bt3_game/src/gs_hud.wgsl

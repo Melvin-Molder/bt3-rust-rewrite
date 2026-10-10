@@ -4,6 +4,7 @@ const CHANNEL_GAIN: [i32; 6] = [0x3C, 0x58, 0x60, 0x80, 0x46, 0x46];
 const OPTION_VOLUME: i32 = 9;
 pub const CH_BGM: usize = 0;
 pub const CH_VOICE0: usize = 2;
+pub const CH_SE0: usize = 4;
 /// ADXT output volume of silence, in 0.1 dB.
 pub const OUTVOL_MUTE: i32 = -960;
 /// `ADX_FADE_STEP`: 12 dB.

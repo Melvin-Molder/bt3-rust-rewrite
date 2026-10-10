@@ -224,11 +224,49 @@ pub(crate) struct Seq {
     line: [i32; 2],
     /// `BTL_CHARS_STARTED`: the roster was reset on the first Ready / Fight frame.
     pub(crate) started: bool,
+    clock: Clock,
+    /// `Battle_GetTimeLimit` in seconds, -1 for none.
+    time_limit: i32,
+}
+
+/// `BtlClock`: hours, minutes, seconds and milliseconds of fight.
+#[derive(Clone, Copy, Debug, Default)]
+struct Clock {
+    ticks: u32,
+    ms: i32,
+    seconds: i32,
+    minutes: i32,
+    hours: i32,
+    time_left: i32,
+}
+
+impl Clock {
+    /// `BtlClock_Tick`: 34, 32, 34 ms in turn (100 ms per three 30 Hz frames), stopping at 9:59:59.999.
+    fn tick(&mut self) {
+        self.ms += [34, 32, 34][(self.ticks % 3) as usize];
+        self.ticks += 1;
+        if self.hours >= 9 && self.minutes >= 59 && self.seconds >= 59 && self.ms >= 999 {
+            (self.hours, self.minutes, self.seconds, self.ms) = (9, 59, 59, 999);
+            return;
+        }
+        if self.ms >= 1000 {
+            self.ms -= 1000;
+            self.seconds += 1;
+        }
+        if self.seconds >= 60 {
+            self.seconds -= 60;
+            self.minutes += 1;
+        }
+        if self.minutes >= 60 {
+            self.minutes -= 60;
+            self.hours += 1;
+        }
+    }
 }
 
 impl Seq {
     /// `BtlSeq_Reset`: the default table starts at the stage intro; modes 5..7 have no intro or talk.
-    pub(crate) fn new(mode: i32) -> Self {
+    pub(crate) fn new(mode: i32, time_limit: i32) -> Self {
         Self {
             state: if (5..=7).contains(&mode) {
                 SeqState::Ready
@@ -241,7 +279,37 @@ impl Seq {
             chara: [0; 2],
             line: [0; 2],
             started: false,
+            // BtlSeq_ResetClocks.
+            clock: Clock {
+                time_left: time_limit,
+                ..Clock::default()
+            },
+            time_limit,
         }
+    }
+
+    /// `BtlSeq_GetTimeLeft`: seconds left, -1 without a limit.
+    pub(crate) fn time_left(&self) -> i32 {
+        if self.time_limit < 0 {
+            -1
+        } else {
+            self.clock.time_left
+        }
+    }
+
+    /// `BtlSeq_TickClocks` (from `BtlSeq_CheckBattleEnd`): whether the time limit was reached.
+    fn tick_clock(&mut self) -> bool {
+        self.clock.tick();
+        if self.time_limit < 0 {
+            return false;
+        }
+        let elapsed = self.clock.minutes * 60 + self.clock.seconds;
+        if elapsed >= self.time_limit {
+            self.clock.time_left = 0;
+            return true;
+        }
+        self.clock.time_left = self.time_limit - elapsed;
+        false
     }
 }
 
@@ -269,12 +337,13 @@ impl Battle {
             SeqState::Ready => {
                 self.seq.step = 0;
                 self.seq.timer.start(0.8, 0.0, 1.0);
+                self.hud.show_all(true);
             }
             SeqState::Fight => {}
         }
     }
 
-    fn seq_exit(&mut self) {
+    fn seq_exit(&mut self, input: &mut SeqInput) {
         match self.seq.state {
             SeqState::StageIntro => {
                 if self.demo.is_active() {
@@ -289,7 +358,8 @@ impl Battle {
                     self.fighters[side].end_entrance();
                 }
             }
-            SeqState::Ready | SeqState::Fight => {}
+            SeqState::Ready => self.hud.show_notice(1, input.sounds),
+            SeqState::Fight => {}
         }
     }
 
@@ -325,11 +395,15 @@ impl Battle {
         let next = match self.seq.state {
             SeqState::StageIntro => self.stage_intro_update(input),
             SeqState::IntroTalk => self.intro_talk_update(input),
-            SeqState::Ready => self.ready_update(),
-            SeqState::Fight => SeqState::Fight,
+            SeqState::Ready => self.ready_update(input),
+            SeqState::Fight => {
+                // BtlSeqFight_Update: BtlSeq_CheckBattleEnd ticks the clock; the finish is not ported yet.
+                self.seq.tick_clock();
+                SeqState::Fight
+            }
         };
         if next != self.seq.state {
-            self.seq_exit();
+            self.seq_exit(input);
             self.seq.state = next;
             self.seq_enter(input);
         }
@@ -443,10 +517,11 @@ impl Battle {
     }
 
     /// `BtlSeqReady_Update`: 0.8 s, announcement 0 with the fighters released, 2 s more.
-    fn ready_update(&mut self) -> SeqState {
+    fn ready_update(&mut self, input: &mut SeqInput) -> SeqState {
         match self.seq.step {
             0 => {
                 if self.seq.timer.step() {
+                    self.hud.show_notice(0, input.sounds);
                     self.seq.timer.start(2.0, 0.0, 1.0);
                     self.seq.step += 1;
                 }

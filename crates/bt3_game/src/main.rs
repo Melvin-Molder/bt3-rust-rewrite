@@ -8,6 +8,9 @@ mod duel_menu;
 mod fade;
 mod flash;
 mod font;
+mod hud;
+mod hud_gauge;
+mod hud_gs;
 mod loading;
 mod logo;
 mod main_menu;
@@ -155,6 +158,11 @@ struct Game {
     /// The stage texture file and this frame's stage triangles.
     stage_textures: Vec<RgbaTexture>,
     stage_batches: Vec<stage_draw::StageBatch>,
+    /// The HUD sheets of the battle and this frame's HUD sprites.
+    hud_textures: Vec<RgbaTexture>,
+    hud_prims: Vec<hud::HudPrim>,
+    /// The gauges and timer, drawn on the CPU (premultiplied RGBA, 512 x 448).
+    hud_layer: Option<Vec<u8>>,
     /// `ScrXfade`: frames captured so far, and the captured frame's alpha (0..128) over this one.
     xfade_captures: u32,
     xfade_alpha: i32,
@@ -186,6 +194,9 @@ struct Game {
     main_menu_item: i32,
     bgm: Option<Player>,
     voice: Option<Player>,
+    /// Streamed-SE player 0 (`StreamSe_PlayDefault(0, id)`) and the file being decoded for it.
+    stream_se: Option<Player>,
+    pending_stream_se: Option<Decoding>,
     /// The voice entity was spawned this update, so it is not in the world yet.
     voice_fresh: bool,
     /// The last voice played to its end (`ADXT_STAT_PLAYEND`).
@@ -333,6 +344,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model_batches: Vec::new(),
             stage_textures: Vec::new(),
             stage_batches: Vec::new(),
+            hud_textures: Vec::new(),
+            hud_prims: Vec::new(),
+            hud_layer: None,
             xfade_captures: 0,
             xfade_alpha: 0,
             demo_count: 0,
@@ -356,6 +370,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             main_menu_item: 0,
             bgm: None,
             voice: None,
+            stream_se: None,
+            pending_stream_se: None,
             voice_fresh: false,
             voice_ended: false,
             pending_voice: None,
@@ -377,6 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_quads,
                 model_draw::sync_models,
                 model_draw::sync_stage,
+                model_draw::sync_hud,
                 model_draw::sync_frame_buffers,
                 apply_volumes,
             )
@@ -533,7 +550,9 @@ fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
 fn stop_all(game: &mut Game, commands: &mut Commands) {
     stop_player(&mut game.bgm, commands);
     stop_player(&mut game.voice, commands);
+    stop_player(&mut game.stream_se, commands);
     game.pending_voice = None;
+    game.pending_stream_se = None;
     game.pending_bgm = None;
     game.voice_ended = false;
 }
@@ -568,6 +587,10 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 }
             }
             TitleSound::Effect(bank, id) => game.se.play_se(bank, id),
+            TitleSound::StreamSe(file_id) => {
+                stop_player(&mut game.stream_se, commands);
+                game.pending_stream_se = Some(decode_adx_file(game.iso_path.clone(), file_id));
+            }
         }
     }
 }
@@ -592,6 +615,7 @@ fn run_frames(
     }
     game.voice_fresh = false;
     start_pending_voice(&mut game, &mut commands, &mut audio);
+    start_pending_stream_se(&mut game, &mut commands, &mut audio);
     start_pending_bgm(&mut game, &mut commands, &mut audio);
     let pad2 = gamepads.iter().count() >= 2;
     if std::mem::take(&mut game.skip_to_title) {
@@ -747,6 +771,8 @@ fn run_frames(
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
                 game.quads = into_screen(frame.quads);
+                game.hud_prims = frame.hud.prims;
+                game.hud_layer = frame.hud.layer;
                 if frame.capture {
                     game.xfade_captures += 1;
                 }
@@ -795,6 +821,8 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
     });
     game.model_batches.clear();
     game.stage_batches.clear();
+    game.hud_prims.clear();
+    game.hud_layer = None;
     game.scene = Scene::BattleLoad(Box::new(BattleLoad {
         screen,
         texture_base,
@@ -826,6 +854,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     };
     game.model_textures = (assets.base_textures.clone(), assets.shade_textures.clone());
     game.stage_textures = assets.stage_textures.clone();
+    game.hud_textures = assets.hud_textures.clone();
     game.scene = Scene::Battle(Box::new(battle::Battle::new(assets)));
     play_bgm(game, commands, battle::BGM_FIRST + setup.bgm.max(0) as u32);
 }
@@ -853,6 +882,34 @@ fn finish_decoding(
             Ok(Err(error)) => error!("cannot decode {what}: {error}"),
             Err(_) => error!("{what} decoder thread panicked"),
         }
+    }
+}
+
+/// `StreamSe_PlayDefault(0, id)` (volume 0x40) once the file is decoded.
+fn start_pending_stream_se(
+    game: &mut Game,
+    commands: &mut Commands,
+    audio: &mut Assets<AudioSource>,
+) {
+    if !game
+        .pending_stream_se
+        .as_ref()
+        .is_some_and(JoinHandle::is_finished)
+    {
+        return;
+    }
+    let mut source = None;
+    finish_decoding(
+        &mut game.pending_stream_se,
+        &mut source,
+        audio,
+        "a streamed sound",
+    );
+    if let Some(source) = source {
+        let level = sound::out_volume(sound::CH_SE0, 0x40);
+        let settings = PlaybackSettings::DESPAWN.with_volume(sound::volume(level));
+        let entity = commands.spawn((AudioPlayer(source), settings)).id();
+        game.stream_se = Some(Player { entity, level });
     }
 }
 

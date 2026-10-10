@@ -2,17 +2,18 @@
 //! behind the loading screen, then the battle sequence (battle_seq.rs) runs the stage intro cuts, the entrance
 //! poses with their lines and the ready wait. Each frame the fighters are posed and drawn the way
 //! `BtlObjDraw_DrawModel` and VU1 program 0 draw them, after the stage, seen through the demo camera or side 0's
-//! fighter camera (`ChrCam_CalcLockOn`).
+//! fighter camera (`ChrCam_CalcLockOn`), then the HUD (hud.rs).
 //!
 //! Not ported yet: the fighters' actions in the fight, the hair / cloth chains, the face animation, animated stage
-//! objects and the HUD.
+//! objects and most of the HUD.
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
 
 use bt3_data::cam_anim::CamAnim;
 use bt3_data::gs::{
-    RgbaTexture, decode_clut256_upload, decode_sprite_texture, psmt8_row_from_upload,
+    RgbaTexture, decode_clut256_upload, decode_sprite_texture, decode_sprite_texture_raw,
+    psmt8_row_from_upload,
 };
 use bt3_data::model::{CharaModel, ModelPart, TEXTURE_SECTION, tex0_cbp, tex0_tbp};
 use bt3_data::motion::{Motion, NODE_MAX};
@@ -24,6 +25,8 @@ use bt3_data::tex::TextureResource;
 use crate::battle_seq::{DemoCam, ScrXfade, Seq, SeqInput, SeqState};
 use crate::char_select::BattleSetup;
 use crate::fade::Fade;
+use crate::hud::{HUD_FILE, Hud, HudFrame, HudSheet, SHEET_WORDS};
+use crate::hud_gauge::{HudTextures, SideGauge};
 use crate::loading::Quad;
 use crate::rng::LibcRandom;
 use crate::stage_draw::{StageBatch, draw_stage};
@@ -42,6 +45,10 @@ pub(crate) const ENTRANCE_LOOP_MOTION: usize = 0x181;
 /// (section 0x16, read as `BtlSeqObj.talkTbl`).
 const ENTRANCE_CUT_SECTION: usize = 0x29;
 const TALK_TABLE_SECTION: usize = 0x16;
+/// `mdl->unk38` (object + 0x50): the HUD's face pictures.
+const FACE_SECTION: usize = 1;
+/// `gBattleTimeLimitTbl` (0x2C3480): the rule's time limit in seconds, -1 for none.
+const TIME_LIMITS: [i32; 8] = [-1, 60, 90, 180, 240, 45, 0, 0];
 /// `BtlStage_GetFileMember(idx)`: the stage's intro cuts are stage file sections 3..5.
 const STAGE_CUT_SECTION: usize = 3;
 /// `BtlObj_GetDefaultAnimStep`: frames per update.
@@ -86,6 +93,14 @@ pub struct BattleAssets {
     pub(crate) stage_cuts: Vec<Option<CamAnim>>,
     /// `Battle_GetMode`.
     pub(crate) mode: i32,
+    /// The five HUD sprite sheets, decoded one after the other (raw GS colours).
+    pub hud_textures: Vec<RgbaTexture>,
+    pub(crate) hud_sheets: Vec<HudSheet>,
+    hud_cpu: HudTextures,
+    /// `Battle_GetAnnouncer`.
+    announcer: i32,
+    /// `Battle_GetTimeLimit` in seconds, -1 for none.
+    pub(crate) time_limit: i32,
 }
 
 pub(crate) struct FighterModel {
@@ -97,6 +112,8 @@ pub(crate) struct FighterModel {
     motions: HashMap<usize, Motion>,
     pub(crate) entrance_cut: Option<CamAnim>,
     pub(crate) talk: Vec<u8>,
+    /// `BtlMember_LoadParams` at the start of the battle.
+    pub(crate) gauge: SideGauge,
 }
 
 /// Reads what the battle draws so far. `read` returns a file of the AFS archives by id.
@@ -135,6 +152,7 @@ pub fn load(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
+    let (hud_textures, hud_sheets, hud_cpu) = load_hud(&read(HUD_FILE)?).map_err(error)?;
     let mut assets = BattleAssets {
         base_textures: Vec::new(),
         shade_textures: Vec::new(),
@@ -145,6 +163,14 @@ pub fn load(
         stage_id: setup.stage,
         stage_cuts,
         mode: setup.mode,
+        hud_textures,
+        hud_sheets,
+        hud_cpu,
+        announcer: setup.announcer,
+        time_limit: TIME_LIMITS
+            .get(setup.time_limit.max(0) as usize)
+            .copied()
+            .unwrap_or(0),
     };
     for side in setup.sides {
         let file_id = CHARA_FILE + side.chara.max(0) as u32 * 10 + side.costume.max(0) as u32;
@@ -161,6 +187,16 @@ pub fn load(
         fighter.talk = pack_section(&file, TALK_TABLE_SECTION)
             .map(<[u8]>::to_vec)
             .unwrap_or_default();
+        fighter.gauge = start_gauge(&common, side.chara);
+        // BtlObj_BindTables: object + 0x50 is section 1; HudGauge_DrawFace draws its texture `side`.
+        let index = assets.fighters.len();
+        assets.hud_cpu.faces[index] = pack_section(&file, FACE_SECTION)
+            .ok()
+            .and_then(|s| TextureResource::parse(s).ok())
+            .and_then(|res| {
+                let entry = res.entries.get(index)?;
+                decode_sprite_texture_raw(entry, entry).ok()
+            });
         let motions = read(MOTION_FILE + side.chara.max(0) as u32 * 10)?;
         for id in [IDLE_MOTION, ENTRANCE_MOTION, ENTRANCE_LOOP_MOTION] {
             let packed = pack_section(&motions, id + 1).map_err(error)?;
@@ -174,6 +210,74 @@ pub fn load(
         assets.fighters.push(fighter);
     }
     Ok(assets)
+}
+
+/// `Hud_Init`'s sheets. Entries with no image (palettes only) become a transparent texel. Sheet 0 is also kept
+/// with raw GS alpha for the CPU draw, with each image under the palettes of the entries after it.
+fn load_hud(file: &[u8]) -> std::io::Result<(Vec<RgbaTexture>, Vec<HudSheet>, HudTextures)> {
+    let word = |i: usize| {
+        file.get(i * 4..i * 4 + 4)
+            .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let mut textures = Vec::new();
+    let mut sheets = Vec::new();
+    let mut cpu = HudTextures::default();
+    for (index, header) in SHEET_WORDS.into_iter().enumerate() {
+        let start = (word(header) & !3) as usize;
+        let res = TextureResource::parse(file.get(start..).unwrap_or_default())?;
+        let mut sheet = HudSheet {
+            base: textures.len(),
+            sizes: Vec::new(),
+        };
+        for (tex, entry) in res.entries.iter().enumerate() {
+            let tex0 = entry.texture_register;
+            sheet
+                .sizes
+                .push([1 << ((tex0 >> 26) & 0xF), 1 << ((tex0 >> 30) & 0xF)]);
+            textures.push(decode_sprite_texture(entry).unwrap_or(RgbaTexture {
+                width: 1,
+                height: 1,
+                pixels: vec![0; 4],
+            }));
+            if index == 0 {
+                for sub in 0..=HUD_PALETTE_SUBS {
+                    let Some(clut) = res.entries.get(tex + usize::from(sub)) else {
+                        break;
+                    };
+                    if let Ok(decoded) = decode_sprite_texture_raw(entry, clut) {
+                        cpu.sheet0.insert((tex as i16, sub), decoded);
+                    }
+                }
+            }
+        }
+        sheets.push(sheet);
+    }
+    Ok((textures, sheets, cpu))
+}
+
+/// The palette offsets the gauges and the clock use (`HudSprite_SetTex(spr, 8, 1..5)`).
+const HUD_PALETTE_SUBS: u16 = 5;
+
+/// `BtlChar_AllocAll`: `gBtlChars->tbl[4]`, the table at header word 8 of common file 2, four words per
+/// character: health max, ki at the start, ?, blast stocks. `BtlMember_LoadParams` with 100 % health and no
+/// abilities.
+fn start_gauge(common: &[u8], chara: i32) -> SideGauge {
+    let word = |o: usize| {
+        common
+            .get(o..o + 4)
+            .map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let entry = (word(8 * 4) as usize & !3) + chara.max(0) as usize * 16;
+    let health_max = word(entry).max(10000);
+    SideGauge {
+        hp: health_max,
+        ki: word(entry + 4).min(100000),
+        blast: 0,
+        blast_max: word(entry + 12) * 100000,
+        max_power: 0,
+        powered_up: false,
+        dead: false,
+    }
 }
 
 /// `BtlAnim_GetFlags`: the roster's motion flag table is the table at header word 3 of common file 2.
@@ -266,6 +370,7 @@ fn load_fighter(
         motions: HashMap::new(),
         entrance_cut: None,
         talk: Vec::new(),
+        gauge: SideGauge::default(),
     })
 }
 
@@ -297,6 +402,8 @@ pub struct BattleFrame {
     pub xfade_alpha: i32,
     /// `Fade_DrawScreen` (slot 0).
     pub quads: Vec<Quad>,
+    /// `BtlGame_Draw`: the HUD, drawn into the frame before the overlay pass.
+    pub hud: HudFrame,
     pub sounds: Vec<TitleSound>,
 }
 
@@ -392,6 +499,7 @@ pub struct Battle {
     pub(crate) seq: Seq,
     pub(crate) demo: DemoCam,
     pub(crate) xfade: ScrXfade,
+    pub(crate) hud: Hud,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
     fade: Fade,
     /// Node 0's world matrix of each fighter from the last pose (`DemoCam_SetBase` reads it before the new pose).
@@ -411,7 +519,8 @@ impl Battle {
         // BtlObj_UpdateAll: BtlObjLight_SetDir(BtlStage_GetLightVecB), which normalises it.
         let light_dir = normalize(assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
         let roots = std::array::from_fn(|side| object_matrix(&fighters[side]));
-        let seq = Seq::new(assets.mode);
+        let seq = Seq::new(assets.mode, assets.time_limit);
+        let hud = Hud::new(&assets.hud_sheets, assets.hud_cpu.clone(), assets.announcer);
         Self {
             assets,
             fighters,
@@ -419,6 +528,7 @@ impl Battle {
             seq,
             demo: DemoCam::default(),
             xfade: ScrXfade::default(),
+            hud,
             fade: Fade::start_in(1.0),
             roots,
             started: false,
@@ -427,7 +537,7 @@ impl Battle {
 
     /// One iteration of `Battle_Loop`: `Gfx_BeginFrame` (the fade), `BtlChars_CheckStart`, the sequence's
     /// preUpdate, `Battle_Update` (the fighters' actions, the cameras with the demo camera last, the poses), the
-    /// sequence's update, then `Battle_Draw`: the stage, the fighters, the overlay pass and the fade.
+    /// sequence's update, then `Battle_Draw`: the stage, the fighters, the HUD, the overlay pass and the fade.
     /// `start` is START going down on a pad; `voice_stat` the voice player's status.
     pub fn run_frame(
         &mut self,
@@ -439,7 +549,7 @@ impl Battle {
         let mut input = SeqInput {
             start,
             voice_stat,
-            libc,
+            libc: &mut *libc,
             sounds: &mut sounds,
         };
         if !std::mem::replace(&mut self.started, true) {
@@ -454,6 +564,8 @@ impl Battle {
                 fighter.reset();
             }
         }
+        let sides = [self.assets.fighters[0].gauge, self.assets.fighters[1].gauge];
+        self.hud.pre_update(self.seq.time_left(), &sides);
         self.seq_pre_update(&mut input);
         let mut poses = Vec::with_capacity(2);
         for (side, fighter) in self.fighters.iter_mut().enumerate() {
@@ -516,6 +628,7 @@ impl Battle {
             .map(|(textures, vertices)| ModelBatch { textures, vertices })
             .collect();
         batches.sort_by_key(|batch| batch.textures);
+        let hud = self.hud.draw(libc);
         let (capture, xfade_alpha) = self.xfade.draw_pass();
         BattleFrame {
             stage,
@@ -523,6 +636,7 @@ impl Battle {
             capture,
             xfade_alpha,
             quads: self.fade.quad().into_iter().collect(),
+            hud,
             sounds,
         }
     }
@@ -1112,5 +1226,39 @@ mod tests {
         assert!((at(11)[1] + 1.2).abs() < 0.5);
         assert!(at(2)[1] > -8.0 && at(2)[1] < -5.0);
         assert!(at(HEAD_NODE)[1] < at(2)[1] - 3.0 && at(HEAD_NODE)[2] < -2.0);
+        // 0.8 s into Ready: READY with announcer 0's line 0, drawn from sheet 1 of the HUD file.
+        let mut sounds = Vec::new();
+        let mut hud_frames = 0;
+        let mut gauges = false;
+        for _ in 0..40 {
+            let frame = battle.run_frame(false, 0, &mut libc);
+            sounds.extend(frame.sounds);
+            if frame.hud.prims.iter().any(|p| p.texture.is_some()) {
+                hud_frames += 1;
+            }
+            gauges |= frame.hud.layer.is_some();
+        }
+        assert!(
+            sounds.contains(&TitleSound::StreamSe(0x10B6C)),
+            "{sounds:?}"
+        );
+        assert!(hud_frames > 10);
+        assert!(gauges);
+        assert_eq!(battle.assets.hud_sheets[1].sizes[0], [512, 64]);
+        // Goku: 40000 health, 40000 ki, 6 blast stocks; Hud_ShowAll(1) came with Ready.
+        assert_eq!(battle.assets.fighters[0].gauge.hp, 40000);
+        assert_eq!(battle.assets.fighters[0].gauge.blast_max, 600000);
+        let layer = battle.run_frame(false, 0, &mut libc).hud.layer.unwrap();
+        let covered = |x0: usize, x1: usize, y0: usize, y1: usize| {
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (y * 512 + x) * 4 + 3))
+                .filter(|&i| layer[i] > 128)
+                .count()
+        };
+        // Both panels at the top corners, mirrored; the infinite clock between them.
+        assert!(covered(0, 200, 0, 80) > 2000);
+        assert!(covered(312, 512, 0, 80) > 2000);
+        assert!(covered(230, 282, 20, 50) > 200);
+        assert!(covered(0, 512, 120, 448) < 100);
     }
 }

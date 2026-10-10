@@ -196,6 +196,8 @@ pub enum TitleSound {
     FadeOutStep,
     /// `Snd_PlaySe(bank, id)`.
     Effect(u32, u32),
+    /// `StreamSe_PlayDefault(0, id)`.
+    StreamSe(u32),
 }
 
 pub struct TitleFrame {

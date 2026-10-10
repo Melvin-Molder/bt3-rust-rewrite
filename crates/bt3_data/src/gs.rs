@@ -20,7 +20,33 @@ pub struct RgbaTexture {
 }
 
 pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture> {
-    let clut_packet = entry
+    let (texels, palette) = sprite_texels(entry, entry)?;
+    Ok(texels.with_palette(&palette))
+}
+
+/// A sprite texture as the GS holds it (alpha 0x80 = 1.0), looked up through the CLUT that `clut_entry` uploads
+/// (the HUD draws one image with the palettes of other entries).
+pub fn decode_sprite_texture_raw(
+    entry: &TextureEntry<'_>,
+    clut_entry: &TextureEntry<'_>,
+) -> io::Result<RgbaTexture> {
+    let (texels, palette) = sprite_texels(entry, clut_entry)?;
+    Ok(RgbaTexture {
+        width: texels.width as u32,
+        height: texels.height as u32,
+        pixels: texels
+            .indices
+            .iter()
+            .flat_map(|&i| palette[usize::from(i)])
+            .collect(),
+    })
+}
+
+fn sprite_texels(
+    entry: &TextureEntry<'_>,
+    clut_entry: &TextureEntry<'_>,
+) -> io::Result<(TexelIndices, Vec<[u8; 4]>)> {
+    let clut_packet = clut_entry
         .clut_data
         .ok_or_else(|| invalid_data("sprite texture has no CLUT packet"))?;
 
@@ -68,7 +94,7 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
                 .unwrap()
         })
         .collect();
-    Ok(texels.with_palette(&palette))
+    Ok((texels, palette))
 }
 
 /// A font sheet (`Font_MakeTex0`): a PSMT4 texture whose glyphs pick the 16-colour CSM1 CLUT at block

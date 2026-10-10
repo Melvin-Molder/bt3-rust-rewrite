@@ -14,24 +14,28 @@ use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendState, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError,
-    TextureDimension, TextureFormat,
+    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Extent3d,
+    RenderPipelineDescriptor, SpecializedMeshPipelineError, TextureDimension, TextureFormat,
 };
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin};
 use bt3_data::gs::RgbaTexture;
 
 use crate::battle::ModelBatch;
+use crate::hud::{HudBlend, HudPrim};
 use crate::stage_draw::StageBatch;
 use crate::{Game, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 const GS_MODEL_SHADER: Handle<Shader> = uuid_handle!("6f0b8f0e-4a8e-4c1e-9d55-2b6a1c3e9a71");
 const GS_STAGE_SHADER: Handle<Shader> = uuid_handle!("2b7f4c1d-8e3a-4f6b-a5c9-1d0e7f3b6a24");
+const GS_HUD_SHADER: Handle<Shader> = uuid_handle!("9c3e5a71-0d2b-4e8f-b6a4-7f15c2d8e903");
 /// GS Z is 24 bits.
 const GS_Z_RANGE: f32 = 16_777_216.0;
 /// Sort positions in the 2D pass: stage groups from -900 (100 apart), the fighters after them.
 const STAGE_SORT: f32 = -900.0;
 const FIGHTER_SORT: f32 = -100.0;
+/// The HUD comes after the fighters (`BtlGame_Draw`), in the order of its sprites.
+const HUD_SORT: f32 = 100.0;
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct GsModelMaterial {
@@ -122,6 +126,91 @@ impl Material2d for GsStageMaterial {
     }
 }
 
+/// One HUD sprite's texture, mask and blend.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[bind_group_data(GsHudKey)]
+pub struct GsHudMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    texture: Handle<Image>,
+    #[texture(2)]
+    #[sampler(3)]
+    mask: Handle<Image>,
+    #[uniform(4)]
+    params: Vec4,
+    blend: HudMaterialBlend,
+    order: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HudMaterialBlend {
+    Alpha,
+    Add,
+    /// The CPU-drawn gauge layer: P + (1 - a) * background.
+    Layer,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GsHudKey {
+    blend: HudMaterialBlend,
+}
+
+impl From<&GsHudMaterial> for GsHudKey {
+    fn from(material: &GsHudMaterial) -> Self {
+        Self {
+            blend: material.blend,
+        }
+    }
+}
+
+impl Material2d for GsHudMaterial {
+    fn fragment_shader() -> ShaderRef {
+        GS_HUD_SHADER.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    fn depth_bias(&self) -> f32 {
+        if self.blend == HudMaterialBlend::Layer {
+            return HUD_SORT - 1.0;
+        }
+        HUD_SORT + f32::from(self.order) * 0.01
+    }
+
+    /// `HudGfx_SetEnv`: ALPHA 0x44, no depth writes; ALPHA 0x58 adds and leaves the alpha plane alone.
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let keep_alpha = BlendComponent {
+            src_factor: BlendFactor::Zero,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        };
+        let colour = |dst_factor| BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor,
+            operation: BlendOperation::Add,
+        };
+        let blend = match key.bind_group_data.blend {
+            HudMaterialBlend::Alpha => BlendState::ALPHA_BLENDING,
+            HudMaterialBlend::Add => BlendState {
+                color: colour(BlendFactor::One),
+                alpha: keep_alpha,
+            },
+            HudMaterialBlend::Layer => BlendState {
+                color: colour(BlendFactor::OneMinusSrcAlpha),
+                alpha: keep_alpha,
+            },
+        };
+        set_pipeline_state(descriptor, Some(blend), false);
+        Ok(())
+    }
+}
+
 fn set_pipeline_state(
     descriptor: &mut RenderPipelineDescriptor,
     blend: Option<BlendState>,
@@ -171,12 +260,15 @@ pub struct StageSlot(usize);
 pub fn add_to(app: &mut App) {
     load_internal_asset!(app, GS_MODEL_SHADER, "gs_model.wgsl", Shader::from_wgsl);
     load_internal_asset!(app, GS_STAGE_SHADER, "gs_stage.wgsl", Shader::from_wgsl);
+    load_internal_asset!(app, GS_HUD_SHADER, "gs_hud.wgsl", Shader::from_wgsl);
     app.add_plugins((
         Material2dPlugin::<GsModelMaterial>::default(),
         Material2dPlugin::<GsStageMaterial>::default(),
+        Material2dPlugin::<GsHudMaterial>::default(),
     ))
     .init_resource::<ModelTextures>()
     .init_resource::<StageTextures>()
+    .init_resource::<HudTextures>()
     .add_systems(Startup, spawn_cameras);
 }
 
@@ -369,6 +461,233 @@ fn write_stage_mesh(mesh: &mut Mesh, batch: &StageBatch) {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, stq);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32((0..count).collect()));
+}
+
+/// The battle's HUD sheets as uploaded so far, a blank texture for untextured sprites, and the materials.
+#[derive(Resource, Default)]
+pub struct HudTextures {
+    images: Vec<Handle<Image>>,
+    blank: Option<Handle<Image>>,
+    materials: HashMap<(Option<usize>, HudBlend, u8, u16), Handle<GsHudMaterial>>,
+}
+
+#[derive(Component)]
+pub struct HudSlot(usize);
+
+/// The CPU-drawn gauge layer and its image.
+#[derive(Component)]
+pub struct HudLayerSlot(Handle<Image>);
+
+/// Runs after the frame logic, like `sync_quads`: the gauge layer, then one mesh per notice sprite, in the 3D
+/// pass's frame buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn sync_hud(
+    mut commands: Commands,
+    game: Res<Game>,
+    mut images: ResMut<Assets<Image>>,
+    mut textures: ResMut<HudTextures>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<GsHudMaterial>>,
+    mut slots: Query<(
+        &HudSlot,
+        &Mesh2d,
+        &mut MeshMaterial2d<GsHudMaterial>,
+        &mut Visibility,
+    )>,
+    mut layers: Query<(&HudLayerSlot, &mut Visibility), Without<HudSlot>>,
+) {
+    if !game.is_changed() {
+        return;
+    }
+    sync_hud_layer(
+        &mut commands,
+        game.hud_layer.as_deref(),
+        &mut images,
+        &mut meshes,
+        &mut materials,
+        &mut layers,
+    );
+    if game.hud_textures.len() < textures.images.len() {
+        textures.images.clear();
+        textures.materials.clear();
+    }
+    while textures.images.len() < game.hud_textures.len() {
+        let texture = &game.hud_textures[textures.images.len()];
+        // TEX1 0x60 bilinear, CLAMP 0 wrapping.
+        textures
+            .images
+            .push(images.add(model_image(texture, ImageAddressMode::Repeat)));
+    }
+    let blank = textures
+        .blank
+        .get_or_insert_with(|| {
+            images.add(model_image(
+                &RgbaTexture {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0xFF; 4],
+                },
+                ImageAddressMode::ClampToEdge,
+            ))
+        })
+        .clone();
+    let mut material = |index: usize, prim: &HudPrim, textures: &mut HudTextures| {
+        let key = (prim.texture, prim.blend, prim.rgba[3], index as u16);
+        if let Some(handle) = textures.materials.get(&key) {
+            return handle.clone();
+        }
+        let image = |i: Option<usize>| {
+            i.and_then(|i| textures.images.get(i).cloned())
+                .unwrap_or_else(|| blank.clone())
+        };
+        let (mask, masked) = match prim.blend {
+            HudBlend::Alpha => (None, 0.0),
+            HudBlend::AddMasked(mask) => (Some(mask), 1.0),
+        };
+        let handle = materials.add(GsHudMaterial {
+            texture: image(prim.texture),
+            mask: image(mask),
+            params: Vec4::new(
+                if prim.texture.is_some() { 1.0 } else { 0.0 },
+                masked,
+                f32::from(prim.rgba[3]) / 128.0,
+                0.0,
+            ),
+            blend: if mask.is_some() {
+                HudMaterialBlend::Add
+            } else {
+                HudMaterialBlend::Alpha
+            },
+            order: index as u16,
+        });
+        textures.materials.insert(key, handle.clone());
+        handle
+    };
+    let mut existing = 0;
+    for (slot, mesh, mut handle, mut visibility) in &mut slots {
+        existing = existing.max(slot.0 + 1);
+        let Some(prim) = game.hud_prims.get(slot.0) else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
+            write_hud_mesh(&mut mesh, prim);
+        }
+        let wanted = material(slot.0, prim, &mut textures);
+        if handle.0 != wanted {
+            handle.0 = wanted;
+        }
+        *visibility = Visibility::Visible;
+    }
+    for (index, prim) in game.hud_prims.iter().enumerate().skip(existing) {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        write_hud_mesh(&mut mesh, prim);
+        commands.spawn((
+            HudSlot(index),
+            Mesh2d(meshes.add(mesh)),
+            MeshMaterial2d(material(index, prim, &mut textures)),
+            Transform::default(),
+        ));
+    }
+}
+
+/// The gauge layer: one full-frame quad over a 512 x 448 image rewritten each frame.
+fn sync_hud_layer(
+    commands: &mut Commands,
+    pixels: Option<&[u8]>,
+    images: &mut Assets<Image>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<GsHudMaterial>,
+    layers: &mut Query<(&HudLayerSlot, &mut Visibility), Without<HudSlot>>,
+) {
+    if let Ok((slot, mut visibility)) = layers.single_mut() {
+        match pixels {
+            Some(pixels) => {
+                if let Some(mut image) = images.get_mut(&slot.0) {
+                    image.data = Some(pixels.to_vec());
+                }
+                *visibility = Visibility::Visible;
+            }
+            None => *visibility = Visibility::Hidden,
+        }
+        return;
+    }
+    let Some(pixels) = pixels else {
+        return;
+    };
+    let mut image = Image::new(
+        Extent3d {
+            width: SCREEN_WIDTH,
+            height: SCREEN_HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        pixels.to_vec(),
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    let handle = images.add(image);
+    let (w, h) = (SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32);
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    let corners = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, 0.0], [w, h], [0.0, h]];
+    let positions: Vec<[f32; 3]> = corners
+        .iter()
+        .map(|&[x, y]| {
+            let [x, y, _] = screen_position([x, y, 0.0]);
+            [x, y, 0.0]
+        })
+        .collect();
+    let uvs: Vec<[f32; 2]> = corners.iter().map(|&[x, y]| [x / w, y / h]).collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, vec![[0.0f32; 4]; 6]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[128.0f32; 4]; 6]);
+    mesh.insert_indices(Indices::U32((0..6).collect()));
+    let material = materials.add(GsHudMaterial {
+        texture: handle.clone(),
+        mask: handle.clone(),
+        params: Vec4::new(0.0, 0.0, 0.0, 1.0),
+        blend: HudMaterialBlend::Layer,
+        order: 0,
+    });
+    commands.spawn((
+        HudLayerSlot(handle),
+        Mesh2d(meshes.add(mesh)),
+        MeshMaterial2d(material),
+        Transform::default(),
+    ));
+}
+
+/// The GS samples a pixel at its corner, the 2D pass at its centre: half a pixel moves one onto the other.
+fn write_hud_mesh(mesh: &mut Mesh, prim: &HudPrim) {
+    let positions: Vec<[f32; 3]> = prim
+        .vertices
+        .iter()
+        .map(|v| {
+            let [x, y, _] = screen_position([v.pos[0] + 0.5, v.pos[1] + 0.5, 0.0]);
+            [x, y, 0.0]
+        })
+        .collect();
+    let uvs: Vec<[f32; 2]> = prim.vertices.iter().map(|v| v.uv).collect();
+    let masks: Vec<[f32; 4]> = prim
+        .vertices
+        .iter()
+        .map(|v| [v.mask_uv[0], v.mask_uv[1], 0.0, 0.0])
+        .collect();
+    let color = prim.rgba.map(f32::from);
+    let count = positions.len() as u32;
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, masks);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![color; count as usize]);
     mesh.insert_indices(Indices::U32((0..count).collect()));
 }
 
