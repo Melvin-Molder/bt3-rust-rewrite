@@ -1,3 +1,4 @@
+mod anim;
 mod dialog;
 mod draw;
 mod fade;
@@ -5,12 +6,14 @@ mod flash;
 mod font;
 mod loading;
 mod logo;
+mod main_menu;
 mod mcflow;
 mod movie;
 mod rng;
 mod se;
 mod sound;
 mod title;
+mod windows;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -37,6 +40,7 @@ use bt3_data::tex::TextureResource;
 use draw::ScreenQuad;
 use loading::LoadingScreen;
 use logo::LogoSequence;
+use main_menu::{MainMenuAssets, MainMenuData, MainMenuLayout, MainMenuResult, MainMenuScreen};
 use movie::{MoviePlayer, VideoStream};
 use rng::GameRandom;
 use title::{TextureLayout, TitleAssets, TitleData, TitleResult, TitleScreen, TitleSound};
@@ -57,15 +61,17 @@ enum Scene {
     Logos(LogoSequence),
     Movie(MoviePlayer, VideoStream),
     Title(Box<TitleScreen>),
+    MainMenu(Box<MainMenuScreen>),
     Black,
     Loading(LoadingScreen),
 }
 
 impl Scene {
-    /// `Logo_Show` and `Title_Run` end their frames with `Gfx_EndFrame(1)`; `Movie_Run` and `Load_RunBlocking` use 2.
+    /// `Logo_Show`, `Title_Run` and `MainMenu_Run` end their frames with `Gfx_EndFrame(1)`; `Movie_Run` and
+    /// `Load_RunBlocking` use 2.
     fn frame_seconds(&self) -> f32 {
         match self {
-            Scene::Logos(_) | Scene::Title(_) | Scene::Black => VBLANK_SECONDS,
+            Scene::Logos(_) | Scene::Title(_) | Scene::MainMenu(_) | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) => 2.0 * VBLANK_SECONDS,
         }
     }
@@ -108,12 +114,23 @@ struct Game {
     music: Option<Decoding>,
     music_source: Option<Handle<AudioSource>>,
     title: Option<TitleData>,
+    main_menu: Option<MainMenuData>,
+    /// `gProgress->flags & MPROG_SAVE_LOADED`: set once the title was left for the main menu.
+    save_loaded: bool,
+    /// `gProgress->mainMenuItem`.
+    main_menu_item: i32,
     bgm: Option<Player>,
     voice: Option<Player>,
+    /// The voice entity was spawned this update, so it is not in the world yet.
+    voice_fresh: bool,
+    /// The last voice played to its end (`ADXT_STAT_PLAYEND`).
+    voice_ended: bool,
     pending_voice: Option<Decoding>,
     picture: Option<Vec<u8>>,
     /// `--title`: start at Progress_Main mode 1 instead of FirstRun_Main.
     skip_to_title: bool,
+    /// `--menu`: start at Progress_Main mode 4.
+    skip_to_menu: bool,
     se: se::SoundEffects,
     font: font::Font,
 }
@@ -129,10 +146,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from("rom").join("Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
     let mut forced_type = None;
     let mut skip_to_title = false;
+    let mut skip_to_menu = false;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--title" {
             skip_to_title = true;
+        } else if argument == "--menu" {
+            skip_to_title = true;
+            skip_to_menu = true;
         } else if argument == "--screen" {
             let value = arguments
                 .next()
@@ -239,11 +260,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             music,
             music_source: None,
             title: None,
+            main_menu: None,
+            save_loaded: false,
+            main_menu_item: 0,
             bgm: None,
             voice: None,
+            voice_fresh: false,
+            voice_ended: false,
             pending_voice: None,
             picture: None,
             skip_to_title,
+            skip_to_menu,
             se: effects,
             font,
         })
@@ -366,8 +393,8 @@ fn setup(mut commands: Commands, stream: Res<SeStream>, mut outputs: ResMut<Asse
 #[derive(Resource)]
 struct SeStream(Arc<Mutex<se::Engine>>);
 
-/// Pad 0 game buttons: arrows or the d-pad, Space or South (Cross), Enter or Start.
-const BUTTONS: [(KeyCode, GamepadButton, u32); 6] = [
+/// Pad 0 game buttons: arrows or the d-pad, Space or South (Cross), Escape or North (Triangle), Enter or Start.
+const BUTTONS: [(KeyCode, GamepadButton, u32); 7] = [
     (KeyCode::ArrowLeft, GamepadButton::DPadLeft, title::PAD_LEFT),
     (
         KeyCode::ArrowRight,
@@ -377,14 +404,60 @@ const BUTTONS: [(KeyCode, GamepadButton, u32); 6] = [
     (KeyCode::ArrowUp, GamepadButton::DPadUp, title::PAD_UP),
     (KeyCode::ArrowDown, GamepadButton::DPadDown, title::PAD_DOWN),
     (KeyCode::Space, GamepadButton::South, title::PAD_CROSS),
+    (KeyCode::Escape, GamepadButton::North, title::PAD_TRIANGLE),
     (KeyCode::Enter, GamepadButton::Start, title::PAD_START),
 ];
+
+/// `Voice_GetStat(0)`: 2 while the file is decoded, 3 while it sounds, 5 once it played to its end, else 0.
+fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
+    if game.pending_voice.is_some() {
+        return 2;
+    }
+    match game.voice {
+        Some(player) if game.voice_fresh || players.contains(player.entity) => 3,
+        Some(_) => {
+            game.voice = None;
+            game.voice_ended = true;
+            anim::VOICE_PLAYEND
+        }
+        None if game.voice_ended => anim::VOICE_PLAYEND,
+        None => 0,
+    }
+}
+
+/// `Adx_StopAll`.
+fn stop_all(game: &mut Game, commands: &mut Commands) {
+    stop_player(&mut game.bgm, commands);
+    stop_player(&mut game.voice, commands);
+    game.pending_voice = None;
+    game.voice_ended = false;
+}
+
+/// What a menu frame asked of the sound players.
+fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>) {
+    for sound in sounds {
+        match sound {
+            TitleSound::Voice(file_id) => {
+                stop_player(&mut game.voice, commands);
+                game.voice_ended = false;
+                game.pending_voice = Some(decode_adx_file(game.iso_path.clone(), file_id));
+            }
+            TitleSound::FadeOutStep => {
+                for player in [&mut game.voice, &mut game.bgm].into_iter().flatten() {
+                    player.level = sound::fade_out_step(player.level);
+                }
+            }
+            TitleSound::Effect(bank, id) => game.se.play_se(bank, id),
+        }
+    }
+}
 
 fn run_frames(
     mut commands: Commands,
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
+    players: Query<(), With<AudioPlayer>>,
     mut audio: ResMut<Assets<AudioSource>>,
     mut game: ResMut<Game>,
 ) {
@@ -397,9 +470,16 @@ fn run_frames(
             held |= bit;
         }
     }
+    game.voice_fresh = false;
     start_pending_voice(&mut game, &mut commands, &mut audio);
     if std::mem::take(&mut game.skip_to_title) {
-        start_title(&mut game, &mut commands, &mut audio);
+        if game.skip_to_menu {
+            load_menu_bank(&mut game);
+            game.save_loaded = true;
+            start_main_menu(&mut game, &mut commands, &mut audio);
+        } else {
+            start_title(&mut game, &mut commands, &mut audio);
+        }
     }
     game.accumulator += time.delta_secs();
     while game.accumulator >= game.scene.frame_seconds() {
@@ -410,6 +490,7 @@ fn run_frames(
         // Snd_Update at the top of every frame loop sends what the last frame queued.
         game.se.update();
         let game = &mut *game;
+        let stat = voice_stat(game, &players);
         match &mut game.scene {
             Scene::Logos(logos) => {
                 game.quads = into_screen(logos.run_frame(cross || start));
@@ -439,36 +520,38 @@ fn run_frames(
                 );
                 let result = screen.result();
                 game.quads = frame.quads;
-                for sound in frame.sounds {
-                    match sound {
-                        TitleSound::Voice(file_id) => {
-                            stop_player(&mut game.voice, &mut commands);
-                            game.pending_voice =
-                                Some(decode_adx_file(game.iso_path.clone(), file_id));
-                        }
-                        TitleSound::FadeOutStep => {
-                            for player in [&mut game.voice, &mut game.bgm].into_iter().flatten() {
-                                player.level = sound::fade_out_step(player.level);
-                            }
-                        }
-                        TitleSound::Effect(bank, id) => game.se.play_se(bank, id),
-                    }
-                }
+                play_sounds(game, &mut commands, frame.sounds);
                 if let Some(result) = result {
                     // Progress_Main: Adx_StopAll after Title_Run.
-                    stop_player(&mut game.bgm, &mut commands);
-                    stop_player(&mut game.voice, &mut commands);
-                    game.pending_voice = None;
+                    stop_all(game, &mut commands);
                     match result {
                         TitleResult::OpeningMovie => {
                             start_opening_movie(game, &mut commands, &mut audio)
                         }
                         TitleResult::MainMenu => {
-                            info!("the main menu is not ported yet");
-                            game.scene = Scene::Black;
+                            game.save_loaded = true;
+                            start_main_menu(game, &mut commands, &mut audio);
                         }
                         TitleResult::Demo => {
                             info!("the attract battle is not ported yet");
+                            game.scene = Scene::Black;
+                        }
+                    }
+                }
+            }
+            Scene::MainMenu(screen) => {
+                let frame = screen.run_frame(held, pressed, stat, &mut game.random, &mut game.font);
+                let result = screen.result();
+                let item = screen.menu_item();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    game.main_menu_item = item;
+                    stop_all(game, &mut commands);
+                    match result {
+                        MainMenuResult::Title => start_title(game, &mut commands, &mut audio),
+                        MainMenuResult::Mode(mode) => {
+                            info!("progress mode {mode} is not ported yet");
                             game.scene = Scene::Black;
                         }
                     }
@@ -522,6 +605,7 @@ fn start_pending_voice(game: &mut Game, commands: &mut Commands, audio: &mut Ass
         let settings = PlaybackSettings::DESPAWN.with_volume(sound::volume(level));
         let entity = commands.spawn((AudioPlayer(source), settings)).id();
         game.voice = Some(Player { entity, level });
+        game.voice_fresh = true;
     }
 }
 
@@ -557,15 +641,7 @@ fn start_opening_movie(game: &mut Game, commands: &mut Commands, audio: &mut Ass
 
 /// Progress_Main mode 1: `Bgm_Play(MENU_BGM_TITLE)`, then `Title_Run(1)`.
 fn start_title(game: &mut Game, commands: &mut Commands, audio: &mut Assets<AudioSource>) {
-    // Progress_Main: Snd_LoadBankFile(2, 0x14C) before the mode loop (a loaded slot is left as it is).
-    match Iso9660::open(&game.iso_path)
-        .map_err(Into::into)
-        .and_then(|mut image| read_file(&mut image, MENU_SE_BANK_FILE_ID))
-        .and_then(|file| Ok(se::LoadedBank::parse(&file)?))
-    {
-        Ok(bank) => game.se.load_bank(2, bank),
-        Err(error) => error!("cannot load the menu sound bank: {error}"),
-    }
+    load_menu_bank(game);
     if game.title.is_none() {
         match load_title_assets(&game.iso_path) {
             Ok(assets) => {
@@ -588,7 +664,7 @@ fn start_title(game: &mut Game, commands: &mut Commands, audio: &mut Assets<Audi
         }
     }
     let data = game.title.as_ref().expect("title assets are loaded");
-    let screen = match TitleScreen::new(data, &mut game.random) {
+    let screen = match TitleScreen::new(data, game.save_loaded, &mut game.random) {
         Ok(screen) => screen,
         Err(error) => {
             error!("cannot start the title movie: {error}");
@@ -596,6 +672,24 @@ fn start_title(game: &mut Game, commands: &mut Commands, audio: &mut Assets<Audi
             return;
         }
     };
+    play_title_music(game, commands, audio);
+    game.scene = Scene::Title(Box::new(screen));
+}
+
+/// Progress_Main: Snd_LoadBankFile(2, 0x14C) before the mode loop (a loaded slot is left as it is).
+fn load_menu_bank(game: &mut Game) {
+    match Iso9660::open(&game.iso_path)
+        .map_err(Into::into)
+        .and_then(|mut image| read_file(&mut image, MENU_SE_BANK_FILE_ID))
+        .and_then(|file| Ok(se::LoadedBank::parse(&file)?))
+    {
+        Ok(bank) => game.se.load_bank(2, bank),
+        Err(error) => error!("cannot load the menu sound bank: {error}"),
+    }
+}
+
+/// `Bgm_Play(MENU_BGM_TITLE)`: the file loops over all of its samples.
+fn play_title_music(game: &mut Game, commands: &mut Commands, audio: &mut Assets<AudioSource>) {
     finish_decoding(
         &mut game.music,
         &mut game.music_source,
@@ -603,13 +697,72 @@ fn start_title(game: &mut Game, commands: &mut Commands, audio: &mut Assets<Audi
         "the title music",
     );
     if let Some(source) = game.music_source.clone() {
-        // The file loops over all of its samples.
         let level = sound::out_volume(sound::CH_BGM, 0x40);
         let settings = PlaybackSettings::LOOP.with_volume(sound::volume(level));
         let entity = commands.spawn((AudioPlayer(source), settings)).id();
         game.bgm = Some(Player { entity, level });
     }
-    game.scene = Scene::Title(Box::new(screen));
+}
+
+/// Progress_Main mode 4: `Bgm_Play(MENU_BGM_TITLE)`, then `MainMenu_Run(2)`.
+fn start_main_menu(game: &mut Game, commands: &mut Commands, audio: &mut Assets<AudioSource>) {
+    if game.main_menu.is_none() {
+        match load_main_menu_assets(&game.iso_path) {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let mut push = |texture: RgbaTexture, sampling: Sampling| {
+                    game.textures.push(texture);
+                    game.samplers.push(sampling);
+                    game.textures.len() - 1
+                };
+                let background = assets
+                    .background
+                    .into_iter()
+                    .map(|texture| push(texture, Sampling::Nearest))
+                    .min()
+                    .expect("a picture has tiles");
+                let mut firsts = std::collections::HashMap::new();
+                for (key, textures) in assets.files {
+                    let mut first = None;
+                    for texture in textures {
+                        let index = push(texture.clone(), Sampling::Linear);
+                        push(texture, Sampling::LinearRepeat);
+                        first.get_or_insert(index);
+                    }
+                    firsts.insert(key, first.unwrap_or(0));
+                }
+                data.layout = MainMenuLayout::new(background, |key| firsts[&key]);
+                game.main_menu = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the main menu: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .main_menu
+        .as_ref()
+        .expect("main menu assets are loaded");
+    match MainMenuScreen::new(data, game.main_menu_item, &mut game.random) {
+        Ok(screen) => {
+            play_title_music(game, commands, audio);
+            game.scene = Scene::MainMenu(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the main menu: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `MainMenu_Init(2)`: section 2 of gMenuArc1, BPE-packed.
+fn load_main_menu_assets(iso_path: &Path) -> Result<MainMenuAssets, Box<dyn std::error::Error>> {
+    let mut image = Iso9660::open(iso_path)?;
+    let archive = read_file(&mut image, title::ARCHIVE_FILE_ID)?;
+    let res = bpe::decode(pack_section(&archive, main_menu::ARCHIVE_SECTION)?)?;
+    MainMenuAssets::parse(&res)
 }
 
 fn register_title_textures(game: &mut Game, assets: TitleAssets) -> TextureLayout {

@@ -7,12 +7,15 @@ use bt3_data::fod::{
 use crate::draw::ScreenQuad;
 
 /// `FlashDraw_PutSprite`: the texture rectangle shrinks by one texel on each side unless flipped. `textures` maps a
-/// movie image to its clamped texture; the repeating sampler is the next texture.
+/// movie image to its clamped texture; the repeating sampler is the next texture, and texture `n` of the image's
+/// file (`uv.tex`) is `2 * n` further on.
 pub fn screen_quad(quad: &DrawQuad, textures: &[Option<usize>]) -> ScreenQuad {
     let texture = quad
         .image
         .and_then(|image| textures.get(image).copied().flatten())
-        .map(|index| index + usize::from(quad.flags & QUAD_REPEAT != 0));
+        .map(|index| {
+            index + 2 * quad.uv.tex.max(0) as usize + usize::from(quad.flags & QUAD_REPEAT != 0)
+        });
     let uv = quad.uv;
     let (mut u0, mut u1, mut v0, mut v1) = (uv.u0 + 1, uv.u1 - 1, uv.v0 + 1, uv.v1 - 1);
     if quad.flags & QUAD_FLIPX != 0 {
@@ -163,6 +166,18 @@ struct Clip {
     flags: u32,
     prop: Prop,
     tl: Timeline,
+    /// `drawOver`: the caller's tag, reported with the clip's drawing state after its children.
+    draw_over: Option<u32>,
+}
+
+/// A `drawOver` call: the clip's combined matrix translation and colour transform.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawOver {
+    pub tag: u32,
+    pub x: f32,
+    pub y: f32,
+    pub mul: [f32; 4],
+    pub add: [i16; 4],
 }
 
 struct TimelineProgram {
@@ -288,6 +303,7 @@ impl Flash {
                 flags: 0,
                 prop: Prop::reset(),
                 tl: new_timeline(&program, usize::from(id) + 1),
+                draw_over: None,
             })
             .collect();
         let depths = usize::from(program.timelines[0].depths)
@@ -430,6 +446,22 @@ impl Flash {
         for index in self.refs(r) {
             self.clips[index].prop.color = color.clamp(0.0, 1.0);
             self.clips[index].prop.flags |= OV_COLOR;
+        }
+    }
+
+    /// `Flash_ClipSetTex`: draws with texture `tex` of the image's texture file.
+    pub fn clip_set_tex(&mut self, r: ClipRef, tex: i32) {
+        for index in self.refs(r) {
+            let prop = &mut self.clips[index].prop;
+            prop.uv.tex = tex;
+            prop.flags |= OV_TEX;
+        }
+    }
+
+    /// `Flash_ClipSetCallbackC`; `None` takes the callback off.
+    pub fn clip_set_draw_over(&mut self, r: ClipRef, tag: Option<u32>) {
+        for index in self.refs(r) {
+            self.clips[index].draw_over = tag;
         }
     }
 
@@ -830,11 +862,20 @@ impl Flash {
 
     /// `Flash_Draw`: every quad of the movie, back to front. `has_texture(image)` is `flash->tex[image] != NULL`.
     pub fn draw(&self, has_texture: &dyn Fn(usize) -> bool) -> Vec<DrawQuad> {
+        self.draw_with_overs(has_texture).0
+    }
+
+    /// `Flash_Draw`, with the `drawOver` calls it makes in order.
+    pub fn draw_with_overs(
+        &self,
+        has_texture: &dyn Fn(usize) -> bool,
+    ) -> (Vec<DrawQuad>, Vec<DrawOver>) {
         let mut quads = Vec::new();
+        let mut overs = Vec::new();
         if self.flags & FLASH_HIDE == 0 {
-            self.draw_tl(TlId::Root, None, has_texture, &mut quads);
+            self.draw_tl(TlId::Root, None, has_texture, &mut quads, &mut overs);
         }
-        quads
+        (quads, overs)
     }
 
     /// `FlashTl_Draw` + `FlashSlot_Draw`.
@@ -844,6 +885,7 @@ impl Flash {
         parent: Option<&Prop>,
         has_texture: &dyn Fn(usize) -> bool,
         quads: &mut Vec<DrawQuad>,
+        overs: &mut Vec<DrawOver>,
     ) {
         for slot in &self.tl(id).slots {
             if let Some(shape) = slot.shape {
@@ -886,7 +928,22 @@ impl Flash {
                     prop.cx.add[i] = add.clamp(0, 255) as i16;
                 }
             }
-            self.draw_tl(TlId::Clip(clip_index), Some(&prop), has_texture, quads);
+            self.draw_tl(
+                TlId::Clip(clip_index),
+                Some(&prop),
+                has_texture,
+                quads,
+                overs,
+            );
+            if let Some(tag) = clip.draw_over {
+                overs.push(DrawOver {
+                    tag,
+                    x: prop.mtx[2],
+                    y: prop.mtx[5],
+                    mul: prop.cx.mul,
+                    add: prop.cx.add,
+                });
+            }
         }
     }
 

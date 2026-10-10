@@ -429,16 +429,16 @@ fn describe_fod(data: &[u8]) -> String {
                 labels.insert(String::from_utf8_lossy(&frame.label).into_owned());
             }
             for tag in &frame.tags {
-                if let FrameTag::Place { name, .. } | FrameTag::PlaceNew { name, .. } = tag
+                if let FrameTag::PlaceNew { name, .. } = tag
                     && !name.is_empty()
                 {
                     names.insert(String::from_utf8_lossy(name).into_owned());
                 }
             }
-            if frame.size == 0 {
-                break;
+            match bt3_data::fod::skip_named(bytes, block, 1) {
+                Ok(Some(next)) => block = next,
+                _ => break,
             }
-            block += frame.size as usize;
         }
     }
     format!("images {images:?}\n      labels {labels:?}\n      clips {names:?}")
@@ -457,13 +457,19 @@ fn probe_main_menu(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>
     let pack = archive.read_entry(image, location.index)?;
     let res = bpe::decode(pack_section(&pack, 2)?)?;
     let count = u32::from_le_bytes(res[0..4].try_into()?) as usize;
-    println!("\nMain menu (archive section 2): {} bytes, {count} sections", res.len());
+    println!(
+        "\nMain menu (archive section 2): {} bytes, {count} sections",
+        res.len()
+    );
     for section in 1..=count {
         let data = pack_section(&res, section)?;
         match section {
             20 => println!("  {section}: FOD {}", describe_fod(data)),
             21 | 22 => {
-                println!("  {section}: pack, part 1 {}", describe_textures(pack_section(data, 1)?));
+                println!(
+                    "  {section}: pack, part 1 {}",
+                    describe_textures(pack_section(data, 1)?)
+                );
                 println!("      part 2 FOD {}", describe_fod(pack_section(data, 2)?));
             }
             27 => {

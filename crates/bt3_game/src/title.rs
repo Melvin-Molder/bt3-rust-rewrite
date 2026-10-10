@@ -30,6 +30,7 @@ pub const PAD_DOWN: u32 = 0x0004;
 pub const PAD_UP: u32 = 0x0008;
 pub const PAD_CROSS: u32 = 0x0200;
 pub const PAD_START: u32 = 0x1000;
+pub const PAD_TRIANGLE: u32 = 0x0400;
 // Pad_SetRepeat(0x28, 3) in Progress_Main.
 const REPEAT_DELAY: i32 = 0x28;
 const REPEAT_INTERVAL: i32 = 3;
@@ -228,11 +229,17 @@ pub struct TitleScreen {
     dialog: Dialog,
     mcflow: McFlow,
     mc_state: i32,
+    /// `gProgress->flags & MPROG_SAVE_LOADED`.
+    save_loaded: bool,
 }
 
 impl TitleScreen {
-    /// `Title_Init` without a loaded save, then the first `ColorFade_StartIn`.
-    pub fn new(data: &TitleData, random: &mut GameRandom) -> Result<Self, Box<dyn Error>> {
+    /// `Title_Init`, then the first `ColorFade_StartIn`.
+    pub fn new(
+        data: &TitleData,
+        save_loaded: bool,
+        random: &mut GameRandom,
+    ) -> Result<Self, Box<dyn Error>> {
         let mut flash = Flash::create(&data.fod)?;
         flash.play(1);
         // Dialog_Init(MPACK_AT(res, 12), NULL, 0); McFlow_Init only loads the save icons.
@@ -252,8 +259,8 @@ impl TitleScreen {
             started: false,
             leaving: false,
             state: 0,
-            cursor: 0,
-            item_count: 1,
+            cursor: i32::from(save_loaded),
+            item_count: 1 + i32::from(save_loaded),
             voice: random.range(6),
             idle: 0,
             timer: 0,
@@ -263,6 +270,7 @@ impl TitleScreen {
             dialog,
             mcflow: McFlow::default(),
             mc_state: 0,
+            save_loaded,
         })
     }
 
@@ -327,7 +335,7 @@ impl TitleScreen {
                 let (state, done) = self.mcflow.update(
                     &mut self.dialog,
                     font,
-                    false,
+                    self.save_loaded,
                     Pad { pressed, repeat },
                     &mut effects,
                     &mut frame.quads,
@@ -622,7 +630,7 @@ mod tests {
         };
         let mut font = crate::font::Font::new(Vec::new(), 20);
         let mut random = crate::rng::GameRandom::from_key(&[1, 2, 3, 4]);
-        let mut title = TitleScreen::new(&data, &mut random).unwrap();
+        let mut title = TitleScreen::new(&data, false, &mut random).unwrap();
         let mut demo = 0;
         let mut frames = 0;
         while matches!(title.phase, Phase::Logo { .. }) {
