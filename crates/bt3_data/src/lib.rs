@@ -250,6 +250,16 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+/// `MPACK_AT`: section `n` of a menu pack starts at header word `n`, rounded down to a word.
+pub fn pack_section(pack: &[u8], n: usize) -> io::Result<&[u8]> {
+    let word = pack
+        .get(n * 4..n * 4 + 4)
+        .ok_or_else(|| invalid_data("pack header is truncated"))?;
+    let offset = (u32::from_le_bytes(word.try_into().unwrap()) & !3) as usize;
+    pack.get(offset..)
+        .ok_or_else(|| invalid_data("pack section starts outside the pack"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{iso_name_matches, read_both_endian_u32};

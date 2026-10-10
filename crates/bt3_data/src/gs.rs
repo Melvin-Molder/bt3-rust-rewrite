@@ -7,6 +7,10 @@ const PSMCT32_PAGE_WIDTH: usize = 64;
 const PSMCT32_PAGE_HEIGHT: usize = 32;
 const PSMT4_PAGE_WIDTH: usize = 128;
 const PSMT4_PAGE_HEIGHT: usize = 128;
+const PSMT8_PAGE_WIDTH: usize = 128;
+const PSMT8_PAGE_HEIGHT: usize = 64;
+const PSM_T8: u8 = 0x13;
+const PSM_T4: u8 = 0x14;
 
 pub struct RgbaTexture {
     pub width: u32,
@@ -27,7 +31,7 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
     let clut_psm = ((entry.texture_register >> 51) & 0xf) as u8;
     let clut_mode = ((entry.texture_register >> 55) & 1) as u8;
     let clut_offset = ((entry.texture_register >> 56) & 0x1f) as u8;
-    if texture_psm != 0x14
+    if !matches!(texture_psm, PSM_T4 | PSM_T8)
         || texture_alpha != 0
         || clut_psm != 0
         || clut_mode != 0
@@ -39,14 +43,9 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
     let width = 1usize << ((entry.texture_register >> 26) & 0xf);
     let height = 1usize << ((entry.texture_register >> 30) & 0xf);
     let target_buffer_width = ((entry.texture_register >> 14) & 0x3f) as usize;
-    if width == 0
-        || height == 0
-        || target_buffer_width < 2
-        || target_buffer_width % 2 != 0
-        || width > target_buffer_width * 64
-    {
+    if target_buffer_width < 2 || target_buffer_width % 2 != 0 || width > target_buffer_width * 64 {
         return Err(invalid_data(
-            "unsupported PSMT4 texture dimensions or stride",
+            "unsupported indexed texture dimensions or stride",
         ));
     }
 
@@ -67,22 +66,27 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
             "offset PSMCT32 sprite transfers are unsupported",
         ));
     }
-    if pixel_transfer.width != PSMCT32_PAGE_WIDTH
-        || pixel_transfer.height != PSMCT32_PAGE_HEIGHT
-        || pixel_transfer.image.len() != GS_PAGE_BYTES
+    if pixel_transfer.width == 0
+        || pixel_transfer.width > pixel_dbw * PSMCT32_PAGE_WIDTH
+        || pixel_transfer.image.len() != pixel_transfer.width * pixel_transfer.height * 4
     {
         return Err(invalid_data("unexpected PSMCT32 sprite transfer geometry"));
     }
 
+    let (clut_width, clut_height, colors) = if texture_psm == PSM_T4 {
+        (8, 2, 16)
+    } else {
+        (16, 16, 256)
+    };
     let clut_transfer = find_image_transfer(clut_packet)?;
     if clut_transfer.direction != 0
         || clut_transfer.source_x != 0
         || clut_transfer.source_y != 0
         || clut_transfer.destination_x != 0
         || clut_transfer.destination_y != 0
-        || clut_transfer.width != 8
-        || clut_transfer.height != 2
-        || clut_transfer.image.len() != 16 * 4
+        || clut_transfer.width != clut_width
+        || clut_transfer.height != clut_height
+        || clut_transfer.image.len() != colors * 4
     {
         return Err(invalid_data("unexpected PSMCT32 sprite CLUT transfer"));
     }
@@ -103,11 +107,9 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
     }
 
     let target_pages_wide = target_buffer_width / 2;
-    let target_pages_high = height.div_ceil(PSMT4_PAGE_HEIGHT);
-    if target_pages_wide * target_pages_high > local_memory.len() / GS_PAGE_BYTES {
-        return Err(invalid_data("PSMT4 texture exceeds uploaded GS memory"));
+    if target_pages_wide != source_pages_wide {
+        return Err(invalid_data("texture and upload page widths differ"));
     }
-
     let output_len = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -118,29 +120,18 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
         .map_err(|_| io::Error::other("could not allocate RGBA texture"))?;
     pixels.resize(output_len, 0);
 
-    let mut palette_memory = [0u8; 64];
-    for palette_y in 0..2 {
-        for palette_x in 0..8 {
-            let source = (palette_y * 8 + palette_x) * 4;
-            let destination = psmct32_byte_offset(palette_x, palette_y);
-            palette_memory[destination..destination + 4]
-                .copy_from_slice(&clut_transfer.image[source..source + 4]);
-        }
-    }
-
     for y in 0..height {
         for x in 0..width {
-            let (index_byte, index_shift) = psmt4_location(x, y, target_pages_wide);
-            let page_count = local_memory.len() / GS_PAGE_BYTES;
-            if index_byte >= page_count * GS_PAGE_BYTES {
-                return Err(invalid_data(
-                    "PSMT4 texel address exceeds uploaded GS memory",
-                ));
-            }
-            let color_index = (local_memory[index_byte] >> index_shift) & 0x0f;
-            let palette_index = csm1_t32_i4_index(color_index);
-            let palette_start = palette_index * 4;
-            let rgba = &palette_memory[palette_start..palette_start + 4];
+            let palette_index = if texture_psm == PSM_T4 {
+                let (byte, shift) = psmt4_location(x, y, target_pages_wide);
+                usize::from((*local_memory.get(byte).ok_or_else(texel_outside)? >> shift) & 0x0f)
+            } else {
+                let index = *local_memory
+                    .get(psmt8_location(x, y, target_pages_wide))
+                    .ok_or_else(texel_outside)?;
+                csm1_t32_i8_transfer_index(index)
+            };
+            let rgba = &clut_transfer.image[palette_index * 4..palette_index * 4 + 4];
             let output = (y * width + x) * 4;
             pixels[output] = rgba[0];
             pixels[output + 1] = rgba[1];
@@ -154,6 +145,10 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
         height: height as u32,
         pixels,
     })
+}
+
+fn texel_outside() -> io::Error {
+    invalid_data("texel address exceeds uploaded GS memory")
 }
 
 struct ImageTransfer<'a> {
@@ -308,6 +303,26 @@ fn psmt4_location(x: usize, y: usize, pages_wide: usize) -> (usize, u8) {
     (byte, ((nibble & 1) * 4) as u8)
 }
 
+/// Byte address of a PSMT8 texel: its 16x16 block is one PSMCT32 8x8 block, four texels per word.
+fn psmt8_location(x: usize, y: usize, pages_wide: usize) -> usize {
+    let page = (y / PSMT8_PAGE_HEIGHT) * pages_wide + x / PSMT8_PAGE_WIDTH;
+    let local_x = x % PSMT8_PAGE_WIDTH;
+    let local_y = y % PSMT8_PAGE_HEIGHT;
+    let swap = ((local_y + 2) >> 2 & 1) * 4;
+    let word_y = (((local_y & !3) >> 1) + (local_y & 1)) & 7;
+    let word_x = (local_x + swap) & 7;
+    let byte = ((local_y >> 1) & 1) + ((local_x >> 2) & 2);
+    let ct32_x = (local_x >> 4) * 8 + word_x;
+    let ct32_y = (local_y >> 4) * 8 + word_y;
+    page * GS_PAGE_BYTES + psmct32_byte_offset(ct32_x, ct32_y) + byte
+}
+
+/// Uploading a 16x16 PSMCT32 CLUT and reading it with CSM1 swaps index bits 3 and 4.
+fn csm1_t32_i8_transfer_index(index: u8) -> usize {
+    usize::from((index & 0xE7) | ((index & 0x08) << 1) | ((index & 0x10) >> 1))
+}
+
+#[cfg(test)]
 fn csm1_t32_i4_index(index: u8) -> usize {
     usize::from((index & 1) | ((index & 2) << 1) | ((index & 4) << 1) | ((index & 8) >> 2))
 }
@@ -327,9 +342,41 @@ fn invalid_data(message: &str) -> io::Error {
 mod tests {
     use super::{
         GS_PAGE_BYTES, PSMCT32_PAGE_HEIGHT, PSMCT32_PAGE_WIDTH, RgbaTexture, csm1_t32_i4_index,
-        decode_sprite_texture, psmct32_byte_offset, psmt4_location,
+        csm1_t32_i8_transfer_index, decode_sprite_texture, psmct32_byte_offset, psmt4_location,
+        psmt8_location,
     };
     use crate::tex::TextureEntry;
+
+    #[test]
+    fn psmt8_addressing_matches_the_gs_column_table() {
+        let first_rows = [
+            (1, 0, 4),
+            (2, 0, 16),
+            (4, 0, 32),
+            (8, 0, 2),
+            (0, 1, 8),
+            (0, 2, 33),
+            (4, 2, 1),
+            (0, 4, 96),
+        ];
+        for (x, y, byte) in first_rows {
+            assert_eq!(psmt8_location(x, y, 1), byte, "texel ({x}, {y})");
+        }
+        let mut addresses: Vec<usize> = (0..64)
+            .flat_map(|y| (0..128).map(move |x| psmt8_location(x, y, 1)))
+            .collect();
+        addresses.sort_unstable();
+        addresses.dedup();
+        assert_eq!(addresses.len(), GS_PAGE_BYTES);
+    }
+
+    #[test]
+    fn csm1_256_colour_lookup_swaps_index_bits_three_and_four() {
+        assert_eq!(csm1_t32_i8_transfer_index(0x07), 0x07);
+        assert_eq!(csm1_t32_i8_transfer_index(0x08), 0x10);
+        assert_eq!(csm1_t32_i8_transfer_index(0x10), 0x08);
+        assert_eq!(csm1_t32_i8_transfer_index(0xF8), 0xF8);
+    }
 
     #[test]
     fn psmct32_addressing_covers_one_page() {

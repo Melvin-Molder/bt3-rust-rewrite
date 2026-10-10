@@ -12,7 +12,7 @@ cargo run -p bt3-data --bin bt3-inspect
 
 By default it reads `rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso`; pass another ISO path as the first argument to override it. The ISO path reader resolves nested directories, and the AFS reader seeks directly to requested entries rather than loading the 1.46 GB archive. The global file-ID mapping, loading-screen behavior, stage layout, and coordinate transforms are grounded in the decomp sources listed below. Packed data, decoded resources, and RGBA textures stay in memory and are not extracted to disk.
 
-Run the Bevy loading-screen prototype with `cargo run -p bt3-game`; it accepts the ISO path as its first argument as well. It displays loading-screen type 0 by default, or type 1 with `cargo run -p bt3-game -- --screen 1`, at native 512x448 resolution. Space and Enter count as the original action button.
+Run the Bevy prototype with `cargo run -p bt3-game`; it accepts the ISO path as its first argument as well. By default it plays the boot pictures of `FirstRun_Main`: the six logos from menu archive `0x1DA`, at 60 Hz, with the original timing, fade colours and skip rules (Space / Enter or a gamepad's South / Start as pad 0 Cross / Start). The memory-card check before them and the opening movie after them are not ported yet. `--screen 0`, `1` or `2` runs a loading screen instead, driven by the decomp-ported `Load_*` logic at 30 Hz; Space stands in for Cross (`PADG_CROSS`, game bit `0x200`).
 
 ## Sources and credit
 

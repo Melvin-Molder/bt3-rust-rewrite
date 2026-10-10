@@ -22,3 +22,6 @@
 !/crates/bt3_game/src/
 /crates/bt3_game/src/*
 !/crates/bt3_game/src/main.rs
+!/crates/bt3_game/src/loading.rs
+!/crates/bt3_game/src/logo.rs
+!/crates/bt3_game/src/rng.rs

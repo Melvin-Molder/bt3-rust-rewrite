@@ -4,6 +4,7 @@ use bt3_data::Iso9660;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
 use bt3_data::bpe;
 use bt3_data::gs::decode_sprite_texture;
+use bt3_data::pack_section;
 use bt3_data::stage::StageResource;
 use bt3_data::tex::TextureResource;
 
@@ -204,6 +205,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "  alternate start {index}: position {:?}, target {:?}",
             placement.position, placement.target
+        );
+    }
+
+    // FirstRun_Main: archive 0 is file baseFile (0x1C1) + 0x19; its section 3 is BPE-packed.
+    let logo_file_id = 0x1C1 + 0x19;
+    let logo_location = partition_entry_for_id(logo_file_id);
+    let logo_archive = AfsArchive::open(
+        &mut image,
+        format!("DATA/PZS3US{}.AFS", logo_location.partition),
+    )?;
+    let logo_pack = logo_archive.read_entry(&mut image, logo_location.index)?;
+    println!(
+        "\nLogo archive 0x{logo_file_id:X}: {} bytes",
+        logo_pack.len()
+    );
+    let logos = bpe::decode(pack_section(&logo_pack, 3)?)?;
+    println!("  section 3 unpacked: {} bytes", logos.len());
+    for picture in [6, 7, 8, 3, 4, 5] {
+        let resource = TextureResource::parse(pack_section(&logos, picture)?)?;
+        let mut opaque = 0usize;
+        for texture in &resource.entries {
+            let rgba = decode_sprite_texture(texture)?;
+            opaque += rgba.pixels.chunks_exact(4).filter(|p| p[3] == 255).count();
+        }
+        let tex0 = resource.entries[0].texture_register;
+        println!(
+            "  picture section {picture}: {} tiles of {}x{}, PSM 0x{:X}, {opaque} opaque texels",
+            resource.entries.len(),
+            1u32 << ((tex0 >> 26) & 0xF),
+            1u32 << ((tex0 >> 30) & 0xF),
+            (tex0 >> 20) & 0x3F,
         );
     }
 
