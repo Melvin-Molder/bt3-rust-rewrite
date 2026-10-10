@@ -22,10 +22,7 @@ const SKIP_FADE_SECONDS: f32 = 0.5;
 /// `Adx_PlayFilePaused(ADX_CH_BGM, adx, 0x40, 0)` through `Adx_CalcOutVol`, in decibels.
 /// Uses channel gain 0x3C (gAdxChannelGainTbl[0]) and the default music option, 9.
 pub fn soundtrack_volume_db() -> f32 {
-    let volume = (0x40 * 0x3C * 9 / 0x480).clamp(0, 0x80);
-    let s = ((0x80 - volume) as f32 * 0.0078125).sin();
-    // ADXT output volume is in 0.1 dB units, truncated to an integer.
-    (s * s * 0.28 * -960.0) as i32 as f32 / 10.0
+    crate::sound::out_volume(crate::sound::CH_BGM, 0x40) as f32 / 10.0
 }
 
 /// The opening video's pictures, read from the ISO and decoded by ffmpeg in the background.

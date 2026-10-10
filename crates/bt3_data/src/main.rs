@@ -21,6 +21,172 @@ struct TextureCandidate {
     alpha_pixels: usize,
 }
 
+fn probe_title(image: &mut Iso9660) -> Result<(), Box<dyn std::error::Error>> {
+    use bt3_data::fod::{self, Action, Fod, FrameTag};
+
+    // Title_Init(1): section 1 of archive baseFile + 1, BPE-packed into an inner pack.
+    let id = 0x1C1 + 1;
+    let location = partition_entry_for_id(id);
+    let archive = AfsArchive::open(image, format!("DATA/PZS3US{}.AFS", location.partition))?;
+    let pack = archive.read_entry(image, location.index)?;
+    let res = bpe::decode(pack_section(&pack, 1)?)?;
+    println!(
+        "\nTitle archive 0x{id:X}: {} bytes, section 1 unpacked to {} bytes",
+        pack.len(),
+        res.len()
+    );
+    for section in [1usize, 2, 3, 5, 6, 7, 8, 9, 10, 14] {
+        let textures = TextureResource::parse(pack_section(&res, section)?)?;
+        let formats: Vec<String> = textures
+            .entries
+            .iter()
+            .map(|t| {
+                let tex0 = t.texture_register;
+                format!(
+                    "{}x{}/psm{:X}{}",
+                    1u32 << ((tex0 >> 26) & 0xF),
+                    1u32 << ((tex0 >> 30) & 0xF),
+                    (tex0 >> 20) & 0x3F,
+                    if t.pixel_data.is_none() {
+                        "/clut-only"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect();
+        let decoded: Vec<String> = textures
+            .entries
+            .iter()
+            .map(|t| match decode_sprite_texture(t) {
+                Ok(_) => "ok".to_owned(),
+                Err(error) => error.to_string(),
+            })
+            .collect();
+        println!(
+            "  section {section:2}: {} textures {} decode {decoded:?}",
+            textures.entries.len(),
+            formats.join(" ")
+        );
+    }
+
+    let movie = Fod::parse(pack_section(&res, 11)?)?;
+    let data = movie.bytes();
+    let mut ofs = 0;
+    let mut tags = Vec::new();
+    loop {
+        let tag = movie.header(ofs)?;
+        tags.push(format!("{}x{}", tag.code, tag.count));
+        if tag.code == 0 {
+            break;
+        }
+        ofs += 8 + tag.size as usize;
+    }
+    println!("  section 11 FOD tags (code x records): {}", tags.join(" "));
+    for index in 0..movie.record_count(3)? {
+        let rec = movie.record(3, index)?;
+        print!(
+            "{}image {index}: {}x{}",
+            if index == 0 { "  " } else { ", " },
+            fod::u16_at(data, rec + 8)?,
+            fod::u16_at(data, rec + 10)?
+        );
+    }
+    println!();
+
+    let mut flat = 0;
+    let mut quad_flags = std::collections::BTreeSet::new();
+    let mut quad_colors = std::collections::BTreeSet::new();
+    for index in 0..movie.record_count(4)? {
+        let rec = movie.record(4, index)?;
+        for quad in 0..fod::u16_at(data, rec + 8)? as usize {
+            let q = rec + 10 + quad * 0x18;
+            if fod::i16_at(data, q)? < 0 {
+                flat += 1;
+            }
+            quad_flags.insert(fod::u16_at(data, q + 2)?);
+            quad_colors.insert(format!("{:08X}", fod::u32_at(data, q + 4)?));
+        }
+    }
+    println!("  shape quad colours (RRGGBBAA): {quad_colors:?}");
+    let mut tfx = std::collections::BTreeSet::new();
+    for section in [1usize, 2, 3, 5, 6, 7, 8, 9, 10, 14] {
+        for t in TextureResource::parse(pack_section(&res, section)?)?.entries {
+            tfx.insert((t.texture_register >> 35) & 3);
+        }
+    }
+    println!("  TEX0 TFX values in the title textures: {tfx:?}");
+    println!(
+        "  shapes: {} records, {flat} flat quads, unk02 values {quad_flags:?}",
+        movie.record_count(4)?
+    );
+
+    let mut timelines = vec![("root".to_owned(), movie.record(7, 0)?)];
+    for index in 0..movie.record_count(6)? {
+        timelines.push((format!("sprite {index}"), movie.record(6, index)?));
+    }
+    let (mut skew, mut flip, mut frames, mut unknown) =
+        (0, 0, 0, std::collections::BTreeSet::new());
+    let mut urls = std::collections::BTreeSet::new();
+    let mut labels = Vec::new();
+    for (name, rec) in &timelines {
+        let mut block = rec + 8;
+        while let Some(frame) = fod::parse_frame(data, block)? {
+            frames += 1;
+            if !frame.label.is_empty() {
+                labels.push(format!("{name}:{}", String::from_utf8_lossy(&frame.label)));
+            }
+            for tag in &frame.tags {
+                let matrix = match tag {
+                    FrameTag::Place { matrix, .. } | FrameTag::PlaceNew { matrix, .. } => {
+                        Some(*matrix)
+                    }
+                    FrameTag::Move { matrix, .. } => *matrix,
+                    FrameTag::Actions(actions) => {
+                        for action in actions {
+                            match action {
+                                Action::GetUrl(url, arg) => {
+                                    urls.insert(format!(
+                                        "{} {}",
+                                        String::from_utf8_lossy(url),
+                                        String::from_utf8_lossy(arg)
+                                    ));
+                                }
+                                Action::Other(code) => {
+                                    unknown.insert(format!("action 0x{code:X}"));
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    }
+                    FrameTag::Unknown(code) => {
+                        unknown.insert(format!("tag {code}"));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(m) = matrix {
+                    if m[1] != 0.0 || m[3] != 0.0 {
+                        skew += 1;
+                    }
+                    if m[0] < 0.0 || m[4] < 0.0 {
+                        flip += 1;
+                    }
+                }
+            }
+            block = fod::skip_named(data, block, 1)?.ok_or("frame list ends unexpectedly")?;
+        }
+    }
+    println!(
+        "  timelines: {}, frames: {frames}, matrices with skew/rotation: {skew}, mirrored: {flip}, unknown: {unknown:?}",
+        timelines.len()
+    );
+    println!("  GetURL commands: {urls:?}");
+    println!("  labels: {}", labels.join(" "));
+    Ok(())
+}
+
 fn file_id_for_partition_entry(partition: u8, index: u32) -> u32 {
     match partition {
         0 => index,
@@ -257,12 +423,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let frames = pcm.len() / header.channels;
         let peak = pcm.iter().map(|s| i32::from(*s).abs()).max().unwrap_or(0);
         println!(
-            "\n{label}: {} Hz, {} ch, cutoff {}, version {}, flags {}, coefficients {:?}; {frames} of {} samples decoded ({:.1} s), peak {peak}",
+            "\n{label}: {} Hz, {} ch, cutoff {}, version {}, flags {}, loop {:?}, coefficients {:?}; {frames} of {} samples decoded ({:.1} s), peak {peak}",
             header.sample_rate,
             header.channels,
             header.cutoff,
             header.version,
             header.flags,
+            header.loop_samples,
             adx::prediction_coefficients(header.cutoff, header.sample_rate),
             header.total_samples,
             frames as f64 / f64::from(header.sample_rate),
@@ -299,6 +466,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = writer.join();
     println!("\nDATA/ZS3USOP.PSS: {pss_size} bytes");
     print!("{}", String::from_utf8_lossy(&output.stdout));
+
+    probe_title(&mut image)?;
 
     println!("\nTexture-resource candidates from real AFS data:");
     let candidates = scan_texture_candidates(&mut image)?;

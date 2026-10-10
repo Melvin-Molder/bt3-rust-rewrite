@@ -5,6 +5,7 @@ use std::path::Path;
 pub mod adx;
 pub mod afs;
 pub mod bpe;
+pub mod fod;
 pub mod gs;
 pub mod stage;
 pub mod tex;

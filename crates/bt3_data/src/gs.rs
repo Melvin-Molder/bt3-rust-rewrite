@@ -12,6 +12,7 @@ const PSMT8_PAGE_HEIGHT: usize = 64;
 const PSM_T8: u8 = 0x13;
 const PSM_T4: u8 = 0x14;
 
+#[derive(Clone)]
 pub struct RgbaTexture {
     pub width: u32,
     pub height: u32,

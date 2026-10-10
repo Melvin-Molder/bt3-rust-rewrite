@@ -25,7 +25,7 @@ const FADE_OUT_DONE: i32 = 8;
 
 /// `gColorFade` (src/sys/color_fade.c): one full-screen colour with an integer alpha ramp.
 #[derive(Clone, Copy, Debug)]
-struct ColorFade {
+pub(crate) struct ColorFade {
     flags: i32,
     rgb: [u8; 3],
     alpha: i32,
@@ -33,7 +33,7 @@ struct ColorFade {
 }
 
 impl ColorFade {
-    fn start_in(black: bool, frames: i32) -> Self {
+    pub(crate) fn start_in(black: bool, frames: i32) -> Self {
         Self {
             flags: FADE_IN,
             rgb: fade_color(black),
@@ -42,7 +42,7 @@ impl ColorFade {
         }
     }
 
-    fn start_out(black: bool, frames: i32) -> Self {
+    pub(crate) fn start_out(black: bool, frames: i32) -> Self {
         Self {
             flags: FADE_OUT,
             rgb: fade_color(black),
@@ -51,7 +51,7 @@ impl ColorFade {
         }
     }
 
-    fn update(&mut self) {
+    pub(crate) fn update(&mut self) {
         if self.flags & FADE_IN != 0 {
             if self.alpha > 0 {
                 self.alpha -= self.step;
@@ -68,7 +68,22 @@ impl ColorFade {
         }
     }
 
-    fn quad(&self) -> Option<Quad> {
+    /// `ColorFade_IsInDone`.
+    pub(crate) fn is_in_done(&self) -> bool {
+        self.flags & FADE_IN_DONE != 0
+    }
+
+    /// `ColorFade_IsFadingOut`.
+    pub(crate) fn is_fading_out(&self) -> bool {
+        self.flags & FADE_OUT != 0
+    }
+
+    /// `ColorFade_IsOutDone`.
+    pub(crate) fn is_out_done(&self) -> bool {
+        self.flags & FADE_OUT_DONE != 0
+    }
+
+    pub(crate) fn quad(&self) -> Option<Quad> {
         let a = self.alpha.clamp(0, FADE_MAX) as u8;
         (a != 0).then(|| Quad {
             texture: None,
@@ -146,7 +161,7 @@ impl LogoSequence {
 }
 
 /// `Sprite_DrawPicture(pic, 0, 0, 0x80)`: 4 x 2 tiles of 128x256 texels, each shown 128x224.
-fn picture_quads(first_texture: usize) -> Vec<Quad> {
+pub(crate) fn picture_quads(first_texture: usize) -> Vec<Quad> {
     let mut quads = Vec::with_capacity(TILES_PER_PICTURE);
     for row in 0..2 {
         let (y0, y1) = if row == 0 { (0, 0xE0) } else { (0xE0, 0x1C0) };

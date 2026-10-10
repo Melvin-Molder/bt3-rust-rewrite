@@ -15,6 +15,8 @@ pub struct AdxHeader {
     pub cutoff: u16,
     pub version: u8,
     pub flags: u8,
+    /// Loop start and end, in samples, when the header carries exactly one loop.
+    pub loop_samples: Option<(u32, u32)>,
 }
 
 impl AdxHeader {
@@ -33,7 +35,10 @@ impl AdxHeader {
             cutoff: be16(bytes, 0x10),
             version: bytes[0x12],
             flags: bytes[0x13],
+            loop_samples: None,
         };
+        let mut header = header;
+        header.loop_samples = loop_samples(bytes, header.version);
         if header.encoding != 3
             || header.bits != 4
             || header.block_size != 18
@@ -50,6 +55,23 @@ impl AdxHeader {
     pub fn samples_per_block(&self) -> usize {
         (self.block_size * 8 - 16) / usize::from(self.bits)
     }
+}
+
+/// func_00289980: loop info sits at 0x20 in version 4 headers (0x14 otherwise) and needs a header of 0x3C
+/// (0x30) bytes; only a loop count of 1 is accepted.
+fn loop_samples(bytes: &[u8], version: u8) -> Option<(u32, u32)> {
+    let (base, needed) = if version == 4 {
+        (0x20, 0x3C)
+    } else {
+        (0x14, 0x30)
+    };
+    if bytes.len() < needed || i32::from(be16(bytes, 2) as i16) < needed as i32 - 4 {
+        return None;
+    }
+    if be16(bytes, base + 2) != 1 {
+        return None;
+    }
+    Some((be32(bytes, base + 8), be32(bytes, base + 0x10)))
 }
 
 /// func_00289300: the two prediction coefficients, in 1/4096 units, computed in single precision.
@@ -166,6 +188,22 @@ mod tests {
             bytes.extend_from_slice(block);
         }
         bytes
+    }
+
+    #[test]
+    fn reads_one_loop_from_a_version_4_header() {
+        let mut bytes = stream(2, 100, &[]);
+        bytes.resize(0x40, 0);
+        bytes[2..4].copy_from_slice(&0x3Cu16.to_be_bytes());
+        bytes[0x22..0x24].copy_from_slice(&1u16.to_be_bytes());
+        bytes[0x28..0x2C].copy_from_slice(&64u32.to_be_bytes());
+        bytes[0x30..0x34].copy_from_slice(&96u32.to_be_bytes());
+        assert_eq!(
+            AdxHeader::parse(&bytes).unwrap().loop_samples,
+            Some((64, 96))
+        );
+        bytes[0x22..0x24].copy_from_slice(&0u16.to_be_bytes());
+        assert_eq!(AdxHeader::parse(&bytes).unwrap().loop_samples, None);
     }
 
     #[test]
