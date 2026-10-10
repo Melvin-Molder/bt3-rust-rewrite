@@ -12,6 +12,7 @@
 /crates/bt3_data/src/*
 !/crates/bt3_data/src/lib.rs
 !/crates/bt3_data/src/main.rs
+!/crates/bt3_data/src/adx.rs
 !/crates/bt3_data/src/afs.rs
 !/crates/bt3_data/src/bpe.rs
 !/crates/bt3_data/src/tex.rs
@@ -24,4 +25,6 @@
 !/crates/bt3_game/src/main.rs
 !/crates/bt3_game/src/loading.rs
 !/crates/bt3_game/src/logo.rs
+!/crates/bt3_game/src/fade.rs
+!/crates/bt3_game/src/movie.rs
 !/crates/bt3_game/src/rng.rs

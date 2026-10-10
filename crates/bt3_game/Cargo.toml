@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.19.1", default-features = false, features = ["2d"] }
+bevy = { version = "0.19.1", default-features = false, features = ["2d", "bevy_audio", "wav"] }
 bt3-data = { path = "../bt3_data" }

@@ -1,3 +1,4 @@
+use crate::fade::Fade;
 use crate::rng::{GameRandom, LibcRandom};
 
 pub const ITEM_COUNT: usize = 30;
@@ -84,66 +85,6 @@ struct Pulse {
     angle: f32,
     amp: f32,
     speed: f32,
-}
-
-/// Fade slot 0 (black), as started by `Load_RunBlocking`.
-#[derive(Clone, Copy, Debug)]
-struct Fade {
-    active: bool,
-    done: bool,
-    alpha: f32,
-    ramp_value: f32,
-    ramp_frames: f32,
-    ramp_step: f32,
-}
-
-impl Fade {
-    fn start_in(seconds: f32) -> Self {
-        let frames = seconds * 30.0;
-        let mut fade = Self {
-            active: true,
-            done: false,
-            alpha: 128.0,
-            ramp_value: 0.0,
-            ramp_frames: frames,
-            ramp_step: 1.0 / frames,
-        };
-        fade.update();
-        fade
-    }
-
-    fn update(&mut self) {
-        if !self.active {
-            return;
-        }
-        self.alpha = 128.0 + -128.0 * self.ramp_value;
-        if self.done {
-            if self.alpha as i32 == 0 {
-                self.active = false;
-            }
-        } else if self.step_ramp() {
-            self.done = true;
-        }
-    }
-
-    fn step_ramp(&mut self) -> bool {
-        self.ramp_frames -= 1.0;
-        if self.ramp_frames <= 0.0001 {
-            self.ramp_value = 1.0;
-            return true;
-        }
-        self.ramp_value = (self.ramp_value + self.ramp_step).min(1.0);
-        false
-    }
-
-    fn quad(&self) -> Option<Quad> {
-        self.active.then(|| Quad {
-            texture: None,
-            screen: [0, 0, 512, 448],
-            uv: [0; 4],
-            rgba: [0, 0, 0, self.alpha as u32 as u8],
-        })
-    }
 }
 
 /// `gLoadScreen` and the code that drives it (src/sys/loading.c).

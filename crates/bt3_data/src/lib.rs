@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+pub mod adx;
 pub mod afs;
 pub mod bpe;
 pub mod gs;

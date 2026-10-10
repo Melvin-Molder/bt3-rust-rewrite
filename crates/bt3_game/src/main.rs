@@ -1,16 +1,21 @@
+mod fade;
 mod loading;
 mod logo;
+mod movie;
 mod rng;
 
 use std::path::PathBuf;
+use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::audio::Volume;
 use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::WindowResolution;
 use bt3_data::Iso9660;
+use bt3_data::adx;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
 use bt3_data::bpe;
 use bt3_data::gs::{RgbaTexture, decode_sprite_texture};
@@ -19,27 +24,34 @@ use bt3_data::tex::TextureResource;
 
 use loading::{LoadingScreen, Quad};
 use logo::LogoSequence;
+use movie::{MoviePlayer, VideoStream};
 
 const SCREEN_WIDTH: u32 = 512;
 const SCREEN_HEIGHT: u32 = 448;
 const FIRST_LOADING_FILE_ID: u32 = 0x3C1;
 // gProgress->baseFile (0x1C1) + 0x19: menu archive 0, loaded by FirstRun_Main.
 const LOGO_ARCHIVE_FILE_ID: u32 = 0x1C1 + 0x19;
+// NTSC: one vertical blank is 1001/60000 s.
+const VBLANK_SECONDS: f32 = 1001.0 / 60000.0;
 
 enum Scene {
     Logos(LogoSequence),
+    Movie(MoviePlayer, VideoStream),
+    Black,
     Loading(LoadingScreen),
 }
 
 impl Scene {
-    /// `Logo_Show` ends its frames with `Gfx_EndFrame(1)`, `Load_RunBlocking` with `Gfx_EndFrame(2)`.
+    /// `Logo_Show` ends its frames with `Gfx_EndFrame(1)`; `Movie_Run` and `Load_RunBlocking` use 2.
     fn frame_seconds(&self) -> f32 {
         match self {
-            Scene::Logos(_) => 1.0 / 60.0,
-            Scene::Loading(_) => 1.0 / 30.0,
+            Scene::Logos(_) | Scene::Black => VBLANK_SECONDS,
+            Scene::Movie(..) | Scene::Loading(_) => 2.0 * VBLANK_SECONDS,
         }
     }
 }
+
+type Soundtrack = JoinHandle<std::io::Result<Vec<u8>>>;
 
 #[derive(Resource)]
 struct Game {
@@ -49,6 +61,11 @@ struct Game {
     cross_latched: bool,
     start_latched: bool,
     quads: Vec<Quad>,
+    iso_path: PathBuf,
+    movie_texture: Option<usize>,
+    soundtrack: Option<Soundtrack>,
+    soundtrack_player: Option<Entity>,
+    picture: Option<Vec<u8>>,
 }
 
 #[derive(Resource, Default)]
@@ -79,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer = SystemTime::now().duration_since(UNIX_EPOCH)?.subsec_nanos();
     let (game_random, libc_random) = rng::init_from_timer(timer);
     let mut image = Iso9660::open(&image_path)?;
+    let mut soundtrack = None;
     let (scene, textures, title) = match forced_type {
         Some(_) => {
             let screen = LoadingScreen::new(game_random, libc_random, None, forced_type);
@@ -89,12 +107,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             (Scene::Loading(screen), textures, title)
         }
-        None => (
-            Scene::Logos(LogoSequence::new()),
-            load_logo_textures(&mut image)?,
-            "Budokai Tenkaichi 3".to_owned(),
-        ),
+        None => {
+            soundtrack = Some(decode_soundtrack(image_path.clone()));
+            (
+                Scene::Logos(LogoSequence::new()),
+                load_logo_textures(&mut image)?,
+                "Budokai Tenkaichi 3".to_owned(),
+            )
+        }
     };
+    let movie_texture = soundtrack.is_some().then_some(textures.len());
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
@@ -119,6 +141,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cross_latched: false,
             start_latched: false,
             quads: Vec::new(),
+            iso_path: image_path,
+            movie_texture,
+            soundtrack,
+            soundtrack_player: None,
+            picture: None,
         })
         .init_resource::<Textures>()
         .add_systems(Startup, setup)
@@ -158,6 +185,19 @@ fn read_file(image: &mut Iso9660, file_id: u32) -> Result<Vec<u8>, Box<dyn std::
     Ok(archive.read_entry(image, location.index)?)
 }
 
+/// The opening soundtrack as an in-memory WAV, decoded while the logos play.
+fn decode_soundtrack(iso_path: PathBuf) -> Soundtrack {
+    std::thread::spawn(move || {
+        let bytes = Iso9660::open(&iso_path)?.read_file(movie::ADX_PATH)?;
+        let (header, pcm) = adx::decode(&bytes)?;
+        Ok(adx::to_wav(
+            header.sample_rate,
+            header.channels as u16,
+            &pcm,
+        ))
+    })
+}
+
 fn decode_textures(resource: &[u8]) -> Result<Vec<RgbaTexture>, Box<dyn std::error::Error>> {
     TextureResource::parse(resource)?
         .entries
@@ -193,12 +233,30 @@ fn setup(
             images.add(image)
         })
         .collect();
+    if game.movie_texture.is_some() {
+        let size = Extent3d {
+            width: movie::WIDTH,
+            height: movie::HEIGHT,
+            depth_or_array_layers: 1,
+        };
+        let mut picture = Image::new_fill(
+            size,
+            TextureDimension::D2,
+            &[0, 0, 0, 0xFF],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        picture.sampler = ImageSampler::nearest();
+        handles.0.push(images.add(picture));
+    }
 }
 
 fn run_frames(
+    mut commands: Commands,
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
+    mut audio: ResMut<Assets<AudioSource>>,
     mut game: ResMut<Game>,
 ) {
     // Pad 0: Space or the gamepad's south button is Cross (PADG_CROSS), Enter or Start is Start.
@@ -221,21 +279,74 @@ fn run_frames(
         game.accumulator -= game.scene.frame_seconds();
         let cross = std::mem::take(&mut game.cross_latched);
         let start = std::mem::take(&mut game.start_latched);
-        game.quads = match &mut game.scene {
-            Scene::Logos(logos) => logos.run_frame(cross || start),
-            Scene::Loading(screen) => screen.run_frame([cross, false]),
-        };
+        let game = &mut *game;
+        match &mut game.scene {
+            Scene::Logos(logos) => {
+                game.quads = logos.run_frame(cross || start);
+                if logos.is_finished() {
+                    start_opening_movie(game, &mut commands, &mut audio);
+                }
+            }
+            Scene::Movie(player, video) => {
+                let frame = player.run_frame(start, || video.next_picture());
+                game.quads = frame.quads;
+                if frame.picture.is_some() {
+                    game.picture = frame.picture;
+                }
+                if player.is_finished() {
+                    if let Some(entity) = game.soundtrack_player.take() {
+                        commands.entity(entity).despawn();
+                    }
+                    game.scene = Scene::Black;
+                }
+            }
+            Scene::Black => game.quads.clear(),
+            Scene::Loading(screen) => game.quads = screen.run_frame([cross, false]),
+        }
     }
+}
+
+/// `FirstRun_Main` after the logos: `Movie_PlayOpening` (partition 2 is already readable from the ISO).
+fn start_opening_movie(game: &mut Game, commands: &mut Commands, audio: &mut Assets<AudioSource>) {
+    let (Some(texture), Some(soundtrack)) = (game.movie_texture, game.soundtrack.take()) else {
+        game.scene = Scene::Black;
+        return;
+    };
+    let video = match VideoStream::open(&game.iso_path) {
+        Ok(video) => video,
+        Err(error) => {
+            error!("cannot decode {} with ffmpeg: {error}", movie::PSS_PATH);
+            game.scene = Scene::Black;
+            return;
+        }
+    };
+    match soundtrack.join() {
+        Ok(Ok(wav)) => {
+            let source = audio.add(AudioSource { bytes: wav.into() });
+            let settings = PlaybackSettings::DESPAWN
+                .with_volume(Volume::Decibels(movie::soundtrack_volume_db()));
+            game.soundtrack_player = Some(commands.spawn((AudioPlayer(source), settings)).id());
+        }
+        Ok(Err(error)) => error!("cannot decode {}: {error}", movie::ADX_PATH),
+        Err(_) => error!("soundtrack decoder thread panicked"),
+    }
+    game.scene = Scene::Movie(MoviePlayer::new(texture), video);
 }
 
 fn sync_quads(
     mut commands: Commands,
-    game: Res<Game>,
+    mut game: ResMut<Game>,
+    mut images: ResMut<Assets<Image>>,
     handles: Res<Textures>,
     mut slots: Query<(&QuadSlot, &mut Sprite, &mut Transform, &mut Visibility)>,
 ) {
     if !game.is_changed() {
         return;
+    }
+    if let (Some(picture), Some(index)) = (game.picture.take(), game.movie_texture)
+        && let Some(mut image) = images.get_mut(&handles.0[index])
+    {
+        image.data = Some(picture);
     }
     let mut existing = 0;
     for (slot, mut sprite, mut transform, mut visibility) in &mut slots {

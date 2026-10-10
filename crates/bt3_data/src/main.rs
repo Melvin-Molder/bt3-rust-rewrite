@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use bt3_data::Iso9660;
+use bt3_data::adx;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
 use bt3_data::bpe;
 use bt3_data::gs::decode_sprite_texture;
@@ -238,6 +239,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (tex0 >> 20) & 0x3F,
         );
     }
+
+    // Movie_Open streams DATA/ZS3USOP.ADX beside the video; Bgm_Play's tracks start at file 0x10B16.
+    let movie_audio = image.read_file("DATA/ZS3USOP.ADX")?;
+    let music_id = 0x10B16;
+    let music_location = partition_entry_for_id(music_id);
+    let music_archive = AfsArchive::open(
+        &mut image,
+        format!("DATA/PZS3US{}.AFS", music_location.partition),
+    )?;
+    let music = music_archive.read_entry(&mut image, music_location.index)?;
+    for (label, bytes) in [
+        ("DATA/ZS3USOP.ADX".to_owned(), &movie_audio),
+        (format!("music file 0x{music_id:X}"), &music),
+    ] {
+        let (header, pcm) = adx::decode(bytes)?;
+        let frames = pcm.len() / header.channels;
+        let peak = pcm.iter().map(|s| i32::from(*s).abs()).max().unwrap_or(0);
+        println!(
+            "\n{label}: {} Hz, {} ch, cutoff {}, version {}, flags {}, coefficients {:?}; {frames} of {} samples decoded ({:.1} s), peak {peak}",
+            header.sample_rate,
+            header.channels,
+            header.cutoff,
+            header.version,
+            header.flags,
+            adx::prediction_coefficients(header.cutoff, header.sample_rate),
+            header.total_samples,
+            frames as f64 / f64::from(header.sample_rate),
+        );
+    }
+    if let Some(path) = std::env::var_os("BT3_WAV") {
+        let (header, pcm) = adx::decode(&music)?;
+        std::fs::write(
+            &path,
+            adx::to_wav(header.sample_rate, header.channels as u16, &pcm),
+        )?;
+        println!(
+            "  wrote music file 0x{music_id:X} to {}",
+            PathBuf::from(path).display()
+        );
+    }
+
+    // Movie_Open: the opening video is DATA/ZS3USOP.PSS; probe its first 4 MiB through ffprobe's stdin.
+    let pss_size = image.file_size("DATA/ZS3USOP.PSS")?;
+    let pss_head =
+        image.read_file_range("DATA/ZS3USOP.PSS", 0, (4 << 20).min(pss_size as usize))?;
+    let mut probe = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-f", "mpeg", "-i", "pipe:0", "-show_entries"])
+        .arg("stream=index,codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate")
+        .args(["-of", "compact"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let mut stdin = probe.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || {
+        let _ = std::io::Write::write_all(&mut stdin, &pss_head);
+    });
+    let output = probe.wait_with_output()?;
+    let _ = writer.join();
+    println!("\nDATA/ZS3USOP.PSS: {pss_size} bytes");
+    print!("{}", String::from_utf8_lossy(&output.stdout));
 
     println!("\nTexture-resource candidates from real AFS data:");
     let candidates = scan_texture_candidates(&mut image)?;
