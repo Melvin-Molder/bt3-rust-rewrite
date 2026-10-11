@@ -16,10 +16,11 @@ use std::f32::consts::PI;
 
 use crate::btl_blast::{blast_limit_a, can_fire, hits_of, ki_cost, ki_cost_of};
 use crate::btl_chr::{
-    Attack, Chr, Env, SideData, add, anim_flag, begin_rise_to_opponent, calc_approach_point, deg,
-    is_blocked_by_opponent, kmh, length, normalize, opp_closing_time, opp_delta, opp_gap_xz,
-    opp_pitch_adjusted, opp_yaw, opp_yaw_from_facing, scale_speed_by_approach, scale3,
-    snap_to_opponent, steer_at_opponent, sub, warp_ahead_of_opponent, warp_behind_opponent,
+    Attack, Chr, Env, SideData, add, anim_flag, begin_rise_to_opponent, calc_approach_point,
+    circle_opponent, deg, is_blocked_by_opponent, kmh, length, normalize, opp_closing_time,
+    opp_delta, opp_distance_xz, opp_gap_xz, opp_pitch_adjusted, opp_yaw, opp_yaw_from_facing,
+    opp_yaw_from_its_facing, scale_speed_by_approach, scale3, snap_to_opponent, steer_at_opponent,
+    sub, warp_ahead_of_opponent, warp_behind_opponent,
 };
 use crate::btl_input::{DIR_MASK, wrap_angle};
 use crate::btl_obj::{mask_to_node, node_side};
@@ -55,7 +56,7 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x32 | 0x37 | 0x38 | 0x3A | 0x40 | 0x44 | 0x47..=0x6F | 0x70..=0x94 | 0x96..=0xB1
+        1..=3 | 0xB..=0x36 | 0x37 | 0x38 | 0x3A | 0x40 | 0x44 | 0x47..=0x6F | 0x70..=0x94 | 0x96..=0xB1
         | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9)
 }
 
@@ -709,6 +710,10 @@ impl Ctx<'_, '_> {
             0x2F | 0x30 => self.slide_attack(phase),
             0x31 => self.rush_attack(phase),
             0x32 => self.hop_back_attack(phase),
+            0x33 => self.circle_dash(phase),
+            0x34 => self.rush_dash(phase),
+            0x35 => self.vanish_dash(phase),
+            0x36 => self.search(phase),
             0x92 | 0x9B | 0xAB => self.attack_dash(phase),
             0x99 => self.attack_volley_dash(phase),
             0x70..=0x94 | 0x96..=0xAD => self.attack(phase),
@@ -4488,6 +4493,420 @@ impl Ctx<'_, '_> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    // ---- the circle, rush and vanish dashes and the search (btl_act_2.c) ----------------------------------------
+
+    /// Action 0x33 (`BtlAct_CircleDashHandler`): round the opponent (motions 0x2D -> 0x19 loop -> 0x1A) toward the
+    /// point opposite where the fighter faced at the start, on the side the opponent is turned from, spending the
+    /// ki of kind 3; close and far enough round, attack record 0x90 or a homing strike. The voice, the sound, the
+    /// vibration and the camera cut are not ported.
+    fn circle_dash(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x2D, 0.15);
+            self.held(0xE);
+            self.me.set_fx(6);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            if 0.0 < opp_yaw_from_its_facing(self.me, self.opp) {
+                self.me.work[0] |= 1;
+            }
+            let base = wrap_angle(self.me.pose.rot[1] + PI);
+            self.set_work_f(0, base);
+        }
+        if phase == RUN {
+            let (mut circling, mut lean) = (false, 0.0);
+            match self.anim_id() {
+                0x2D => {
+                    self.me.anim_advance_then(0x19, 0.15, 0);
+                    lean = 1.0;
+                }
+                0x19 => {
+                    self.me.anim_advance_loop(0);
+                    lean = 1.0;
+                    circling = true;
+                }
+                0x1A => {
+                    self.me.anim_set_duration(0.3);
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                    lean = 1.0 - self.me.anim_progress();
+                }
+                _ => {}
+            }
+            if circling {
+                let speed = self.me.move_speed(self.data, self.env, 0x13);
+                let side = self.me.work[0] & 1 != 0;
+                let lead = self.opp_seen_action() == 0xD5;
+                let base = self.work_f(0);
+                if circle_opponent(
+                    self.me,
+                    self.opp,
+                    self.data,
+                    self.opp_data,
+                    self.env,
+                    side,
+                    lead,
+                    base,
+                    speed,
+                ) {
+                    self.me.work[0] |= 2;
+                }
+                self.set(9);
+                self.set(0x50);
+                self.set(0x51);
+                self.me.set_fx(4);
+                self.set(0x47);
+            } else {
+                let yaw = if self.me.work[0] & 2 != 0 { 2 } else { 6 };
+                self.step(yaw, 6, 7, 0.0, kmh(100.0));
+                self.me.apply_gravity();
+            }
+            let pitch = self.me.pose.pitch;
+            self.me.set_lean_x(pitch * lean);
+            self.set(0x89);
+        }
+        if phase == DECIDE {
+            let mut stop = false;
+            match self.anim_id() {
+                0x2D => {
+                    if self.blocked() {
+                        stop = true;
+                        self.me.pose.speed = 0.0;
+                    }
+                }
+                0x19 => {
+                    if self.blocked() {
+                        stop = true;
+                        self.me.pose.speed = 0.0;
+                    }
+                    if self.me.work[0] & 2 != 0 {
+                        stop = true;
+                        self.me.pose.speed = 0.0;
+                    }
+                    let cost = self.move_ki_cost(3);
+                    if self.me.spend_ki(cost, false) {
+                        stop = true;
+                        self.me.pose.speed *= 0.2;
+                    }
+                    if !self.flag(5) {
+                        stop = true;
+                    }
+                    if length(self.me.pose.moved) < kmh(1000.0) {
+                        self.me.work[2] += 1;
+                        if self.me.work[2] >= 6 {
+                            stop = true;
+                            self.me.pose.speed = 0.0;
+                        }
+                    } else {
+                        self.me.work[2] = 0;
+                    }
+                }
+                _ => {}
+            }
+            if stop {
+                self.request_anim(0x1A, 0.15);
+            }
+            if self.flag(0x13) {
+                let limit = if self.anim_id() == 0x1A {
+                    PI / 2.0
+                } else {
+                    PI / 4.0
+                };
+                let round = wrap_angle(opp_yaw(self.me, self.opp) - self.work_f(0));
+                if round.abs() < limit {
+                    if self.queue_attack(0x90) != 0 {
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                    if self.decide_attack(0x400_0000) != 0 {
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Action 0x34 (`BtlAct_RushDashHandler`): a dash at the opponent (motions 0x23 -> 0x24 loop -> 0x25 stop) at
+    /// 1800 km/h, or vanished and untouchable at 2200 km/h with parameter flag bit 20; attack record 0x9C, the
+    /// rush 0x46 (input 0x34) or 0xB5 (input 0x5D) take over. The sounds and the vibration are not ported.
+    fn rush_dash(&mut self, phase: u32) {
+        let fast = (self.data.tables.params.flags() >> 20) & 1 != 0;
+        if phase == ENTER {
+            self.play(0x23, 0.15);
+            self.held(0xE);
+            if fast {
+                self.me.set_fx(0xE);
+            }
+        }
+        if phase == RUN {
+            let (mut yaw, mut accel, mut pitch) = (2, 10000.0, 1);
+            let mut speed = if fast {
+                for f in [0xB, 0x42, 0x43, 0x44, 0x45, 0x46] {
+                    self.set(f);
+                }
+                if self.me.action_frame != 0 {
+                    kmh(2200.0)
+                } else {
+                    0.0
+                }
+            } else {
+                kmh(1800.0)
+            };
+            match self.anim_id() {
+                0x23 => {
+                    self.me.anim_advance_then(0x24, 0.15, 0);
+                }
+                0x24 => {
+                    self.me.anim_advance_loop(0);
+                }
+                0x25 => {
+                    self.me.anim_set_duration(0.1);
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                        self.me.pose.speed = 0.0;
+                        self.me.pose.fall_speed = 0.0;
+                    }
+                    speed = 0.0;
+                    yaw = 6;
+                    accel = kmh(100.0);
+                    pitch = 6;
+                }
+                _ => {}
+            }
+            self.step(yaw, pitch, 3, speed, accel);
+            self.me.apply_gravity();
+            self.me.set_fx(9);
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            if self.anim_id() == 0x24 && self.blocked() {
+                self.request_anim(0x25, 0.0);
+            }
+            if self.queue_attack(0x9C) != 0 {
+                let q = self.queued();
+                self.request(q);
+            }
+            if self.test(0x34) {
+                self.request(0x46);
+            }
+            if self.test(0x5D) {
+                self.request(0xB5);
+            }
+        }
+        if phase == LEAVE && fast {
+            self.me.set_fx(0xD);
+        }
+    }
+
+    /// Action 0x35 (`BtlAct_VanishDashHandler`): vanished and untouchable at 2000 km/h the way the stick points
+    /// (motions 0xC -> 0xD loop -> 0xE), for 13 frames or until it meets the opponent head on; from the seventh
+    /// frame the main inputs. The sound is not ported.
+    fn vanish_dash(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xC, 0.15);
+            self.me.set_fx(0xE);
+            self.held(0xE);
+            self.me.turn_yaw(self.opp, 0, PI);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 2, PI);
+            self.me.turn_model_yaw(PI, 1.0);
+        }
+        if phase == RUN {
+            let mut moving = true;
+            match self.anim_id() {
+                0xC => {
+                    self.me.anim_set_duration(0.05);
+                    self.me.anim_advance_then(0xD, 0.15, 0);
+                    if self.me.anim_is_new() {
+                        moving = false;
+                    }
+                }
+                0xD => {
+                    self.me.anim_advance_loop(0);
+                    self.set(0xB);
+                }
+                0xE => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                    if self.me.anim_is_new() {
+                        self.me.set_fx(0xD);
+                        self.me.pose.speed = kmh(1000.0);
+                    }
+                    if self.blocked() {
+                        self.me.pose.speed = 0.0;
+                    }
+                    moving = false;
+                }
+                _ => {}
+            }
+            if moving {
+                self.step(6, 6, 3, kmh(2000.0), 10000.0);
+                for f in [9, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47] {
+                    self.set(f);
+                }
+            } else {
+                self.step(6, 6, 3, 0.0, kmh(100.0));
+            }
+            self.me.apply_gravity();
+            self.me.request_orbit(50.0, 100.0);
+            self.set(0xBC);
+        }
+        if phase == DECIDE {
+            match self.anim_id() {
+                0xC | 0xD => {
+                    let mut stop = self.me.action_frame >= 0xD;
+                    if self.blocked() && opp_yaw_from_facing(self.me, self.opp).abs() < PI / 4.0 {
+                        stop = true;
+                    }
+                    if stop {
+                        self.request_anim(0xE, 0.15);
+                    }
+                }
+                0xE => {
+                    self.decide_attack(3);
+                    let q = self.queued();
+                    self.request(q);
+                }
+                _ => {}
+            }
+            if self.me.action_frame >= 7 {
+                self.decide_main(0x2000_0000);
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
+    /// `BtlParam_GetType`: the search type of the costume (parameter +0x58; 2..4 become 7 / 8 in a variant).
+    fn search_type(&self) -> usize {
+        let costume = if (0..4).contains(&self.data.costume) {
+            self.data.costume as usize
+        } else {
+            0
+        };
+        let t = i32::from(self.data.tables.params.u8_at(0x58 + costume) as i8);
+        let t = match t {
+            2..=4 if self.me.gauge.variant != 0 => {
+                if t == 4 {
+                    8
+                } else {
+                    7
+                }
+            }
+            _ => t,
+        };
+        t.max(0) as usize
+    }
+
+    /// `BtlAct_GrowSearchWindow`: the window widens by the search type's angle and range (60% against an opponent
+    /// with parameter word bit 0x80; ability 0x6B is not ported), up to pi and 1000000; true when the angle passes
+    /// `limit`.
+    fn grow_search_window(&mut self, limit: f32) -> bool {
+        const ANGLE: [f32; 10] = [
+            0.022_577_715,
+            0.027_516_59,
+            0.062_895_06,
+            0.110_066_36,
+            0.293_510_3,
+            0.022_013_27,
+            0.030_363_134,
+            0.016_933_287,
+            0.019_567_352,
+            0.025_158_024,
+        ];
+        const RANGE: [f32; 10] = [
+            3000.0, 3500.0, 20000.0, 30000.0, 40000.0, 3000.0, 4000.0, 2000.0, 2500.0, 3000.0,
+        ];
+        let t = self.search_type();
+        let slow = (self.opp_data.tables.params.chara_flags() >> 7) & 1 != 0;
+        let mut d_angle = ANGLE.get(t).copied().unwrap_or(0.0);
+        let mut d_range = RANGE.get(t).map_or(0.0, |&v| kmh(v));
+        if slow {
+            d_angle *= 0.6;
+            d_range *= 0.6;
+        }
+        let old = self.me.search_angle;
+        self.me.search_angle = (old + d_angle).min(PI);
+        self.me.search_range = (self.me.search_range + d_range).min(1_000_000.0);
+        old < limit && limit <= self.me.search_angle
+    }
+
+    /// `BtlAct_IsOppInSearchWindow`: the opponent within the window's angle of the facing and its range (narrower
+    /// to the sides), unless it is hidden (flag 0xBA) or cannot be targeted (0xB2). Ability 0x6C is not ported.
+    fn opp_in_search_window(&self) -> bool {
+        if self.flag(0xB2) {
+            return false;
+        }
+        let dist = opp_distance_xz(self.me, self.opp);
+        let yaw = opp_yaw_from_facing(self.me, self.opp).abs();
+        yaw <= self.me.search_angle
+            && dist < self.me.search_range * ((1.0 - yaw / PI) * 0.85 + 0.15)
+            && !self.flag(0xBA)
+    }
+
+    /// Action 0x36 (`BtlAct_SearchHandler`): looking for an opponent lost from sight (motion 0x17F for search
+    /// types 2..4, then the loop 0x17E) while the search window grows; found, the lock-on comes back and 0xB
+    /// follows. Leaving resets the window. The voices and the sound are not ported.
+    fn search(&mut self, phase: u32) {
+        if phase == ENTER {
+            let looks = matches!(self.search_type(), 2..=4);
+            self.play(if looks { 0x17F } else { 0x17E }, 0.15);
+        }
+        if phase == RUN {
+            let mut grow = false;
+            match self.anim_id() {
+                0x17F => {
+                    self.me.anim_advance_then(0x17E, 0.15, 0);
+                    if 0.5 < self.me.anim_progress() {
+                        grow = true;
+                    }
+                }
+                0x17E => {
+                    self.me.anim_advance_loop(0);
+                    grow = true;
+                }
+                _ => {}
+            }
+            if grow {
+                self.grow_search_window(PI / 2.0);
+            }
+            if self.opp_in_search_window() {
+                self.held(5);
+                self.me.turn_yaw(self.opp, 2, PI);
+                if !self.flag(0xBA) {
+                    self.me.set_fx(0x15);
+                }
+            }
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xC9);
+            self.set(0x1B);
+            self.set(0x1C);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            if self.flag(0xF) {
+                self.clear(0xE);
+            }
+            if self.flag(5) {
+                self.request(0xB);
+            }
+        }
+        if phase == DECIDE {
+            self.decide_main(0x48_1FEB);
+            self.decide_attack(3);
+            self.decide_common(6);
+            let q = self.queued();
+            self.request(q);
+        }
+        if phase == LEAVE {
+            self.me.search_angle = 0.5;
+            self.me.search_range = 500.0;
         }
     }
 

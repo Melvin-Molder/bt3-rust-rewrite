@@ -149,6 +149,7 @@ pub struct BattleAssets {
 
 pub(crate) struct FighterModel {
     pub(crate) chara: i32,
+    pub(crate) costume: i32,
     model: CharaModel,
     /// Per part, per batch: the material texture and the shading row.
     batch_textures: Vec<Vec<[usize; 2]>>,
@@ -274,6 +275,7 @@ pub fn load(
         let mut fighter = load_fighter(&file, &ramp, &mut assets)
             .map_err(|e| format!("character file 0x{file_id:X}: {e}"))?;
         fighter.chara = side.chara;
+        fighter.costume = side.costume;
         for (i, cut) in fighter.cam_cuts.iter_mut().enumerate() {
             *cut = pack_section(&file, ENTRANCE_CUT_SECTION + i)
                 .ok()
@@ -571,6 +573,7 @@ fn load_fighter(
         .collect::<Result<Vec<_>, String>>()?;
     Ok(FighterModel {
         chara: 0,
+        costume: 0,
         model,
         batch_textures,
         motions: Vec::new(),
@@ -663,6 +666,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         entry: f.entry,
         effect: f.effect.as_ref(),
         blast_assets: std::array::from_fn(|i| f.blast_assets[i].as_ref()),
+        costume: f.costume,
     }
 }
 
@@ -2673,6 +2677,70 @@ mod tests {
         };
         assert_eq!(mine, [0xB, 0x44, 0x63, 0xB], "{mine:x?}");
         assert!(anims.contains(&0x93), "{anims:x?}");
+    }
+
+    #[test]
+    fn real_circle_dash_goes_round_the_opponent() {
+        use crate::btl_input::pad::{CROSS, L2, START};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..20 {
+            frame(&mut battle, 0);
+        }
+        // The bearing of the fighter seen from the opponent.
+        let bearing = |b: &Battle| {
+            let (a, o) = (b.roster.chars[0].pose.pos, b.roster.chars[1].pose.pos);
+            (a[0] - o[0]).atan2(a[2] - o[2])
+        };
+        let before = bearing(&battle);
+        // The homing dash (L2 + Cross), and the same again while it flies: the circle dash 0x33.
+        let (mut mine, mut anims) = (Vec::new(), Vec::new());
+        for i in 0..100 {
+            let held = if i < 2 || (20..22).contains(&i) {
+                CROSS | L2
+            } else {
+                0
+            };
+            frame(&mut battle, held);
+            let a = &battle.roster.chars[0];
+            mine.push(a.act.current);
+            anims.push(a.anim.cur);
+        }
+        mine.dedup();
+        anims.dedup();
+        assert_eq!(mine, [0x19, 0x33, 0xB], "{mine:x?}");
+        assert!(
+            anims.windows(3).any(|w| w == [0x2D, 0x19, 0x1A]),
+            "{anims:x?}"
+        );
+        let turned = crate::btl_input::wrap_angle(bearing(&battle) - before).abs();
+        assert!(turned > 2.0, "went round by {turned} rad");
     }
 
     #[test]

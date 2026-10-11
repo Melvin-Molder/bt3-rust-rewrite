@@ -183,6 +183,8 @@ pub(crate) struct SideData<'a> {
     pub effect: Option<&'a EffectPack>,
     /// The decoded textures and sprite packs of the two blast lists' emitter sets.
     pub blast_assets: [Option<&'a crate::eft::SetAssets>; 2],
+    /// The costume of the side's character (`BtlMember_GetActive()->costume`).
+    pub costume: i32,
 }
 
 impl SideData<'_> {
@@ -324,6 +326,10 @@ pub(crate) struct Chr {
     pub vanish_limit: i32,
     /// `attackId`: the attack last prepared (read by `BtlAct_QueueComboFinish`, which is not ported).
     pub attack_id: i32,
+    /// `searchAngle` / `searchRange`: the window the search 0x36 finds the opponent in (zero until a search ends,
+    /// then 0.5 rad / 500).
+    pub search_angle: f32,
+    pub search_range: f32,
     /// `burstNode`: the node the finisher 0x66's burst effect follows.
     pub burst_node: i32,
     /// `nextAttack` / `attack`: the pending and the latched attack parameters.
@@ -441,6 +447,8 @@ impl Chr {
             vanish_count: 0,
             vanish_limit: 0,
             attack_id: 0,
+            search_angle: 0.0,
+            search_range: 0.0,
             burst_node: 0,
             next_attack: Attack::default(),
             attack: Attack::default(),
@@ -1780,6 +1788,98 @@ pub(crate) fn snap_to_opponent(me: &mut Chr, opp: &Chr) {
     me.flags.set(0x55);
     me.flags.set(0x3F);
     me.flags.set(0x24);
+}
+
+/// `BtlOpp_GetYawFromItsFacing`: the yaw to the opponent relative to the opponent's own facing.
+pub(crate) fn opp_yaw_from_its_facing(me: &Chr, opp: &Chr) -> f32 {
+    wrap_angle(opp_yaw(me, opp) - opp.snap_rot(6)[1])
+}
+
+/// `BtlMove_ClipToRadius`: where the segment from -> to leaves the vertical cylinder of `radius` (in x / z).
+fn clip_to_radius(from: [f32; 3], to: [f32; 3], radius: f32) -> Option<[f32; 3]> {
+    let p = [from[0], 0.0, from[2]];
+    let q = [to[0], 0.0, to[2]];
+    let d = sub(q, p);
+    let a = dot(d, d);
+    let b = 2.0 * dot(p, d);
+    let c = dot(p, p) - radius * radius;
+    let disc = b * b - a * 4.0 * c;
+    if disc < 0.0 || a < 0.001 {
+        return None;
+    }
+    let t = (disc.sqrt() - b) / (a + a);
+    if !(0.0..=1.0).contains(&t) {
+        return None;
+    }
+    // Vec4_Lerp(out, to, from, t) = to * t + from * (1 - t).
+    Some(add(scale3(to, t), scale3(from, 1.0 - t)))
+}
+
+/// `BtlMove_CircleOpponent`: flies round the opponent on a 200 circle toward the point opposite `base_yaw` (`side`
+/// picks the way round; `lead` leads a moving opponent), clipped to the stage radius; true on the frame the point
+/// is reached.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn circle_opponent(
+    me: &mut Chr,
+    opp: &Chr,
+    data: &SideData,
+    opp_data: &SideData,
+    env: &Env,
+    side: bool,
+    lead: bool,
+    base_yaw: f32,
+    speed: f32,
+) -> bool {
+    let mut at = opp.snap_pos(6);
+    at[1] += data.height() * 0.5 - opp_data.height() * 0.5;
+    let radius = 200.0;
+    let d = sub(at, me.pose.pos);
+    let mut diff = 0.0;
+    if 0.01 < d[0].abs() || 0.01 < d[2].abs() {
+        diff = wrap_angle(base_yaw - d[0].atan2(d[2]));
+    }
+    let mut diff = diff.abs();
+    let mut scale = 1.0;
+    if diff < 1.570_796_3 {
+        scale = 0.0;
+        if deg(18.0) < diff {
+            scale = (diff - deg(18.0)).sin();
+        }
+    }
+    let t = radius * diff / speed;
+    if lead {
+        let v = opp.pose.vel;
+        if kmh(10.0) < v[0].hypot(v[2]) {
+            let k = (wrap_angle(base_yaw - v[0].atan2(v[2])).abs() - 1.570_796_3) / 1.570_796_3;
+            if 0.0 < k {
+                at = add(at, scale3(v, t * k));
+            }
+        }
+    }
+    if !side {
+        diff = -diff;
+    }
+    let a = wrap_angle(diff * 0.5 + wrap_angle(base_yaw + PI));
+    let mut tgt = add(
+        [a.sin() * radius * scale, 0.0, a.cos() * radius * scale],
+        at,
+    );
+    if let Some(hit) = clip_to_radius(at, tgt, env.inner_radius()) {
+        tgt = hit;
+    }
+    me.turn_to_point(tgt, PI, PI);
+    me.turn_model_yaw(1.570_796_3, 0.5);
+    me.set_direction(3);
+    let p = &mut me.pose;
+    p.speed = speed;
+    let ahead = dot(sub(tgt, p.pos), p.dir).max(0.0);
+    let mut reached = false;
+    if ahead < p.speed {
+        p.speed = ahead;
+        reached = true;
+    }
+    p.pos = add(p.pos, scale3(p.dir, p.speed));
+    reached
 }
 
 /// `BtlOpp_GetYawFromFacing`: relative to the own model yaw plus the root yaw.
