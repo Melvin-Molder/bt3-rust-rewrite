@@ -56,6 +56,8 @@ const IDLE_MOTION: usize = 0;
 /// (section 0x16, read as `BtlSeqObj.talkTbl`).
 const ENTRANCE_CUT_SECTION: usize = 0x29;
 const TALK_TABLE_SECTION: usize = 0x16;
+/// `BtlObj_BindTables`: `mdl.unkA4` is section 0x2D + `gProgress->language`, which the US game leaves at 0.
+const SKILL_TEXT_SECTION: usize = 0x2D;
 /// `mdl->unk38` (object + 0x50): the HUD's face pictures.
 const FACE_SECTION: usize = 1;
 /// `gBattleTimeLimitTbl`: the rule's time limit in seconds (s16, -1 for none), in the executable.
@@ -165,6 +167,8 @@ pub(crate) struct FighterModel {
     pub(crate) effect: Option<EffectPack>,
     /// The textures and sprite packs of its two ki blast emitter sets.
     pub(crate) blast_assets: [Option<SetAssets>; 2],
+    /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
+    pub(crate) skill_text: Option<Vec<u16>>,
 }
 
 /// Reads what the battle draws so far. `read` returns a file of the AFS archives by id.
@@ -281,6 +285,12 @@ pub fn load(
         fighter.talk = pack_section(&file, TALK_TABLE_SECTION)
             .map(<[u8]>::to_vec)
             .unwrap_or_default();
+        fighter.skill_text = pack_section(&file, SKILL_TEXT_SECTION).ok().map(|s| {
+            s.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&c| c != 0)
+                .collect()
+        });
         fighter.gauge = start_gauge(&common, side.chara);
         // BtlObj_BindTables: object + 0x50 is section 1; HudGauge_DrawFace draws its texture `side`.
         let index = assets.fighters.len();
@@ -358,6 +368,7 @@ fn load_menu_sheet(file: &[u8], textures: &mut Vec<RgbaTexture>) -> std::io::Res
     let mut sheet = HudSheet {
         base: textures.len(),
         sizes: Vec::new(),
+        views: Vec::new(),
     };
     for entry in &res.entries {
         let tex0 = entry.texture_register;
@@ -369,6 +380,17 @@ fn load_menu_sheet(file: &[u8], textures: &mut Vec<RgbaTexture>) -> std::io::Res
             height: 1,
             pixels: vec![0; 4],
         }));
+    }
+    // The skill list's page tabs (entry 3) and page bar (entry 4) with the palettes of entries 0x26 + page.
+    for tex in [3, 4] {
+        for clut in 0x26..0x30 {
+            if let (Some(t), Some(c)) = (res.entries.get(tex), res.entries.get(clut))
+                && let Ok(texture) = bt3_data::gs::decode_sprite_texture_with_clut(t, c)
+            {
+                textures.push(texture);
+                sheet.views.push(((tex, clut), textures.len() - 1));
+            }
+        }
     }
     Ok(sheet)
 }
@@ -411,6 +433,7 @@ fn load_hud(file: &[u8]) -> std::io::Result<(Vec<RgbaTexture>, Vec<HudSheet>, Hu
         let mut sheet = HudSheet {
             base: textures.len(),
             sizes: Vec::new(),
+            views: Vec::new(),
         };
         for (tex, entry) in res.entries.iter().enumerate() {
             let tex0 = entry.texture_register;
@@ -558,6 +581,7 @@ fn load_fighter(
         gauge: SideGauge::default(),
         effect: None,
         blast_assets: [None, None],
+        skill_text: None,
     })
 }
 
@@ -621,6 +645,10 @@ pub struct Battle {
     prev_held: [u32; 2],
     /// The VU0 R register: seeded at boot and shared by every battle (the game moves it in and out).
     pub vu0: Vu0Random,
+    /// `Pad.gameRepeatTimer` / `gameRepeatLast` of both pads.
+    pad_repeat: [(i32, u32); 2],
+    /// The save's `charaBits` (the skill list's unlock tests); the game hands its save in.
+    pub chara_bits: [u64; 3],
 }
 
 /// What a side's files give the fighter simulation.
@@ -695,6 +723,7 @@ impl Battle {
         let menu = assets.menus.clone().map(|(pause, result)| {
             let mut menu = PauseMenu::new(pause, result);
             menu.reset();
+            menu.scripts = std::array::from_fn(|side| assets.fighters[side].skill_text.clone());
             menu
         });
         Self {
@@ -712,6 +741,8 @@ impl Battle {
             menu,
             prev_held: [0; 2],
             vu0: Vu0Random::default(),
+            pad_repeat: [(0, 0); 2],
+            chara_bits: crate::save::SaveData::default().chara_bits,
         }
     }
 
@@ -782,14 +813,35 @@ impl Battle {
             self.restart(&mut sounds);
         }
         let menu = std::array::from_fn(|i| {
+            use crate::btl_input::pad::{CROSS, DOWN, LEFT, RIGHT, START, TRIANGLE, UP};
             let (held, prev) = (pads[i].held, self.prev_held[i]);
             let down = held & !prev;
+            // Pad_CalcRepeat with the battle's Pad_SetRepeat(0x14, 1).
+            let (timer, last) = &mut self.pad_repeat[i];
+            let mut repeat = 0;
+            if held == *last && held != 0 {
+                *timer -= 1;
+                if *timer < 0 {
+                    *timer = 1;
+                    repeat = held;
+                }
+            } else {
+                *last = held;
+                *timer = 0x14;
+            }
+            if down != 0 {
+                repeat = down;
+            }
             MenuInput {
-                up: down & crate::btl_input::pad::UP != 0,
-                down: down & crate::btl_input::pad::DOWN != 0,
-                cross: down & crate::btl_input::pad::CROSS != 0,
-                triangle: down & crate::btl_input::pad::TRIANGLE != 0,
-                start: down & crate::btl_input::pad::START != 0,
+                up: down & UP != 0,
+                down: down & DOWN != 0,
+                cross: down & CROSS != 0,
+                triangle: down & TRIANGLE != 0,
+                start: down & START != 0,
+                rep_up: repeat & UP != 0,
+                rep_down: repeat & DOWN != 0,
+                rep_left: repeat & LEFT != 0,
+                rep_right: repeat & RIGHT != 0,
             }
         });
         self.prev_held = pads.map(|p| p.held);
@@ -814,7 +866,9 @@ impl Battle {
         ];
         self.hud.pre_update(self.seq.time_left(), &sides);
         self.seq_pre_update(&mut input);
-        {
+        // BATTLE_FLAG_PAUSE as the sequence left it last frame.
+        let paused = self.seq.paused;
+        if !paused {
             // BtlAiMgr_Update, after Battle_UpdateWork and before the fighters sample their input.
             let data = [
                 side_data(&self.assets.fighters[0]),
@@ -838,11 +892,17 @@ impl Battle {
         }
         let mut vu0 = self.vu0;
         self.with_roster(|roster, data, env| {
-            roster.sample_input(&pads, env);
-            roster.update_input(data, env);
-            roster.update_main(data, env);
-            roster.update_scene(data, env, &mut *input.libc, &mut vu0);
-            roster.post_scene(data, env);
+            // BtlChars_SampleInput, UpdateInput, UpdateMain and PostScene do nothing while paused; the effect
+            // scene runs with its time stopped.
+            if !paused {
+                roster.sample_input(&pads, env);
+                roster.update_input(data, env);
+                roster.update_main(data, env);
+            }
+            roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
+            if !paused {
+                roster.post_scene(data, env);
+            }
             false
         });
         self.vu0 = vu0;
@@ -850,17 +910,36 @@ impl Battle {
         let mut view = View::new(cam.eye, cam.rot);
         if self.demo.is_active() {
             let base = self.demo.attached().map(|side| self.roots[side]);
-            if let Some(demo) = self.demo.update(base) {
+            if let Some(demo) = self.demo.update(base, paused) {
                 view = demo;
             }
         }
-        self.roster.end_frame();
+        if !paused {
+            self.roster.end_frame();
+        }
         for side in 0..2 {
             if let Some(n) = self.roster.chars[side].obj.node(0) {
                 self.roots[side] = n.mtx;
             }
         }
+        // What the skill lists' line tests read (BtlText_CheckUnlock).
+        if let Some(menu) = &mut self.menu {
+            for side in 0..2 {
+                menu.text_ctx[side] = crate::btl_text::TextCtx {
+                    pad_type: 0,
+                    chara_bits: self.chara_bits,
+                    body_changed: self.roster.chars[side].gauge.body_changed,
+                };
+            }
+        }
         self.seq_update(&mut input);
+        // FontIcon_ResetAnim from the skill list's cursor.
+        if let Some(menu) = &mut self.menu
+            && std::mem::take(&mut menu.reset_anim)
+            && let Some(font) = font.as_deref_mut()
+        {
+            font.reset_icon_anim();
+        }
         let stage = draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view);
         let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
         for side in 0..2 {
@@ -909,6 +988,7 @@ impl Battle {
                 .draw(&fxw, &mut ot, &ctx, |chr| demo || chr == 0);
             ot.into_list()
         };
+        self.hud.set_paused(self.seq.paused);
         let mut hud = self.hud.draw(libc, shown);
         // BtlGame_Draw: the menu over the HUD.
         if let Some(menu) = &self.menu {
@@ -2270,6 +2350,164 @@ mod tests {
     #[test]
     fn real_ki_blast_of_character_2_draws_its_sprites() {
         ki_blast_draws_its_effects(2);
+    }
+
+    #[test]
+    fn real_pause_menu_shows_the_fighters_skill_list() {
+        use crate::btl_input::pad::{CROSS, DOWN, RIGHT, START, TRIANGLE};
+        let setup = BattleSetup::default();
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false)
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        frame(&mut battle, 0);
+        frame(&mut battle, START);
+        for _ in 0..10 {
+            frame(&mut battle, 0);
+        }
+        // Title, resume, skill list: one down from "resume".
+        frame(&mut battle, DOWN);
+        frame(&mut battle, 0);
+        let closed = frame(&mut battle, 0).hud.prims.len();
+        frame(&mut battle, CROSS);
+        for _ in 0..10 {
+            frame(&mut battle, 0);
+        }
+        let list = battle.menu.as_ref().unwrap().skill_list(0);
+        // Goku's script: four pages (special attacks, rushing techniques, signature techniques, ...).
+        assert_eq!(list.pages, 4);
+        assert_eq!(&list.count[..4], &[5, 7, 16, 22]);
+        let open = frame(&mut battle, 0).hud.prims.len();
+        assert!(
+            open > closed,
+            "the page drew nothing: {open} prims against {closed}"
+        );
+        // Right turns the page; down moves the page's cursor.
+        frame(&mut battle, RIGHT);
+        frame(&mut battle, 0);
+        frame(&mut battle, DOWN);
+        frame(&mut battle, 0);
+        let list = battle.menu.as_ref().unwrap().skill_list(0);
+        assert_eq!((list.page, list.cursor[1], list.cursor[0]), (1, 1, 0));
+        // Triangle closes the page, then the menu; the fight goes on.
+        frame(&mut battle, TRIANGLE);
+        for _ in 0..10 {
+            frame(&mut battle, 0);
+        }
+        frame(&mut battle, TRIANGLE);
+        for _ in 0..10 {
+            frame(&mut battle, 0);
+        }
+        assert!(!battle.seq.paused);
+    }
+
+    #[test]
+    fn real_pause_menu_freezes_the_fight_and_leaves_for_the_main_menu() {
+        use crate::btl_input::pad::{CROSS, DOWN, START, UP};
+        let setup = BattleSetup::default();
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        // `start` is START going down, as the game derives it from the same pad.
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false)
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..30 {
+            frame(&mut battle, 0);
+        }
+        assert!(!battle.seq.paused);
+        // START opens the pause menu for pad 0; from the next frame on nothing moves.
+        frame(&mut battle, START);
+        assert!(battle.seq.paused && battle.seq.pause_menu);
+        let still = |b: &Battle| (b.roster.frame, [0, 1].map(|i| b.roster.chars[i].pose.pos));
+        let before = still(&battle);
+        for _ in 0..40 {
+            frame(&mut battle, 0);
+        }
+        assert_eq!(still(&battle), before, "the fight moved while paused");
+        // START again closes it (the menu has finished opening by now) and the fight goes on.
+        frame(&mut battle, START);
+        for _ in 0..20 {
+            if !battle.seq.paused {
+                break;
+            }
+            frame(&mut battle, 0);
+        }
+        assert!(!battle.seq.paused && !battle.seq.pause_menu);
+        frame(&mut battle, 0);
+        frame(&mut battle, 0);
+        assert!(battle.roster.frame > before.0, "the fight did not resume");
+        // Pause again, down to "main menu" (title, resume, skill list, character select, main menu), confirm with
+        // "yes" (the yes / no box opens on "no").
+        frame(&mut battle, START);
+        for _ in 0..10 {
+            frame(&mut battle, 0);
+        }
+        for _ in 0..3 {
+            frame(&mut battle, DOWN);
+            frame(&mut battle, 0);
+        }
+        frame(&mut battle, CROSS);
+        for _ in 0..10 {
+            frame(&mut battle, 0);
+        }
+        frame(&mut battle, UP);
+        frame(&mut battle, 0);
+        frame(&mut battle, CROSS);
+        let mut exit = None;
+        for _ in 0..90 {
+            if let Some(reason) = frame(&mut battle, 0).exit {
+                exit = Some(reason);
+                break;
+            }
+        }
+        assert_eq!(
+            exit,
+            Some(8),
+            "state {:?}, winner {:#x}",
+            battle.seq.state,
+            battle.seq.winner
+        );
     }
 
     #[test]

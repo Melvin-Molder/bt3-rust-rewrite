@@ -198,6 +198,8 @@ pub enum TitleSound {
     Effect(u32, u32),
     /// `StreamSe_PlayDefault(0, id)`.
     StreamSe(u32),
+    /// `Adx_PauseSeVoice` (true) / `Adx_ResumeSeVoice` (false): the streamed SE and voice players.
+    PauseSeVoice(bool),
 }
 
 pub struct TitleFrame {

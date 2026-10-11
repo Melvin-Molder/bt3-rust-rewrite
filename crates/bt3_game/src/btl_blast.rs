@@ -192,6 +192,8 @@ pub(crate) struct World<'a, 'd> {
     pub libc: &'a mut LibcRandom,
     /// The VU0 R register (`Rand_FloatRange`).
     pub vu0: &'a mut crate::rng::Vu0Random,
+    /// `BATTLE_FLAG_PAUSE`: `BtlScene_IsTimeStopped` and every effect's "stopped" test hold.
+    pub paused: bool,
 }
 
 // ---- vectors ------------------------------------------------------------------------------------------------------
@@ -549,9 +551,12 @@ impl Scene {
     /// `BtlScene_Update`, `EftDet_Update` and `BtlScene_PostUpdate` for the ki blasts; then every fighter's live
     /// blast counts for `BtlMove_CanFireBlast`.
     pub(crate) fn update(&mut self, w: &mut World) {
-        // EftHit_BeginFrame (the pause is not ported).
-        self.records.clear();
-        let stopped = w.chars.iter().any(Chr::is_frozen);
+        // EftHit_BeginFrame: the records are kept while time is stopped.
+        if !w.paused {
+            self.records.clear();
+        }
+        // BtlScene_IsAnyCharStopped.
+        let stopped = w.paused || w.chars.iter().any(Chr::is_frozen);
         for side in 0..2 {
             for list in 0..2 {
                 let mut i = 0;
@@ -578,11 +583,13 @@ impl Scene {
         };
         self.fx.update(&fxw, w.libc, w.vu0);
         self.clamp_to_stage(w.env);
-        // EftDet_Update.
-        self.prepare(w.env);
-        self.clash_pass();
-        self.stage_pass(w.env);
-        self.fighter_pass(w);
+        // EftDet_Update: nothing while paused.
+        if !w.paused {
+            self.prepare(w.env);
+            self.clash_pass();
+            self.stage_pass(w.env);
+            self.fighter_pass(w);
+        }
         // BtlScene_PostUpdate: EftHit_UpdateResults has nothing a ki blast reads; the impacts are not ported.
         for side in 0..2 {
             for list in 0..2 {

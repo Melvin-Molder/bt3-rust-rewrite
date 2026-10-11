@@ -270,6 +270,7 @@ impl Roster {
         env: &Env,
         libc: &mut crate::rng::LibcRandom,
         vu0: &mut crate::rng::Vu0Random,
+        paused: bool,
     ) {
         let mut world = World {
             chars: &mut self.chars,
@@ -279,6 +280,7 @@ impl Roster {
             time_stopped: env.gate.time_stopped,
             libc,
             vu0,
+            paused,
         };
         self.scene.update(&mut world);
     }

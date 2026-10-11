@@ -2,15 +2,16 @@
 //! executable's data (0x2C4E70..0x2C6070), the engine that runs and draws one tree, and the pause-menu wrapper that
 //! turns a picked "result" item into the battle result.
 //!
-//! Only the result menu of the versus mode is wired up (`PauseMenu_Update(pad, 1)` from the end state). The
-//! skill-list and controls pages (item types 3 / 4), the menu sounds' bank and the font's button icons are not
-//! ported; no shipped result menu uses the two pages.
+//! The versus pause menu (`PauseMenu_Update(pad, 0)` while the fight is paused, with its skill-list page) and
+//! result menu (`PauseMenu_Update(pad, 1)` from the end state) are wired up. The controls page (item type 4) and
+//! the CPU level menu, which no versus tree has, are not ported.
 
 use std::collections::HashMap;
 use std::io;
 
 use bt3_data::elf::Elf;
 
+use crate::btl_text::{self, Painter, SkillList, TextCtx};
 use crate::font::{Font, rgba};
 use crate::hud::{HudBlend, HudPrim, HudSheet, HudVertex};
 use crate::title::TitleSound;
@@ -187,6 +188,14 @@ impl Tree {
         Ok(index)
     }
 
+    /// `BtlMenu_IsSkillList`.
+    fn is_skills(&self, m: usize) -> bool {
+        self.menus[m]
+            .items
+            .first()
+            .is_some_and(|i| i.kind == ITEM_SKILLS)
+    }
+
     fn is_page(&self, m: usize) -> bool {
         self.menus[m]
             .items
@@ -276,6 +285,11 @@ pub(crate) struct MenuInput {
     pub cross: bool,
     pub triangle: bool,
     pub start: bool,
+    /// `gameRepeat`: the directions that went down or repeat this frame.
+    pub rep_up: bool,
+    pub rep_down: bool,
+    pub rep_left: bool,
+    pub rep_right: bool,
 }
 
 /// The menu texts of the HUD file (`BtlMenu_GetText(n)`: entry n of its offset table, 16-bit characters up to a
@@ -330,6 +344,14 @@ pub(crate) struct PauseMenu {
     pad: i32,
     /// `gBtlMenu->top`: the tree being shown.
     top: Option<usize>,
+    /// `gBtlMenu->list`: each controller port's skill list.
+    lists: [SkillList; 2],
+    /// Each side's skill-list script (`BtlMenu_SetScript` of the fighter's character file entry 0x2D).
+    pub(crate) scripts: [Option<Vec<u16>>; 2],
+    /// What the scripts' line tests read, per side.
+    pub(crate) text_ctx: [TextCtx; 2],
+    /// `FontIcon_ResetAnim` was called during the update (the caller resets the font's clock).
+    pub(crate) reset_anim: bool,
 }
 
 impl PauseMenu {
@@ -340,7 +362,21 @@ impl PauseMenu {
             active: true,
             pad: 0,
             top: None,
+            lists: [SkillList::default(); 2],
+            scripts: [None, None],
+            text_ctx: [TextCtx {
+                pad_type: 0,
+                chara_bits: [0; 3],
+                body_changed: false,
+            }; 2],
+            reset_anim: false,
         }
+    }
+
+    /// A controller port's skill list.
+    #[cfg(test)]
+    pub(crate) fn skill_list(&self, pad: usize) -> SkillList {
+        self.lists[pad]
     }
 
     /// `PauseMenu_Reset`: both trees closed.
@@ -362,6 +398,8 @@ impl PauseMenu {
         texts: &MenuTexts,
         sounds: &mut Vec<TitleSound>,
     ) -> (bool, Option<i32>) {
+        // BtlMenu_SetScript: the script of the pad's side.
+        let side = (pad & 1) as usize;
         let mut run = Run {
             tree: &mut self.trees[which],
             work_active: &mut self.active,
@@ -371,6 +409,10 @@ impl PauseMenu {
             font,
             texts,
             sounds: &mut *sounds,
+            list: &mut self.lists[side],
+            script: self.scripts[side].as_deref(),
+            text_ctx: self.text_ctx[side],
+            reset_anim: &mut self.reset_anim,
         };
         if run.update(None, 0, pad, input) {
             self.active = false;
@@ -406,7 +448,13 @@ impl PauseMenu {
         if !self.active {
             return;
         }
-        draw_menu(&self.trees[which], 0, self.pad, d, out);
+        let side = (self.pad & 1) as usize;
+        let skills = Skills {
+            list: &self.lists[side],
+            script: self.scripts[side].as_deref(),
+            ctx: self.text_ctx[side],
+        };
+        draw_menu(&self.trees[which], 0, self.pad, d, &skills, out);
     }
 }
 
@@ -420,6 +468,17 @@ struct Run<'r> {
     font: Option<&'r Font>,
     texts: &'r MenuTexts,
     sounds: &'r mut Vec<TitleSound>,
+    list: &'r mut SkillList,
+    script: Option<&'r [u16]>,
+    text_ctx: TextCtx,
+    reset_anim: &'r mut bool,
+}
+
+/// The skill list a page draws.
+struct Skills<'s> {
+    list: &'s SkillList,
+    script: Option<&'s [u16]>,
+    ctx: TextCtx,
 }
 
 impl Run<'_> {
@@ -468,14 +527,77 @@ impl Run<'_> {
         }
     }
 
+    /// `PauseMenu_SkillListFunc`: left / right turn the page (wrapping), up / down move the entry cursor (held
+    /// at the ends) and scroll the seven-line window, on the owner pad's repeat word.
+    fn skill_list_func(&mut self, press: MenuInput) {
+        let list = &mut *self.list;
+        let last = list.pages - 1;
+        let mut page = list.page;
+        let mut sounds = 0;
+        if press.rep_right {
+            page += 1;
+            sounds += 1;
+        }
+        if press.rep_left {
+            page -= 1;
+            sounds += 1;
+        }
+        if page > last {
+            page = 0;
+        }
+        if page < 0 {
+            page = last;
+        }
+        let mut step = 0;
+        if press.rep_up {
+            step = -1;
+        }
+        if press.rep_down {
+            step += 1;
+        }
+        let pi = page.clamp(0, 9) as usize;
+        let mut scroll = list.scroll[pi];
+        let mut cursor = list.cursor[pi];
+        let max = list.count[pi] - 1;
+        let lim = scroll + 6;
+        let old = cursor;
+        if step != 0 {
+            if (step < 0 && cursor != 0) || (step > 0 && cursor != max) {
+                sounds += 1;
+            }
+            cursor += step;
+        }
+        if cursor > max {
+            cursor = max;
+        }
+        if cursor < 0 {
+            cursor = 0;
+        }
+        if cursor < scroll {
+            scroll = cursor;
+        }
+        if cursor > lim {
+            scroll = cursor - 6;
+        }
+        list.scroll[pi] = scroll;
+        list.cursor[pi] = cursor;
+        list.page = page;
+        if cursor != old {
+            *self.reset_anim = true;
+        }
+        for _ in 0..sounds {
+            self.se(SE_MOVE);
+        }
+    }
+
     /// `BtlMenu_CallItem`.
-    fn call_item(&mut self, m: usize, i: usize, leaf: bool) {
+    fn call_item(&mut self, m: usize, i: usize, leaf: bool, press: MenuInput) {
         let item = &self.tree.menus[m].items[i];
         let (Some(func), true) = (item.func, item.active) else {
             return;
         };
         let selected = item.selected;
-        let result = self.call_func(func, m, selected);
+        let result = self.call_func(func, m, selected, press);
         let item = &mut self.tree.menus[m].items[i];
         if result != 0 {
             item.active = false;
@@ -487,9 +609,11 @@ impl Run<'_> {
         }
     }
 
-    /// The item callbacks of pause_menu.c. The skill list and the CPU level menu are not reachable from the result
-    /// menus and do nothing here.
-    fn call_func(&mut self, func: Func, _m: usize, selected: bool) -> i32 {
+    /// The item callbacks of pause_menu.c (the CPU level menu, in no versus tree, does nothing here).
+    fn call_func(&mut self, func: Func, m: usize, selected: bool, press: MenuInput) -> i32 {
+        if func == Func::SkillList && self.tree.menus[m].state == STATE_ACTIVE {
+            self.skill_list_func(press);
+        }
         if func == Func::Confirm && selected {
             // PauseMenu_ConfirmFunc: on the shown tree's top.
             self.tree.set_value(self.top, 1, 0);
@@ -505,11 +629,13 @@ impl Run<'_> {
     fn update(&mut self, parent: Option<usize>, m: usize, pad: i32, press: MenuInput) -> bool {
         *self.work_active = true;
         *self.work_pad = pad;
+        // The controller type (Pad_GetLastStatus: 0 once a pad was read) and BtlText_CountEntries.
+        btl_text::count_entries(self.list, self.script, &self.text_ctx);
         self.fix_cursor(m);
         let open = self.tree.menus[m].open;
         if open >= 0 {
             if let Some(sub) = self.tree.menus[m].items[open as usize].sub {
-                self.call_item(m, open as usize, false);
+                self.call_item(m, open as usize, false, press);
                 if self.update(Some(m), sub, pad, press) {
                     let menu = &mut self.tree.menus[m];
                     menu.items[open as usize].active = false;
@@ -582,7 +708,7 @@ impl Run<'_> {
         // end: the leaf callback of the item under the cursor.
         let cursor = self.tree.menus[m].cursor.max(0) as usize;
         if self.tree.menus[m].items[cursor].sub.is_none() {
-            self.call_item(m, cursor, true);
+            self.call_item(m, cursor, true, press);
         }
         false
     }
@@ -756,6 +882,152 @@ fn sprite(sheet: &HudSheet, tex: usize, rect: [f32; 4], uv: [f32; 4], color: [u8
 
 const GREY: [u8; 4] = [0x80, 0x80, 0x80, 0x80];
 
+/// `BtlText_PutSprite` under a scissor (`SCISSOR_1`, inclusive bounds): sheet entry `tex`, texels `uv` over the
+/// pixels `rect` (either may run backwards), cut to the scissor with the texels following.
+pub(crate) fn push_cut(
+    sheet: &HudSheet,
+    out: &mut Vec<HudPrim>,
+    tex: usize,
+    rect: [i32; 4],
+    uv: [i32; 4],
+    scissor: [i32; 4],
+) {
+    let [x0, y0, x1, y1] = rect.map(|v| v as f32);
+    let [u0, v0, u1, v1] = uv.map(|v| v as f32);
+    let (sx0, sy0) = (scissor[0] as f32, scissor[1] as f32);
+    let (sx1, sy1) = ((scissor[2] + 1) as f32, (scissor[3] + 1) as f32);
+    let cut = |a0: f32, a1: f32, t0: f32, t1: f32, lo: f32, hi: f32| -> Option<[f32; 4]> {
+        let (min, max) = (a0.min(a1), a0.max(a1));
+        let (n0, n1) = (min.max(lo), max.min(hi));
+        if n0 >= n1 {
+            return None;
+        }
+        let t = |a: f32| t0 + (a - a0) / (a1 - a0) * (t1 - t0);
+        Some(if a0 <= a1 {
+            [n0, n1, t(n0), t(n1)]
+        } else {
+            [n1, n0, t(n1), t(n0)]
+        })
+    };
+    let (Some([nx0, nx1, nu0, nu1]), Some([ny0, ny1, nv0, nv1])) =
+        (cut(x0, x1, u0, u1, sx0, sx1), cut(y0, y1, v0, v1, sy0, sy1))
+    else {
+        return;
+    };
+    out.push(sprite(
+        sheet,
+        tex,
+        [nx0, ny0, nx1, ny1],
+        [nu0, nv0, nu1, nv1],
+        GREY,
+    ));
+}
+
+/// `BtlMenu_Draw` of the skill-list page in the box (x, y, w, h): the lower and upper frames, every page's tab
+/// with the current one on top of the page bar, the list and the details (`BtlText_DrawList`), the scroll bar.
+fn draw_skill_page(
+    tree: &Tree,
+    m: usize,
+    [x, y, w, h]: [i32; 4],
+    d: &mut MenuDraw,
+    skills: &Skills,
+    out: &mut Vec<HudPrim>,
+) {
+    let menu = &tree.menus[m];
+    let (pad_x, pad_y) = (menu.pad_x, menu.pad_y);
+    let list = skills.list;
+    let x1 = x + w;
+    draw_frame(d.sheet, out, x, x1, y + 0x10C, y + h, 1);
+    draw_frame(d.sheet, out, x, x1, y, y + 0x111, 1);
+    // BtlMenu_DrawPageTab: sheet entry 3 with the page's palette (entry 0x26 + page), 50 pixels per tab.
+    let tab = |out: &mut Vec<HudPrim>, page: i32| {
+        let tx = x + page * 50 + 20;
+        put_mirrored(
+            d.sheet,
+            out,
+            [tx, tx + 50, y + 6, y + 0x19],
+            3,
+            (page + 0x26) as usize,
+            true,
+        );
+    };
+    for i in (0..list.pages).rev() {
+        tab(out, i);
+    }
+    // BtlMenu_DrawPageBar: sheet entry 4 with the page's palette.
+    put_mirrored(
+        d.sheet,
+        out,
+        [x + 4, x1 - 3, y + 0x14, y + 0x39],
+        4,
+        (list.page.max(0) + 0x26) as usize,
+        false,
+    );
+    tab(out, list.page);
+    let Some(font) = d.font.as_deref_mut() else {
+        return;
+    };
+    let mut paint = Painter {
+        sheet: d.sheet,
+        out,
+        scissor: [0, 0, 0x1FF, 0x1BF],
+    };
+    let (lx0, lx1) = (x + pad_x, x - pad_x + w);
+    btl_text::draw_list(
+        font,
+        &mut paint,
+        list,
+        skills.script,
+        &skills.ctx,
+        [lx0, lx1, y + 0x3E, y + 0x102],
+        0,
+    );
+    btl_text::draw_list(
+        font,
+        &mut paint,
+        list,
+        skills.script,
+        &skills.ctx,
+        [lx0, lx1, y + 0x11B, y - pad_y + h],
+        1,
+    );
+    btl_text::draw_scroll_bar(&mut paint, list, lx1, y + 0x3E, y + 0x100);
+}
+
+/// `BtlMenu_PutMirrored`: copies of sheet entry `tex` (seen through entry `clut`'s palette) mirrored about the box
+/// centre: with `halves` a left and a right copy, else four quarters.
+#[allow(clippy::too_many_arguments)]
+fn put_mirrored(
+    sheet: &HudSheet,
+    out: &mut Vec<HudPrim>,
+    [x0, x1, y0, y1]: [i32; 4],
+    tex: usize,
+    clut: usize,
+    halves: bool,
+) {
+    let (hw, hh) = ((x1 - x0) / 2, (y1 - y0) / 2);
+    let (cx, cy) = ((x0 + hw) as f32, (y0 + hh) as f32);
+    let (w, h) = (hw as f32, hh as f32);
+    let texture = sheet.view(tex, clut);
+    let mut put = |rect: [f32; 4], uv: [f32; 4]| {
+        let mut prim = sprite(sheet, tex, rect, uv, GREY);
+        prim.texture = texture;
+        out.push(prim);
+    };
+    if halves {
+        for sx in [-1.0, 1.0] {
+            put(
+                [cx + sx * w, cy - h, cx, cy + h],
+                [0.0, 0.0, w * 2.0, h * 2.0],
+            );
+        }
+    } else {
+        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            put([cx + sx * w, cy + sy * h, cx, cy], [0.0, 0.0, w, h]);
+        }
+    }
+}
+
 /// `BtlMenu_DrawFrame` / `BtlMenu_PutMirrored` with four quarters: the top-left corner of sheet entry kind + 1,
 /// mirrored about the box centre (the texture clamps past its edge).
 fn draw_frame(
@@ -782,9 +1054,17 @@ fn draw_frame(
 }
 
 /// `BtlMenu_Draw`: the growing box while a menu opens or closes; when active, the deepest open menu.
-fn draw_menu(tree: &Tree, m: usize, pad: i32, d: &mut MenuDraw, out: &mut Vec<HudPrim>) {
+fn draw_menu(
+    tree: &Tree,
+    m: usize,
+    pad: i32,
+    d: &mut MenuDraw,
+    skills: &Skills,
+    out: &mut Vec<HudPrim>,
+) {
     let menu = &tree.menus[m];
     let page = tree.is_page(m);
+    let is_skills = tree.is_skills(m);
     match menu.state {
         STATE_OPEN..=STATE_CLOSING => {
             let (mut w, mut h) = (menu.w as i32, menu.h as i32);
@@ -795,7 +1075,7 @@ fn draw_menu(tree: &Tree, m: usize, pad: i32, d: &mut MenuDraw, out: &mut Vec<Hu
                 h = 4;
             }
             let (x, y) = ((SCREEN_W - w) >> 1, (SCREEN_H - h) >> 1);
-            draw_frame(d.sheet, out, x, x + w, y, y + h, usize::from(page));
+            draw_frame(d.sheet, out, x, x + w, y, y + h, usize::from(is_skills));
         }
         STATE_ACTIVE => {
             if !tree.has_open_sub(m) {
@@ -803,8 +1083,12 @@ fn draw_menu(tree: &Tree, m: usize, pad: i32, d: &mut MenuDraw, out: &mut Vec<Hu
                 let w = menu_width(tree, Some(m), pad, font, d.texts);
                 let h = menu_height(tree, Some(m), font);
                 let (x, y) = ((SCREEN_W - w) >> 1, (SCREEN_H - h) >> 1);
-                // The two pages are not ported: their box only.
-                draw_frame(d.sheet, out, x, x + w, y, y + h, usize::from(page));
+                if is_skills {
+                    draw_skill_page(tree, m, [x, y, w, h], d, skills, out);
+                } else {
+                    // The controls page (no versus tree has one) draws its box only.
+                    draw_frame(d.sheet, out, x, x + w, y, y + h, 0);
+                }
                 if !page {
                     let ty = y + menu.pad_y;
                     if let Some(font) = d.font.as_deref_mut() {
@@ -855,9 +1139,16 @@ fn draw_menu(tree: &Tree, m: usize, pad: i32, d: &mut MenuDraw, out: &mut Vec<Hu
                     }
                 }
             }
+            // FontIcon_ResetAnim behind every plain menu: its icons stand on their first frame.
+            if !tree.has_open_sub(m)
+                && !page
+                && let Some(font) = d.font.as_deref_mut()
+            {
+                font.reset_icon_anim();
+            }
             for (i, item) in menu.items.iter().enumerate() {
                 if let (Some(sub), true) = (item.sub, menu.open == i as i32) {
-                    draw_menu(tree, sub, pad, d, out);
+                    draw_menu(tree, sub, pad, d, skills, out);
                 }
             }
         }

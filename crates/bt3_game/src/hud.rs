@@ -51,6 +51,21 @@ const PART_OFS: [[i16; 2]; 12] = [
 pub(crate) struct HudSheet {
     pub(crate) base: usize,
     pub(crate) sizes: Vec<[i32; 2]>,
+    /// Extra decodings: entry `.0.0` looked up through entry `.0.1`'s palette, at texture `.1`.
+    pub(crate) views: Vec<((usize, usize), usize)>,
+}
+
+impl HudSheet {
+    /// The texture of entry `tex` drawn with entry `clut`'s palette (`BtlMenu_GetTex0(tex, clut)`).
+    pub(crate) fn view(&self, tex: usize, clut: usize) -> Option<usize> {
+        if tex == clut {
+            return Some(self.base + tex);
+        }
+        self.views
+            .iter()
+            .find(|(k, _)| *k == (tex, clut))
+            .map(|&(_, t)| t)
+    }
 }
 
 /// One corner of a HUD triangle: GS screen pixels, texture coordinates (0..1) and the mask texture's.
@@ -660,6 +675,12 @@ impl Hud {
         }
     }
 
+    /// `BATTLE_FLAG_PAUSE` as the parts read it while they update.
+    pub(crate) fn set_paused(&mut self, paused: bool) {
+        self.gauge.paused = paused;
+        self.timer.paused = paused;
+    }
+
     /// `Hud_ShowAll`.
     pub(crate) fn show_all(&mut self, on: bool) {
         self.flags = if on { SHOW_ALL } else { 0 };
@@ -740,6 +761,7 @@ mod tests {
                 [512, 128],
                 [32, 32],
             ],
+            views: Vec::new(),
         }
     }
 

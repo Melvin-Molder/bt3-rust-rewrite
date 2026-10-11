@@ -163,6 +163,8 @@ pub(crate) struct GaugePart {
     hp_bar_fade: [Ramp; 2],
     slide: [Ramp; 2],
     slide_all: Ramp,
+    /// `BATTLE_FLAG_PAUSE`: every animation stands still.
+    pub(crate) paused: bool,
     hp_drain: [i32; 2],
     ki_drain: [i32; 2],
     ki_reserve_pulse: [Ramp; 2],
@@ -360,6 +362,7 @@ impl GaugePart {
             hp_bar_fade: [Ramp::default(); 2],
             slide: [Ramp::default(); 2],
             slide_all: Ramp::default(),
+            paused: false,
             hp_drain: [0; 2],
             ki_drain: [0; 2],
             ki_reserve_pulse: [Ramp::default(); 2],
@@ -404,14 +407,16 @@ impl GaugePart {
             self.spr[i].mirror = flip;
         }
         // Updates: root, panel, then the panel's children in order.
-        if side == 0 {
+        if !self.paused && side == 0 {
             self.slide_all.step();
         }
         self.root_pos = [
             (self.slide_all.value * -256.0) as i32,
             (self.slide_all.value * -224.0) as i32,
         ];
-        self.slide[side].step();
+        if !self.paused {
+            self.slide[side].step();
+        }
         let slide = self.slide[side].value;
         self.panel_pos = [(slide * -256.0) as i32 - 2, (slide * -224.0) as i32 + 8];
         self.update_aura(libc);
@@ -486,14 +491,23 @@ impl GaugePart {
         for i in 0..10 {
             let spr = &mut self.spr[53 + i];
             let mut n;
-            loop {
-                n = libc.int_range(0, 9) as usize;
-                if AURA_FRAMES[n] != spr.uv {
-                    break;
+            // While paused each spark shows its own frame, without jitter or random draws.
+            if self.paused {
+                n = i;
+            } else {
+                loop {
+                    n = libc.int_range(0, 9) as usize;
+                    if AURA_FRAMES[n] != spr.uv {
+                        break;
+                    }
                 }
             }
             spr.uv = AURA_FRAMES[n];
-            let ofs = [libc.int_range(-5, 5), libc.int_range(-5, 5) - 8];
+            let ofs = if self.paused {
+                [0, -8]
+            } else {
+                [libc.int_range(-5, 5), libc.int_range(-5, 5) - 8]
+            };
             spr.set_rect(0, 0x40, 0, 0x40);
             spr.move_by((i % 5) as i32 * 46 + ofs[0], (i / 5) as i32 * 20 + ofs[1]);
             spr.rgba = [0x80, 0x80, 0x80, self.aura_alpha[side] as u8];
@@ -502,15 +516,16 @@ impl GaugePart {
         self.spr[62].init_plain([0, 0, 0xFF, blue]);
         self.spr[62].set_rect(0, 0x180, 0, 0x6C);
         let ramp = &mut self.low_hp_pulse[side];
+        let paused = self.paused;
         if self.hp[side] <= HP_BAR && !self.dead[side] {
-            if ramp.step() {
+            if !paused && ramp.step() {
                 if ramp.value == 0.0 {
                     ramp.start(0.5, 0.0, 1.0);
                 } else {
                     ramp.start(0.5, 1.0, 0.0);
                 }
             }
-        } else if ramp.step() && ramp.value == 1.0 {
+        } else if !paused && ramp.step() && ramp.value == 1.0 {
             ramp.start(0.5, 1.0, 0.0);
         }
         let red = (ramp.value * 44.0) as u8;
@@ -524,12 +539,18 @@ impl GaugePart {
         for i in 0..3 {
             let (count, amp) = &mut self.shake[side][i];
             if *count != 0 {
+                if self.paused {
+                    continue;
+                }
                 *count -= 1;
                 let amp = i32::from(*amp);
                 self.ofs[i] = [libc.int_range(-amp, amp), libc.int_range(-amp, amp)];
             } else {
                 self.ofs[i] = [0, 0];
             }
+        }
+        if self.paused {
+            return;
         }
         self.hp_bar_fade[side].step();
         let (hp, shown) = (self.hp[side], self.hp_shown[side]);
@@ -583,7 +604,7 @@ impl GaugePart {
         } else {
             400
         });
-        if ki < self.ki_shown[side] {
+        if !self.paused && ki < self.ki_shown[side] {
             self.ki_shown[side] -= *drain;
         }
         if ki >= self.ki_shown[side] {
@@ -624,9 +645,12 @@ impl GaugePart {
         let side = self.side;
         let ki = self.ki[side];
         let bars = ki / KI_BAR;
-        if self.ki_bar_flash[side].step() {
+        // While paused: whether the flash is over, without stepping it.
+        let paused = self.paused;
+        let a = &mut self.ki_bar_flash[side];
+        if if paused { a.at_target() } else { a.step() } {
             let b = &mut self.ki_full_pulse[side];
-            if b.step() {
+            if !paused && b.step() {
                 if b.value == 0.0 {
                     b.start(1.0, 0.0, 1.0);
                 } else {
@@ -681,8 +705,9 @@ impl GaugePart {
             spr.set_uv(u0, u1, v0, v1);
             spr.move_by(10, -16);
         }
+        let paused = self.paused;
         let ramp = &mut self.blast_flash[side];
-        if ramp.step() {
+        if !paused && ramp.step() {
             if blast >= max {
                 if ramp.value == 0.0 {
                     ramp.start(1.0, 0.0, 1.0);
@@ -932,6 +957,8 @@ pub(crate) struct TimerPart {
     prev: i32,
     pulse: Ramp,
     slide: Ramp,
+    /// `BATTLE_FLAG_PAUSE`: the slide and the pulse stand still.
+    pub(crate) paused: bool,
 }
 
 impl TimerPart {
@@ -961,6 +988,7 @@ impl TimerPart {
             prev: 0,
             pulse: Ramp::default(),
             slide: Ramp::default(),
+            paused: false,
         }
     }
 
@@ -978,7 +1006,9 @@ impl TimerPart {
 
     /// The root's and the clock's updates, then the clock's draw.
     pub(crate) fn run(&mut self, layer: &mut GsLayer, textures: &HudTextures) {
-        self.slide.step();
+        if !self.paused {
+            self.slide.step();
+        }
         let root = [0, (self.slide.value * -224.0) as i32];
         self.update_digits();
         let mut paint = Painter {
@@ -1054,7 +1084,9 @@ impl TimerPart {
                 s.scale(scale, scale);
                 s.move_by(0, -16);
             }
-            self.pulse.step();
+            if !self.paused {
+                self.pulse.step();
+            }
         } else {
             let sub = if (0..10).contains(&value) { 1 } else { 0 };
             for i in 1..4 {

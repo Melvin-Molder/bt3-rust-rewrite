@@ -11,6 +11,7 @@ mod btl_input;
 mod btl_menu;
 mod btl_mgr;
 mod btl_obj;
+mod btl_text;
 mod char_select;
 mod dialog;
 mod draw;
@@ -224,6 +225,8 @@ struct Game {
     /// Streamed-SE player 0 (`StreamSe_PlayDefault(0, id)`) and the file being decoded for it.
     stream_se: Option<Player>,
     pending_stream_se: Option<Decoding>,
+    /// `Adx_PauseSeVoice`: the voice and streamed-SE players are paused.
+    se_voice_paused: bool,
     /// The voice entity was spawned this update, so it is not in the world yet.
     voice_fresh: bool,
     /// The last voice played to its end (`ADXT_STAT_PLAYEND`).
@@ -407,6 +410,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             voice: None,
             stream_se: None,
             pending_stream_se: None,
+            se_voice_paused: false,
             voice_fresh: false,
             voice_ended: false,
             pending_voice: None,
@@ -508,7 +512,26 @@ fn load_fonts(
         slots.push(font::FontSlot::new(&file, indices));
         line_height = file.line_height;
     }
-    Ok(font::Font::new(slots, line_height))
+    let mut font = font::Font::new(slots, line_height);
+    // FontIcon_Init: the icon file is at boot file word 8; the tag and icon tables are in the executable.
+    let cnf = image.read_file("SYSTEM.CNF")?;
+    let exe = bt3_data::elf::boot_path(&cnf).ok_or("SYSTEM.CNF names no executable")?;
+    let elf = bt3_data::elf::Elf::parse(image.read_file(&exe)?)?;
+    let mut icons = font::Icons::read(&elf)?;
+    let res = bt3_data::tex::TextureResource::parse(
+        boot.get(word(8)? & !3..)
+            .ok_or("the icon file is outside the boot file")?,
+    )?;
+    for entry in &res.entries {
+        let width = 1 << ((entry.texture_register >> 26) & 0xF);
+        let texture = bt3_data::gs::decode_sprite_texture(entry).ok().map(|t| {
+            textures.push(t);
+            textures.len() - 1
+        });
+        icons.textures.push((texture, width));
+    }
+    font.icons = Some(icons);
+    Ok(font)
 }
 
 /// `Title_Init`: section 1 of gMenuArc1, BPE-packed.
@@ -591,7 +614,7 @@ const BATTLE_KEYS: [(KeyCode, u32); 14] = [
 ];
 
 /// The same from a gamepad.
-const BATTLE_BUTTONS: [(GamepadButton, u32); 15] = [
+const BATTLE_BUTTONS: [(GamepadButton, u32); 16] = [
     (GamepadButton::DPadUp, btl_input::pad::UP),
     (GamepadButton::DPadDown, btl_input::pad::DOWN),
     (GamepadButton::DPadLeft, btl_input::pad::LEFT),
@@ -605,6 +628,7 @@ const BATTLE_BUTTONS: [(GamepadButton, u32); 15] = [
     (GamepadButton::LeftTrigger2, btl_input::pad::L2),
     (GamepadButton::RightTrigger2, btl_input::pad::R2),
     (GamepadButton::Select, btl_input::pad::SELECT),
+    (GamepadButton::Start, btl_input::pad::START),
     (GamepadButton::LeftThumb, btl_input::pad::L3),
     (GamepadButton::RightThumb, btl_input::pad::R3),
 ];
@@ -626,8 +650,9 @@ fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
     }
 }
 
-/// `Adx_StopAll`.
+/// `Adx_StopAll`: `Adx_ResumeSeVoice`, then every player stops.
 fn stop_all(game: &mut Game, commands: &mut Commands) {
+    game.se_voice_paused = false;
     stop_player(&mut game.bgm, commands);
     stop_player(&mut game.voice, commands);
     stop_player(&mut game.stream_se, commands);
@@ -641,6 +666,7 @@ fn stop_all(game: &mut Game, commands: &mut Commands) {
 fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>) {
     for sound in sounds {
         match sound {
+            TitleSound::PauseSeVoice(on) => game.se_voice_paused = on,
             TitleSound::Voice(file_id) => {
                 stop_player(&mut game.voice, commands);
                 game.voice_ended = false;
@@ -760,6 +786,12 @@ fn run_frames(
         game.se.update();
         let game = &mut *game;
         let stat = voice_stat(game, &players);
+        // Gfx_EndFrame(vsyncs) of the screen this frame runs.
+        let vsyncs = if game.scene.frame_seconds() > VBLANK_SECONDS {
+            2
+        } else {
+            1
+        };
         match &mut game.scene {
             Scene::Logos(logos) => {
                 game.quads = into_screen(logos.run_frame(cross || start));
@@ -921,6 +953,8 @@ fn run_frames(
                 }
             }
         }
+        // FontIcon_Tick.
+        game.font.tick_icons(vsyncs);
     }
 }
 
@@ -1040,6 +1074,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     game.hud_clamp_from = assets.menu_sheet.base;
     let mut battle = battle::Battle::new(assets);
     battle.vu0 = game.vu0_random;
+    battle.chara_bits = game.save.chara_bits;
     game.scene = Scene::Battle(Box::new(battle));
     play_bgm(game, commands, battle::BGM_FIRST + setup.bgm.max(0) as u32);
 }
@@ -1718,13 +1753,22 @@ fn write_quad_mesh(mesh: &mut Mesh, quad: &ScreenQuad, texture_size: Option<(u32
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![color; 4]);
 }
 
-/// ADXT output volumes changed by fade steps.
+/// ADXT output volumes changed by fade steps, and the pause of the voice and streamed-SE players.
 fn apply_volumes(game: Res<Game>, mut sinks: Query<&mut AudioSink>) {
     for player in [game.bgm, game.voice].into_iter().flatten() {
         if let Ok(mut sink) = sinks.get_mut(player.entity) {
             let volume = sound::volume(player.level);
             if sink.volume() != volume {
                 sink.set_volume(volume);
+            }
+        }
+    }
+    for player in [game.voice, game.stream_se].into_iter().flatten() {
+        if let Ok(sink) = sinks.get_mut(player.entity) {
+            if game.se_voice_paused && !sink.is_paused() {
+                sink.pause();
+            } else if !game.se_voice_paused && sink.is_paused() {
+                sink.play();
             }
         }
     }

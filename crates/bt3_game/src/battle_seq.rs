@@ -34,6 +34,11 @@ impl Ramp {
         self.step = (to - from) / self.frames;
     }
 
+    /// `value == target`.
+    pub(crate) fn at_target(&self) -> bool {
+        self.value == self.target
+    }
+
     /// `Ramp_Step`: 1 when it has ended (or is stopped).
     pub(crate) fn step(&mut self) -> bool {
         if !self.running {
@@ -106,9 +111,9 @@ impl DemoCam {
 
     /// `DemoCam_Update` for an animation: advance by 2.0 (holding the end, stopping there for a stage cut), take
     /// the attached fighter's node 0 as the base, then the view: rotations X, Y, Z, the position, the base, inverted.
-    pub(crate) fn update(&mut self, base: Option<Mtx>) -> Option<View> {
+    pub(crate) fn update(&mut self, base: Option<Mtx>, paused: bool) -> Option<View> {
         let anim = self.anim.as_ref()?;
-        if self.flags & DEMO_AUTO != 0 {
+        if self.flags & DEMO_AUTO != 0 && !paused {
             let t = self.time + 2.0;
             if anim.length < t {
                 if self.flags & DEMO_STOP_AT_END != 0 {
@@ -261,8 +266,12 @@ pub(crate) struct Seq {
     pub(crate) restart: bool,
     /// The sequence has left without a restart: the battle is over (`BtlGame_Update` returns 1).
     pub(crate) left: bool,
-    /// `BtlPause_GetMenuPad`: the controller port that drives the result menu.
+    /// `gBtlPause.pad` (`BtlPause_GetMenuPad`): the controller port that drives the pause and result menus.
     pub(crate) result_pad: usize,
+    /// `BATTLE_FLAG_PAUSE`: the simulation stands still.
+    pub(crate) paused: bool,
+    /// `BATTLE_FLAG_PAUSE_MENU`: the pause menu is open.
+    pub(crate) pause_menu: bool,
 }
 
 /// `BtlClock`: hours, minutes, seconds and milliseconds of fight.
@@ -328,6 +337,8 @@ impl Seq {
             restart: false,
             left: false,
             result_pad: 0,
+            paused: false,
+            pause_menu: false,
         }
     }
 
@@ -524,6 +535,43 @@ impl Battle {
     /// `BtlSeqFight_Update` without the pause menu: the end of the battle goes to the finish (state 6 without a
     /// finish scene).
     fn fight_update(&mut self, input: &mut SeqInput) -> SeqState {
+        if self.assets.mode != 8 {
+            if !self.seq.pause_menu && self.check_open(input) {
+                if self.assets.mode == 7 {
+                    // BattleResult_Set(BTL_RESULT_ABORT, 0).
+                    self.seq.winner = ABORT;
+                    self.seq.reason = 0;
+                } else {
+                    // Mode 1's running script events are not ported.
+                    self.seq.pause_menu = true;
+                    self.seq.paused = true;
+                    input.sounds.push(TitleSound::PauseSeVoice(true));
+                }
+            }
+            if self.seq.pause_menu
+                && let Some(menu) = &mut self.menu
+            {
+                let pad = self.seq.result_pad;
+                let (open, reason) = menu.update(
+                    pad as i32,
+                    0,
+                    input.menu[pad],
+                    input.font,
+                    &self.assets.menu_texts,
+                    input.sounds,
+                );
+                if let Some(reason) = reason {
+                    self.seq.winner = ABORT;
+                    self.seq.reason = reason as u32;
+                }
+                if !open {
+                    // PauseMenu_Update's close (Adx_ResumeSeVoice), then the flags.
+                    input.sounds.push(TitleSound::PauseSeVoice(false));
+                    self.seq.pause_menu = false;
+                    self.seq.paused = false;
+                }
+            }
+        }
         if self.check_battle_end(input) {
             if self.assets.mode == 7 || self.seq.winner & ABORT != 0 {
                 return SeqState::End;
@@ -533,10 +581,27 @@ impl Battle {
         SeqState::Fight
     }
 
-    /// `BtlSeq_CheckBattleEnd`: ticks the clock and decides whether the battle is over.
+    /// `BtlPause_CheckOpen`: START on one of the pads that may pause (both in split screen, else pad 0) opens the
+    /// menu for that pad. (Mode 7's second test of pad 0 adds nothing here; the pulled-out pad of
+    /// `PadWatch_GetMissing` is not emulated.)
+    fn check_open(&mut self, input: &SeqInput) -> bool {
+        let count = if self.assets.screen_mode == 1 { 2 } else { 1 };
+        for i in 0..count {
+            if input.menu[i].start {
+                self.seq.result_pad = i;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `BtlSeq_CheckBattleEnd`: ticks the clock and decides whether the battle is over (never while paused).
     fn check_battle_end(&mut self, input: &mut SeqInput) -> bool {
         if self.seq.winner & 0x1F != 0 {
             return true;
+        }
+        if self.seq.paused {
+            return false;
         }
         if self.roster.chars.iter().any(|c| c.flags.test(0x128)) {
             return false;

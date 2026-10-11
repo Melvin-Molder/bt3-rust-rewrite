@@ -24,6 +24,15 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
     Ok(texels.with_palette(&palette))
 }
 
+/// `decode_sprite_texture` with the palette that `clut_entry` uploads.
+pub fn decode_sprite_texture_with_clut(
+    entry: &TextureEntry<'_>,
+    clut_entry: &TextureEntry<'_>,
+) -> io::Result<RgbaTexture> {
+    let (texels, palette) = sprite_texels(entry, clut_entry)?;
+    Ok(texels.with_palette(&palette))
+}
+
 /// A sprite texture as the GS holds it (alpha 0x80 = 1.0), looked up through the CLUT that `clut_entry` uploads
 /// (the HUD draws one image with the palettes of other entries).
 pub fn decode_sprite_texture_raw(
