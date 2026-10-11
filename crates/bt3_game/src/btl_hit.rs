@@ -133,8 +133,16 @@ pub(crate) fn voice_kind(reaction: i32) -> i32 {
     }
 }
 
+/// `BtlChar_RaiseFirstClash`: the first hit of the battle (flag 0xE3; battle event 0x3C is not ported).
+pub(crate) fn raise_first_clash(atk: &mut Chr, def: &Chr) {
+    if !atk.first_hit && !def.first_hit {
+        atk.first_hit = true;
+        atk.flags.set(0xE3);
+    }
+}
+
 /// `BtlColl_GetGuardKind`: the guard motions 0xEC..0xF7.
-fn guard_kind(me: &Chr) -> i32 {
+pub(crate) fn guard_kind(me: &Chr) -> i32 {
     match me.anim.cur {
         0xEF | 0xF0 => 1,
         0xF1 | 0xF2 => 2,
@@ -473,11 +481,8 @@ impl Pair<'_, '_> {
             atk.add_ki(gain);
         }
         atk.charge_gauge = (atk.charge_gauge + charge_gauge_gain(atk, data, env)).min(100_000);
-        // BtlChar_RaiseFirstClash; BtlChar_AddStageTimer concerns stages 4 / 27 only.
-        if !atk.first_hit && !def.first_hit {
-            atk.first_hit = true;
-            atk.flags.set(0xE3);
-        }
+        // BtlChar_AddStageTimer concerns stages 4 / 27 only.
+        raise_first_clash(atk, def);
     }
 }
 

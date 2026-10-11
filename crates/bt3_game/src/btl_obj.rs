@@ -142,7 +142,7 @@ impl Default for Aabb {
 }
 
 impl Aabb {
-    fn add(&mut self, p: [f32; 3]) {
+    pub(crate) fn add(&mut self, p: [f32; 3]) {
         for i in 0..3 {
             self.min[i] = self.min[i].min(p[i]);
             self.max[i] = self.max[i].max(p[i]);
@@ -159,7 +159,9 @@ impl Aabb {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BodyBox {
     pub obb: Obb,
+    /// The part's sphere (`center`): centre and radius.
     pub center: [f32; 3],
+    pub radius: f32,
 }
 
 /// `BobjBody` with the sphere records.
@@ -168,6 +170,8 @@ pub(crate) struct Body {
     pub boxes: Vec<BodyBox>,
     /// `body.box`: bounds of every part box.
     pub bounds: Aabb,
+    /// `body.centerBox` (the object's `hitBox`): bounds of every part sphere.
+    pub center_bounds: Aabb,
     /// The two body sphere records (centre, radius); `cur` / `prev` say which is this frame's and last frame's,
     /// `index` is the record the next swap makes current.
     pub sphere: [([f32; 3], f32); 2],
@@ -639,6 +643,7 @@ impl Obj {
     pub(crate) fn build_volumes(&mut self, data: &ObjData) {
         if let Some(body) = data.body {
             let mut bounds = Aabb::default();
+            let mut center_bounds = Aabb::default();
             for (part, out) in body.parts.iter().zip(&mut self.body.boxes) {
                 let Some(i) = self
                     .node_index
@@ -661,11 +666,17 @@ impl Obj {
                 placed[3] = [c[0], c[1], c[2], 1.0];
                 out.obb = Obb::new(part.half, &placed);
                 out.center = [c[0], c[1], c[2]];
+                out.radius = part.radius;
                 for p in out.obb.world {
                     bounds.add(p);
                 }
+                // ColBounds_AddSphere.
+                let r = part.radius;
+                center_bounds.add([c[0] + r, c[1] + r, c[2] + r]);
+                center_bounds.add([c[0] - r, c[1] - r, c[2] - r]);
             }
             self.body.bounds = bounds;
+            self.body.center_bounds = center_bounds;
         }
         let work = &mut self.work;
         work.atk_spheres.clear();

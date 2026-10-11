@@ -3,6 +3,7 @@ mod battle;
 mod battle_seq;
 mod btl_act;
 mod btl_ai;
+mod btl_blast;
 mod btl_chr;
 mod btl_flags;
 mod btl_hit;

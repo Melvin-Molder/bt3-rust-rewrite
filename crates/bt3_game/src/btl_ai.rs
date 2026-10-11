@@ -13,6 +13,7 @@
 use bt3_data::ai_data::{AiData, AiRule, AiTables};
 use bt3_data::stage_col::StageNav;
 
+use crate::btl_blast::{HitRec, hit_flags_of};
 use crate::btl_chr::{
     Chr, Env, SideData, add, dot, is_blocked_by_opponent, length, normalize, scale3, spacing, sub,
 };
@@ -231,6 +232,8 @@ pub(crate) struct Ctx<'a, 'd> {
     pub tab: &'a AiTables,
     pub nav: &'a StageNav,
     pub rng: &'a mut GameRandom,
+    /// The effect scene's record list (`EftHit_GetList`): the ki blasts in flight.
+    pub blasts: &'a mut Vec<HitRec>,
 }
 
 /// `gBtlAi`: the shared values and both sides.
@@ -544,7 +547,7 @@ impl Ai<'_, '_, '_, '_> {
     /// `BtlCharApi_GetChargeRate`.
     fn charge_rate(&self, i: usize) -> f32 {
         let c = self.chr(i);
-        0f32.max(c.charge).max(c.blast_charge as f32)
+        0f32.max(c.charge).max(c.blast_charge)
     }
 
     /// `BtlCharApi_IsAttackHitPending`.
@@ -591,9 +594,63 @@ impl Ai<'_, '_, '_, '_> {
         -1
     }
 
-    /// `BtlCharApi_FindIncomingBlast`: no ki blast is ever alive.
-    fn incoming_blast(&self, _mode: i32) -> i32 {
+    /// `BtlCharApi_FindIncomingBlast`: the first ki blast record (modes 0 / 1; mode 2 / 3 look at technique
+    /// records, none of which is ported) not the fighter's own nor seen, flying toward it and within five frames
+    /// of its travel (less the body radius and 10). Mode 1 gives its class instead: 0 for kinds 0, 4, 8, else 2
+    /// when it cannot be guarded, else 1.
+    fn incoming_blast(&self, mode: i32) -> i32 {
+        if mode >= 2 {
+            return -1;
+        }
+        let me = self.me();
+        let pos = self.pos(me);
+        for (i, rec) in self.c.blasts.iter().enumerate() {
+            if rec.owner == me || rec.seen_by_ai {
+                continue;
+            }
+            let to_blast = normalize(sub(rec.pos, pos));
+            let step = sub(rec.pos, rec.prev);
+            if 0.0 < dot(to_blast, normalize(step)) {
+                continue;
+            }
+            let dist = length(sub(rec.pos, pos)) - self.radius(me) - 10.0;
+            if length(step) * 5.0 < dist {
+                continue;
+            }
+            if mode != 1 {
+                return i as i32;
+            }
+            if matches!(rec.atk.kind, 0 | 4 | 8) {
+                return 0;
+            }
+            return if hit_flags_of(rec, self.c.chars, self.c.data) & 1 != 0 {
+                2
+            } else {
+                1
+            };
+        }
         -1
+    }
+
+    /// `BtlCharApi_MarkIncomingBlast`: the blast `incoming_blast(0)` finds is not reported again.
+    fn mark_incoming_blast(&mut self) {
+        if let Ok(i) = usize::try_from(self.incoming_blast(0)) {
+            self.c.blasts[i].seen_by_ai = true;
+        }
+    }
+
+    /// `BtlCharApi_IsBlastPassing`: some blast not fired by the fighter is level with it or moving away.
+    fn blast_passing(&self) -> bool {
+        let me = self.me();
+        let pos = self.pos(me);
+        self.c.blasts.iter().any(|rec| {
+            rec.atk.src != me
+                && !(0.0
+                    < dot(
+                        normalize(sub(rec.pos, pos)),
+                        normalize(sub(rec.pos, rec.prev)),
+                    ))
+        })
     }
 
     /// `BtlCharApi_GetTechniqueFramesLeft` of a fighter: frames to the next event with mask bit 0.
@@ -625,13 +682,13 @@ impl Ai<'_, '_, '_, '_> {
         i32::from(self.c.data[i].tables.params.u16_at(0x80) as i16)
     }
 
-    /// `BtlCharApi_GetBlastRoom` / `B` with no blast alive.
+    /// `BtlCharApi_GetBlastRoom` / `B`: the shots left, or the room for live blasts of the class if smaller.
     fn blast_room(&self, i: usize, b: bool) -> i32 {
         let left = self.blast_limit_a(i) - self.chr(i).blast_shots;
         let room = if b {
-            i32::from(self.c.data[i].tables.params.u16_at(0x82) as i16)
+            i32::from(self.c.data[i].tables.params.u16_at(0x82) as i16) - self.chr(i).live_blasts[1]
         } else {
-            self.blast_limit_a(i)
+            self.blast_limit_a(i) - self.chr(i).live_blasts[0]
         };
         left.min(room)
     }
@@ -828,7 +885,7 @@ impl Ai<'_, '_, '_, '_> {
                 3 => {
                     // BtlAi_RunInstant.
                     match self.w.seq.top().arg {
-                        0 => {}
+                        0 => self.mark_incoming_blast(),
                         1 => self.w.seq.flags |= SEQ_CHAIN,
                         2 => self.note_opponent(0x20000),
                         _ => {}
@@ -939,7 +996,7 @@ impl Ai<'_, '_, '_, '_> {
         s.start_state = self.c.chars[me].anim.cur;
         s.charge = 0f32
             .max(self.c.chars[me].charge)
-            .max(self.c.chars[me].blast_charge as f32);
+            .max(self.c.chars[me].blast_charge);
         s.start_dist = self.g.dist;
         s.dir_x = 0.0;
         s.dir_z = 0.0;
@@ -1454,7 +1511,7 @@ impl Ai<'_, '_, '_, '_> {
         let op = self.op();
         let cls = self.cls(op);
         let attacking = self.attack_hit_pending(op);
-        let passing = false;
+        let passing = self.blast_passing();
         let flags = self.state_flags(op);
         let kind = self.opp_technique_kind();
         let ret = (kind as u32).wrapping_sub(1) >= 2;

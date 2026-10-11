@@ -12,7 +12,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use bt3_data::ai_data::{AiData, AiTables};
 use bt3_data::cam_anim::CamAnim;
-use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables};
+use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables, EffectPack};
 use bt3_data::elf::Elf;
 use bt3_data::gs::{
     RgbaTexture, decode_clut256_upload, decode_sprite_texture, decode_sprite_texture_raw,
@@ -157,6 +157,8 @@ pub(crate) struct FighterModel {
     pub(crate) talk: Vec<u8>,
     /// `BtlMember_LoadParams` at the start of the battle.
     pub(crate) gauge: SideGauge,
+    /// The character's effect pack (`BtlCharApi_GetPlayerCharPack`) as far as the simulation reads it.
+    pub(crate) effect: Option<EffectPack>,
 }
 
 /// Reads what the battle draws so far. `read` returns a file of the AFS archives by id.
@@ -289,6 +291,8 @@ pub fn load(
             .get(side.chara.max(0) as usize)
             .copied()
             .unwrap_or_default();
+        // BtlRes_Request: the second animation file is chara * 10 + 0x599.
+        fighter.effect = EffectPack::parse(&read(MOTION_FILE + 1 + side.chara.max(0) as u32 * 10)?);
         let motions = read(MOTION_FILE + side.chara.max(0) as u32 * 10)?;
         let word = |n: usize| {
             motions
@@ -537,6 +541,7 @@ fn load_fighter(
         cam_cuts: [None, None, None],
         talk: Vec::new(),
         gauge: SideGauge::default(),
+        effect: None,
     })
 }
 
@@ -608,6 +613,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         },
         tables: &f.tables,
         entry: f.entry,
+        effect: f.effect,
     }
 }
 
@@ -649,6 +655,7 @@ impl Battle {
             let env = assets.env(seq.state_id(), seq.input_gate(assets.stage_id));
             // Resetting the sides draws no random number.
             let mut unused = GameRandom::from_key(&[0]);
+            let mut no_blasts = Vec::new();
             let mut ctx = AiCtx {
                 chars: &mut roster.chars,
                 data: [&data[0], &data[1]],
@@ -657,6 +664,7 @@ impl Battle {
                 tab: &assets.ai_tables,
                 nav: &assets.nav,
                 rng: &mut unused,
+                blasts: &mut no_blasts,
             };
             AiMgr::new(&mut ctx, assets.cpu_level, assets.ai_type)
         };
@@ -802,6 +810,7 @@ impl Battle {
                 tab: &self.assets.ai_tables,
                 nav: &self.assets.nav,
                 rng: &mut *random,
+                blasts: &mut self.roster.scene.records,
             };
             self.ai.update(&mut ctx);
         }
@@ -809,6 +818,7 @@ impl Battle {
             roster.sample_input(&pads, env);
             roster.update_input(data, env);
             roster.update_main(data, env);
+            roster.update_scene(data, env);
             roster.post_scene(data, env);
             false
         });
@@ -2097,5 +2107,112 @@ mod tests {
         run(&mut battle, UP | R2, 120, &mut worst);
         eprintln!("deepest below the surface: {worst}");
         assert!(worst < 1.0, "the fighter went {worst} below the terrain");
+    }
+
+    #[test]
+    fn real_ki_blasts_fly_hit_and_are_guarded() {
+        use crate::btl_input::pad::{CIRCLE, TRIANGLE};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32, b: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState {
+                    held: b,
+                    ..PadState::default()
+                },
+            ]
+        };
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, pads(0, 0), 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        let mut frame = |b: &mut Battle, p1: u32, p2: u32| {
+            b.run_frame(false, pads(p1, p2), 0, &mut libc, &mut random, None, false);
+        };
+        // A tap of the blast button: action 0xAE fires on its motion's event, the shot flies and hits the idle P2.
+        let (ki, health) = (
+            battle.roster.chars[0].gauge.ki,
+            battle.roster.chars[1].gauge.health,
+        );
+        let mut fired = false;
+        let mut spent = false;
+        let mut flew = 0;
+        let mut hit_at = None;
+        for i in 0..90 {
+            let p1 = if i < 2 { TRIANGLE } else { 0 };
+            let before = battle.roster.chars[0].gauge.ki;
+            frame(&mut battle, p1, 0);
+            fired |= battle.roster.chars[0].act.current == 0xAE;
+            spent |= battle.roster.chars[0].gauge.ki < before;
+            let live = battle.roster.scene.records.len();
+            flew = flew.max(live);
+            if hit_at.is_none() && battle.roster.chars[1].gauge.health < health {
+                hit_at = Some(i);
+            }
+        }
+        let gap = crate::btl_chr::opp_distance(&battle.roster.chars[0], &battle.roster.chars[1]);
+        eprintln!(
+            "ki {ki} -> {}, P2 health {health} -> {} at {hit_at:?}, reaction {}, gap {gap}",
+            battle.roster.chars[0].gauge.ki,
+            battle.roster.chars[1].gauge.health,
+            battle.roster.chars[1].react.reaction
+        );
+        assert!(fired, "no ki blast action");
+        assert!(spent, "no ki spent");
+        assert!(flew > 0, "no blast record");
+        assert!(hit_at.is_some(), "the blast never hit");
+        assert!(
+            battle.roster.scene.records.is_empty(),
+            "a blast is still flying"
+        );
+        let unguarded = health - battle.roster.chars[1].gauge.health;
+        // Let P2 recover, then it guards (0x38) while P1 fires again.
+        for _ in 0..90 {
+            frame(&mut battle, 0, 0);
+        }
+        let health = battle.roster.chars[1].gauge.health;
+        let mut guarded = false;
+        for i in 0..90 {
+            let p1 = if i % 20 < 2 { TRIANGLE } else { 0 };
+            frame(&mut battle, p1, CIRCLE);
+            guarded |= battle.roster.chars[1].flags.test(0x66);
+        }
+        let took = health - battle.roster.chars[1].gauge.health;
+        eprintln!("unguarded {unguarded}, guarded {took}");
+        assert!(guarded, "no blast was guarded");
+        assert!(took < unguarded, "guarding did not reduce the damage");
+        // Holding the button charges (0xAF); the release fires a charged kind.
+        for _ in 0..60 {
+            frame(&mut battle, 0, 0);
+        }
+        let mut charged = false;
+        let mut kinds = Vec::new();
+        for i in 0..90 {
+            let p1 = if i < 40 { TRIANGLE } else { 0 };
+            frame(&mut battle, p1, 0);
+            charged |= battle.roster.chars[0].act.current == 0xAF;
+            for r in &battle.roster.scene.records {
+                if !kinds.contains(&r.atk.kind) {
+                    kinds.push(r.atk.kind);
+                }
+            }
+        }
+        eprintln!("charged kinds {kinds:?}");
+        assert!(charged, "no charged ki blast");
+        assert!(kinds.iter().any(|k| (1..=3).contains(k)), "no charged shot");
     }
 }

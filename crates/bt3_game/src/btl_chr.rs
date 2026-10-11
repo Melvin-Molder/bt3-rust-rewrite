@@ -7,7 +7,7 @@
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
-use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables};
+use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables, EffectPack};
 use bt3_data::stage::StageResource;
 use bt3_data::stage_col::StageCollision;
 
@@ -154,6 +154,7 @@ pub(crate) struct SideData<'a> {
     pub obj: ObjData<'a>,
     pub tables: &'a CharaTables,
     pub entry: CharaEntry,
+    pub effect: Option<EffectPack>,
 }
 
 impl SideData<'_> {
@@ -273,7 +274,21 @@ pub(crate) struct Chr {
     pub charge_timer: i32,
     pub charge_gauge: i32,
     pub charge_full_frames: i32,
-    pub blast_charge: i32,
+    /// `blastCharge`: progress of the charged ki blast's hold motion (0..1).
+    pub blast_charge: f32,
+    /// `blastAltHand`: the next plain ki blast uses the second hand.
+    pub blast_alt_hand: i32,
+    /// `blastNode`: the model node the charged ki blast leaves from.
+    pub blast_node: i32,
+    /// `aimDir`: the direction the ki blast actions aim (read when the motion fires).
+    pub aim_dir: [f32; 3],
+    /// `pitch`: the pitch toward the opponent `BtlAct_SetPitchMotion` measured.
+    pub aim_pitch: f32,
+    /// `deflectDir`: the direction a deflected blast is sent in.
+    pub deflect_dir: [f32; 3],
+    /// This fighter's live ki blast records by class (definition kinds 0 / 4 / 8, the others), from the last
+    /// record list (`BtlMove_CanFireBlast`).
+    pub live_blasts: [i32; 2],
     pub rush_step: i32,
     pub dash_count: i32,
     pub dash_limit: i32,
@@ -376,7 +391,13 @@ impl Chr {
             charge_timer: 0,
             charge_gauge: 0,
             charge_full_frames: 0,
-            blast_charge: 0,
+            blast_charge: 0.0,
+            blast_alt_hand: 0,
+            blast_node: 0,
+            aim_dir: [0.0; 3],
+            aim_pitch: 0.0,
+            deflect_dir: [0.0; 3],
+            live_blasts: [0; 2],
             rush_step: 0,
             dash_count: 0,
             dash_limit: 0,
@@ -1218,6 +1239,14 @@ impl Chr {
     /// `BtlMove_SetImpulseYaw` (`BtlMove_SetImpulse`: unless the current one is larger).
     pub(crate) fn set_impulse_yaw(&mut self, yaw: f32, speed: f32) {
         let v = scale3([yaw.sin(), 0.0, yaw.cos()], speed);
+        if length(self.pose.impulse) < length(v) {
+            self.pose.impulse = v;
+        }
+    }
+
+    /// `BtlMove_SetImpulseDir`.
+    pub(crate) fn set_impulse_dir(&mut self, dir: [f32; 3], speed: f32) {
+        let v = scale3(dir, speed);
         if length(self.pose.impulse) < length(v) {
             self.pose.impulse = v;
         }

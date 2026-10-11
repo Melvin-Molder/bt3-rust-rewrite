@@ -82,6 +82,14 @@ impl Flags {
         self.stamp[n as usize] = self.stage;
     }
 
+    /// `BtlChar_ToggleHeldFlag`.
+    pub(crate) fn toggle_held(&mut self, n: u32) {
+        self.snapshot_held(n);
+        let (i, m) = bit(n);
+        self.held[i] ^= m;
+        self.stamp[n as usize] = self.stage;
+    }
+
     /// `BtlChar_ClearFlag`: drops a flag of either kind.
     pub(crate) fn clear(&mut self, n: u32) {
         self.snapshot_held(n);

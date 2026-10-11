@@ -1,7 +1,9 @@
 //! Battle tables of a character file (`BtlObj_BindTables`, src/battle/btl_obj_anim.c) and of common file 2
 //! (`BtlChar_AllocAll`, src/battle/btl_char_mgr.c): the parameter block (section 0x12, `BtlParam`), the attack
-//! records (section 0x13, `BtlAtkRecord`), the movement table (section 0x15, `BtlMoveData`) and the body volumes
-//! (section 2, `BobjBodyData`); the roster's motion flags, attack actions and character table.
+//! records (section 0x13, `BtlAtkRecord`), the ki blast records (section 0x14, `BtlKiBlastData`), the movement
+//! table (section 0x15, `BtlMoveData`) and the body volumes (section 2, `BobjBodyData`); the roster's motion flags,
+//! attack actions and character table; and the ki blast emitter set headers of the character's effect pack
+//! (`EftKiBlastMgr_Init`).
 
 use std::io;
 
@@ -9,6 +11,7 @@ use std::io;
 pub const BODY_SECTION: usize = 2;
 pub const PARAM_SECTION: usize = 0x12;
 pub const ATTACK_SECTION: usize = 0x13;
+pub const KI_BLAST_SECTION: usize = 0x14;
 pub const MOVE_SECTION: usize = 0x15;
 /// The technique table (`mdl->super`, object + 0x92C: the AI's "skill table").
 pub const SUPER_SECTION: usize = 0x18;
@@ -19,6 +22,9 @@ pub const AI_PARAM_SECTION: usize = 0x1B;
 /// `BTL_ATK_COUNT`.
 pub const ATTACK_COUNT: usize = 0xA3;
 const ATTACK_SIZE: usize = 0x30;
+/// `BTL_KIBLAST_COUNT`.
+pub const KI_BLAST_COUNT: usize = 13;
+const KI_BLAST_SIZE: usize = 0x34;
 
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -108,6 +114,86 @@ impl AttackRecord {
     }
 }
 
+/// `BtlKiBlastData`, 0x34 bytes: one kind of ki blast.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KiBlastRecord(pub [u8; KI_BLAST_SIZE]);
+
+impl Default for KiBlastRecord {
+    fn default() -> Self {
+        Self([0; KI_BLAST_SIZE])
+    }
+}
+
+impl KiBlastRecord {
+    /// 1: cannot be guarded (except by guard kind 6); 2: cannot be deflected, reflected or absorbed; 0x10: no
+    /// flinch against a tougher victim; 0x20: copied into the spawn request.
+    pub fn flags(&self) -> u16 {
+        u16::from_le_bytes([self.0[0], self.0[1]])
+    }
+    /// Spark module, sound class, deflect rules.
+    pub fn kind_type(&self) -> i8 {
+        self.0[2] as i8
+    }
+    pub fn unk3(&self) -> u8 {
+        self.0[3]
+    }
+    /// Total over all hits.
+    pub fn damage(&self) -> i32 {
+        u32_at(&self.0, 4) as i32
+    }
+    pub fn guard_damage(&self) -> i32 {
+        u32_at(&self.0, 8) as i32
+    }
+    pub fn ki(&self) -> i32 {
+        u32_at(&self.0, 0xC) as i32
+    }
+    /// 10 km/h.
+    pub fn speed(&self) -> f32 {
+        f32_at(&self.0, 0x10)
+    }
+    /// Degrees per second.
+    pub fn turn(&self) -> f32 {
+        f32_at(&self.0, 0x14)
+    }
+    /// Seconds.
+    pub fn time(&self) -> f32 {
+        f32_at(&self.0, 0x18)
+    }
+    /// 10 km/h, total over all hits.
+    pub fn push(&self) -> f32 {
+        f32_at(&self.0, 0x1C)
+    }
+    pub fn guard_push(&self) -> f32 {
+        f32_at(&self.0, 0x20)
+    }
+    /// Reaction ids: plain, against state bits 0x800 / 0x4000 / 0x200 (0: the plain one).
+    pub fn react(&self) -> i8 {
+        self.0[0x24] as i8
+    }
+    pub fn react_s800(&self) -> i8 {
+        self.0[0x25] as i8
+    }
+    pub fn react_s4000(&self) -> i8 {
+        self.0[0x26] as i8
+    }
+    pub fn react_s200(&self) -> i8 {
+        self.0[0x27] as i8
+    }
+    pub fn radius(&self) -> f32 {
+        f32_at(&self.0, 0x28)
+    }
+    pub fn unk2c(&self) -> f32 {
+        f32_at(&self.0, 0x2C)
+    }
+    /// The hits the damage and the knock-back are spread over.
+    pub fn hits(&self) -> i8 {
+        self.0[0x30] as i8
+    }
+    pub fn spread_mode(&self) -> i8 {
+        self.0[0x31] as i8
+    }
+}
+
 /// `BtlMoveData` (object + 0x928), all floats except the ki costs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MoveTable {
@@ -131,6 +217,8 @@ pub struct BodyPart {
     pub offset: [f32; 3],
     /// Box half extents (`BobjObb.half`).
     pub half: [f32; 3],
+    /// Radius of the part's sphere (+0x30), the volume projectiles are tested against.
+    pub radius: f32,
 }
 
 /// `BobjBodyData`.
@@ -145,6 +233,8 @@ pub struct BodyData {
 pub struct CharaTables {
     pub params: CharaParams,
     pub attacks: Vec<AttackRecord>,
+    /// `KI_BLAST_COUNT` records; zeroed when the file has none.
+    pub ki_blasts: Vec<KiBlastRecord>,
     pub moves: MoveTable,
     /// `None` when the model has no body volumes.
     pub body: Option<BodyData>,
@@ -169,6 +259,13 @@ impl CharaTables {
         if attacks.len() < ATTACK_COUNT {
             return Err(invalid_data("character has too few attack records"));
         }
+        let mut ki_blasts = bounded_section(file, KI_BLAST_SECTION)
+            .unwrap_or_default()
+            .chunks_exact(KI_BLAST_SIZE)
+            .take(KI_BLAST_COUNT)
+            .map(|c| KiBlastRecord(c.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        ki_blasts.resize(KI_BLAST_COUNT, KiBlastRecord::default());
         let mv = bounded_section(file, MOVE_SECTION)
             .filter(|s| s.len() >= 0xA0)
             .ok_or_else(|| invalid_data("character has no movement table"))?;
@@ -201,6 +298,7 @@ impl CharaTables {
                         node: u32_at(rec, 4) as u16,
                         offset: [f32_at(rec, 0x10), f32_at(rec, 0x14), f32_at(rec, 0x18)],
                         half: [f32_at(rec, 0x50), f32_at(rec, 0x54), f32_at(rec, 0x58)],
+                        radius: f32_at(rec, 0x30),
                     });
                     if flags & 1 != 0 {
                         break;
@@ -217,6 +315,7 @@ impl CharaTables {
         Ok(Self {
             params,
             attacks,
+            ki_blasts,
             moves,
             body,
             super_table: raw(SUPER_SECTION).unwrap_or_default(),
@@ -274,6 +373,63 @@ impl CommonTables {
             motion_flags,
             attack_actions,
             charas,
+        })
+    }
+}
+
+/// The header of an emitter set (`EftSetHead`, 0x40 bytes) as far as the simulation reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EmitSetHead {
+    /// `width0`: the trail width a ki blast's hit radius is scaled by (the blast never steps that animation).
+    pub width0: f32,
+    /// `endFrames`: frames the end animation runs.
+    pub end_frames: u8,
+    /// Bit 4: the second width animation is used (`EftEmit_HasWidth2`).
+    pub flags: u8,
+}
+
+/// What the battle reads from a character's effect pack (entry 6 of the character's second animation file,
+/// `BtlCharApi_GetPlayerCharPack`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EffectPack {
+    /// The first word of entry 1 of entry 1 (`BtlScene_TestCharPackBit`): bit n - 1 creates the manager of kind n.
+    pub kind_bits: u32,
+    /// The set headers of the ki blast managers (`EftKiBlastMgr_Init`): kind 1 is entry 3, kind 2 entry 4; each
+    /// header is entry 1 of its entry. `None` when it lies outside the file.
+    pub blast_sets: [Option<EmitSetHead>; 2],
+}
+
+/// `BObjFile_GetEntry`: entry `n` of a pack, `None` when it is empty.
+fn pack_entry(pack: &[u8], n: usize) -> Option<&[u8]> {
+    let start = (u32_at(pack, n * 4) & !3) as usize;
+    let end = (u32_at(pack, n * 4 + 4) & !3) as usize;
+    (start != end).then(|| pack.get(start..)).flatten()
+}
+
+/// `BtlScene_GetPackEntry`: entry `n` without the emptiness test.
+fn pack_entry_any(pack: &[u8], n: usize) -> Option<&[u8]> {
+    pack.get((u32_at(pack, n * 4) & !3) as usize..)
+}
+
+impl EffectPack {
+    /// From the character's second animation file (`chara * 10 + 0x599`); `None` without the pack.
+    pub fn parse(anim_file: &[u8]) -> Option<Self> {
+        let pack = pack_entry(anim_file, 6)?;
+        let kind_bits = pack_entry_any(pack, 1)
+            .and_then(|e| pack_entry_any(e, 1))
+            .map_or(0, |w| u32_at(w, 0));
+        let head = |n: usize| {
+            let set = pack_entry_any(pack, n)?;
+            let h = pack_entry_any(set, 1)?;
+            Some(EmitSetHead {
+                width0: f32_at(h, 8),
+                end_frames: *h.get(0x20)?,
+                flags: *h.get(0x21)?,
+            })
+        };
+        Some(Self {
+            kind_bits,
+            blast_sets: [head(3), head(4)],
         })
     }
 }

@@ -14,11 +14,14 @@
 
 use std::f32::consts::PI;
 
+use crate::btl_blast::{blast_limit_a, can_fire, hits_of, ki_cost, ki_cost_of};
 use crate::btl_chr::{
     Chr, Env, SideData, anim_flag, begin_rise_to_opponent, deg, is_blocked_by_opponent, kmh,
-    opp_gap_xz, opp_yaw, opp_yaw_from_facing, scale_speed_by_approach, steer_at_opponent,
+    length, opp_delta, opp_gap_xz, opp_yaw, opp_yaw_from_facing, scale_speed_by_approach,
+    steer_at_opponent, sub,
 };
 use crate::btl_input::{DIR_MASK, wrap_angle};
+use crate::btl_obj::mask_to_node;
 
 const ENTER: u32 = 0;
 const RUN: u32 = 1;
@@ -41,7 +44,7 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x1D | 0x37 | 0x38 | 0x3A | 0x44
+        1..=3 | 0xB..=0x1D | 0x37 | 0x38 | 0x3A | 0x44 | 0xAE..=0xB1
         | 0xBD | 0xC0..=0xCA | 0xCF..=0xD3 | 0xD8 | 0xD9 | 0xDA..=0xDE | 0xE0..=0xE6)
 }
 
@@ -455,9 +458,64 @@ impl Ctx<'_, '_> {
                 }
             }
         }
+        // The ki blasts: ki for the kind, a shot left (blastShots) and room for one more live blast of the class.
+        let limit = blast_limit_a(self.data);
+        let room = |s: &Self, kind: i32, class: usize| {
+            s.me.has_ki(ki_cost_of(s.data, kind))
+                && s.me.blast_shots < limit
+                && can_fire(s.me, s.data, class)
+        };
+        if mask & 4 != 0 && room(self, 0, 0) {
+            self.add_action_bit(0xAE);
+            if self.test(0x59) {
+                if self.flag(5) && opp_yaw_from_facing(self.me, self.opp).abs() > 1.7 {
+                    self.set_queue(0, 0x3A);
+                    self.set_queue(1, 0xAE);
+                    return 2;
+                }
+                self.set_queue(0, 0xAE);
+                return 1;
+            }
+        }
+        if mask & 8 != 0 && room(self, 3, 1) {
+            self.add_action_bit(0xAF);
+            if self.test(0x5A) {
+                self.set_queue(0, 0xAF);
+                return 1;
+            }
+        }
+        let dash_blasts = self.flags2() & 0x10 != 0;
+        if mask & 0x4000 != 0 && dash_blasts && room(self, 4, 0) {
+            self.add_action_bit(0xB0);
+            if self.test(0x59) {
+                self.set_queue(0, 0xB0);
+                return 1;
+            }
+        }
+        if mask & 0x8000 != 0 && dash_blasts && room(self, 7, 1) {
+            self.add_action_bit(0xB1);
+            if self.test(0x5A) {
+                self.set_queue(0, 0xB1);
+                return 1;
+            }
+        }
         if mask & 0x1_0000 != 0 && self.test(0x40) {
             self.set_queue(0, 0x59);
             return 1;
+        }
+        if mask & 0x2_0000 != 0 && dash_blasts && room(self, 8, 0) {
+            self.add_action_bit(0xB2);
+            if self.test(0x59) {
+                self.set_queue(0, 0xB2);
+                return 1;
+            }
+        }
+        if mask & 0x4_0000 != 0 && dash_blasts && room(self, 0xB, 1) {
+            self.add_action_bit(0xB3);
+            if self.test(0x5A) {
+                self.set_queue(0, 0xB3);
+                return 1;
+            }
         }
         if mask & 0xC0 != 0 && (self.flag(0x13) || mask & 0x80 != 0) {
             self.add_action_bit(0xB4);
@@ -517,6 +575,10 @@ impl Ctx<'_, '_> {
             0x1B..=0x1D => self.side_step(phase),
             0x37 => self.charge(phase),
             0x38 => self.guard(phase),
+            0xAE => self.ki_blast(phase),
+            0xAF => self.charged_ki_blast(phase),
+            0xB0 => self.dash_ki_blast(phase),
+            0xB1 => self.dash_charged_ki_blast(phase),
             0x44 => self.rush(phase),
             0xBD | 0xC0..=0xCA => self.stagger(phase),
             0xCF..=0xD1 => self.pushed_back(phase),
@@ -548,7 +610,7 @@ impl Ctx<'_, '_> {
             self.me.charge = 0.0;
             self.me.charge_timer = 0;
             self.me.charge_full_frames = 0;
-            self.me.blast_charge = 0;
+            self.me.blast_charge = 0.0;
             self.pop_queue();
             self.me.flags.clear_range(0x81, 0x84);
             self.me.flags.clear_range(0x5B, 0x5D);
@@ -2225,6 +2287,364 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// `BtlAct_PlaySubAnim`: the sub layer's motion, and the node of its first fire event.
+    fn play_sub_anim(&mut self, motion: i32) -> i32 {
+        self.me.anim_play_sub(self.data, motion);
+        mask_to_node(self.query_event(4, 1, 6) as u32)
+    }
+
+    /// `BtlAct_SetPitchMotion` (measuring again): blends in an up or down motion by the pitch toward the opponent,
+    /// under lock-on only.
+    fn set_pitch_motion(&mut self, up: i32, down: i32) {
+        if !self.flag(5) {
+            self.me.aim_pitch = 0.0;
+            return;
+        }
+        let own = self.me.obj.node_pos(0x11);
+        let mut dir = sub(self.opp.obj.node_pos(0x11), own);
+        let len = length(dir);
+        if 0.0001 < len {
+            dir = dir.map(|v| v * (1.0 / len));
+        }
+        self.me.aim_pitch = -dir[1].clamp(-1.0, 1.0).asin();
+        let t = (self.me.aim_pitch / 0.785_398_16).clamp(-1.0, 1.0);
+        if t < 0.0 {
+            self.me.anim_set_sub_mix(-t);
+            self.me.anim_play_sub(self.data, down);
+        } else {
+            self.me.anim_set_sub_mix(t);
+            self.me.anim_play_sub(self.data, up);
+        }
+    }
+
+    /// `BtlCharApi_CalcAimDir`: the unit direction from `from` to the opponent's node `node`, its pitch kept in
+    /// min..max (no technique is ported); a direction away from the opponent is mirrored.
+    fn calc_aim_dir(&self, node: u32, from: [f32; 3], min: f32, max: f32) -> [f32; 3] {
+        let yaw = self.me.pose.rot[1];
+        let mut out = sub(self.opp.obj.node_pos(node), from);
+        let len = length(out);
+        if len < 0.0001 {
+            return [yaw.sin(), 0.0, yaw.cos()];
+        }
+        out = out.map(|v| v * (1.0 / len));
+        let delta = opp_delta(self.me, self.opp);
+        if out[0] * delta[0] + out[2] * delta[2] < 0.0 {
+            out[0] = -out[0];
+            out[2] = -out[2];
+        }
+        let (lo, hi) = (min.sin(), max.sin());
+        for limit in [lo, hi] {
+            let past = if limit == lo {
+                out[1] < lo
+            } else {
+                hi < out[1]
+            };
+            if !past {
+                continue;
+            }
+            let xz = (1.0 - limit * limit).sqrt();
+            if out[1].abs() < 0.999 {
+                let k = xz / (1.0 - out[1] * out[1]).sqrt();
+                out = [out[0] * k, limit, out[2] * k];
+            } else {
+                out = [xz * yaw.sin(), limit, xz * yaw.cos()];
+            }
+        }
+        out
+    }
+
+    /// The aim of the standing ki blasts: at the opponent's node `node` from the own node 0x11 within 36 degrees
+    /// under lock-on, else along the heading.
+    fn aim_blast(&mut self, node: u32) {
+        self.me.aim_dir = if self.flag(5) {
+            let from = self.me.obj.node_pos(0x11);
+            self.calc_aim_dir(node, from, -deg(36.0), deg(36.0))
+        } else {
+            let yaw = self.me.pose.yaw;
+            [yaw.sin(), 0.0, yaw.cos()]
+        };
+    }
+
+    /// Action 0xAE (`BtlAct_KiBlastHandler`): motion 0x71 (0x72 for the second hand, which nothing ever picks:
+    /// the previous action is never stored), the ki cost, the shot count and its 30-frame timer; the shot leaves
+    /// on the motion's fire event. The voice is not ported.
+    fn ki_blast(&mut self, phase: u32) {
+        if phase == ENTER {
+            if self.me.act.prev != 0xAE {
+                self.me.blast_alt_hand = 0;
+            }
+            if self.me.blast_alt_hand == 0 {
+                self.play(0x71, 0.1);
+                self.me.blast_alt_hand = 1;
+            } else {
+                self.play(0x72, 0.1);
+                if !self.me.gauge.body_changed && self.data.tables.params.flags() & 0x100 == 0 {
+                    self.me.blast_alt_hand = 0;
+                }
+            }
+            let cost = ki_cost(self.me, self.data);
+            self.me.spend_ki(cost, false);
+            self.me.blast_shots += hits_of(self.data, 0);
+            self.me.blast_shots_timer = 0x1E;
+        }
+        if phase == RUN {
+            let idle = if self.flag(0xE) { 0x26 } else { 0 };
+            match self.anim_id() {
+                0x71 | 0x72 => {
+                    self.me.anim_advance_then(idle, 0.2, 0);
+                    let a = self.anim_id();
+                    self.set_pitch_motion(a + 2, a + 4);
+                }
+                0 | 0x26 => {
+                    self.me.anim_advance(1);
+                    if !self.flag(0x34) {
+                        self.request(0xB);
+                    }
+                    self.set(0x87);
+                }
+                _ => {}
+            }
+            self.step(2, 5, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xD5);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            self.aim_blast(0x11);
+        }
+        if phase == DECIDE {
+            self.decide_attack(0xC);
+            match self.anim_id() {
+                0x71 | 0x72 => {
+                    if self.flag(anim_flag::END) {
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                }
+                0 | 0x26 => {
+                    self.decide_main(0x81CEA);
+                    let q = self.queued();
+                    self.request(q);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Action 0xAF (`BtlAct_ChargedKiBlastHandler`): wind-up 0x7B, hold 0x7C until the blast button is released
+    /// (input 91; the hold's progress is the charge), release 0x7D (ki cost on its first frame). The sounds and the
+    /// voice are not ported.
+    fn charged_ki_blast(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x7B, 0.15);
+            self.me.blast_node = self.play_sub_anim(0x7D);
+            self.me.set_fx(0x17);
+            self.me.blast_shots += 1;
+            self.me.blast_shots_timer = 0x1E;
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0x7B => {
+                    self.me.anim_advance_then(0x7C, 0.0, 0);
+                    self.set(0x8E);
+                }
+                0x7C => {
+                    self.me.anim_advance_then(0x7D, 0.0, 0);
+                    self.set(0x8E);
+                    self.me.blast_charge = self.me.anim_progress();
+                }
+                0x7D => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                    if self.me.obj.frame < self.query_event(4, 0, 0) as f32 {
+                        self.set(0x8E);
+                    }
+                    if self.me.anim_is_new() {
+                        let cost = ki_cost(self.me, self.data);
+                        self.me.spend_ki(cost, false);
+                    }
+                }
+                _ => {}
+            }
+            self.step(2, 5, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xD5);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            let a = self.anim_id();
+            self.set_pitch_motion(a + 3, a + 6);
+            // BtlCharApi_CalcAimDir is given the blast's node as the opponent's node to aim at.
+            let node = self.me.blast_node as u32;
+            self.aim_blast(node);
+        }
+        if phase == DECIDE && self.anim_id() == 0x7C && self.test(0x5B) {
+            self.request_anim(0x7D, 0.0);
+        }
+    }
+
+    /// The motion of a dash ki blast by the facing relative to the camera (`BtlUtil_AngleToSector`): forward under
+    /// lock-on steers at the opponent (work[0] bit 0).
+    fn dash_blast_motion(&mut self, forward: i32, left: i32, right: i32) -> i32 {
+        let a = self.me.facing_rel_cam();
+        if a < -2.356_194_5 {
+            forward
+        } else if a < -0.785_398_16 {
+            left
+        } else if a < 0.785_398_16 {
+            if self.flag(5) {
+                self.me.work[0] |= 1;
+                self.held(0xE);
+            }
+            forward
+        } else if a < 2.356_194_5 {
+            right
+        } else {
+            forward
+        }
+    }
+
+    /// The movement of the dash ki blasts: the dash, steering at the opponent when locked on forward.
+    fn dash_blast_move(&mut self) {
+        let speed = self
+            .me
+            .move_speed(self.data, self.env, 4 + usize::from(self.flag(0x11)));
+        if self.me.work[0] & 1 != 0 && self.flag(5) {
+            let max = deg(54.0);
+            let yaw_accel = if self.me.action_frame == 0 {
+                PI
+            } else {
+                deg(9.0)
+            };
+            let near = (opp_gap_xz(self.me, self.opp, self.data, self.opp_data) * 0.01).min(1.0);
+            steer_at_opponent(
+                self.me,
+                self.opp,
+                self.data,
+                self.opp_data,
+                speed,
+                yaw_accel,
+                0.0,
+                near * max,
+                0.0,
+                max,
+            );
+            self.me.turn_model_yaw(deg(36.0), 0.5);
+            self.me.set_direction(3);
+            self.me.advance(speed, kmh(200.0));
+        } else {
+            let turn = self.me.turn_rate(self.data, 0);
+            self.me.turn_yaw(self.opp, 0, turn);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 5, deg(9.0));
+            self.me.turn_model_yaw(deg(36.0), 0.3);
+            self.me.set_direction(3);
+            self.me.advance(speed, 10000.0);
+        }
+        self.me.apply_gravity();
+        self.me.request_orbit(20.0, 50.0);
+        self.set(0xCA);
+        self.me.set_fx(0xB);
+        if self.flag(0x11) {
+            self.held(0xE);
+        }
+        if self.flag(5) && self.me.work[0] & 1 != 0 {
+            let pitch = self.me.pose.pitch;
+            self.me.set_lean_x(pitch);
+        }
+    }
+
+    /// The aim of the dash ki blasts: the direction of travel, turned 90 degrees for the sideways motions.
+    fn aim_sideways(&mut self, left: i32, right: i32) {
+        let d = self.me.pose.dir;
+        let a = self.anim_id();
+        self.me.aim_dir = if a == left {
+            [d[2], d[1], -d[0]]
+        } else if a == right {
+            [-d[2], d[1], d[0]]
+        } else {
+            d
+        };
+    }
+
+    /// Action 0xB0 (`BtlAct_DashKiBlastHandler`): a ki blast while dashing (0x77 forward, 0x78 / 0x79 sideways,
+    /// fired across the direction of travel), then the dash 0xF. The voice is not ported.
+    fn dash_ki_blast(&mut self, phase: u32) {
+        if phase == ENTER {
+            let anim = self.dash_blast_motion(0x77, 0x78, 0x79);
+            self.play(anim, 0.15);
+            let cost = ki_cost(self.me, self.data);
+            self.me.spend_ki(cost, false);
+            self.me.blast_shots += self.query_event(4, 0, 3);
+            self.me.blast_shots_timer = 0x1E;
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.request(0xF);
+            }
+            self.aim_sideways(0x78, 0x79);
+            self.dash_blast_move();
+        }
+        if phase == DECIDE && 0.5 < self.me.anim_progress() {
+            self.decide_attack(0xC000);
+            if self.test(0x2C) {
+                self.set_queue(0, 0x3E);
+            }
+            if self.flag(anim_flag::END) {
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
+    /// Action 0xB1 (`BtlAct_DashChargedKiBlastHandler`): the charged ki blast while dashing: wind-up 0x84 / 0x87 /
+    /// 0x8A, hold +1 until the button is released, release +2 (only the sideways releases aim across), then 0xF.
+    fn dash_charged_ki_blast(&mut self, phase: u32) {
+        if phase == ENTER {
+            let anim = self.dash_blast_motion(0x84, 0x87, 0x8A);
+            self.play(anim, 0.15);
+            self.me.blast_node = self.play_sub_anim(anim + 2);
+            self.me.set_fx(0x17);
+            self.me.blast_shots += 1;
+            self.me.blast_shots_timer = 0x1E;
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0x84 | 0x87 | 0x8A => {
+                    let next = self.anim_id() + 1;
+                    self.me.anim_advance_then(next, 0.0, 0);
+                    self.set(0x8E);
+                }
+                0x85 | 0x88 | 0x8B => {
+                    let next = self.anim_id() + 1;
+                    self.me.anim_advance_then(next, 0.0, 0);
+                    self.set(0x8E);
+                    self.me.blast_charge = self.me.anim_progress();
+                }
+                0x86 | 0x89 | 0x8C => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xF);
+                    }
+                    if self.me.anim_is_new() {
+                        let cost = ki_cost(self.me, self.data);
+                        self.me.spend_ki(cost, false);
+                    }
+                    if self.me.obj.frame < self.query_event(4, 0, 0) as f32 {
+                        self.set(0x8E);
+                    }
+                }
+                _ => {}
+            }
+            self.aim_sideways(0x89, 0x8C);
+            self.dash_blast_move();
+        }
+        if phase == DECIDE && matches!(self.anim_id(), 0x85 | 0x88 | 0x8B) && self.test(0x5B) {
+            let next = self.anim_id() + 1;
+            self.request_anim(next, 0.0);
+        }
+    }
+
     /// Action 0xC: the idle motion once over a second, then 0xB.
     fn idle_once(&mut self, phase: u32) {
         if phase == ENTER {
@@ -3237,11 +3657,11 @@ mod tests {
     #[test]
     fn the_slice_s_actions_are_ported_and_others_are_not() {
         for id in [
-            0xB, 0xD, 0xF, 0x38, 0x44, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB, 0xE1,
+            0xB, 0xD, 0xF, 0x38, 0x44, 0xAE, 0xB1, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB, 0xE1,
         ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [0xAE, 0x60, 0xB8, 0xF6] {
+        for id in [0xB2, 0x60, 0xB8, 0xF6] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

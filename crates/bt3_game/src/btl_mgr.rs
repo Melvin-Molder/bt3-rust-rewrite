@@ -9,6 +9,7 @@
 use bt3_data::stage_col::{ColBox, PushSphere};
 
 use crate::btl_act::Ctx;
+use crate::btl_blast::{Scene, World};
 use crate::btl_chr::{
     Chr, Env, SideData, apply_orbit, cam_update_input, clamp_to_stage, length, push_out, scale3,
     sub, update_lock_on,
@@ -24,6 +25,10 @@ pub(crate) struct Roster {
     pub frame: u32,
     /// `BTL_CHARS_STARTED`.
     pub started: bool,
+    /// `randState`: the fighters' generator (`BtlChar_Rand`).
+    pub rand: u32,
+    /// The ki blasts of the effect scene and its record list.
+    pub scene: Scene,
     cpu: [bool; 2],
 }
 
@@ -37,6 +42,8 @@ impl Roster {
             ],
             frame: 0,
             started: false,
+            rand: 0,
+            scene: Scene::default(),
             cpu,
         }
     }
@@ -44,8 +51,10 @@ impl Roster {
     /// `BtlChar_ResetAll`: the manager's counters and both fighters from the setup.
     fn reset_all(&mut self, data: [&SideData; 2], env: &Env) {
         let started = self.started;
+        let scene = std::mem::take(&mut self.scene);
         *self = Self::new(data, env, self.cpu);
         self.started = started;
+        self.scene = scene;
     }
 
     /// `BtlChars_CheckStart`: the first frame the sequence is in Ready or Fight resets the roster (not in mode 1).
@@ -228,6 +237,9 @@ impl Roster {
             }
             cam_update_input(me, opp, data[i]);
             me.obj.calc_matrices(&data[i].obj);
+            // BtlFx_UpdateAll: only the ki blast it fires is ported.
+            self.scene
+                .fire(me, opp, data[i], &mut self.rand, env.gate.time_stopped);
             me.obj.build_volumes(&data[i].obj);
         }
         if !self.chars.iter().any(Chr::is_frozen) {
@@ -249,6 +261,18 @@ impl Roster {
                 chr.flags.set_stage(10);
             }
         }
+    }
+
+    /// `BtlScene_Update`, `EftDet_Update` and `BtlScene_PostUpdate` (`Battle_Update`, after the main passes).
+    pub(crate) fn update_scene(&mut self, data: [&SideData; 2], env: &Env) {
+        let mut world = World {
+            chars: &mut self.chars,
+            data,
+            env,
+            rand: &mut self.rand,
+            time_stopped: env.gate.time_stopped,
+        };
+        self.scene.update(&mut world);
     }
 
     /// `BtlChars_PostScene`: the fighter camera, the low-health state.
