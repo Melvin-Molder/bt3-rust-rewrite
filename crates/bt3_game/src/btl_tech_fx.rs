@@ -11,9 +11,10 @@
 //! The prop shot of type 6 (`EftPropShot_*`) is the same item as the beam with its differences; the volley of
 //! type 1 is in `btl_tech_volley`.
 //!
-//! The sweep of type 3 is in `btl_tech_sweep`, the multi of type 5 (its pieces are discs) in `btl_tech_disc`.
+//! The sweep of type 3 is in `btl_tech_sweep`, the ring shot of type 4 in `btl_tech_ring`, the multi of type 5
+//! (its pieces are discs) in `btl_tech_disc`.
 //!
-//! Not ported: the skills' shots (slots 0, 1); the items of effect types other than 0, 1, 3, 5 and 6 (their timeline runs,
+//! Not ported: the skills' shots (slots 0, 1); the items of effect types 2, 7, 8 and 9 (their timeline runs,
 //! so flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); every emitter, stage blur, flash and sound
 //! (the beam is not drawn); the rush catches (reactions 0x1D / 0x1E) and throws (0x22) of a technique hit, which
 //! let the record pass; the beam struggle (`EftStruggle`); abilities; the battle events.
@@ -31,6 +32,7 @@ use crate::btl_hit::guard_kind;
 use crate::btl_input::wrap_angle;
 use crate::btl_obj::mask_to_node;
 use crate::btl_tech_disc::{Discs, Multi};
+use crate::btl_tech_ring::Ring;
 use crate::btl_tech_sweep::Sweep;
 use crate::btl_tech_volley::{Shots, Volley, scene_rand_f};
 
@@ -231,6 +233,7 @@ pub(crate) struct TechFx {
     volleys: [[Vec<Volley>; 5]; 2],
     sweeps: [[Vec<Sweep>; 5]; 2],
     multis: [[Vec<Multi>; 5]; 2],
+    rings: [[Vec<Ring>; 5]; 2],
     /// The discs: ki blasts of types 4 / 5 and the multis' pieces (layer 3).
     pub discs: Discs,
     /// The blast objects the volleys fire (layer 3).
@@ -250,6 +253,7 @@ impl Default for TechFx {
             volleys: Default::default(),
             sweeps: Default::default(),
             multis: Default::default(),
+            rings: Default::default(),
             discs: Discs::default(),
             shots: Shots::default(),
             rand: 0,
@@ -883,6 +887,13 @@ impl TechFx {
                     items.push(Sweep::new(*next_id, src, me, opp, set));
                 }
             }
+            4 => {
+                let items = &mut self.rings[side][slot as usize];
+                if items.len() < ITEMS {
+                    *next_id += 1;
+                    items.push(Ring::new(*next_id, src, set));
+                }
+            }
             5 => {
                 let items = &mut self.multis[side][slot as usize];
                 if items.len() < ITEMS {
@@ -921,6 +932,15 @@ impl TechFx {
         }
         if let Some(t) = self.discs.tag_mut(id) {
             return Some(t);
+        }
+        if let Some(r) = self
+            .rings
+            .iter_mut()
+            .flatten()
+            .flatten()
+            .find(|r| r.id() == id)
+        {
+            return Some(&mut r.tag);
         }
         if let Some(s) = self
             .sweeps
@@ -1008,6 +1028,36 @@ impl TechFx {
                             w.chars[side].flags.set_held(0xA8);
                         }
                         self.sweeps[side][slot].remove(k);
+                    } else {
+                        k += 1;
+                    }
+                }
+                let mut k = 0;
+                while k < self.rings[side][slot].len() {
+                    let r = &mut self.rings[side][slot][k];
+                    let rec = r.update(
+                        w,
+                        self.events[side],
+                        self.cur_slot[side],
+                        &mut self.requests[side],
+                        &mut self.shots,
+                        next_id,
+                        &mut self.rand,
+                    );
+                    if let Some(rec) = rec
+                        && records.len() < max
+                    {
+                        records.push(rec);
+                    }
+                    if r.dead() {
+                        // EftRingShot_Term.
+                        if !r.done() {
+                            w.chars[side].flags.set_held(0xA8);
+                        }
+                        if r.src().def.kind != 0 {
+                            w.chars[side].flags.set_held(0xA9);
+                        }
+                        self.rings[side][slot].remove(k);
                     } else {
                         k += 1;
                     }
@@ -1143,6 +1193,9 @@ impl TechFx {
                 }
                 for s in &mut self.sweeps[side][slot] {
                     s.post_update(w);
+                }
+                for r in &mut self.rings[side][slot] {
+                    r.post_update(w, &self.shots);
                 }
             }
         }

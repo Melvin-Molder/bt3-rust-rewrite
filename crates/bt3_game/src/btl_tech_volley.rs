@@ -671,8 +671,84 @@ impl Shots {
             .find(|s| s.id == id && s.flags & B_ALIVE != 0)
     }
 
+    /// `EftBlastObj_Create` for another module (`EftBlastObj_Init`); `None` when the list is full.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create(
+        &mut self,
+        next_id: &mut u32,
+        src: TechSrc,
+        owner: &Chr,
+        set: &SetHead,
+        pos: [f32; 3],
+        dir: [f32; 3],
+        life: f32,
+        scale: f32,
+        speed: f32,
+    ) -> Option<u32> {
+        if self.list.len() >= SHOTS_MAX {
+            return None;
+        }
+        *next_id += 1;
+        self.list.push(Shot::new(
+            *next_id, src, owner, set, pos, dir, life, scale, speed,
+        ));
+        Some(*next_id)
+    }
+
+    /// `EftBlastObj_SetTarget`: placed at `pos` each update that moves it, or flying again.
+    pub(crate) fn set_target(&mut self, id: Option<u32>, pos: Option<[f32; 3]>) {
+        if let Some(s) = self.get(id) {
+            match pos {
+                Some(p) => {
+                    s.flags |= B_PLACED;
+                    s.target = p;
+                }
+                None => s.flags &= !B_PLACED,
+            }
+        }
+    }
+
+    /// `EftBlastObj_SetDir`: the direction only (the velocity follows only while homing).
+    pub(crate) fn set_dir(&mut self, id: Option<u32>, dir: [f32; 3]) {
+        if let Some(s) = self.get(id) {
+            s.dir = dir;
+        }
+    }
+
+    /// `EftBlastObj_SetDelay`.
+    pub(crate) fn set_delay(&mut self, id: Option<u32>, frames: f32) {
+        if let Some(s) = self.get(id) {
+            s.delay = frames;
+        }
+    }
+
+    /// `EftBlastObj_SetHeld`: its records do not meet the fighters.
+    pub(crate) fn set_held(&mut self, id: Option<u32>, on: bool) {
+        if let Some(s) = self.get(id) {
+            if on {
+                s.flags |= B_HELD;
+            } else {
+                s.flags &= !B_HELD;
+            }
+        }
+    }
+
+    /// `EftBlastObj_SetPrevPos`.
+    pub(crate) fn set_prev(&mut self, id: Option<u32>, pos: [f32; 3]) {
+        if let Some(s) = self.get(id) {
+            s.prev = pos;
+        }
+    }
+
+    /// `EftBlastObj_MarkLast`.
+    pub(crate) fn mark_last(&mut self, id: Option<u32>) {
+        if let Some(s) = self.get(id) {
+            s.flags |= B_LAST;
+        }
+    }
+
     /// `EftBlastObj_IsAlive`.
-    fn alive(&self, id: Option<u32>) -> bool {
+    pub(crate) fn alive(&self, id: Option<u32>) -> bool {
         id.is_some_and(|id| {
             self.list
                 .iter()

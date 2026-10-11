@@ -60,6 +60,7 @@
 !/crates/bt3_game/src/btl_clash.rs
 !/crates/bt3_game/src/btl_tech_disc.rs
 !/crates/bt3_game/src/btl_tech_fx.rs
+!/crates/bt3_game/src/btl_tech_ring.rs
 !/crates/bt3_game/src/btl_tech_sweep.rs
 !/crates/bt3_game/src/btl_tech_volley.rs
 !/crates/bt3_game/src/eft.rs

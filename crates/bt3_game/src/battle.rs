@@ -3159,7 +3159,17 @@ mod tests {
     /// `frames` frames: P2's health drops with its reaction, the frame the technique's end motion
     /// (`super_anim(2, 6)`) starts, and P1's action at the end.
     fn fire_slot_2(chara: i32, frames: usize) -> Option<(Vec<(i32, i32)>, Option<usize>, i32)> {
-        use crate::btl_input::pad::{L2, START, TRIANGLE};
+        fire_slot(chara, 2, frames)
+    }
+
+    /// The same for slot 2 (neutral) or 3 (up); the end motion is that of the slot.
+    fn fire_slot(
+        chara: i32,
+        slot: i32,
+        frames: usize,
+    ) -> Option<(Vec<(i32, i32)>, Option<usize>, i32)> {
+        use crate::btl_input::pad::{L2, START, TRIANGLE, UP};
+        let dir = if slot == 3 { UP } else { 0 };
         let mut setup = BattleSetup::default();
         setup.sides[0].chara = chara;
         setup.sides[1].chara = 1;
@@ -3193,13 +3203,13 @@ mod tests {
         for _ in 0..5 {
             frame(&mut battle, 0);
         }
-        let end_anim = 2 * 0x22 + 0xC1 + 6;
+        let end_anim = slot * 0x22 + 0xC1 + 6;
         let mut health = battle.roster.chars[1].gauge.health;
         let (mut hits, mut end_at) = (Vec::new(), None);
         for i in 0..frames {
             let held = match i {
-                2..4 => L2,
-                4..6 => L2 | TRIANGLE,
+                2..4 => L2 | dir,
+                4..6 => L2 | TRIANGLE | dir,
                 _ => 0,
             };
             frame(&mut battle, held);
@@ -3321,6 +3331,45 @@ mod tests {
             }
             assert!(battle.roster.scene.tech.discs.of(0).is_empty());
         }
+    }
+
+    #[test]
+    fn real_ring_shots() {
+        // Effect type 4 under the long beam action (0x10C..): its first wait ends on flag 0xA8 (the record placed,
+        // or the carrier's path flown), the second on 0xA9 at the ring shot's end. Characters 147 / 80 (slot 2,
+        // techniques 0x197 / 0x200): a multi-hit record at P2's node 3 from event 0x10. Characters 25 / 75 (slot
+        // 3, techniques 0x156 / 0x1DC): the carrier's spline over P2, then a volley of ten shots fired at it from
+        // there, the spread ones missing.
+        for (c, slot, dmg, n, end) in [
+            (147, 2, 1370, 6, 127),
+            (80, 2, 1060, 6, 104),
+            (25, 3, 780, 4, 105),
+            (75, 3, 780, 4, 107),
+        ] {
+            let Some((hits, end_at, act)) = fire_slot(c, slot, 140) else {
+                return;
+            };
+            assert_eq!(hits.len(), n, "character {c}: {hits:?}");
+            assert!(hits.iter().all(|h| h.0 == dmg), "character {c}: {hits:?}");
+            assert!(
+                hits[..n - 1].iter().all(|h| h.1 == 3),
+                "character {c}: {hits:?}"
+            );
+            assert_eq!(hits[n - 1].1, 0xF, "character {c}");
+            assert_eq!(end_at, Some(end), "character {c}");
+            assert_eq!(act, 0xB, "character {c}");
+        }
+        // Character 137's slot 3 (technique 0x18D): eight shots slide to two rings round the fighter, held
+        // harmless; once all are there flag 0xA8 comes, and event 0x40 launches them, the later the earlier made,
+        // each along the velocity it was made with (they do not home), so three of them hit P2.
+        let Some((hits, end_at, _)) = fire_slot(137, 3, 140) else {
+            return;
+        };
+        assert_eq!(
+            hits.iter().map(|h| h.0).collect::<Vec<_>>(),
+            [910, 910, 910]
+        );
+        assert_eq!(end_at, Some(115));
     }
 
     #[test]
