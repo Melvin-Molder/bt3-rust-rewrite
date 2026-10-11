@@ -171,7 +171,7 @@ impl Motion {
 }
 
 /// `BtlObjAnim_ClearNodeRot`'s packed identity.
-const PACKED_IDENTITY: u64 = 0x37FF_FF7F_FFF7_FFFF;
+pub const PACKED_IDENTITY: u64 = 0x37FF_FF7F_FFF7_FFFF;
 
 impl Track {
     fn len(&self) -> usize {

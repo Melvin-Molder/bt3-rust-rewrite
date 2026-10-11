@@ -58,7 +58,7 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0x94 | 0x96..=0xB1
+        1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
         | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9)
 }
 
@@ -146,7 +146,8 @@ impl Ctx<'_, '_> {
     }
 
     fn play(&mut self, motion: i32, blend: f32) {
-        self.me.anim_play(self.data, motion, blend);
+        self.me
+            .anim_play_any(self.data, self.opp_data, self.env, motion, blend);
     }
 
     fn request_anim(&mut self, motion: i32, blend: f32) {
@@ -736,7 +737,17 @@ impl Ctx<'_, '_> {
             0x36 => self.search(phase),
             0x92 | 0x9B | 0xAB => self.attack_dash(phase),
             0x99 => self.attack_volley_dash(phase),
+            0x95 => self.ki_volley(phase),
             0x70..=0x94 | 0x96..=0xAD => self.attack(phase),
+            0xB2 => self.falling_blast(phase),
+            0xB3 => self.charged_falling_blast(phase),
+            0xB4..=0xB6 => self.grab(phase),
+            0xB7 | 0xB9 => self.throw(phase),
+            0xB8 | 0xBA => self.thrown(phase),
+            0xBB => self.slam_throw(phase),
+            0xBC => self.slam_thrown(phase),
+            0xBE => self.drag_down(phase),
+            0xBF => self.dragged_down(phase),
             0x47..=0x4C => self.smash_charge(phase),
             0x4D..=0x52 => self.smash_full(phase),
             0x53..=0x57 => self.dash_smash(phase),
@@ -818,7 +829,8 @@ impl Ctx<'_, '_> {
             }
             self.handler(ENTER);
         } else {
-            self.me.anim_flush_requests(self.data);
+            self.me
+                .anim_flush_requests(self.data, self.opp_data, self.env);
             self.me.apply_root_yaw();
         }
         self.me.flags.set_stage(5);
@@ -5433,6 +5445,480 @@ impl Ctx<'_, '_> {
         }
     }
 
+    // ---- the throws (btl_act_change.c, btl_act_super.c) --------------------------------------------------------
+
+    /// `BtlActThrow_SetupDamage`: the queue of the current attack record's damage, spread over the motion's damage
+    /// events (+ 1 with `extra`) as total / (hits + 5), rounded up to a multiple of 10 while that stays within the
+    /// total; unless the opponent's parameter word has bit 0x80, the record's health / ki drains between its
+    /// 0x20000 and 0x40000 events.
+    fn setup_throw_damage(&mut self, extra: bool) {
+        let mut hits = self.query_event(0x2_0000_0000, 0, 3);
+        if extra {
+            hits += 1;
+        }
+        let damage = crate::btl_hit::damage(self.me, self.data, self.env);
+        let (drain_health, drain_ki) = crate::btl_hit::throw_drains(self.me, self.data, self.env);
+        let immune = self.opp_data.tables.params.chara_flags() & 0x80 != 0;
+        let (from, to) = (
+            self.query_event(0x2_0000, 0, 0),
+            self.query_event(0x4_0000, 0, 2),
+        );
+        let q = &mut self.me.queue;
+        *q = crate::btl_chr::DamageQueue {
+            hits,
+            total_start: damage,
+            total: damage,
+            per_hit: damage / (hits + 5),
+            flags: if damage <= 0 {
+                0x1000_0200
+            } else {
+                0x1000_0000
+            },
+            drain_from: -1,
+            drain_to: -1,
+            ..Default::default()
+        };
+        let rem = q.per_hit % 10;
+        if rem != 0 {
+            let up = q.per_hit - rem + 10;
+            if up * q.hits < q.total_start {
+                q.per_hit = up;
+            }
+        }
+        if !immune && (drain_health > 0 || drain_ki > 0) {
+            let span = ((to - from) / 2).max(1);
+            q.drain_health_start = drain_health;
+            q.drain_health = drain_health;
+            q.drain_health_step = drain_health / span + 1;
+            q.drain_ki_start = drain_ki;
+            q.drain_ki = drain_ki;
+            q.drain_ki_step = drain_ki / span + 1;
+            q.drain_from = from;
+            q.drain_to = to;
+        }
+    }
+
+    /// `BtlActThrow_TurnByRootYaw`: the heading less the yaw of the first key of the motion's root rotation.
+    fn turn_by_root_yaw(&mut self) {
+        if let Some(yaw) = self.me.obj.root_key_yaw(&self.data.obj) {
+            let h = wrap_angle(self.me.pose.yaw - yaw);
+            self.me.set_heading(h, 0.0);
+        }
+    }
+
+    /// `BtlActThrow_SetReleaseHeading`: the thrown fighter leaves along the hit's launch angles (mirrored when
+    /// grabbed from behind).
+    fn set_release_heading(&mut self) {
+        let r = self.me.react;
+        let p = &self.me.pose;
+        let (yaw, pitch) = if r.back {
+            (wrap_angle(wrap_angle(p.yaw + r.launch_a) + PI), r.launch_b)
+        } else {
+            (wrap_angle(p.yaw + r.launch_a), -r.launch_b)
+        };
+        let pitch = pitch * p.root_rot[1].cos();
+        self.me.set_heading(yaw, pitch);
+    }
+
+    /// The blend a throw's motions start with: none for a throw of parameter flag bit 19.
+    fn throw_blend(&self) -> f32 {
+        if self.me.react.no_blend { 0.0 } else { 0.3 }
+    }
+
+    /// Actions 0xB4..0xB6 (`BtlAct_GrabDash`): the grab, motions 0x94 -> 0x95 (0xB6: 0x186 -> 0x187 at double
+    /// rate); missed (flag 0x7A) 0x9D, caught (0x5B) the throw 0xB7 (0xBB for parameter flag 0x200), 0xB6 0xB9.
+    fn grab(&mut self, phase: u32) {
+        if phase == ENTER {
+            let anim = if self.current() == 0xB6 { 0x186 } else { 0x94 };
+            self.play(anim, 0.15);
+            begin_rise_to_opponent(self.me, self.opp, self.data, self.opp_data);
+        }
+        if phase == RUN {
+            let yaw = if self.current() == 0xB5 { 2 } else { 6 };
+            match self.anim_id() {
+                0x94 => {
+                    self.me.anim_advance_then(0x95, 0.0, 0);
+                }
+                0x186 => {
+                    self.me.anim_advance_then(0x187, 0.0, 0);
+                }
+                0x95 | 0x9D | 0x187 => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                }
+                _ => {}
+            }
+            self.step(yaw, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xD5);
+            self.set(0x92);
+            if self.current() == 0xB6 {
+                self.me.obj.rate = 2.0;
+            }
+        }
+        if phase == DECIDE {
+            if self.flag(0x7A) {
+                self.request_anim(0x9D, 0.0);
+            }
+            if self.flag(0x5B) {
+                let next = match self.current() {
+                    0xB6 => 0xB9,
+                    _ if self.data.tables.params.flags() & 0x200 != 0 => 0xBB,
+                    _ => 0xB7,
+                };
+                self.request(next);
+            }
+        }
+    }
+
+    /// Actions 0xB7, 0xB9 (`BtlAct_Throw`): the thrower, motions 0x96 -> 0x98 (0xB9: 0x188 -> 0x18A) holding the
+    /// victim (flag 0x8B); near the stage's edge facing out it turns round. The drain runs between the queue's
+    /// frames. The voice, the sounds and the camera cut are not ported.
+    fn throw(&mut self, phase: u32) {
+        let alt = self.current() == 0xB9;
+        if phase == ENTER {
+            let blend = self.throw_blend();
+            self.play(if alt { 0x188 } else { 0x96 }, blend);
+            self.held(0xE);
+            self.setup_throw_damage(false);
+            if crate::btl_hit::launch_angle_a(self.me, self.data, self.env).abs() < deg(90.0) {
+                let radius = self.env.inner_radius();
+                let p = self.me.pose.pos;
+                if radius - 200.0 < p[0].hypot(p[2]) {
+                    self.me.turn_yaw(self.opp, if alt { 8 } else { 7 }, PI);
+                }
+            }
+            if self.data.chara == 0x6E && self.opp_data.tables.params.chara_flags() & 0x80 == 0 {
+                self.me.boost_stock = (self.me.boost_stock + 1).clamp(0, 10);
+            }
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0x96 => {
+                    self.me.anim_advance_then(0x98, 0.0, 1);
+                    self.set(0x8B);
+                }
+                0x188 => {
+                    self.me.anim_advance_then(0x18A, 0.0, 1);
+                    self.set(0x8B);
+                }
+                0x98 | 0x18A => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                }
+                _ => {}
+            }
+            self.step(6, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            for f in [0xBB, 0x1A, 0x3F, 0x44, 0x45, 0x46] {
+                self.set(f);
+            }
+            let aflags = crate::btl_hit::attack_flags(self.me, self.data, self.env);
+            if aflags & 0x400 != 0 {
+                self.set(0x13B);
+            }
+            let q = self.me.queue;
+            if q.drain_from >= 0 && q.drain_to >= 0 {
+                if self
+                    .me
+                    .anim_in_frame_range(q.drain_from as f32, q.drain_to as f32)
+                {
+                    self.me.set_fx(0x38);
+                }
+                if aflags & 0x2000_0000 != 0 {
+                    self.set(0x13C);
+                }
+            }
+        }
+        if phase == LEAVE {
+            self.set(0x8C);
+            self.set(0x33);
+        }
+    }
+
+    /// Actions 0xB8, 0xBA (`BtlAct_Thrown`): the victim, motion 0x97 (0xBA: 0x189, both the thrower's) held by the
+    /// thrower; at its end the hit's second reaction. Dropped by the hold (flag 0x23), it leaves along the launch
+    /// angles. The voice is not ported.
+    fn thrown(&mut self, phase: u32) {
+        if phase == ENTER {
+            let blend = self.throw_blend();
+            self.play(if self.current() == 0xBA { 0x189 } else { 0x97 }, blend);
+            self.held(0xE);
+            self.turn_by_root_yaw();
+        }
+        if phase == RUN {
+            if self.me.anim_advance(1) {
+                if self.me.react.back {
+                    self.set(0x35);
+                }
+                let sub = self.me.react.reaction_sub;
+                self.queue_reaction(sub);
+                let q = self.queued();
+                self.request(q);
+            }
+            self.step(9, 6, 3, kmh(1000.0), kmh(100.0));
+            self.me.apply_gravity();
+            for f in [0x97, 0x95, 0xBB, 0xA, 0x1A, 0x3F, 0x44, 0x45, 0x46] {
+                self.set(f);
+            }
+            if !self.me.react.silent {
+                self.set(0x96);
+            }
+            self.set(0x1B);
+            self.me.set_fx(0x3B);
+            if self.me.flags.dropped(0x23) {
+                self.set_release_heading();
+                self.me.work[0] |= 1;
+            }
+            if self.me.work[0] & 1 != 0 {
+                let pitch = self.me.pose.pitch;
+                self.me.set_lean_x(-pitch);
+            }
+        }
+        if phase == LEAVE {
+            self.set(0x33);
+            if self.me.work[0] & 1 == 0 {
+                self.set_release_heading();
+            }
+        }
+    }
+
+    /// Action 0xBB (`BtlAct_SlamThrow`): the thrower dives with the victim, motion 0x96, the loop 0x99 at 1500 km/h
+    /// down, then 0x98 on the ground, at the stage's bottom, when the victim is gone, after 91 frames, or (parameter
+    /// flag 0x400) close above the water. The voices, the sound, the camera cuts and the vibration are not ported.
+    fn slam_throw(&mut self, phase: u32) {
+        if phase == ENTER {
+            let blend = self.throw_blend();
+            self.play(0x96, blend);
+            self.setup_throw_damage(true);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let mut rise = false;
+            match self.anim_id() {
+                0x96 => {
+                    self.me.anim_advance_then(0x99, 0.0, 1);
+                    if self.me.anim_progress() > 0.9 {
+                        rise = true;
+                    }
+                    self.set(0x8B);
+                }
+                0x99 => {
+                    self.me.anim_advance_loop(0);
+                    self.set(0x8B);
+                    self.me.set_fx(4);
+                    rise = true;
+                }
+                0x98 => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                }
+                _ => {}
+            }
+            self.step(6, 5, 2, 0.0, kmh(100.0));
+            if rise {
+                self.me.move_vertical(kmh(1500.0), kmh(100.0));
+            } else {
+                self.me.brake_vertical();
+            }
+            for f in [0xBB, 0x1A, 0x3F, 0x44, 0x45, 0x46] {
+                self.set(f);
+            }
+        }
+        if phase == DECIDE && self.anim_id() == 0x99 {
+            let mut end = self.flag(0xF) || self.flag(0x16);
+            if self.opp_seen_action() != 0xBC {
+                end = true;
+            }
+            if self.env.stage_4_or_27 && self.flag(0x17) {
+                end = true;
+            }
+            self.me.work[2] += 1;
+            if self.me.work[2] > 10 {
+                if self.me.work[2] > 90 {
+                    end = true;
+                }
+                if self.data.tables.params.flags() & 0x400 != 0
+                    && let Some(top) = self.env.stage.water_level
+                    && top - self.me.pose.pos[1] < self.data.height() * 3.0
+                {
+                    end = true;
+                }
+            }
+            if end {
+                self.request_anim(0x98, 0.0);
+                self.me.pose.fall_speed = 0.0;
+            }
+        }
+    }
+
+    /// Action 0xBC (`BtlAct_SlamThrown`): its victim, motion 0x97, the loop 0x9A diving with the thrower, 0x9B on
+    /// the ground once let go, then down (0xDE); out of the stage or without the thrower 0xE6. The camera shake and
+    /// the rumble are not ported.
+    fn slam_thrown(&mut self, phase: u32) {
+        if phase == ENTER {
+            let blend = self.throw_blend();
+            self.play(0x97, blend);
+            self.held(0xE);
+            self.turn_by_root_yaw();
+        }
+        if phase == RUN {
+            let mut rise = false;
+            match self.anim_id() {
+                0x97 => {
+                    self.me.anim_advance_then(0x9A, 0.0, 1);
+                    self.set(0x97);
+                }
+                0x9A => {
+                    self.me.anim_advance_loop(0);
+                    self.set(0x97);
+                    self.set(0xA);
+                    rise = true;
+                }
+                0x9B => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            self.step(9, 6, 3, 0.0, kmh(100.0));
+            if rise {
+                self.me.move_vertical(kmh(1500.0), 10000.0);
+            } else {
+                self.me.apply_gravity();
+            }
+            for f in [0x95, 0xBB, 0x1A, 0x3F, 0x44, 0x45, 0x46, 0x96, 0x1B] {
+                self.set(f);
+            }
+            self.me.set_fx(0x3B);
+        }
+        if phase == DECIDE {
+            if self.anim_id() == 0x9A {
+                if self.flag(0x16)
+                    || (self.env.stage_4_or_27 && self.flag(0x17))
+                    || self.opp_seen_action() != 0xBB
+                {
+                    self.request(0xE6);
+                }
+                if !self.flag(0x23) && self.flag(0xF) {
+                    self.request_anim(0x9B, 0.0);
+                    self.opp.flags.set(0x8C);
+                }
+            }
+            if self.me.work[1] != 0 {
+                if self.me.react.back {
+                    self.set(0x35);
+                }
+                self.request(0xDE);
+            }
+        }
+        if phase == LEAVE {
+            self.set(0x33);
+        }
+    }
+
+    /// Action 0xBE (`BtlAct_DragDown`, forced by flag 0x7F): drags the opponent down head first at 2000 km/h
+    /// (motion 0x197), then 0x198 and the hop 0x28 once it is let go. The camera cut is not ported.
+    fn drag_down(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x197, 0.0);
+        }
+        if phase == RUN {
+            let (mut lean, mut speed) = (0.0, 0.0);
+            match self.anim_id() {
+                0x197 => {
+                    self.me.anim_advance_loop(0);
+                    lean = 1.0;
+                    self.me.move_vertical(kmh(2000.0), 10000.0);
+                }
+                0x198 => {
+                    self.me.anim_advance_then(0x28, 0.15, 0);
+                    lean = 1.0 - self.me.anim_progress();
+                    self.me.move_vertical(0.0, 10000.0);
+                }
+                0x28 => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                    if self.me.anim_progress() < 0.6 {
+                        speed = self.me.move_speed(self.data, self.env, 0xB);
+                    }
+                    self.me.move_vertical(0.0, 10000.0);
+                }
+                _ => {}
+            }
+            self.step(6, 5, 4, speed, kmh(100.0));
+            for f in [0xBB, 0x1A, 0x3F, 0x44, 0x45, 0x46] {
+                self.set(f);
+            }
+            self.me.set_lean_x(lean * deg(-90.0));
+        }
+        if phase == DECIDE
+            && self.anim_id() == 0x197
+            && self.me.action_frame > 0
+            && self.opp_seen_action() != 0xBF
+        {
+            self.request_anim(0x198, 0.0);
+        }
+    }
+
+    /// Action 0xBF (`BtlAct_DraggedDown`, reaction 0x31): dragged down under the opponent in 0xBE (its position
+    /// plus its movement, 0.3 of its height lower, by this model's node 0 less node 0x10), motion 0xC3 / 0xC4
+    /// (`BtlAct_GetPrev` is never 0xD5); on the ground 500 damage and 0xDE, out of the stage 0xE6 (0xD9 dead). The
+    /// camera shake and the rumble are not ported.
+    fn dragged_down(&mut self, phase: u32) {
+        if phase == ENTER {
+            let air = self.me.is_air_motion(self.env, false);
+            self.play(if air { 0xC4 } else { 0xC3 }, 0.0);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+        }
+        if phase == RUN {
+            let air = self.me.is_air_motion(self.env, false);
+            self.me.anim_advance_loop(0);
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.move_vertical(kmh(2000.0), 10000.0);
+            if self.opp_seen_action() == 0xBE || self.me.action_frame == 0 {
+                let mut pos = add(self.opp.snap_pos(6), self.opp.pose.vel);
+                pos[1] += self.opp_data.height() * 0.3;
+                let offset = sub(self.me.obj.node_pos(0), self.me.obj.node_pos(0x10));
+                self.me.pose.pos = add(pos, offset);
+            }
+            for f in [0xBB, 0xA, 0x1A, 0x3F, 0x44, 0x45, 0x46, 0x95, 0x96, 0x1B] {
+                self.set(f);
+            }
+            self.me.set_fx(0x3B);
+            self.me.set_lean_x(if air { deg(-90.0) } else { deg(90.0) });
+        }
+        if phase == DECIDE {
+            if self.flag(0x1F) || self.flag(0xF) {
+                self.request(0xDE);
+                self.me.damage(self.env, self.data, 500, 0);
+            }
+            let out = |s: &Self| if s.me.is_dead() { 0xD9 } else { 0xE6 };
+            if self.flag(0x16) {
+                self.request(0xE6);
+            }
+            if self.flag(0xB6) {
+                let a = out(self);
+                self.request(a);
+            }
+            if self.env.stage_4_or_27 {
+                if self.flag(0x17) {
+                    self.request(0xE6);
+                }
+                if self.flag(0xB7) {
+                    let a = out(self);
+                    self.request(a);
+                }
+            }
+        }
+    }
+
     // ---- the reactions a smash gives (btl_act_1.c) ---------------------------------------------------------------
 
     /// `BtlActB_UpdateMashRate`: each press of an action button (`ANY_FACE`) adds to the motion's step, kept in
@@ -6146,6 +6632,139 @@ impl Ctx<'_, '_> {
             let yaw = self.me.pose.yaw;
             [yaw.sin(), 0.0, yaw.cos()]
         };
+    }
+
+    /// The falling blasts' aim: under lock-on at the opponent's node 0x11 from the own, 18..45 degrees below the
+    /// horizon; otherwise 45 degrees down along the heading.
+    fn aim_falling_blast(&mut self) {
+        self.me.aim_dir = if self.flag(5) {
+            let from = self.me.obj.node_pos(0x11);
+            self.calc_aim_dir(0x11, from, deg(18.0), deg(45.0))
+        } else {
+            let r = 0.7071;
+            let yaw = self.me.pose.yaw;
+            [yaw.sin() * r, r, yaw.cos() * r]
+        };
+    }
+
+    /// Action 0xB2 (`BtlAct_KiBlastB2`): the falling ki blast, motion 0x7A, paid on entry; then 0xB in flight or
+    /// the jump 0x11. The voice is not ported.
+    fn falling_blast(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x7A, 0.15);
+            let cost = ki_cost(self.me, self.data);
+            self.me.spend_ki(cost, false);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.me.blast_shots += self.query_event(4, 0, 3);
+            self.me.blast_shots_timer = 0x1E;
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.request(if self.flag(0xE) { 0xB } else { 0x11 });
+            }
+            self.step(2, 5, 7, 0.0, kmh(100.0));
+            self.me.brake_vertical();
+            self.set(0xD5);
+            self.aim_falling_blast();
+        }
+    }
+
+    /// Action 0xB3 (`BtlAct_KiBlastChargeB3`): the charged falling blast, motions 0x8D wind-up, 0x8E hold (its
+    /// progress the charge; left when the blast button is let go, input 0x5B), 0x8F release, paid when it starts;
+    /// flag 0x8E until the release fires. The sound and the voice are not ported.
+    fn charged_falling_blast(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x8D, 0.15);
+            self.me.blast_node = self.play_sub_anim(0x8F);
+            self.me.set_fx(0x17);
+            self.me.blast_shots += 1;
+            self.me.blast_shots_timer = 0x1E;
+        }
+        if phase == RUN {
+            let id = self.anim_id();
+            match id {
+                0x8D => {
+                    self.me.anim_advance_then(id + 1, 0.0, 0);
+                    self.set(0x8E);
+                }
+                0x8E => {
+                    self.me.anim_advance_then(id + 1, 0.0, 0);
+                    self.set(0x8E);
+                    self.me.blast_charge = self.me.anim_progress();
+                }
+                0x8F => {
+                    if self.me.anim_advance(0) {
+                        self.request(if self.flag(0xE) { 0xB } else { 0x11 });
+                    }
+                    if self.me.anim_is_new() {
+                        let cost = ki_cost(self.me, self.data);
+                        self.me.spend_ki(cost, false);
+                    }
+                    if self.me.obj.frame < self.query_event(4, 0, 0) as f32 {
+                        self.set(0x8E);
+                    }
+                }
+                _ => {}
+            }
+            self.step(2, 5, 7, 0.0, kmh(100.0));
+            self.me.brake_vertical();
+            self.set(0xD5);
+            self.aim_falling_blast();
+        }
+        if phase == DECIDE && self.anim_id() == 0x8E && self.test(0x5B) {
+            let id = self.anim_id();
+            self.request_anim(id + 1, 0.0);
+        }
+    }
+
+    /// Action 0x95 (`BtlAct_KiVolley95`, attack record 0x95): ten ki blasts, motions 0x71 / 0x72 of 0.1 s each
+    /// paid as it starts, alternating (always 0x72 with parameter flag 0x100 or a changed body), with their pitch
+    /// variants. The voice and the camera cut are not ported.
+    fn ki_volley(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.me.attack = self.me.next_attack;
+            self.play(0x71, 0.1);
+            self.held(0xE);
+            let atk = self.me.attack;
+            if atk.flags & 0x80 != 0 {
+                self.set(0xCD);
+            }
+            if (1..4).contains(&atk.lead_in) {
+                self.me.set_fx(0xD);
+            }
+        }
+        if phase == RUN {
+            let id = self.anim_id();
+            if matches!(id, 0x71 | 0x72) {
+                if self.me.anim_is_new() {
+                    self.me.work[2] += 1;
+                    let cost = ki_cost(self.me, self.data);
+                    self.me.spend_ki(cost, false);
+                }
+                self.me.anim_set_duration(0.1);
+                if self.me.anim_advance(0) {
+                    if self.me.work[2] >= 10 {
+                        self.request(0xB);
+                    } else {
+                        let next = if self.data.tables.params.flags() & 0x100 != 0
+                            || self.me.gauge.body_changed
+                            || id == 0x71
+                        {
+                            0x72
+                        } else {
+                            0x71
+                        };
+                        self.request_anim(next, 0.0);
+                    }
+                }
+                let a = self.anim_id();
+                self.set_pitch_motion(a + 2, a + 4);
+            }
+            self.step(2, 5, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.aim_blast(0x11);
+        }
     }
 
     /// Action 0xAE (`BtlAct_KiBlastHandler`): motion 0x71 (0x72 for the second hand, which nothing ever picks:
@@ -7464,7 +8083,7 @@ mod tests {
         ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [0xB2, 0x95, 0xB8, 0xF6] {
+        for id in [0xEC, 0xFA, 0xF6] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

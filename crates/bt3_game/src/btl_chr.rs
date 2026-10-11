@@ -126,6 +126,27 @@ pub(crate) struct React {
     pub launch_a: f32,
     pub launch_b: f32,
     pub damage: i32,
+    /// `noBlend`: a throw of a character with parameter flag bit 19 starts its motions without a blend.
+    pub no_blend: bool,
+}
+
+/// The damage a fighter has queued against its opponent (fighter + 0xD94): a throw's hits, dealt on its motion's
+/// events, and its health / ki drain between two frames.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DamageQueue {
+    pub hits: i32,
+    pub total_start: i32,
+    pub total: i32,
+    pub per_hit: i32,
+    pub flags: u32,
+    pub drain_health_start: i32,
+    pub drain_health: i32,
+    pub drain_health_step: i32,
+    pub drain_ki_start: i32,
+    pub drain_ki: i32,
+    pub drain_ki_step: i32,
+    pub drain_from: i32,
+    pub drain_to: i32,
 }
 
 /// `HitStatus` (fighter + 0xF40).
@@ -185,6 +206,8 @@ pub(crate) struct SideData<'a> {
     pub blast_assets: [Option<&'a crate::eft::SetAssets>; 2],
     /// The costume of the side's character (`BtlMember_GetActive()->costume`).
     pub costume: i32,
+    /// The side's character (`BtlMember_GetActive()->chara`).
+    pub chara: i32,
 }
 
 impl SideData<'_> {
@@ -332,6 +355,10 @@ pub(crate) struct Chr {
     /// then 0.5 rad / 500).
     pub search_angle: f32,
     pub search_range: f32,
+    /// The damage queued against the opponent (`queue`).
+    pub queue: DamageQueue,
+    /// `boostStock` (0..10): raised by the throws of character 0x6E.
+    pub boost_stock: i32,
     /// `burstNode`: the node the finisher 0x66's burst effect follows.
     pub burst_node: i32,
     /// `nextAttack` / `attack`: the pending and the latched attack parameters.
@@ -452,6 +479,8 @@ impl Chr {
             idle_talk_count: 0,
             search_angle: 0.0,
             search_range: 0.0,
+            queue: DamageQueue::default(),
+            boost_stock: 0,
             burst_node: 0,
             next_attack: Attack::default(),
             attack: Attack::default(),
@@ -588,6 +617,68 @@ impl Chr {
         }
     }
 
+    /// `BtlAnim_Play` of a motion with table flag 0x20000000: the opponent's motion of that id, retargeted.
+    pub(crate) fn anim_play_from(
+        &mut self,
+        data: &SideData,
+        opp: &SideData,
+        env: &Env,
+        motion: i32,
+        blend: f32,
+    ) {
+        let flags = env.anim_flags(motion);
+        self.obj
+            .play_from(&data.obj, &opp.obj, motion.max(0) as usize, flags);
+        self.obj.flags &= !0x60;
+        self.flags.clear(anim_flag::F30);
+        self.flags.clear_range(anim_flag::REQ, anim_flag::END);
+        self.flags.set(anim_flag::NEW);
+        self.anim.next = -1;
+        self.anim.cur = motion;
+        self.stall = 0;
+        if blend > 0.0 {
+            self.anim_set_blend(blend);
+            self.anim_apply_blend();
+        }
+    }
+
+    /// `BtlAnim_Play` with its table-flag switch: the motion from the opponent's table for flag 0x20000000.
+    pub(crate) fn anim_play_any(
+        &mut self,
+        data: &SideData,
+        opp: &SideData,
+        env: &Env,
+        motion: i32,
+        blend: f32,
+    ) {
+        if env.anim_flags(motion) & 0x2000_0000 != 0 {
+            self.anim_play_from(data, opp, env, motion, blend);
+        } else {
+            self.anim_play(data, motion, blend);
+        }
+    }
+
+    /// `BtlAnim_InFrameRange`: the last step crossed frames lo..hi.
+    pub(crate) fn anim_in_frame_range(&self, lo: f32, hi: f32) -> bool {
+        let (f, p) = (self.obj.frame, self.obj.prev_frame);
+        if f >= p {
+            p <= hi && lo <= f
+        } else {
+            p <= hi || lo <= f
+        }
+    }
+
+    /// `BtlMember_DrainKi`: what was taken.
+    pub(crate) fn drain_ki(&mut self, amount: i32) -> i32 {
+        if amount <= 0 {
+            return 0;
+        }
+        let before = self.gauge.ki;
+        self.gauge.max_power = 0;
+        self.gauge.ki = (before - amount).max(0);
+        before - self.gauge.ki
+    }
+
     /// `BtlAnim_PlayKeep`: the same without restarting the frame, raising flag 0x2C.
     pub(crate) fn anim_play_keep(&mut self, data: &SideData, motion: i32, blend: f32) {
         self.obj.play(&data.obj, 0, motion.max(0) as usize, false);
@@ -632,9 +723,9 @@ impl Chr {
     }
 
     /// `BtlAnim_FlushRequest`, `BtlAnim_FlushRequestKeep`, `BtlAnim_FlushSubToMain`.
-    pub(crate) fn anim_flush_requests(&mut self, data: &SideData) {
+    pub(crate) fn anim_flush_requests(&mut self, data: &SideData, opp: &SideData, env: &Env) {
         if self.flags.test(anim_flag::REQ) {
-            self.anim_play(data, self.anim.next, self.blend_time);
+            self.anim_play_any(data, opp, env, self.anim.next, self.blend_time);
         }
         if self.flags.test(anim_flag::REQ_KEEP) {
             self.anim_play_keep(data, self.anim.next, self.blend_time);

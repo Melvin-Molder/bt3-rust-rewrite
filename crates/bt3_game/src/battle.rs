@@ -156,6 +156,8 @@ pub(crate) struct FighterModel {
     /// Every motion of the character's table by id (`None` for an empty section), with `BtlAnim_Play`'s table
     /// flags applied.
     pub(crate) motions: Vec<Option<Motion>>,
+    /// The motions with table flag 0x20000000 as decoded, by id (what a throw's victim borrows).
+    pub(crate) raw_motions: Vec<Option<Motion>>,
     pub(crate) tables: CharaTables,
     /// `gBtlChars->paramTbl[chara]`.
     pub(crate) entry: CharaEntry,
@@ -344,6 +346,11 @@ pub fn load(
                 continue;
             }
             let mut motion = Motion::parse(&raw).map_err(error)?;
+            // The motions an opponent borrows (BtlObjAnim_PlayFrom) are kept as decoded as well.
+            if motion_flags(&common, id) & 0x2000_0000 != 0 {
+                fighter.raw_motions.resize(id + 1, None);
+                fighter.raw_motions[id] = Some(motion.clone());
+            }
             // BtlAnim_Play: BtlAnim_ApplyTableFlags and BtlAnim_HideModelNodes.
             motion.apply_table_flags(motion_flags(&common, id));
             motion.hide_model_nodes(side.chara);
@@ -577,6 +584,7 @@ fn load_fighter(
         model,
         batch_textures,
         motions: Vec::new(),
+        raw_motions: Vec::new(),
         tables: CharaTables::default(),
         entry: CharaEntry::default(),
         cam_cuts: [None, None, None],
@@ -660,13 +668,17 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         obj: ObjData {
             model: &f.model,
             motions: &f.motions,
+            raw: &f.raw_motions,
             body: f.tables.body.as_ref(),
+            chara: f.chara,
+            height: f.tables.params.height(),
         },
         tables: &f.tables,
         entry: f.entry,
         effect: f.effect.as_ref(),
         blast_assets: std::array::from_fn(|i| f.blast_assets[i].as_ref()),
         costume: f.costume,
+        chara: f.chara,
     }
 }
 
@@ -1782,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn real_cpu_closes_in_rushes_and_hits_an_idle_player() {
+    fn real_cpu_closes_in_rushes_throws_and_knocks_out_an_idle_player() {
         let mut setup = BattleSetup::default();
         setup.sides[1].chara = 1;
         setup.sides[1].control = 2;
@@ -1826,11 +1838,16 @@ mod tests {
             battle.roster.chars[0].gauge.health < health,
             "the CPU never hit"
         );
-        // The CPU rushes and uses its finishers and attack records. On this stage it also dives at the player from
-        // the higher ground with the lift strike 0x59, which the slope stops short, so the round is not over yet.
-        for a in [0x44, 0x60, 0x59] {
+        // The CPU rushes, throws (0xB4 -> 0xB7) and uses its attack records; the idle player is knocked out and the
+        // round ends for the CPU side.
+        for a in [0x44, 0xB4, 0xB7] {
             assert!(actions.contains(&a), "no action {a:X}");
         }
+        assert_eq!(battle.seq.state, SeqState::Finish);
+        assert_eq!(
+            (battle.seq.winner, battle.seq.reason),
+            (crate::battle_seq::WIN_P2, crate::battle_seq::REASON_KO)
+        );
     }
 
     /// From the start to the result menu: START skips the intro, the CPU side loses its last health, then the
@@ -2735,6 +2752,76 @@ mod tests {
         );
         let turned = crate::btl_input::wrap_angle(bearing(&battle) - before).abs();
         assert!(turned > 2.0, "went round by {turned} rad");
+    }
+
+    #[test]
+    fn real_grab_throws_the_opponent() {
+        use crate::btl_input::pad::{CROSS, START, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        let gap = |b: &Battle| crate::btl_chr::opp_distance(&b.roster.chars[0], &b.roster.chars[1]);
+        for _ in 0..300 {
+            if gap(&battle) < 25.0 {
+                break;
+            }
+            frame(&mut battle, UP);
+        }
+        for _ in 0..20 {
+            frame(&mut battle, 0);
+        }
+        // A double tap of the dash button when close: the step in, then the grab 0xB4. It catches: the thrower
+        // plays 0xB7 holding the victim in 0xB8, whose motion is the thrower's 0x97 moved to its skeleton; the
+        // throw's damage comes from the queue, and the victim is let go along the launch angles, blown away (0xD5)
+        // into a wall (0xE7).
+        let health = battle.roster.chars[1].gauge.health;
+        let (mut mine, mut theirs) = (Vec::new(), Vec::new());
+        let (mut borrowed, mut held, mut nearest) = (false, false, f32::MAX);
+        for i in 0..120 {
+            frame(&mut battle, if i == 0 || i == 2 { CROSS } else { 0 });
+            let (a, b) = (&battle.roster.chars[0], &battle.roster.chars[1]);
+            mine.push(a.act.current);
+            theirs.push(b.act.current);
+            if b.act.current == 0xB8 {
+                borrowed |= b.anim.cur == 0x97 && b.obj.layers[0].borrowed;
+                held |= b.flags.test(0x23);
+                nearest = nearest.min(gap(&battle));
+            }
+        }
+        mine.dedup();
+        theirs.dedup();
+        assert_eq!(&mine[..4], &[0x1E, 0xB4, 0xB7, 0xB], "{mine:x?}");
+        let at = theirs.iter().position(|&a| a == 0xB8).expect("not thrown");
+        assert_eq!(&theirs[at..at + 3], &[0xB8, 0xD5, 0xE7], "{theirs:x?}");
+        assert!(borrowed, "the victim did not play the thrower's motion");
+        assert!(held, "the victim was not held");
+        assert!(nearest < 20.0, "held {nearest} away");
+        assert!(battle.roster.chars[1].gauge.health < health);
     }
 
     #[test]

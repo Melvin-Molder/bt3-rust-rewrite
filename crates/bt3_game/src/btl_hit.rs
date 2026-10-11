@@ -170,6 +170,23 @@ pub(crate) fn launch_angle_b_of(data: &SideData, id: usize) -> f32 {
     f32::from(data.tables.attacks[n].s8_at(0x16)) * PI / 180.0
 }
 
+/// `BtlAtk_GetLaunchAngleA`: record +0x15 (degrees), the launch yaw.
+pub(crate) fn launch_angle_a(me: &Chr, data: &SideData, env: &Env) -> f32 {
+    let (r, _) = record(me, data, env);
+    f32::from(r.s8_at(0x15)) * PI / 180.0
+}
+
+/// `BtlAtk_GetFlags`.
+pub(crate) fn attack_flags(me: &Chr, data: &SideData, env: &Env) -> u32 {
+    record(me, data, env).0.flags()
+}
+
+/// `BtlAtk_GetThrowParamC` / `E`: record +0x0C / +0x0E, a throw's health and ki drains.
+pub(crate) fn throw_drains(me: &Chr, data: &SideData, env: &Env) -> (i32, i32) {
+    let (r, _) = record(me, data, env);
+    (i32::from(r.u16_at(0xC)), i32::from(r.u16_at(0xE)))
+}
+
 /// `BtlAtk_GetLaunchSpeed`: record +0x14 in 10 km/h, times curve row 8.
 pub(crate) fn launch_speed(me: &Chr, data: &SideData, env: &Env) -> f32 {
     let (r, _) = record(me, data, env);
@@ -182,7 +199,7 @@ fn hit_windows(me: &Chr, data: &SideData) -> i32 {
 }
 
 /// `BtlAtk_GetDamage`: record damage times curve row 4, divided by the motion's hits.
-fn damage(me: &Chr, data: &SideData, env: &Env) -> i32 {
+pub(crate) fn damage(me: &Chr, data: &SideData, env: &Env) -> i32 {
     let (r, _) = record(me, data, env);
     let mut v = (i32::from(r.u16_at(4)) as f32 * env.curve_base(4)) as i32;
     let hits = hit_windows(me, data);
@@ -486,6 +503,9 @@ impl Pair<'_, '_> {
         def.react.reaction = react;
         if react != 2 {
             def.react.reaction_sub = i32::from(rec.s8_at(0x20));
+            if atk.gauge.body_changed {
+                def.react.reaction_sub = 0x13;
+            }
             def.react.silent = (atk_flags >> 10) & 1 != 0;
             def.react.scale = if react == 0x14 {
                 1.0
@@ -535,10 +555,16 @@ impl Pair<'_, '_> {
         let angle = |o: usize| f32::from(rec.s8_at(o)) * PI / 180.0;
         if react != 2 {
             if launch {
+                let (mut launch_a, mut launch_b) = (angle(0x15), angle(0x16));
                 def.react.back = (atk_flags >> 12) & 1 != 0;
+                if atk.gauge.body_changed && atk_id == 0x55 {
+                    def.react.back = false;
+                    launch_a = 0.0;
+                    launch_b = -0.785_398_07;
+                }
                 def.react.yaw = yaw;
-                def.react.launch_a = angle(0x15);
-                def.react.launch_b = angle(0x16);
+                def.react.launch_a = launch_a;
+                def.react.launch_b = launch_b;
                 def.react.turn_yaw = 0.0;
                 def.react.turn_pitch = 0.0;
                 for f in [0x44, 0x45, 0x46] {
@@ -569,6 +595,9 @@ impl Pair<'_, '_> {
                 def.react.launch_b = 0.0;
             }
         }
+        let no_blend = atk_id == 0x55 && (data.tables.params.flags() >> 19) & 1 != 0;
+        atk.react.no_blend = no_blend;
+        def.react.no_blend = no_blend;
         match react {
             0x14 | 0x16 | 0x25 => def.react.damage = damage(atk, data, env),
             _ => {

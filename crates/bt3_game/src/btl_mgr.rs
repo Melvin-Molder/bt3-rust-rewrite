@@ -193,6 +193,7 @@ impl Roster {
                 chr.flags.set_stage(6);
             }
         }
+        self.update_hold(data);
         self.snapshot(1);
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
@@ -248,6 +249,7 @@ impl Roster {
                 .fire(me, opp, data[i], &mut self.rand, env.gate.time_stopped);
             me.obj.build_volumes(&data[i].obj);
         }
+        self.update_queued_damage(data, env);
         if !self.chars.iter().any(Chr::is_frozen) {
             let mut pair = Pair {
                 chars: &mut self.chars,
@@ -265,6 +267,131 @@ impl Roster {
         for chr in &mut self.chars {
             if !chr.is_frozen() {
                 chr.flags.set_stage(10);
+            }
+        }
+    }
+
+    /// `BtlChars_UpdateHold`: a held fighter (flag 0x97) and its holder (0x8B) are moved so that the holder's node
+    /// 0x34 and the held one's hold node meet: the holder with its flag 0x9B, else the held fighter (flag 0x23); by
+    /// what is left of the held fighter's blend while it runs.
+    fn update_hold(&mut self, data: [&SideData; 2]) {
+        let (mut holder, mut held) = (None, None);
+        for (i, chr) in self.chars.iter().enumerate() {
+            if chr.is_frozen() {
+                continue;
+            }
+            if chr.flags.test(0x8B) {
+                holder = Some(i);
+            }
+            if chr.flags.test(0x97) {
+                held = Some(i);
+            }
+        }
+        let (Some(h), Some(d)) = (holder, held) else {
+            return;
+        };
+        if h == d {
+            return;
+        }
+        let at = self.chars[h].obj.node_pos(0x34);
+        let held_node = self.chars[d].obj.hit.node.max(0) as u32;
+        let pos = self.chars[d].obj.node_pos(held_node);
+        let keep = if self.chars[d]
+            .flags
+            .test(crate::btl_chr::anim_flag::BLENDING)
+        {
+            1.0 - self.chars[d].obj.blend
+        } else {
+            1.0
+        };
+        let (mover, delta) = if self.chars[h].flags.test(0x9B) {
+            (h, sub(pos, at))
+        } else {
+            (d, sub(at, pos))
+        };
+        let me = &mut self.chars[mover];
+        me.pose.pos = crate::btl_chr::add(me.pose.pos, delta.map(|v| v * keep));
+        me.pose_to_obj(false);
+        me.obj.calc_matrices(&data[mover].obj);
+        me.obj_to_pose();
+        if mover == d {
+            me.flags.set(0x23);
+        }
+    }
+
+    /// `BtlMembers_UpdateQueuedDamage`: each fighter deals what it queued against its opponent, a share on each of
+    /// the motion's damage events (0x200000000), and drains health / ki past the drain's first frame while the
+    /// motion is a throw (table flag 8 without 0x10); flag 0x8C deals the rest and empties the queue. The
+    /// vibration is not ported.
+    fn update_queued_damage(&mut self, data: [&SideData; 2], env: &Env) {
+        for i in 0..2 {
+            let (me, other) = split(&mut self.chars, i);
+            if me.is_frozen() {
+                continue;
+            }
+            if me.anim_test_attr(0x2_0000_0000) {
+                let q = &mut me.queue;
+                if q.hits >= 2 {
+                    other.damage(env, data[i ^ 1], q.per_hit, q.flags);
+                    q.total -= q.per_hit;
+                } else {
+                    other.damage(env, data[i ^ 1], q.total, q.flags);
+                    q.total = 0;
+                }
+                q.hits -= 1;
+                other.unk_fe4 = 30;
+                if me.flags.test(0x13B) {
+                    other.unk_fe4 = 0;
+                }
+            }
+            let mflags = env.anim_flags(me.anim.cur);
+            let (active, frame) = if mflags & 8 != 0 && mflags & 0x10 == 0 {
+                (true, me.obj.frame as i32)
+            } else {
+                (false, 0)
+            };
+            let q = &mut me.queue;
+            if active && q.drain_from < frame {
+                if q.drain_health > 0 {
+                    let amount = if q.drain_health_step < q.drain_health {
+                        q.drain_health -= q.drain_health_step;
+                        q.drain_health_step
+                    } else {
+                        std::mem::take(&mut q.drain_health)
+                    };
+                    let mut flags = q.flags | 1 | 2;
+                    if other.combo.hits > 0 {
+                        flags |= 8;
+                    }
+                    let lost = other.damage(env, data[i ^ 1], amount, flags);
+                    if !me.flags.test(0x13C) {
+                        me.add_health(lost);
+                    }
+                    other.unk_fe4 = 30;
+                }
+                let q = &mut me.queue;
+                if q.drain_ki > 0 {
+                    let amount = if q.drain_ki_step < q.drain_ki {
+                        q.drain_ki -= q.drain_ki_step;
+                        q.drain_ki_step
+                    } else {
+                        std::mem::take(&mut q.drain_ki)
+                    };
+                    let lost = other.drain_ki(amount);
+                    if !me.flags.test(0x13C) {
+                        me.add_ki(lost);
+                    }
+                    other.unk_fe4 = 30;
+                }
+            }
+            if me.flags.test(0x8C) {
+                if me.queue.total > 0 {
+                    other.damage(env, data[i ^ 1], me.queue.total, me.queue.flags);
+                }
+                me.queue = crate::btl_chr::DamageQueue {
+                    drain_to: me.queue.drain_to,
+                    ..Default::default()
+                };
             }
         }
     }

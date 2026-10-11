@@ -4,13 +4,16 @@
 //!
 //! The fighter code steps the player itself (`anim.manual`): it sets the frame, then the object samples the pose
 //! (`BtlObjAnim_SamplePose`), reads the events (`BtlObjAnim_UpdateEvents`) and builds the matrices
-//! (`BtlObjPose_CalcMatrices`). Not ported: the look-at rotations of nodes 0x2E / 0x2F, the jaw, retargeting.
+//! (`BtlObjPose_CalcMatrices`). A throw's victim plays the thrower's motion retargeted to its own skeleton
+//! (`BtlObjAnim_PlayFrom`). Not ported: the look-at rotations of nodes 0x2E / 0x2F, the jaw.
 
 use std::f32::consts::PI;
 
 use bt3_data::chara_data::BodyData;
 use bt3_data::model::CharaModel;
-use bt3_data::motion::{EV_HIT_BEGIN, EV_HIT_END, Motion, NODE_MAX, quat_slerp};
+use bt3_data::motion::{
+    EV_HIT_BEGIN, EV_HIT_END, Motion, NODE_MAX, Track, quat_slerp, quat_unpack,
+};
 
 use crate::battle::{IDENTITY, Mtx, apply, mul};
 
@@ -28,7 +31,13 @@ pub(crate) struct ObjData<'a> {
     pub model: &'a CharaModel,
     /// By motion id, `None` for an empty section.
     pub motions: &'a [Option<Motion>],
+    /// The motions other objects borrow (table flag 0x20000000), as decoded: before `BtlAnim_Play`'s table flags.
+    pub raw: &'a [Option<Motion>],
     pub body: Option<&'a BodyData>,
+    /// The model id `BtlAnim_HideModelNodes` tests (the character).
+    pub chara: i32,
+    /// `mdl.param->height` (parameter block +4): the scale of the vertical root motion.
+    pub height: f32,
 }
 
 /// `BobjPart`: one node's local pose of this frame and its world matrix.
@@ -59,6 +68,8 @@ impl Default for Node {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layer {
     pub motion: Option<usize>,
+    /// The motion is the object's borrowed copy (`BtlObjAnim_PlayFrom`), not one of its own.
+    pub borrowed: bool,
     pub length: f32,
     cursors: [u16; NODE_MAX],
 }
@@ -67,6 +78,7 @@ impl Default for Layer {
     fn default() -> Self {
         Self {
             motion: None,
+            borrowed: false,
             length: 0.0,
             cursors: [0; NODE_MAX],
         }
@@ -236,6 +248,8 @@ pub(crate) struct Obj {
     pub area: i32,
     pub body: Body,
     pub work: Work,
+    /// Layer 0's borrowed motion (`BtlObjAnim_PlayFrom`).
+    pub borrowed: Option<Motion>,
 }
 
 impl Obj {
@@ -287,6 +301,7 @@ impl Obj {
                 ..Body::default()
             },
             work: Work::default(),
+            borrowed: None,
         }
     }
 
@@ -308,6 +323,7 @@ impl Obj {
         let m = data.motions.get(motion).and_then(Option::as_ref);
         let l = &mut self.layers[layer];
         l.motion = m.map(|_| motion);
+        l.borrowed = false;
         let Some(m) = m else {
             return;
         };
@@ -323,6 +339,77 @@ impl Obj {
                 self.prev_frame = self.prev_frame.min(l.length);
             }
         }
+    }
+
+    /// `BtlObjAnim_PlayFrom` (`useTable` 0): layer 0 plays a copy of the other object's motion moved to this
+    /// skeleton (`BtlObjAnim_Retarget`: each translation key less the other's rest translation of the node, y scaled
+    /// by the height ratio, plus this one's rest), then `BtlAnim_Play`'s table flags and hidden nodes.
+    pub(crate) fn play_from(
+        &mut self,
+        data: &ObjData,
+        other: &ObjData,
+        motion: usize,
+        table_flags: u32,
+    ) {
+        self.hit.node = 3;
+        let Some(src) = other.raw.get(motion).and_then(Option::as_ref) else {
+            self.layers[0].motion = None;
+            self.layers[0].borrowed = false;
+            return;
+        };
+        let mut m = src.clone();
+        let scale = data.height / other.height;
+        for bone in &data.model.parts {
+            let id = usize::from(bone.node);
+            if id >= NODE_MAX {
+                continue;
+            }
+            let Some(Some(Track::Full(keys))) = m.tracks.get_mut(id) else {
+                continue;
+            };
+            let Some(from) = other.model.parts.iter().find(|p| usize::from(p.node) == id) else {
+                continue;
+            };
+            for key in keys.iter_mut() {
+                let p = &mut key.1;
+                for k in 0..3 {
+                    p[k] -= from.rest[k];
+                }
+                p[1] *= scale;
+                for k in 0..3 {
+                    p[k] += bone.rest[k];
+                }
+            }
+        }
+        // BtlAnim_HideModelNode10, then BtlAnim_ApplyTableFlags and BtlAnim_HideModelNodes on the copy.
+        if data.chara == 0x78
+            && let Some(Some(t)) = m.tracks.get_mut(0x10)
+        {
+            match t {
+                Track::Rot(keys) => keys.iter_mut().for_each(|k| k.1 = PACKED_IDENTITY_ROT),
+                Track::Full(keys) => keys.iter_mut().for_each(|k| k.2 = PACKED_IDENTITY_ROT),
+            }
+        }
+        m.apply_table_flags(table_flags);
+        m.hide_model_nodes(data.chara);
+        let l = &mut self.layers[0];
+        l.motion = Some(motion);
+        l.borrowed = true;
+        l.length = f32::from(m.length);
+        l.cursors = [0; NODE_MAX];
+        self.frame = 0.0;
+        self.prev_frame = 0.0;
+        self.borrowed = Some(m);
+    }
+
+    /// The yaw of the first key of layer 0's root rotation track (`BtlActThrow_TurnByRootYaw`); `None` without one.
+    pub(crate) fn root_key_yaw(&self, data: &ObjData) -> Option<f32> {
+        let m = layer_motion(&self.layers[0], self.borrowed.as_ref(), data)?;
+        let q = match m.tracks.first()?.as_ref()? {
+            Track::Rot(keys) => keys.first().map(|k| k.1),
+            Track::Full(keys) => keys.first().map(|k| k.2),
+        };
+        Some(q.map_or(0.0, |q| quat_to_euler(quat_unpack(q))[1]))
     }
 
     /// `BtlObjAnim_PromoteLayer`: layer 1 becomes layer 0 at frame 0.
@@ -351,17 +438,10 @@ impl Obj {
     /// `BtlObjAnim_SamplePose`: every node's local translation and rotation: layer 0, layer 1 mixed in by `mix`
     /// (on the same relative frame), then the blend from the remembered pose (not on node 0).
     pub(crate) fn sample_pose(&mut self, data: &ObjData) {
-        let Some(m0) = self.layers[0]
-            .motion
-            .and_then(|id| data.motions.get(id))
-            .and_then(Option::as_ref)
-        else {
+        let Some(m0) = layer_motion(&self.layers[0], self.borrowed.as_ref(), data) else {
             return;
         };
-        let m1 = self.layers[1]
-            .motion
-            .and_then(|id| data.motions.get(id))
-            .and_then(Option::as_ref);
+        let m1 = layer_motion(&self.layers[1], self.borrowed.as_ref(), data);
         let b = self.blend;
         let w = if 0.0 < b {
             b * b * b * -2.0 + b * b * 3.0
@@ -418,11 +498,7 @@ impl Obj {
         hit.index = -1;
         hit.node_mask = 0;
         hit.count = 0;
-        let Some(m) = self.layers[0]
-            .motion
-            .and_then(|id| data.motions.get(id))
-            .and_then(Option::as_ref)
-        else {
+        let Some(m) = layer_motion(&self.layers[0], self.borrowed.as_ref(), data) else {
             return;
         };
         let cur = (self.frame + 1.0 / 60.0) as i32;
@@ -511,11 +587,7 @@ impl Obj {
     /// first still ahead, 2 of the last, 3 how many, 4 how many ahead, 5 how many reached, 6 / 7 / 8 the arguments
     /// of 0 / 1 / 2. Frames are -1 and arguments 0 when there is none.
     pub(crate) fn query_event(&self, data: &ObjData, mask: u64, layer: usize, what: u32) -> i32 {
-        let Some(m) = self.layers[layer]
-            .motion
-            .and_then(|id| data.motions.get(id))
-            .and_then(Option::as_ref)
-        else {
+        let Some(m) = layer_motion(&self.layers[layer], self.borrowed.as_ref(), data) else {
             return 0;
         };
         let (mut first, mut next, mut last) = (-1, -1, -1);
@@ -886,6 +958,24 @@ pub(crate) fn node_side(node: i32) -> i32 {
         _ => 3,
     }
 }
+
+/// The motion a layer plays: its own table's, or the borrowed copy.
+fn layer_motion<'a>(
+    layer: &Layer,
+    borrowed: Option<&'a Motion>,
+    data: &'a ObjData,
+) -> Option<&'a Motion> {
+    if layer.borrowed {
+        return borrowed;
+    }
+    layer
+        .motion
+        .and_then(|id| data.motions.get(id))
+        .and_then(Option::as_ref)
+}
+
+/// The packed identity rotation (`BtlObjAnim_ClearNodeRot`).
+const PACKED_IDENTITY_ROT: u64 = bt3_data::motion::PACKED_IDENTITY;
 
 pub(crate) fn mask_to_node(mask: u32) -> i32 {
     const ORDER: [(u32, i32); 19] = [
