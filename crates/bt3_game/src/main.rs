@@ -7,6 +7,7 @@ mod btl_chr;
 mod btl_flags;
 mod btl_hit;
 mod btl_input;
+mod btl_menu;
 mod btl_mgr;
 mod btl_obj;
 mod char_select;
@@ -178,6 +179,9 @@ struct Game {
     /// `ScrXfade`: frames captured so far, and the captured frame's alpha (0..128) over this one.
     xfade_captures: u32,
     xfade_alpha: i32,
+    /// HUD textures from this index on (the menu sheet) clamp at their edges (`CLAMP_1` 1 of the default
+    /// environment); the others wrap.
+    hud_clamp_from: usize,
     demo_count: u32,
     movie_texture: Option<usize>,
     soundtrack: Option<Decoding>,
@@ -365,6 +369,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hud_layer: None,
             xfade_captures: 0,
             xfade_alpha: 0,
+            hud_clamp_from: usize::MAX,
             demo_count: 0,
             movie_texture,
             soundtrack,
@@ -878,11 +883,16 @@ fn run_frames(
                     stat,
                     &mut game.libc_random,
                     &mut game.random,
+                    Some(&mut game.font),
                     shown,
                 );
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
-                game.quads = into_screen(frame.quads);
+                // The menu texts, then the screen fade over everything.
+                let mut quads = Vec::new();
+                game.font.flush(&mut quads);
+                quads.extend(into_screen(frame.quads));
+                game.quads = quads;
                 game.hud_prims = frame.hud.prims;
                 game.hud_layer = frame.hud.layer;
                 if frame.capture {
@@ -890,6 +900,9 @@ fn run_frames(
                 }
                 game.xfade_alpha = frame.xfade_alpha;
                 play_sounds(game, &mut commands, frame.sounds);
+                if let Some(reason) = frame.exit {
+                    leave_battle(game, &mut commands, &mut audio, reason);
+                }
             }
         }
     }
@@ -903,6 +916,34 @@ fn into_screen_at(quads: Vec<loading::Quad>, texture_base: usize) -> Vec<ScreenQ
             ScreenQuad::from(quad)
         })
         .collect()
+}
+
+/// `Battle_Term`, then `Progress_Main` picks the next screen from the result's reason: 8 the main menu, 0x10 the
+/// character select (the team select of team battles is not ported), 0x80 the Vs menu; the replay screen (0x1000)
+/// is not ported.
+fn leave_battle(
+    game: &mut Game,
+    commands: &mut Commands,
+    audio: &mut Assets<AudioSource>,
+    reason: u32,
+) {
+    stop_all(game, commands);
+    game.model_batches.clear();
+    game.stage_batches.clear();
+    game.hud_prims.clear();
+    game.hud_layer = None;
+    game.xfade_alpha = 0;
+    game.hud_clamp_from = usize::MAX;
+    if reason & 8 != 0 {
+        start_main_menu(game, commands, audio);
+    } else if reason & 0x10 != 0 && game.duel.battle_type == 0 {
+        start_char_select(game, commands);
+    } else if reason & 0x80 != 0 {
+        start_duel_menu(game, commands);
+    } else {
+        info!("the screen after the battle (reason {reason:#X}) is not ported yet");
+        game.scene = Scene::Black;
+    }
 }
 
 /// `Battle_Main` from `Battle_Init`: `Battle_Load` shows the loading screen (it takes over the shared generators)
@@ -974,6 +1015,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     game.model_textures = (assets.base_textures.clone(), assets.shade_textures.clone());
     game.stage_textures = assets.stage_textures.clone();
     game.hud_textures = assets.hud_textures.clone();
+    game.hud_clamp_from = assets.menu_sheet.base;
     game.scene = Scene::Battle(Box::new(battle::Battle::new(assets)));
     play_bgm(game, commands, battle::BGM_FIRST + setup.bgm.max(0) as u32);
 }

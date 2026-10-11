@@ -30,10 +30,12 @@ use crate::battle_seq::{DemoCam, ScrXfade, Seq, SeqInput};
 use crate::btl_ai::{AiMgr, Ctx as AiCtx};
 use crate::btl_chr::{Env, SideData};
 use crate::btl_input::{InputGate, PadState};
+use crate::btl_menu::{MenuDraw, MenuInput, MenuTexts, PauseMenu, Tree};
 use crate::btl_mgr::Roster;
 use crate::btl_obj::ObjData;
 use crate::char_select::BattleSetup;
 use crate::fade::Fade;
+use crate::font::Font;
 use crate::hud::{HUD_FILE, Hud, HudFrame, HudSheet, SHEET_WORDS};
 use crate::hud_gauge::{HudTextures, SideGauge};
 use crate::loading::Quad;
@@ -128,6 +130,15 @@ pub struct BattleAssets {
     /// The active members' `cpuLevel` and `aiType`.
     pub(crate) cpu_level: [i32; 2],
     pub(crate) ai_type: [usize; 2],
+    /// `Battle_IsSplitScreen`.
+    pub(crate) screen_mode: i32,
+    /// `Battle_GetBgm`.
+    pub(crate) bgm: i32,
+    /// The versus pause and result menus (mode 0 only), the menu sheet (HUD file entry 7, in `hud_textures`)
+    /// and the menu texts.
+    pub(crate) menus: Option<(Tree, Tree)>,
+    pub(crate) menu_sheet: HudSheet,
+    pub(crate) menu_texts: MenuTexts,
 }
 
 pub(crate) struct FighterModel {
@@ -185,7 +196,19 @@ pub fn load(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let (hud_textures, hud_sheets, hud_cpu) = load_hud(&read(HUD_FILE)?).map_err(error)?;
+    let hud_file = read(HUD_FILE)?;
+    let (mut hud_textures, hud_sheets, hud_cpu) = load_hud(&hud_file).map_err(error)?;
+    let menu_sheet = load_menu_sheet(&hud_file, &mut hud_textures).map_err(error)?;
+    let menu_texts = MenuTexts::read(&hud_file, MENU_TEXT_COUNT);
+    // PauseMenu_GetMenu: the versus trees without a replay; the other modes' menus are not ported.
+    let menus = if setup.mode == 0 {
+        Some((
+            Tree::read(elf, crate::btl_menu::PAUSE_VERSUS).map_err(error)?,
+            Tree::read(elf, crate::btl_menu::RESULT_VERSUS).map_err(error)?,
+        ))
+    } else {
+        None
+    };
     let common_tables = CommonTables::parse(&common).map_err(error)?;
     let collision = StageCollision::parse(&stage_file).map_err(error)?;
     let nav = StageNav::parse(&stage_file).map_err(error)?;
@@ -226,6 +249,11 @@ pub fn load(
         nav,
         cpu_level: setup.sides.map(|side| side.cpu_level),
         ai_type,
+        screen_mode: setup.screen_mode,
+        bgm: setup.bgm,
+        menus,
+        menu_sheet,
+        menu_texts,
     };
     for side in setup.sides {
         let file_id = CHARA_FILE + side.chara.max(0) as u32 * 10 + side.costume.max(0) as u32;
@@ -293,6 +321,37 @@ pub fn load(
         assets.fighters.push(fighter);
     }
     Ok(assets)
+}
+
+/// Entries of the HUD file's offset table read as menu texts (`BtlMenu_GetText`).
+const MENU_TEXT_COUNT: usize = 0x40;
+/// `BtlMenu_Init`: the menu sheet is the texture file at HUD file word 7.
+const MENU_SHEET_WORD: usize = 7;
+
+/// The menu sheet, appended to the HUD textures.
+fn load_menu_sheet(file: &[u8], textures: &mut Vec<RgbaTexture>) -> std::io::Result<HudSheet> {
+    let start = file
+        .get(MENU_SHEET_WORD * 4..MENU_SHEET_WORD * 4 + 4)
+        .map_or(0, |b| {
+            u32::from_le_bytes(b.try_into().unwrap()) as usize & !3
+        });
+    let res = TextureResource::parse(file.get(start..).unwrap_or_default())?;
+    let mut sheet = HudSheet {
+        base: textures.len(),
+        sizes: Vec::new(),
+    };
+    for entry in &res.entries {
+        let tex0 = entry.texture_register;
+        sheet
+            .sizes
+            .push([1 << ((tex0 >> 26) & 0xF), 1 << ((tex0 >> 30) & 0xF)]);
+        textures.push(decode_sprite_texture(entry).unwrap_or(RgbaTexture {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+        }));
+    }
+    Ok(sheet)
 }
 
 /// `BtlMember_ApplyItems`' AI type (`ItemSet_GetStats`): the last AI item's, else the character table's entry of
@@ -512,6 +571,8 @@ pub struct BattleFrame {
     /// `BtlGame_Draw`: the HUD, drawn into the frame before the overlay pass.
     pub hud: HudFrame,
     pub sounds: Vec<TitleSound>,
+    /// The battle is over: the result's reason bits (`BattleResult_GetReason`), which pick the next screen.
+    pub exit: Option<u32>,
 }
 
 /// The battle as far as it is ported.
@@ -531,6 +592,10 @@ pub struct Battle {
     started: bool,
     /// `gBtlAi`.
     ai: AiMgr,
+    /// `gBtlMenu` with the versus menus.
+    pub(crate) menu: Option<PauseMenu>,
+    /// Last frame's buttons per pad, for the menus' pressed words.
+    prev_held: [u32; 2],
 }
 
 /// What a side's files give the fighter simulation.
@@ -597,6 +662,12 @@ impl Battle {
         };
         let roots = std::array::from_fn(|side| roster.chars[side].obj.mtx);
         let hud = Hud::new(&assets.hud_sheets, assets.hud_cpu.clone(), assets.announcer);
+        // PauseMenu_Init; BtlGame_Reset closes both trees.
+        let menu = assets.menus.clone().map(|(pause, result)| {
+            let mut menu = PauseMenu::new(pause, result);
+            menu.reset();
+            menu
+        });
         Self {
             assets,
             roster,
@@ -609,7 +680,42 @@ impl Battle {
             roots,
             started: false,
             ai,
+            menu,
+            prev_held: [0; 2],
         }
+    }
+
+    /// `Battle_Restart` for a rematch: `Battle_ResetWork` (sounds stopped, the battle music again, the result
+    /// cleared), `StgFx_Reset` (the cross-fade), `BtlGame_Reset` (the menus, the HUD, the sequence),
+    /// `BtlChar_ResetAll` and the 1 s fade-in. The AI is not reset, as in the original.
+    fn restart(&mut self, sounds: &mut Vec<TitleSound>) {
+        sounds.push(TitleSound::VoiceStop);
+        sounds.push(TitleSound::Bgm(BGM_FIRST + self.assets.bgm.max(0) as u32));
+        self.xfade = ScrXfade::default();
+        if let Some(menu) = &mut self.menu {
+            menu.reset();
+        }
+        self.hud = Hud::new(
+            &self.assets.hud_sheets,
+            self.assets.hud_cpu.clone(),
+            self.assets.announcer,
+        );
+        self.seq = Seq::new(self.assets.mode, self.assets.time_limit);
+        self.demo = DemoCam::default();
+        self.roster = {
+            let data = [
+                side_data(&self.assets.fighters[0]),
+                side_data(&self.assets.fighters[1]),
+            ];
+            let env = self.assets.env(
+                self.seq.state_id(),
+                self.seq.input_gate(self.assets.stage_id),
+            );
+            Roster::new([&data[0], &data[1]], &env, self.assets.cpu)
+        };
+        self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
+        self.fade = Fade::start_in(1.0);
+        self.started = false;
     }
 
     /// The fighter phases with both sides' data and the shared state.
@@ -637,14 +743,33 @@ impl Battle {
         voice_stat: i32,
         libc: &mut LibcRandom,
         random: &mut GameRandom,
+        mut font: Option<&mut Font>,
         shown: bool,
     ) -> BattleFrame {
         let mut sounds = Vec::new();
+        // Battle_Loop: a restart asked for last frame happens first.
+        if std::mem::take(&mut self.seq.restart) {
+            self.restart(&mut sounds);
+        }
+        let menu = std::array::from_fn(|i| {
+            let (held, prev) = (pads[i].held, self.prev_held[i]);
+            let down = held & !prev;
+            MenuInput {
+                up: down & crate::btl_input::pad::UP != 0,
+                down: down & crate::btl_input::pad::DOWN != 0,
+                cross: down & crate::btl_input::pad::CROSS != 0,
+                triangle: down & crate::btl_input::pad::TRIANGLE != 0,
+                start: down & crate::btl_input::pad::START != 0,
+            }
+        });
+        self.prev_held = pads.map(|p| p.held);
         let mut input = SeqInput {
             start,
             voice_stat,
             libc: &mut *libc,
             sounds: &mut sounds,
+            menu,
+            font: font.as_deref(),
         };
         if !std::mem::replace(&mut self.started, true) {
             self.seq_start(&mut input);
@@ -732,7 +857,18 @@ impl Battle {
             .map(|(textures, vertices)| ModelBatch { textures, vertices })
             .collect();
         batches.sort_by_key(|batch| batch.textures);
-        let hud = self.hud.draw(libc, shown);
+        let mut hud = self.hud.draw(libc, shown);
+        // BtlGame_Draw: the menu over the HUD.
+        if let Some(menu) = &self.menu {
+            menu.draw(
+                &mut MenuDraw {
+                    font: font.as_deref_mut(),
+                    sheet: &self.assets.menu_sheet,
+                    texts: &self.assets.menu_texts,
+                },
+                &mut hud.prims,
+            );
+        }
         let (capture, xfade_alpha) = self.xfade.draw_pass();
         BattleFrame {
             stage,
@@ -742,6 +878,7 @@ impl Battle {
             quads: self.fade.quad().into_iter().collect(),
             hud,
             sounds,
+            exit: self.seq.left.then_some(self.seq.reason),
         }
     }
 }
@@ -1183,6 +1320,7 @@ mod tests {
             0,
             &mut libc,
             &mut random,
+            None,
             true,
         );
         assert_eq!(battle.seq.state, SeqState::StageIntro);
@@ -1199,6 +1337,7 @@ mod tests {
             0,
             &mut libc,
             &mut random,
+            None,
             true,
         );
         assert_eq!(battle.seq.state, SeqState::Ready);
@@ -1247,6 +1386,7 @@ mod tests {
                 0,
                 &mut libc,
                 &mut random,
+                None,
                 true,
             );
             sounds.extend(frame.sounds);
@@ -1274,6 +1414,7 @@ mod tests {
                     0,
                     &mut libc,
                     &mut random,
+                    None,
                     false
                 )
                 .hud
@@ -1287,6 +1428,7 @@ mod tests {
                 0,
                 &mut libc,
                 &mut random,
+                None,
                 true,
             )
             .hud
@@ -1350,7 +1492,7 @@ mod tests {
         };
         // Ready: 0.8 s, then READY for 2 s; the fighters stand on the ground in the neutral action.
         for _ in 0..90 {
-            battle.run_frame(false, idle, 0, &mut libc, &mut random, false);
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
         }
         assert_eq!(battle.seq.state, SeqState::Fight);
         for chr in &battle.roster.chars {
@@ -1368,6 +1510,7 @@ mod tests {
                 0,
                 &mut libc,
                 &mut random,
+                None,
                 false,
             );
         }
@@ -1385,6 +1528,7 @@ mod tests {
                 0,
                 &mut libc,
                 &mut random,
+                None,
                 false,
             );
         }
@@ -1397,7 +1541,7 @@ mod tests {
             } else {
                 0
             };
-            battle.run_frame(false, pad(held), 0, &mut libc, &mut random, false);
+            battle.run_frame(false, pad(held), 0, &mut libc, &mut random, None, false);
             rushed |= battle.roster.chars[0].act.current == 0x44;
             reacted |= matches!(battle.roster.chars[1].act.current, 0xC0..=0xC6 | 0xD0);
         }
@@ -1433,7 +1577,7 @@ mod tests {
         // START skips the stage intro and the talk.
         for _ in 0..200 {
             let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
-            battle.run_frame(start, pad(0), 0, &mut libc, &mut random, false);
+            battle.run_frame(start, pad(0), 0, &mut libc, &mut random, None, false);
             if battle.seq.state == SeqState::Fight {
                 break;
             }
@@ -1450,8 +1594,8 @@ mod tests {
             } else {
                 crate::btl_input::pad::UP
             };
-            battle.run_frame(false, pad(held), 0, &mut libc, &mut random, false);
-            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, false);
+            battle.run_frame(false, pad(held), 0, &mut libc, &mut random, None, false);
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
             if battle.seq.state != SeqState::Fight {
                 break;
             }
@@ -1462,7 +1606,7 @@ mod tests {
         let mut posed = false;
         let mut downed = false;
         for _ in 0..600 {
-            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, false);
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
             posed |= battle.roster.chars[0].act.current == 2;
             downed |= matches!(
                 battle.roster.chars[1].act.current,
@@ -1479,13 +1623,13 @@ mod tests {
         setup.mode = 5;
         let mut battle = real_battle(&setup).unwrap();
         for _ in 0..90 {
-            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, false);
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
         }
         assert_eq!(battle.seq.state, SeqState::Fight);
         battle.roster.chars[0].gauge.health -= 1000;
         let mut frames = 0;
         while battle.seq.state == SeqState::Fight && frames < 2000 {
-            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, false);
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
             frames += 1;
         }
         assert_eq!(battle.seq.state, SeqState::Finish);
@@ -1509,7 +1653,7 @@ mod tests {
         let idle = [PadState::default(); 2];
         for _ in 0..200 {
             let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
-            battle.run_frame(start, idle, 0, &mut libc, &mut random, false);
+            battle.run_frame(start, idle, 0, &mut libc, &mut random, None, false);
             if battle.seq.state == SeqState::Fight {
                 break;
             }
@@ -1522,7 +1666,7 @@ mod tests {
         let mut pressed = 0u32;
         let mut min_gap = start_gap;
         for _ in 0..5400 {
-            battle.run_frame(false, idle, 0, &mut libc, &mut random, false);
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
             actions.insert(battle.roster.chars[1].act.current);
             pressed |= battle.roster.chars[1].input.inject_buttons;
             min_gap = min_gap.min(gap(&battle));
@@ -1547,5 +1691,117 @@ mod tests {
             (battle.seq.winner, battle.seq.reason),
             (crate::battle_seq::WIN_P2, crate::battle_seq::REASON_KO)
         );
+    }
+
+    /// From the start to the result menu: START skips the intro, the CPU side loses its last health, then the
+    /// finish and winner scenes run to End.
+    fn run_to_result_menu(battle: &mut Battle, libc: &mut LibcRandom, random: &mut GameRandom) {
+        let pad = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, pad(0), 0, libc, random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        // The CPU side has no health left: K.O.
+        battle.roster.chars[1].gauge.health = 0;
+        for _ in 0..800 {
+            battle.run_frame(false, pad(0), 0, libc, random, None, false);
+            if battle.seq.state == SeqState::End {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::End);
+    }
+
+    #[test]
+    fn real_result_menu_restarts_the_match_or_leaves_for_the_character_select() {
+        use crate::btl_input::pad::{CROSS, DOWN, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].control = 2;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut tap = |battle: &mut Battle, held: u32| {
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            let frame = battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+            let idle = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            frame.exit.or(idle.exit)
+        };
+        run_to_result_menu(
+            &mut battle,
+            &mut LibcRandom::new(2),
+            &mut GameRandom::from_key(&[2]),
+        );
+        // The box opens over six frames; the cursor starts on "Fight Again" (the title is skipped).
+        for _ in 0..4 {
+            assert_eq!(tap(&mut battle, 0), None);
+        }
+        assert!(battle.menu.as_ref().unwrap().active);
+        assert_eq!(tap(&mut battle, CROSS), None);
+        // Fight Again: the fade out, then the restart into a fresh match.
+        for _ in 0..40 {
+            assert_eq!(tap(&mut battle, 0), None);
+            if battle.seq.state == SeqState::StageIntro {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::StageIntro);
+        assert_eq!(
+            battle.roster.chars[1].gauge.health,
+            battle.roster.chars[1].gauge.health_max
+        );
+        assert_eq!(battle.seq.winner, 0);
+
+        // Again, now "Return to Character Select", then "Yes" in the box (it opens on "No").
+        run_to_result_menu(
+            &mut battle,
+            &mut LibcRandom::new(3),
+            &mut GameRandom::from_key(&[3]),
+        );
+        for _ in 0..4 {
+            tap(&mut battle, 0);
+        }
+        tap(&mut battle, DOWN);
+        tap(&mut battle, CROSS);
+        for _ in 0..4 {
+            tap(&mut battle, 0);
+        }
+        tap(&mut battle, UP);
+        assert_eq!(tap(&mut battle, CROSS), None);
+        let mut exit = None;
+        for _ in 0..40 {
+            exit = tap(&mut battle, 0);
+            if exit.is_some() {
+                break;
+            }
+        }
+        assert_eq!(exit, Some(0x10));
     }
 }

@@ -104,6 +104,11 @@ impl Font {
         }
     }
 
+    /// `Font_GetGlyphHeight`: the line height of the font bound last.
+    pub fn line_height(&self) -> i32 {
+        self.line_height
+    }
+
     pub fn push_style(&mut self) {
         self.stack.push(self.style);
     }
@@ -133,7 +138,6 @@ impl Font {
     }
 
     /// `Font_GetWidth`: the widest line at scale 1.
-    #[allow(dead_code)]
     pub fn width(&self, text: &[u16]) -> i32 {
         let style = &self.style;
         let gap = style.spacing_x;

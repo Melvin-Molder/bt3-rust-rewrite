@@ -6,6 +6,8 @@ use bt3_data::cam_anim::CamAnim;
 
 use crate::battle::{Battle, IDENTITY, Mtx, View, inverse_rt, mul};
 use crate::btl_input::InputGate;
+use crate::btl_menu::MenuInput;
+use crate::font::Font;
 use crate::rng::LibcRandom;
 use crate::title::TitleSound;
 
@@ -257,6 +259,10 @@ pub(crate) struct Seq {
     pub(crate) reason: u32,
     /// `BATTLE_FLAG_RESTART`: the battle restarts once the sequence has left.
     pub(crate) restart: bool,
+    /// The sequence has left without a restart: the battle is over (`BtlGame_Update` returns 1).
+    pub(crate) left: bool,
+    /// `BtlPause_GetMenuPad`: the controller port that drives the result menu.
+    pub(crate) result_pad: usize,
 }
 
 /// `BtlClock`: hours, minutes, seconds and milliseconds of fight.
@@ -320,6 +326,8 @@ impl Seq {
             winner: 0,
             reason: 0,
             restart: false,
+            left: false,
+            result_pad: 0,
         }
     }
 
@@ -385,6 +393,10 @@ pub(crate) struct SeqInput<'a> {
     pub voice_stat: i32,
     pub libc: &'a mut LibcRandom,
     pub sounds: &'a mut Vec<TitleSound>,
+    /// Per controller port, the menu buttons that went down this frame.
+    pub menu: [MenuInput; 2],
+    /// The text printer, for the menus' box sizes.
+    pub font: Option<&'a Font>,
 }
 
 impl Battle {
@@ -481,7 +493,7 @@ impl Battle {
             SeqState::Fight => self.fight_update(input),
             SeqState::Finish => self.finish_update(),
             SeqState::WinTalk => self.win_talk_update(input),
-            SeqState::End => self.end_update(),
+            SeqState::End => self.end_update(input),
             SeqState::Exit => SeqState::Exit,
         };
         // A state the mode's table leaves out is never entered: modes 5..7 have no winner scene.
@@ -494,9 +506,14 @@ impl Battle {
             self.seq_exit(input);
             self.seq.state = next;
             if next == SeqState::Exit {
-                // A rematch asked for from the result menu restarts the battle (BATTLE_FLAG_RESTART).
-                if self.seq.reason & REASON_RESTART != 0 {
+                // A rematch asked for from the result menu restarts the battle (BATTLE_FLAG_RESTART); anything
+                // else leaves it.
+                if self.seq.reason & REASON_RESTART != 0
+                    || (self.assets.mode == 6 && self.seq.reason & REASON_FLAG7 != 0)
+                {
                     self.seq.restart = true;
+                } else {
+                    self.seq.left = true;
                 }
                 return;
             }
@@ -707,8 +724,8 @@ impl Battle {
         SeqState::WinTalk
     }
 
-    /// `BtlSeqEnd_Enter`: mode 0 with a finished battle opens the result menu (not ported: the battle waits
-    /// there); otherwise the 1.2 s fade out.
+    /// `BtlSeqEnd_Enter`: mode 0 with a finished battle opens the result menu, for pad 0 (or the winner's pad in
+    /// split screen, `BtlSeq_SetResultPad`); otherwise the 1.2 s fade out.
     fn end_enter(&mut self) {
         self.seq.demo_flag = true;
         if self.seq.winner & ABORT != 0 || self.assets.mode != 0 {
@@ -717,13 +734,47 @@ impl Battle {
             self.seq.step = 1;
         } else {
             self.seq.step = 0;
+            self.seq.result_pad = if self.assets.screen_mode == 1 {
+                self.seq.winner_side()
+            } else {
+                0
+            };
         }
     }
 
-    /// `BtlSeqEnd_Update`.
-    fn end_update(&mut self) -> SeqState {
-        if self.seq.step == 1 && self.seq.timer.step() {
-            return SeqState::Exit;
+    /// `BtlSeqEnd_Update`: step 0 runs the result menu until a picked entry ends the battle, step 1 waits for the
+    /// fade.
+    fn end_update(&mut self, input: &mut SeqInput) -> SeqState {
+        match self.seq.step {
+            0 => {
+                if let Some(menu) = &mut self.menu {
+                    let pad = self.seq.result_pad;
+                    let (_, reason) = menu.update(
+                        pad as i32,
+                        1,
+                        input.menu[pad],
+                        input.font,
+                        &self.assets.menu_texts,
+                        input.sounds,
+                    );
+                    if let Some(reason) = reason {
+                        // BattleResult_Set(BTL_RESULT_ABORT, reason).
+                        self.seq.winner = ABORT;
+                        self.seq.reason = reason as u32;
+                    }
+                }
+                if self.seq.winner & ABORT != 0 {
+                    self.fade = crate::fade::Fade::start_out(1.0);
+                    self.seq.timer.start(1.2, 0.0, 1.0);
+                    self.seq.step = 1;
+                }
+            }
+            1 => {
+                if self.seq.timer.step() {
+                    return SeqState::Exit;
+                }
+            }
+            _ => {}
         }
         SeqState::End
     }

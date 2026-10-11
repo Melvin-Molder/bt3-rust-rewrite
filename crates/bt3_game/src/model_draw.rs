@@ -513,11 +513,17 @@ pub fn sync_hud(
         textures.materials.clear();
     }
     while textures.images.len() < game.hud_textures.len() {
-        let texture = &game.hud_textures[textures.images.len()];
-        // TEX1 0x60 bilinear, CLAMP 0 wrapping.
+        let index = textures.images.len();
+        let texture = &game.hud_textures[index];
+        // TEX1 0x60 bilinear; CLAMP 0 wrapping, the menu sheet under the default environment's clamp.
+        let address = if index >= game.hud_clamp_from {
+            ImageAddressMode::ClampToEdge
+        } else {
+            ImageAddressMode::Repeat
+        };
         textures
             .images
-            .push(images.add(model_image(texture, ImageAddressMode::Repeat)));
+            .push(images.add(model_image(texture, address)));
     }
     let blank = textures
         .blank
