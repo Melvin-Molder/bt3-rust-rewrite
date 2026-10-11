@@ -324,6 +324,8 @@ pub(crate) struct Chr {
     pub vanish_limit: i32,
     /// `attackId`: the attack last prepared (read by `BtlAct_QueueComboFinish`, which is not ported).
     pub attack_id: i32,
+    /// `burstNode`: the node the finisher 0x66's burst effect follows.
+    pub burst_node: i32,
     /// `nextAttack` / `attack`: the pending and the latched attack parameters.
     pub next_attack: Attack,
     pub attack: Attack,
@@ -439,6 +441,7 @@ impl Chr {
             vanish_count: 0,
             vanish_limit: 0,
             attack_id: 0,
+            burst_node: 0,
             next_attack: Attack::default(),
             attack: Attack::default(),
             body_warp_pos: [0.0; 3],

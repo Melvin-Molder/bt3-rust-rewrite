@@ -873,6 +873,20 @@ fn node_by_code(code: u32) -> Option<u32> {
 }
 
 /// `BtlObjAnim_MaskToNode`: the lowest set bit of an event argument, in the original's priority order.
+/// `BtlObj_GetNodeSide`: 0 / 1 the two sides of the body, 2 the centre, 3 the ids from 0x35.
+pub(crate) fn node_side(node: i32) -> i32 {
+    match node {
+        ..8 => 2,
+        ..0xC => 1,
+        ..0x10 => 0,
+        ..0x12 => 2,
+        ..0x20 => 1,
+        ..0x2E => 0,
+        ..0x35 => 2,
+        _ => 3,
+    }
+}
+
 pub(crate) fn mask_to_node(mask: u32) -> i32 {
     const ORDER: [(u32, i32); 19] = [
         (1, 3),

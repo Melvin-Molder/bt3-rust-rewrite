@@ -164,6 +164,12 @@ fn record<'a>(me: &Chr, data: &'a SideData, env: &Env) -> (&'a AttackRecord, usi
     (&data.tables.attacks[n], n)
 }
 
+/// `BtlAtk_GetLaunchAngleBOf`: record `id`'s +0x16 (degrees), the launch pitch; ids past the table give record 0.
+pub(crate) fn launch_angle_b_of(data: &SideData, id: usize) -> f32 {
+    let n = if id < ATTACK_COUNT { id } else { 0 };
+    f32::from(data.tables.attacks[n].s8_at(0x16)) * PI / 180.0
+}
+
 /// `BtlAtk_GetLaunchSpeed`: record +0x14 in 10 km/h, times curve row 8.
 pub(crate) fn launch_speed(me: &Chr, data: &SideData, env: &Env) -> f32 {
     let (r, _) = record(me, data, env);

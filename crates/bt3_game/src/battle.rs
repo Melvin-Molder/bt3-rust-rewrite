@@ -2589,6 +2589,93 @@ mod tests {
     }
 
     #[test]
+    fn real_rush_finishers_by_the_rush_step() {
+        use crate::btl_input::pad::{SQUARE, START, TRIANGLE, UP};
+        let run = |hits: usize, hold: usize| {
+            let mut setup = BattleSetup::default();
+            setup.sides[1].chara = 1;
+            setup.sides[1].pad = 1;
+            let mut battle = real_battle(&setup)?;
+            let mut libc = LibcRandom::new(1);
+            let mut random = GameRandom::from_key(&[1]);
+            let pads = |a: u32| {
+                [
+                    PadState {
+                        held: a,
+                        ..PadState::default()
+                    },
+                    PadState::default(),
+                ]
+            };
+            let mut frame = |battle: &mut Battle, held: u32| {
+                let start = held & START != 0 && battle.prev_held[0] & START == 0;
+                battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+            };
+            for i in 0..200 {
+                let skip =
+                    battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+                frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+                if battle.seq.state == SeqState::Fight {
+                    break;
+                }
+            }
+            for _ in 0..300 {
+                if battle.roster.chars[0].flags.test(0x13) {
+                    break;
+                }
+                frame(&mut battle, UP);
+            }
+            for _ in 0..20 {
+                frame(&mut battle, 0);
+            }
+            let (mut mine, mut anims, mut theirs) = (Vec::new(), Vec::new(), Vec::new());
+            let tri = hits * 4;
+            for i in 0..150 {
+                let held = if i < tri {
+                    if i % 4 < 2 { SQUARE } else { 0 }
+                } else if i < tri + hold {
+                    TRIANGLE
+                } else {
+                    0
+                };
+                frame(&mut battle, held);
+                let a = &battle.roster.chars[0];
+                mine.push(a.act.current);
+                anims.push(a.anim.cur);
+                theirs.push(battle.roster.chars[1].act.current);
+            }
+            mine.dedup();
+            anims.dedup();
+            theirs.dedup();
+            Some((mine, anims, theirs))
+        };
+        // Goku's finishers by the rush step (parameter +0x84: 0, 1, 3, 0): the blast button during the rush. Held,
+        // 0x60 charges through its wind-up and hold (0x47, 0x48) and its release 0x49 staggers the opponent (0xCB).
+        let Some((mine, anims, theirs)) = run(2, 40) else {
+            return;
+        };
+        assert_eq!(mine, [0xB, 0x44, 0x60, 0xB], "{mine:x?}");
+        assert!(
+            anims.windows(3).any(|w| w == [0x47, 0x48, 0x49]),
+            "{anims:x?}"
+        );
+        assert_eq!(theirs, [0xB, 0xCB, 0xB], "{theirs:x?}");
+        let Some((mine, anims, _)) = run(3, 2) else {
+            return;
+        };
+        assert_eq!(mine, [0xB, 0x44, 0x61, 0xB], "{mine:x?}");
+        assert!(
+            anims.windows(3).any(|w| w == [0x90, 0x91, 0x92]),
+            "{anims:x?}"
+        );
+        let Some((mine, anims, _)) = run(4, 2) else {
+            return;
+        };
+        assert_eq!(mine, [0xB, 0x44, 0x63, 0xB], "{mine:x?}");
+        assert!(anims.contains(&0x93), "{anims:x?}");
+    }
+
+    #[test]
     fn real_charged_smash_knocks_the_opponent_away() {
         use crate::btl_input::pad::{SQUARE, START, UP};
         let mut setup = BattleSetup::default();
