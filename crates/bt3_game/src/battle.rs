@@ -3373,6 +3373,91 @@ mod tests {
     }
 
     #[test]
+    fn real_beam_struggle_is_won_by_mashing() {
+        use crate::btl_input::pad::{DOWN, L2, LEFT, RIGHT, START, TRIANGLE, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 1;
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32, b: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState {
+                    held: b,
+                    ..PadState::default()
+                },
+            ]
+        };
+        let mut frame = |battle: &mut Battle, p1: u32, p2: u32| {
+            let start = p1 & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(p1, p2), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 }, 0);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..120 {
+            frame(&mut battle, L2, L2);
+        }
+        for _ in 0..5 {
+            frame(&mut battle, 0, 0);
+        }
+        // Both fire the beam of slot 2 (technique 0x1CE); P2's start is longer, so P1's beam passes it while it
+        // is invulnerable, and the two beams meet head-on: both are held in a struggle (clash A, 0x130). From 60
+        // frames on P1's mashing (a direction every other frame) gives it the lead, which then grows to 71: P2
+        // loses (0x104, the damage of both techniques) and falls, P1 is free, the struggle and the beams are over.
+        let mash = [LEFT, UP, RIGHT, DOWN];
+        let health = battle.roster.chars[1].gauge.health;
+        let (mut struggle_at, mut lost_at, mut moved) = (None, None, false);
+        let mut first_pos = None;
+        for i in 0..300 {
+            let (p1, p2) = match i {
+                2..4 => (L2, L2),
+                4..6 => (L2 | TRIANGLE, L2 | TRIANGLE),
+                _ if lost_at.is_some() => (0, 0),
+                _ => (mash[(i / 2) % 4], 0),
+            };
+            frame(&mut battle, p1, p2);
+            let r = &battle.roster;
+            if let Some(s) = r.scene.struggle {
+                if struggle_at.is_none() {
+                    struggle_at = Some(i);
+                    first_pos = Some(s.pos);
+                }
+                moved |= first_pos.is_some_and(|p| p != s.pos);
+            }
+            if r.clash.state != 0 {
+                assert_eq!(r.chars[0].act.current, 0x130);
+                assert_eq!(r.chars[1].act.current, 0x130);
+            }
+            if lost_at.is_none() && r.chars[1].act.current == 0x104 {
+                lost_at = Some(i);
+            }
+        }
+        let r = &battle.roster;
+        let struggle_at = struggle_at.expect("no struggle");
+        let lost_at = lost_at.expect("P2 did not lose");
+        assert!(moved, "the struggle point never moved");
+        assert!(lost_at > struggle_at + 106, "{struggle_at} {lost_at}");
+        assert_eq!(health - r.chars[1].gauge.health, 10910);
+        assert!(!(0x130..=0x132).contains(&r.chars[0].act.current));
+        assert_ne!(r.chars[0].act.current, 0x104);
+        assert!(r.scene.struggle.is_none());
+        assert!(r.scene.records.is_empty());
+    }
+
+    #[test]
     fn real_charged_smash_knocks_the_opponent_away() {
         use crate::btl_input::pad::{SQUARE, START, UP};
         let mut setup = BattleSetup::default();

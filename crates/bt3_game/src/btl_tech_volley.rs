@@ -747,6 +747,11 @@ impl Shots {
         }
     }
 
+    /// A fighter's blast objects reset (`EftBlastObj_Reset`).
+    pub(crate) fn reset_side(&mut self, side: usize) {
+        self.list.retain(|s| s.src.side != side);
+    }
+
     /// `EftBlastObj_IsAlive`.
     pub(crate) fn alive(&self, id: Option<u32>) -> bool {
         id.is_some_and(|id| {

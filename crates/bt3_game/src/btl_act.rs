@@ -90,7 +90,8 @@ pub(crate) struct Ctx<'a, 'd> {
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xFA..=0xFC | 0x105..=0x11A)
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xFA..=0xFC | 0x104 | 0x105..=0x11A
+        | 0x130..=0x132)
 }
 
 impl Ctx<'_, '_> {
@@ -840,6 +841,8 @@ impl Ctx<'_, '_> {
             0x112..=0x114 => self.super_repeat(phase),
             0x115..=0x11A => self.super_quick_beam(phase),
             0xFA => self.clash_blows(phase),
+            0x104 => self.clash_lost(phase),
+            0x130..=0x132 => self.clash_struggle(phase),
             0xFB => self.clash_vanish(phase),
             0xFC => self.clash_exchange(phase),
             _ => {}
@@ -943,7 +946,14 @@ impl Ctx<'_, '_> {
                 self.request(action);
             }
         }
-        // Flags 0xAA / 0xAB (the techniques) are not ported.
+        if self.flag(0xAA) {
+            let a = id_class(self.current()) + 0x12E;
+            self.request(a);
+        }
+        if self.flag(0xAB) {
+            self.clear(0xAB);
+            self.request(0x104);
+        }
         for (flag, action) in [(0x7D, 0x41), (0x7E, 0x45)] {
             if self.flag(flag) {
                 self.request(action);
@@ -5985,7 +5995,103 @@ impl Ctx<'_, '_> {
         }
     }
 
-    // ---- the clashes (btl_act_2.c) -----------------------------------------------------------------------------
+    // ---- the clashes (btl_act_2.c, btl_act_super.c) ------------------------------------------------------------
+
+    /// Actions 0x130..0x132 (`BtlAct_ClashStruggleHandler`, forced by flag 0xAA): both fighters in a beam
+    /// struggle (clash A). A beam (hit direction kind 1) holds motion 0x16C, else the firing loop, aimed up / down
+    /// unless technique flag 0x1000; the score starts at the clash power / 20 and every direction input from frame
+    /// 16 adds one. The clash's flags end it: 0xC3 (won) 0xB, 0xC2 (lost) 0x104, 0x72 (a catch connected) the rush
+    /// sequence. The abilities, camera shake, vibration and the chains' push are not ported.
+    fn clash_struggle(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            let anim = if self.tech().hit_dir_kind(cls) == 1 {
+                0x16C
+            } else {
+                super_anim(cls, 3)
+            };
+            self.play(anim, 0.15);
+            self.clear(0xAA);
+            self.me.flags.clear_range(0xBF, 0xC3);
+            self.clear(0x11F);
+            self.me.clash_count_a = self.tech().clash_power(cls) / 20;
+        }
+        if phase == RUN {
+            self.me.anim_advance_loop(0);
+            let a = self.anim_id();
+            let pitch = if a == super_anim(cls, 3) && (2..5).contains(&cls) {
+                Some((super_anim(cls, 0xA), super_anim(cls, 0x11)))
+            } else if a == 0x16C {
+                Some((0x16E, 0x170))
+            } else {
+                None
+            };
+            if let Some((up, down)) = pitch
+                && self.tech().flags(cls) & 0x1000 == 0
+            {
+                self.set_pitch_motion_with(up, down, true);
+            }
+            self.step(2, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            for f in [0xBB, 0x128] {
+                self.set(f);
+            }
+            self.me.set_fx(0x10);
+            for f in [0xE6, 0xD2, 0x42, 0x43, 0x44, 0x45, 0x46, 0x134] {
+                self.set(f);
+            }
+            if self.me.action_frame >= 0x10 && self.test(0x33) {
+                self.me.clash_count_a += 1;
+            }
+        }
+        if phase == DECIDE {
+            if self.flag(0xC3) {
+                self.request(0xB);
+            }
+            if self.flag(0xC2) {
+                self.request(0x104);
+            }
+            if self.flag(0x72) {
+                self.request(cls + 0x12B);
+            }
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+            self.me.flags.clear_range(0xBF, 0xC3);
+            self.me.clash_count_a = 0;
+        }
+    }
+
+    /// Action 0x104 (`BtlAct_ClashLostHandler`, forced by flag 0xAB or the lost struggle): motion 0x172 under
+    /// level 2 hit-stop, held to its end, then falling (0xD9). Not ported: the change to the damaged model of a
+    /// fighter still in its undamaged one (a character change), the camera cut, the chains' push and the stage
+    /// timer.
+    fn clash_lost(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x172, 0.0);
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.me.work[1] = 1;
+            }
+            self.step(6, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            for f in [
+                0x125, 0xBB, 0x128, 0xD2, 0x95, 0x96, 0x42, 0x43, 0x44, 0x45, 0x46,
+            ] {
+                self.set(f);
+            }
+            self.me.hold_action = true;
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.held(0x1D);
+            self.held(0x1E);
+            self.request(0xD9);
+        }
+        if phase == LEAVE {
+            self.me.flags.clear_range(0xBF, 0xC3);
+        }
+    }
 
     /// Action 0xFA (`BtlAct_ClashBlowsHandler`, forced by flag 0x61): clash B, trading blows (motion 0x173 / 0x174
     /// by player) while spinning round the opponent; every direction input counts, and one in four frames counts by
@@ -6458,7 +6564,7 @@ impl Ctx<'_, '_> {
     /// raises flag 0xA7, the fire, the firing loop until 0xA8 (the long beam: a second stage until 0xA9), the end;
     /// each wait also ends after 150 frames, the original's own timeout (the end of an effect type other than 0,
     /// and flag 0xA9, come from effects not ported). Not ported either: the self-destruct change of flag 0x2000 (a
-    /// character change), the shakes, vibration, sounds and cuts, and the beam struggles 0x12A.. (flags 0x72 /
+    /// character change), the shakes, vibration, sounds and cuts, and the rush sequences 0x12A.. (flags 0x72 /
     /// 0x73).
     fn super_beam(&mut self, phase: u32) {
         let cls = self.current_class();

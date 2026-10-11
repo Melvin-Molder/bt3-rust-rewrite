@@ -379,6 +379,10 @@ impl TechTable<'_> {
     pub fn shot_scale(&self, slot: i32) -> f32 {
         self.f32_of(0x6C, slot)
     }
+    /// The struggle power (+0x3C, `EftShotParam.power`).
+    pub fn power(&self, slot: i32) -> f32 {
+        self.f32_of(0x3C, slot)
+    }
     /// The hit records' scale (+0x48, `EftShotParam.hitScale`): the factor of their radius in the stage test.
     pub fn hit_scale(&self, slot: i32) -> f32 {
         self.f32_of(0x48, slot)

@@ -14,8 +14,7 @@
 //! The ki blasts of types 4 / 5 are discs (`btl_tech_disc`).
 //!
 //! Not ported: blast types 2 (ki object) and 3 (ki bomb) fire nothing, nor does a character whose kind 1 / 2 list
-//! belongs to those managers; the beam struggle (`EftStruggle`: a head-on pair of beams only gets its
-//! flags); breaking stage objects (a blast stops at every object, a rush technique's record meets none); the
+//! belongs to those managers; the struggle's spark; breaking stage objects (a blast stops at every object, a rush technique's record meets none); the
 //! particles, impact effects, sounds, voices, camera shake, pad vibration and battle events; abilities.
 
 use std::f32::consts::PI;
@@ -163,6 +162,8 @@ pub(crate) struct HitRec {
     pub atk: Arg,
     /// `seenByAi`.
     pub seen_by_ai: bool,
+    /// `origin` (`pose.start`): where the shot started (a beam's muzzle when it fired).
+    pub origin: [f32; 3],
     /// The technique of a technique record (`src`; `None` for a ki blast).
     pub tech: Option<TechSrc>,
     /// `EFT_HIT_FLAG_*` (0x10: the technique's last hit).
@@ -229,6 +230,7 @@ impl HitRec {
             turned: false,
             atk: Arg::default(),
             seen_by_ai: false,
+            origin: start,
             tech: Some(src),
             flags: if src.def.sub == 9 { H_KIND9 } else { 0 },
             unk54: src.def.flags & 2 != 0,
@@ -299,6 +301,58 @@ pub(crate) struct Scene {
     pub fx: Modules,
     /// The technique effects (layer 1).
     pub tech: TechFx,
+    /// The beam struggle (`EftStruggle`, layer 3).
+    pub struggle: Option<Struggle>,
+}
+
+/// One side of a beam struggle: a copy of its record.
+#[derive(Clone, Copy, Debug)]
+struct StruggleSide {
+    task: u32,
+    start: [f32; 3],
+    scale: f32,
+    power: f32,
+}
+
+/// The beam struggle task (`EftStruggle`): two head-on technique records (fighter 0's first) held where the
+/// clash's bias puts the struggle point between their starts.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Struggle {
+    side: [StruggleSide; 2],
+    pub bias: f32,
+    pub pos: [f32; 3],
+    frames: i32,
+    end: bool,
+}
+
+/// `Vec3_Lerp(out, a, b, t)`: a t + b (1 - t).
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    std::array::from_fn(|i| a[i] * t + b[i] * (1.0 - t))
+}
+
+impl Struggle {
+    /// `EftStruggle_Start` / `EftStruggle_Init`: both sides' powers (the definition's +0x88), the point from the
+    /// clash bias. The spark is drawing only.
+    fn start(a: &HitRec, b: &HitRec, bias: f32) -> Option<Self> {
+        let (r0, r1) = if a.owner == 0 { (a, b) } else { (b, a) };
+        let side = |r: &HitRec| {
+            r.tech.map(|t| StruggleSide {
+                task: r.task,
+                start: r.origin,
+                scale: t.def.scale,
+                power: t.def.power,
+            })
+        };
+        let side = [side(r0)?, side(r1)?];
+        let bias = ((bias + 1.0) * 0.5).clamp(0.0, 1.0);
+        Some(Self {
+            pos: lerp3(side[1].start, side[0].start, bias),
+            side,
+            bias,
+            frames: 0,
+            end: false,
+        })
+    }
 }
 
 /// What a scene pass needs of the battle.
@@ -318,6 +372,8 @@ pub(crate) struct World<'a, 'd> {
     pub paused: bool,
     /// The roster's frame counter (`BtlChar_FrameMod`).
     pub frame: u32,
+    /// `BtlCharApi_GetClashBias`: clash A's bias.
+    pub clash_bias: f32,
 }
 
 // ---- vectors ------------------------------------------------------------------------------------------------------
@@ -668,6 +724,64 @@ impl Scene {
         });
     }
 
+    /// `EftStruggle_Step`: ends once either fighter left clash A; else the point follows the clash bias and each
+    /// beam's head (its task's reported position) is held its power times its scale times 13 from the point,
+    /// toward its start.
+    fn step_struggle(&mut self, w: &World) {
+        let Some(mut s) = self.struggle else {
+            return;
+        };
+        s.frames += 1;
+        if !w.chars.iter().all(crate::btl_clash::Clash::in_clash_a) {
+            s.end = true;
+        }
+        if s.end {
+            self.struggle = None;
+            return;
+        }
+        s.bias = ((w.clash_bias + 1.0) * 0.5).clamp(0.0, 1.0);
+        s.pos = lerp3(s.side[1].start, s.side[0].start, s.bias);
+        for side in s.side {
+            let v = scale3(norm(sub(side.start, s.pos)), side.power * side.scale * 13.0);
+            if let Some(t) = self.tag_mut(side.task) {
+                t.pos = add(s.pos, v);
+            }
+        }
+        self.struggle = Some(s);
+    }
+
+    /// `EftStruggle_End`: the loser's technique timeline expires and its effects reset (`BtlScene_Reset` of its
+    /// layer), which ends its beam; -1: both.
+    pub(crate) fn end_struggle(&mut self, chars: &mut [Chr; 2], winner: i32) {
+        let Some(s) = &mut self.struggle else {
+            return;
+        };
+        if s.end {
+            return;
+        }
+        s.end = true;
+        let losers: &[usize] = match winner {
+            0 => &[1],
+            1 => &[0],
+            _ => &[0, 1],
+        };
+        for &l in losers {
+            self.tech.request_restart(l, true);
+        }
+        for &l in losers {
+            self.reset_side(chars, l);
+        }
+    }
+
+    /// `BtlScene_Reset(2 / 3)`: every effect task of a fighter is reset (its technique items end as their term
+    /// callbacks do, raising flag 0xA8 / 0xA9); the scene's generator restarts.
+    pub(crate) fn reset_side(&mut self, chars: &mut [Chr; 2], side: usize) {
+        for list in &mut self.lists[side] {
+            list.clear();
+        }
+        self.tech.reset_side(chars, side);
+    }
+
     /// `BtlFx_SpawnHitSparkReq17` for a ki blast of type 4: request 0x17 grows a disc in the firing hand (the
     /// other types' charge effects are drawing only).
     pub(crate) fn spawn_held_disc(&mut self, me: &Chr, data: &SideData) {
@@ -732,7 +846,10 @@ impl Scene {
                 }
             }
         }
-        // Layer 3: the discs, the blast objects, then the particle modules.
+        // Layer 3: the struggle, the discs, the blast objects, then the particle modules.
+        if !w.paused {
+            self.step_struggle(w);
+        }
         self.tech.discs.update(w, &mut self.records, HIT_MAX);
         self.tech.update_shots(w, &mut self.records, HIT_MAX);
         let fxw = FxWorld {
@@ -927,8 +1044,8 @@ impl Scene {
     /// `EftDet_ClashPass`: every pair of records of different owners; the shapes are swept against each other
     /// (spheres, capsules from their muzzles, or one of each); the clash is decided for every pair and used when
     /// they touch: the loser stops (task flag 8). A beam struggle with no sight (flag 0xBA) or late in the battle
-    /// sequence (state 4 on) stops both; else both fighters get held flag 0xAA and both records flag 0x100 (the
-    /// struggle effect itself is not ported).
+    /// sequence (state 4 on) stops both; else both fighters get held flag 0xAA and, unless a struggle runs, both
+    /// records flag 0x100 and the struggle starts (`EftStruggle_Start`).
     fn clash_pass(&mut self, w: &mut World) {
         let n = self.records.len();
         for i in 0..n.saturating_sub(1) {
@@ -970,9 +1087,12 @@ impl Scene {
                     } else {
                         w.chars[0].flags.set_held(0xAA);
                         w.chars[1].flags.set_held(0xAA);
-                        // EftStruggle_IsActive: the struggle is not ported, so never active.
-                        self.set_task_flag(i, T_STRUGGLE, pi);
-                        self.set_task_flag(j, T_STRUGGLE, pj);
+                        if self.struggle.is_none() {
+                            self.set_task_flag(i, T_STRUGGLE, pi);
+                            self.set_task_flag(j, T_STRUGGLE, pj);
+                            let (a, b) = (self.records[i], self.records[j]);
+                            self.struggle = Struggle::start(&a, &b, w.clash_bias);
+                        }
                     }
                 }
             }
@@ -1329,6 +1449,7 @@ impl HitRec {
             turned: false,
             atk,
             seen_by_ai: false,
+            origin: pos,
             tech: None,
             flags: 0,
             unk54: false,

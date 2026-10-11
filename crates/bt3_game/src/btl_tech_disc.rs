@@ -188,6 +188,21 @@ impl Discs {
             .map(|d| &mut d.tag)
     }
 
+    /// A fighter's discs reset (`EftDisc_Reset`, then `EftDisc_Term`).
+    pub(crate) fn reset_side(&mut self, side: usize) {
+        let mut i = 0;
+        while i < self.list.len() {
+            if self.list[i].arg.owner == side {
+                let d = self.list.remove(i);
+                if d.flags & D_PIECE == 0 && d.arg.kind < 2 {
+                    self.pop_held(d.arg.owner);
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     /// `EftDiscMgr_AllocNode`: the first free entry from the cursor.
     fn alloc_node(&mut self) -> Option<usize> {
         if self.cursor >= NODES_MAX {

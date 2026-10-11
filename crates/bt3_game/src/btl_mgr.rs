@@ -297,7 +297,10 @@ impl Roster {
             }
         }
         self.clash
-            .update(&mut self.chars, env, &mut self.rand, self.frame);
+            .update(&mut self.chars, data, env, &mut self.rand, self.frame);
+        if let Some(winner) = self.clash.struggle_end.take() {
+            self.scene.end_struggle(&mut self.chars, winner);
+        }
     }
 
     /// `BtlChars_UpdateHold`: a held fighter (flag 0x97) and its holder (0x8B) are moved so that the holder's node
@@ -444,6 +447,7 @@ impl Roster {
             vu0,
             paused,
             frame: self.frame,
+            clash_bias: self.clash.a.bias,
         };
         self.scene.update(&mut world);
     }

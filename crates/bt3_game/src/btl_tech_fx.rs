@@ -93,6 +93,8 @@ pub(crate) struct TechDef {
     /// Frames from the fire to the END event.
     pub life: i32,
     pub scale: f32,
+    /// `power`: the beam's weight in a struggle.
+    pub power: f32,
     /// `hitScale`: the records' scale (`EftHit_GetScale`), the factor of their radius against the stage.
     pub hit_scale: f32,
     /// Per frame (`BtlSuper_GetShotSpeed`).
@@ -124,6 +126,7 @@ impl TechDef {
             life: (t.shot_time(slot) * 30.0) as i32,
             scale: t.shot_scale(slot),
             hit_scale: t.hit_scale(slot),
+            power: t.power(slot),
             speed: t.shot_speed(slot) * 10.0 * kmh(1.0),
             homing: t.shot_turn(slot) * 3.141_592_7 / 180.0 * (1.0 / 30.0),
             flags: t.flags_a(slot),
@@ -757,7 +760,7 @@ impl Beam {
         if w.paused {
             return None;
         }
-        let rec = HitRec::technique(
+        let mut rec = HitRec::technique(
             self.src,
             self.id,
             self.head,
@@ -766,6 +769,7 @@ impl Beam {
             self.muzzle(),
             self.radius * self.trail_width,
         )?;
+        rec.origin = self.origin;
         // EftHit_InitMultiHit.
         if def.max_hits > 0 {
             self.tag.flags |= T_MULTI;
@@ -919,7 +923,6 @@ impl TechFx {
     }
 
     /// `EftTechEvt_RequestRestart` / `RequestExpire`: unless the END is out.
-    #[allow(dead_code)]
     pub(crate) fn request_restart(&mut self, side: usize, expire: bool) {
         if self.events[side] & EV_END == 0 {
             self.requests[side] |= if expire { REQ_EXPIRE } else { REQ_RESTART };
@@ -1105,6 +1108,40 @@ impl TechFx {
                 }
             }
         }
+    }
+
+    /// The reset of a fighter's tasks (`BtlScene_Reset`, the owner tag 0x800 / 0x1000): its items die with their
+    /// term callbacks' flags (0xA8 for a technique's, a ring shot's 0xA8 when not yet given and 0xA9), its blast
+    /// objects and discs are gone; the scene's generator restarts at 0.
+    pub(crate) fn reset_side(&mut self, chars: &mut [Chr; 2], side: usize) {
+        let held = &mut chars[side].flags;
+        for slot in 0..5 {
+            for b in self.beams[side][slot].drain(..) {
+                if b.src.def.kind != 0 && !(b.prop && b.flags & 0x800 != 0) {
+                    held.set_held(0xA8);
+                }
+            }
+            let kinds = self.volleys[side][slot]
+                .drain(..)
+                .map(|v| v.src().def.kind)
+                .chain(self.sweeps[side][slot].drain(..).map(|s| s.src().def.kind))
+                .chain(self.multis[side][slot].drain(..).map(|m| m.src().def.kind))
+                .collect::<Vec<_>>();
+            if kinds.iter().any(|&k| k != 0) {
+                held.set_held(0xA8);
+            }
+            for r in self.rings[side][slot].drain(..) {
+                if !r.done() {
+                    held.set_held(0xA8);
+                }
+                if r.src().def.kind != 0 {
+                    held.set_held(0xA9);
+                }
+            }
+        }
+        self.shots.reset_side(side);
+        self.discs.reset_side(side);
+        self.rand = 0;
     }
 
     /// Layer 3's blast objects (`EftBlastObj_Update`), after the ki blasts.

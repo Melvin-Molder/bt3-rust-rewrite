@@ -372,6 +372,8 @@ pub(crate) struct Chr {
     pub queue: DamageQueue,
     /// `clashCountB`: the inputs counted in clashes B and C.
     pub clash_count_b: i32,
+    /// `clashPower` (`clashCountA`): the beam struggle's score.
+    pub clash_count_a: i32,
     /// `clashAnswerFrame`: the clash C answer, -1 none yet, -2 a wrong button, else the frame it came.
     pub clash_answer_frame: i32,
     /// `skillCount3` (fighter + 0xE5C): a skill counter technique 0x268 scales with (the skills are not ported).
@@ -500,6 +502,7 @@ impl Chr {
             search_range: 0.0,
             queue: DamageQueue::default(),
             clash_count_b: 0,
+            clash_count_a: 0,
             clash_answer_frame: 0,
             skill_count3: 0,
             boost_stock: 0,

@@ -2,14 +2,17 @@
 //! src/battle/btl_char_pose.c): started when both fighters are in a clash action at once, they decide who won and
 //! tell the actions by flags.
 //!
-//! Clash B (states 6..8): both in 0xFA, trading blows for 76 frames; the one who counted more inputs wins
+//! Clash A (states 1..5): both in a beam struggle (0x130..0x132); for 106 frames the one counting more inputs
+//! gains the lead, then the leader's lead grows to 71: the winner gets held flags 0xC1 / 0xC3, the loser 0xC2 and
+//! the damage of both techniques (the winner's whole plus half the loser's); the struggle effect ends, the loser's
+//! effects reset (a throw technique's win would throw: not ported). Clash B (states 6..8): both in 0xFA, trading blows for 76 frames; the one who counted more inputs wins
 //! (flags 0xBF / 0xC0). Clash C (states 9..11): both in 0xFB, then 0xFC exchanges placed on the stage paths; each
 //! exchange (both raising 0xC4) scores one for the fighter whose answer is right, and after seven with a leader
-//! the winner gets 0xC7, the loser 0xC8. Not ported: clash A (techniques, actions 0x130..0x132), the clash
-//! cameras (`ChrCam_SetCut` / `RequestCut`), the voices and the streamed sounds.
+//! the winner gets 0xC7, the loser 0xC8. Not ported: the clash cameras (`ChrCam_SetCut` / `RequestCut`), the voices and the streamed sounds.
 
 use crate::btl_chr::{Chr, Env, SideData};
 use crate::btl_hit::raise_first_clash;
+use crate::btl_tech_fx::tech_damage;
 
 /// `BtlClashC` (roster + 0x7C): read by the exchange action and the placement.
 #[derive(Clone, Copy, Debug, Default)]
@@ -27,10 +30,30 @@ pub(crate) struct ClashC {
     pub prev_pick: i32,
 }
 
-/// `gBtlChars->clashState` with the clash B and C blocks.
+/// `BtlClashA` (roster + 0x50).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ClashA {
+    pub timer: i32,
+    pub winner: i32,
+    /// > 0: fighter 0 is ahead.
+    pub lead: i32,
+    /// `clashBias`: the lead squashed into -0.8..0.8; where the struggle point is.
+    pub bias: f32,
+}
+
+/// `BtlClash_CalcBias`: x / (|x| + 1) with x = lead / 20, at most 0.8 either way.
+fn calc_bias(lead: i32) -> f32 {
+    let x = lead as f32 * 0.05;
+    (x / (x.abs() + 1.0)).clamp(-0.8, 0.8)
+}
+
+/// `gBtlChars->clashState` with the clash A, B and C blocks.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Clash {
     pub state: i32,
+    pub a: ClashA,
+    /// `EftStruggle_End` asked by clash A this frame: the winner, -1 both lose.
+    pub struggle_end: Option<i32>,
     pub b_timer: i32,
     pub b_winner: i32,
     pub c: ClashC,
@@ -65,6 +88,20 @@ impl Clash {
         chars[0].act.current == action && chars[1].act.current == action
     }
 
+    /// `BtlCharApi_IsInClashA`.
+    pub(crate) fn in_clash_a(chr: &Chr) -> bool {
+        (0x130..=0x132).contains(&chr.act.current)
+    }
+
+    /// `BtlClash_HoldClashA`: a fighter in clash A gets held flag 0xC3.
+    fn hold_clash_a(chars: &mut [Chr; 2]) {
+        for c in chars.iter_mut() {
+            if Self::in_clash_a(c) {
+                c.flags.set_held(0xC3);
+            }
+        }
+    }
+
     /// `BtlClash_EndActionFA` / `EndActionFC`: a fighter still in the action gets the flag that ends it.
     fn end_action(chr: &mut Chr, action: i32, flag: u32) {
         if chr.act.current == action {
@@ -77,11 +114,16 @@ impl Clash {
     pub(crate) fn update(
         &mut self,
         chars: &mut [Chr; 2],
+        data: [&SideData; 2],
         env: &Env,
         rand_state: &mut u32,
         frame: u32,
     ) {
+        let both_a = |c: &[Chr; 2]| Self::in_clash_a(&c[0]) && Self::in_clash_a(&c[1]);
         if self.state == 0 {
+            if both_a(chars) {
+                self.state = 1;
+            }
             if Self::both_in(chars, 0xFA) {
                 self.state = 6;
             }
@@ -91,14 +133,119 @@ impl Clash {
         }
         match self.state {
             0 => {
+                Self::hold_clash_a(chars);
                 for c in chars.iter_mut() {
                     Self::end_action(c, 0xFA, 0xBF);
+                }
+            }
+            1..=5 => {
+                self.state = self.update_a(chars, data, env, frame);
+                if !both_a(chars) {
+                    Self::hold_clash_a(chars);
+                    self.state = 0;
                 }
             }
             6..=8 => self.state = self.update_b(chars, frame),
             9..=11 => self.state = self.update_c(chars, env, rand_state),
             _ => {}
         }
+    }
+
+    /// `BtlClash_UpdateA`. The cameras, voices and streamed sounds are not ported.
+    fn update_a(
+        &mut self,
+        chars: &mut [Chr; 2],
+        data: [&SideData; 2],
+        env: &Env,
+        frame: u32,
+    ) -> i32 {
+        let (count0, count1) = (chars[0].clash_count_a, chars[1].clash_count_a);
+        let a = &mut self.a;
+        let mut state = self.state;
+        match state {
+            1 => {
+                a.timer = 0;
+                a.lead = 0;
+                state += 1;
+            }
+            2 => {
+                if a.timer >= 0x3C {
+                    if count1 < count0 {
+                        a.lead += 1;
+                    }
+                    if count0 < count1 {
+                        a.lead -= 1;
+                    }
+                }
+                a.timer += 1;
+                if a.timer >= 0x6A {
+                    a.timer = 0;
+                    state += 1;
+                }
+            }
+            3 => {
+                if a.timer == 0 && a.lead == 0 {
+                    a.lead = if frame % 2 != 0 { 1 } else { -1 };
+                }
+                a.timer += 1;
+                if a.timer >= 0x10 {
+                    a.timer = 0;
+                    state += 1;
+                }
+            }
+            4 => {
+                a.lead += if a.lead > 0 { 4 } else { -4 };
+                if a.lead.abs() >= 0x47 {
+                    a.timer = 0;
+                    state += 1;
+                }
+            }
+            5 => {
+                if a.timer == 0 {
+                    let w = if a.lead > 0 || (a.lead == 0 && frame % 2 != 0) {
+                        0
+                    } else {
+                        1
+                    };
+                    let l = w ^ 1;
+                    let cls = crate::btl_act::id_class(chars[w].act.current);
+                    let lcls = crate::btl_act::id_class(chars[l].act.current);
+                    chars[w].flags.set_held(0xC1);
+                    chars[w].flags.set_held(0xC3);
+                    chars[l].flags.set_held(0xC2);
+                    if data[w].tables.tech().is_throw(cls) {
+                        // BtlColl_StartThrow of a technique is not ported.
+                        chars[w].flags.set_held(0xA0);
+                        self.struggle_end = Some(w as i32);
+                    } else {
+                        let mut dmg =
+                            tech_damage(&chars[w], data[w], data[l], env, cls, false, true);
+                        dmg += tech_damage(&chars[l], data[l], data[w], env, lcls, false, true) / 2;
+                        let flags = match cls {
+                            2 => 0x80_0000,
+                            3 => 0x100_0000,
+                            4 => 0x200_0000,
+                            _ => 0,
+                        };
+                        chars[l].damage(env, data[l], dmg, flags);
+                        self.struggle_end = Some(-1);
+                    }
+                    let (lo, hi) = chars.split_at_mut(1);
+                    let (winner, loser) = if w == 0 {
+                        (&mut lo[0], &mut hi[0])
+                    } else {
+                        (&mut hi[0], &mut lo[0])
+                    };
+                    raise_first_clash(winner, loser);
+                    self.a.winner = w as i32;
+                }
+                self.a.lead = 0;
+                state = 0;
+            }
+            _ => {}
+        }
+        self.a.bias = calc_bias(self.a.lead);
+        state
     }
 
     /// `BtlClash_UpdateB`.
