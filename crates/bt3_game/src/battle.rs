@@ -36,6 +36,7 @@ use crate::btl_menu::{MenuDraw, MenuInput, MenuTexts, PauseMenu, Tree};
 use crate::btl_mgr::Roster;
 use crate::btl_obj::ObjData;
 use crate::btl_tech_fx::TechPack;
+use crate::btl_tech_volley::FxTables;
 use crate::char_select::BattleSetup;
 use crate::fade::Fade;
 use crate::font::Font;
@@ -127,6 +128,8 @@ pub struct BattleAssets {
     /// The roster's tables of common file 2.
     pub(crate) common: CommonTables,
     pub(crate) stat_curve: [[f32; 3]; 13],
+    /// The executable's tables of the technique effects.
+    pub(crate) fx_tables: FxTables,
     pub(crate) collision: StageCollision,
     /// `Battle_GetSetup()->side[n].cpu`.
     pub(crate) cpu: [bool; 2],
@@ -261,6 +264,7 @@ pub fn load(
         time_limit,
         common: common_tables,
         stat_curve,
+        fx_tables: FxTables::read(elf).map_err(error)?,
         collision,
         cpu: [setup.sides[0].control == 2, setup.sides[1].control == 2],
         ai,
@@ -705,6 +709,7 @@ impl BattleAssets {
             stage_4_or_27: matches!(self.stage_id, 4 | 27),
             seq_state,
             gate,
+            fx: &self.fx_tables,
         }
     }
 }
@@ -3076,6 +3081,78 @@ mod tests {
             "{drops:?}"
         );
         assert_eq!(battle.roster.chars[1].act.current, 0x38);
+    }
+
+    #[test]
+    fn real_volley_fires_ten_steered_shots() {
+        use crate::btl_input::pad::{L2, START, TRIANGLE};
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 45;
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..120 {
+            frame(&mut battle, L2);
+        }
+        for _ in 0..5 {
+            frame(&mut battle, 0);
+        }
+        // Character 45's slot 2 (technique 0x184, effect type 1): the beam action's firing motion fires one shot on
+        // each of its ten FIRE events; each is spread round the aim and steered at P2 (1 degree a frame). Nine hit
+        // for equal damage (the ninth passes beside P2 while it reels), the last shot (the motion's last FIRE)
+        // knocking it away. The volley's end raises flag 0xA8.
+        let mut health = battle.roster.chars[1].gauge.health;
+        let (mut hits, mut most, mut end_at) = (Vec::new(), 0, None);
+        for i in 0..120 {
+            let held = match i {
+                2..4 => L2,
+                4..6 => L2 | TRIANGLE,
+                _ => 0,
+            };
+            frame(&mut battle, held);
+            let a = &battle.roster.chars[0];
+            let o = &battle.roster.chars[1];
+            most = most.max(battle.roster.scene.tech.shots.of(0).len());
+            if end_at.is_none() && a.anim.cur == 0x10B {
+                end_at = Some(i);
+            }
+            if o.gauge.health < health {
+                hits.push((health - o.gauge.health, o.react.reaction));
+                health = o.gauge.health;
+            }
+        }
+        assert_eq!(hits.len(), 9, "{hits:?}");
+        assert!(hits.iter().all(|h| h.0 == hits[0].0), "{hits:?}");
+        assert!(hits[..8].iter().all(|h| h.1 == 3), "{hits:?}");
+        assert_eq!(hits[8].1, 0xF);
+        assert!((2..=4).contains(&most), "{most}");
+        assert!(end_at.is_some_and(|e| e < 90), "{end_at:?}");
+        assert!(battle.roster.scene.tech.shots.of(0).is_empty());
+        assert_eq!(battle.roster.chars[0].act.current, 0xB);
     }
 
     #[test]

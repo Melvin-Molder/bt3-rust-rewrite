@@ -30,6 +30,8 @@ fn entry_offset(pack: &[u8], n: usize) -> usize {
 pub struct SetHead {
     /// Bit per group kind present.
     pub mask: u32,
+    /// `aimKind`: how a volley spreads its shots (7 straight up, 8 lifted 45 degrees, ...).
+    pub aim_kind: u8,
     /// The trail width animation: width0 -> width1 -> width2 over `width_time` seconds, or `width_step` per frame.
     pub width: [f32; 3],
     pub width_time: f32,
@@ -190,6 +192,7 @@ impl EmitSet {
             .ok_or_else(|| invalid_data("emitter set header is outside the pack"))?;
         let head = SetHead {
             mask: u32_at(h, 0),
+            aim_kind: h[6],
             width: [f32_at(h, 8), f32_at(h, 0xC), f32_at(h, 0x10)],
             width_time: f32_at(h, 0x14),
             width_split: f32_at(h, 0x18),

@@ -402,6 +402,13 @@ impl TechTable<'_> {
     pub fn guard_kind(&self, slot: i32) -> i32 {
         self.s8_of(0x150, slot)
     }
+    /// The shot count and the shots per firing as stored (`EftShot_BuildParam`'s `shots` / `volley`).
+    pub fn shots_raw(&self, slot: i32) -> i32 {
+        self.s8_of(0x93, slot)
+    }
+    pub fn hits_b_raw(&self, slot: i32) -> i32 {
+        self.s8_of(0x96, slot)
+    }
     /// `BtlSuper_GetShots` / `GetHitsB` (at least 1) / `GetHitsC` (byte + 1).
     pub fn shots(&self, slot: i32) -> i32 {
         self.s8_of(0x93, slot).max(1)

@@ -8,8 +8,10 @@
 //! here too (`BtlColl_GuardRush`, `BtlColl_HitByRush` and their helpers, src/battle/btl_hit_reaction.c), with
 //! `BtlSuper_GetDamage` (src/battle/btl_tech.c).
 //!
-//! Not ported: the skills' shots (slots 0, 1); the items of effect types other than 0 (their timeline runs, so
-//! flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); every emitter, stage blur, flash and sound
+//! The volley of type 1 is in `btl_tech_volley`.
+//!
+//! Not ported: the skills' shots (slots 0, 1); the items of effect types other than 0 and 1 (their timeline runs,
+//! so flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); every emitter, stage blur, flash and sound
 //! (the beam is not drawn); the rush catches (reactions 0x1D / 0x1E) and throws (0x22) of a technique hit, which
 //! let the record pass; the beam struggle (`EftStruggle`); abilities; the battle events.
 
@@ -25,6 +27,7 @@ use crate::btl_chr::{
 use crate::btl_hit::guard_kind;
 use crate::btl_input::wrap_angle;
 use crate::btl_obj::mask_to_node;
+use crate::btl_tech_volley::{Shots, Volley};
 
 /// A technique slot's effect pack (`effectPacks[slot]`): what the ported effect types read of it.
 #[derive(Clone, Debug, Default)]
@@ -37,7 +40,7 @@ pub(crate) struct TechPack {
 pub(crate) const EV_START: u32 = 0x2;
 pub(crate) const EV_FIRE: u32 = 0x4;
 pub(crate) const EV_END: u32 = 0x8;
-const EV_ABORT: u32 = 0x400;
+pub(crate) const EV_ABORT: u32 = 0x400;
 
 // EFT_TECH_REQ_*.
 const REQ_STOP: u32 = 2;
@@ -50,9 +53,9 @@ const TIMELINES: usize = 2;
 const ITEMS: usize = 2;
 
 // EFT_TASK_*: the task tag bits the hit pass reports through (eft_core.h).
-const T_HIT_CHAR: u32 = 0x1;
+pub(crate) const T_HIT_CHAR: u32 = 0x1;
 const T_HIT_STAGE: u32 = 0x4;
-const T_MULTI: u32 = 0x4000;
+pub(crate) const T_MULTI: u32 = 0x4000;
 
 /// `BTL_REACT_NOFLINCH`.
 const REACT_NOFLINCH: i32 = 2;
@@ -69,7 +72,10 @@ pub(crate) struct TechDef {
     pub sub: i32,
     /// The hit shape: 0 two spheres, 1 two capsules from the muzzle.
     pub shape: i32,
+    /// The shot count; a volley ends once it has fired this many times.
     pub shots: i32,
+    /// `volley`: the shots of a volley's firing.
+    pub volley: i32,
     /// `maxHits`: more than 0 makes a multi-hit; the hits it lands past it end it.
     pub max_hits: i32,
     /// `unkB`: frames between two hits of a multi-hit.
@@ -100,7 +106,8 @@ impl TechDef {
             kind: if slot == 4 { 2 } else { 1 },
             sub: t.hit_dir_kind(slot),
             shape: t.hit_shape(slot),
-            shots: t.shots(slot),
+            shots: t.shots_raw(slot),
+            volley: t.hits_b_raw(slot),
             max_hits: t.max_hits(slot),
             hit_interval: t.hit_interval(slot),
             effect_type: t.effect_type(slot),
@@ -161,7 +168,7 @@ struct Timeline {
 
 /// `EftEmitNodes`: the node of each event slot (and its pair), fixed when the slot's event first comes.
 #[derive(Clone, Copy, Debug, Default)]
-struct EmitNodes {
+pub(crate) struct EmitNodes {
     /// Bit 2i slot i resolved, bit 2i + 1 slot i is a pair; 0x1000 frozen.
     flags: u32,
     flags_c: u32,
@@ -210,6 +217,11 @@ pub(crate) struct TechFx {
     cur_slot: [i32; 2],
     /// The items by fighter and slot.
     beams: [[Vec<Beam>; 5]; 2],
+    volleys: [[Vec<Volley>; 5]; 2],
+    /// The blast objects the volleys fire (layer 3).
+    pub shots: Shots,
+    /// `gBtlScene->randState`: the scene's generator.
+    rand: u32,
 }
 
 impl Default for TechFx {
@@ -220,12 +232,15 @@ impl Default for TechFx {
             timelines: Vec::new(),
             cur_slot: [0; 2],
             beams: Default::default(),
+            volleys: Default::default(),
+            shots: Shots::default(),
+            rand: 0,
         }
     }
 }
 
 /// `BtlScene_IsCharStopped`.
-fn stopped(w: &World, side: usize) -> bool {
+pub(crate) fn stopped(w: &World, side: usize) -> bool {
     w.paused || w.chars[side].is_frozen()
 }
 
@@ -337,10 +352,27 @@ fn attr_kind(chr: &Chr, data: &SideData, cur_slot: i32, bits: u32) -> i32 {
 }
 
 impl EmitNodes {
+    /// The position of event slot `i` (`n[i][0].pos`).
+    pub(crate) fn pos(&self, i: usize) -> [f32; 3] {
+        self.n[i][0].1
+    }
+
+    /// The node of event slot `i` (`n[i][0].id`).
+    pub(crate) fn node(&self, i: usize) -> i32 {
+        self.n[i][0].0
+    }
+
     /// `EftEmit_UpdateNodesReq` / `EftEmit_UpdateNodes`: each slot takes its node the first time its event comes
     /// (from the definition with flag 4, else from the event), then every resolved slot is sampled (an unresolved
     /// one at slot 0's node once that is). ABORT freezes them.
-    fn update(&mut self, chr: &Chr, data: &SideData, def: &TechDef, cur_slot: i32, events: u32) {
+    pub(crate) fn update(
+        &mut self,
+        chr: &Chr,
+        data: &SideData,
+        def: &TechDef,
+        cur_slot: i32,
+        events: u32,
+    ) {
         const BITS: [u32; 6] = [2, 4, 8, 0x10, 0x20, 0x40];
         let req = events & 0x47E;
         if req & 0x400 != 0 {
@@ -391,7 +423,7 @@ impl EmitNodes {
 }
 
 /// `EftAim_GetDir`: under lock-on at the opponent's node 0x11 within 45 degrees, else along the model's facing.
-fn aim_dir(w: &World, side: usize, from: [f32; 3]) -> [f32; 3] {
+pub(crate) fn aim_dir(w: &World, side: usize, from: [f32; 3]) -> [f32; 3] {
     let me = &w.chars[side];
     let out = if me.flags.test(5) {
         let q = PI / 4.0;
@@ -404,7 +436,7 @@ fn aim_dir(w: &World, side: usize, from: [f32; 3]) -> [f32; 3] {
 }
 
 /// `EftAim_GetDirKeep` (aim mode 0): the same aim, but the facing when it is more than 60 degrees off it.
-fn aim_dir_keep(w: &World, side: usize, from: [f32; 3]) -> [f32; 3] {
+pub(crate) fn aim_dir_keep(w: &World, side: usize, from: [f32; 3]) -> [f32; 3] {
     let me = &w.chars[side];
     let yaw = me.pose.rot[1];
     let fwd = [yaw.sin(), 0.0, yaw.cos()];
@@ -425,6 +457,16 @@ fn aim_dir_keep(w: &World, side: usize, from: [f32; 3]) -> [f32; 3] {
         fwd
     } else {
         out
+    }
+}
+
+/// `EftEmit_UpdateTrailWidth`: the trail width animation, or its step per frame up to key 2.
+pub(crate) fn update_trail_width(width: &mut f32, t: &mut f32, h: &SetHead) {
+    if !step_width(width, t, h.width, h.width_time, h.width_split) {
+        *width += h.width_step;
+        if 0.0 < h.width[2] && h.width[2] < *width {
+            *width = h.width[2];
+        }
     }
 }
 
@@ -633,19 +675,7 @@ impl Beam {
         if def.flags & 1 == 0 || self.flags & 0x10 == 0 {
             return None;
         }
-        let h = self.head_set;
-        if !step_width(
-            &mut self.trail_width,
-            &mut self.trail_time,
-            h.width,
-            h.width_time,
-            h.width_split,
-        ) {
-            self.trail_width += h.width_step;
-            if 0.0 < h.width[2] && h.width[2] < self.trail_width {
-                self.trail_width = h.width[2];
-            }
-        }
+        update_trail_width(&mut self.trail_width, &mut self.trail_time, &self.head_set);
         // EftBlast_AddHit and EftHit_Add (nothing while time is stopped).
         if w.paused {
             return None;
@@ -743,16 +773,27 @@ impl TechFx {
             });
             self.requests[side] = 0;
         }
-        if def.effect_type != 0 {
+        let src = TechSrc { side, slot, def };
+        let Some(set) = &pack.blast else {
             return;
-        }
-        let items = &mut self.beams[side][slot as usize];
-        if let Some(set) = &pack.blast
-            && items.len() < ITEMS
-        {
-            *next_id += 1;
-            let src = TechSrc { side, slot, def };
-            items.push(Beam::new(*next_id, src, me, set));
+        };
+        match def.effect_type {
+            0 => {
+                let items = &mut self.beams[side][slot as usize];
+                if items.len() < ITEMS {
+                    *next_id += 1;
+                    items.push(Beam::new(*next_id, src, me, set));
+                }
+            }
+            1 => {
+                let items = &mut self.volleys[side][slot as usize];
+                if items.len() < ITEMS
+                    && let Some(v) = Volley::new(src, set)
+                {
+                    items.push(v);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -771,6 +812,9 @@ impl TechFx {
     }
 
     pub(crate) fn tag_mut(&mut self, id: u32) -> Option<&mut Tag> {
+        if let Some(t) = self.shots.tag_mut(id) {
+            return Some(t);
+        }
         self.beams
             .iter_mut()
             .flatten()
@@ -782,7 +826,13 @@ impl TechFx {
     /// Layer 1 of `BtlScene_Update`: the timelines (`EftTechEvt_Update`, the events cleared first), the current
     /// slots (`EftShotChar_Update`), then every item, fighter 0's slots first; a dead item is removed at once, and
     /// one of a technique raises flag 0xA8 (`EftBlast_Term`).
-    pub(crate) fn update(&mut self, w: &mut World, records: &mut Vec<HitRec>, max: usize) {
+    pub(crate) fn update(
+        &mut self,
+        w: &mut World,
+        records: &mut Vec<HitRec>,
+        max: usize,
+        next_id: &mut u32,
+    ) {
         self.events = [0; 2];
         let mut i = 0;
         while i < self.timelines.len() {
@@ -827,8 +877,40 @@ impl TechFx {
                         k += 1;
                     }
                 }
+                let mut k = 0;
+                while k < self.volleys[side][slot].len() {
+                    let v = &mut self.volleys[side][slot][k];
+                    v.update(
+                        w,
+                        w.env.fx,
+                        self.events[side],
+                        self.cur_slot[side],
+                        &mut self.requests[side],
+                        &mut self.shots,
+                        next_id,
+                        &mut self.rand,
+                    );
+                    if v.dead() {
+                        if v.src().def.kind != 0 {
+                            w.chars[side].flags.set_held(0xA8);
+                        }
+                        self.volleys[side][slot].remove(k);
+                    } else {
+                        k += 1;
+                    }
+                }
             }
         }
+    }
+
+    /// Layer 3's blast objects (`EftBlastObj_Update`), after the ki blasts.
+    pub(crate) fn update_shots(&mut self, w: &World, records: &mut Vec<HitRec>, max: usize) {
+        self.shots.update(w, self.events, records, max);
+    }
+
+    /// Layer 3's post-update of the blast objects.
+    pub(crate) fn post_update_shots(&mut self, w: &World) {
+        self.shots.post_update(w);
     }
 
     /// `EftTechEvtTask_UpdateNormal` of a technique: START runs the fire timer, FIRE the end timer, the motion's
@@ -897,8 +979,15 @@ impl TechFx {
 
     /// Layer 1 of `BtlScene_PostUpdate`: every item reads what the passes reported.
     pub(crate) fn post_update(&mut self, w: &World) {
-        for beam in self.beams.iter_mut().flatten().flatten() {
-            beam.post_update(w);
+        for side in 0..2 {
+            for slot in 0..5 {
+                for beam in &mut self.beams[side][slot] {
+                    beam.post_update(w);
+                }
+                for v in &mut self.volleys[side][slot] {
+                    v.post_update(w, &self.shots);
+                }
+            }
         }
     }
 

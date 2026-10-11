@@ -263,6 +263,8 @@ pub(crate) struct Env<'a> {
     pub seq_state: i32,
     /// The battle flags the input reads.
     pub gate: InputGate,
+    /// The executable's tables of the technique effects.
+    pub fx: &'a crate::btl_tech_volley::FxTables,
 }
 
 impl Env<'_> {

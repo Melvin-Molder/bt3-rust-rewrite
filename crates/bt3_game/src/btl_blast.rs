@@ -60,6 +60,7 @@ const T_END: u32 = 0x3F;
 // EFT_HIT_FLAG_*.
 const H_KIND9: u32 = 0x8;
 const H_LAST: u32 = 0x10;
+const H_NO_MODE1: u32 = 0x80;
 const H_NO_LAST: u32 = 0x800;
 const T_TURN: u32 = 0xC0;
 
@@ -656,7 +657,8 @@ impl Scene {
             self.records.clear();
         }
         // Layer 1: the technique effects.
-        self.tech.update(w, &mut self.records, HIT_MAX);
+        self.tech
+            .update(w, &mut self.records, HIT_MAX, &mut self.next_id);
         // BtlScene_IsAnyCharStopped.
         let stopped = w.paused || w.chars.iter().any(Chr::is_frozen);
         for side in 0..2 {
@@ -678,7 +680,8 @@ impl Scene {
                 }
             }
         }
-        // Layer 3: the particle modules.
+        // Layer 3: the blast objects, then the particle modules.
+        self.tech.update_shots(w, &mut self.records, HIT_MAX);
         let fxw = FxWorld {
             sets: std::array::from_fn(|s| w.data[s].blast_assets),
             any_frozen: stopped,
@@ -703,6 +706,7 @@ impl Scene {
                 }
             }
         }
+        self.tech.post_update_shots(w);
         for (i, chr) in w.chars.iter_mut().enumerate() {
             chr.live_blasts = [0; 2];
             for rec in self
@@ -770,7 +774,7 @@ impl Scene {
                 }
             }
             1 => {
-                if flags & T_NO_MODE1 != 0 {
+                if self.records[i].flags & H_NO_MODE1 != 0 || flags & T_NO_MODE1 != 0 {
                     false
                 } else if flags & T_MULTI != 0 {
                     true
