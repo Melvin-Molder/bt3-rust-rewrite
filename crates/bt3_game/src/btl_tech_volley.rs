@@ -157,6 +157,11 @@ fn scene_rand(state: &mut u32, time_stopped: bool) -> u32 {
     next
 }
 
+/// `BtlScene_RandF`.
+pub(crate) fn scene_rand_f(state: &mut u32, ts: bool) -> f32 {
+    scene_rand(state, ts) as f32 / 150_889.0
+}
+
 /// `BtlScene_RandRangeF`.
 fn rand_range_f(state: &mut u32, ts: bool, a: f32, b: f32) -> f32 {
     if b == a {

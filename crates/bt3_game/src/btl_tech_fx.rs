@@ -8,9 +8,12 @@
 //! here too (`BtlColl_GuardRush`, `BtlColl_HitByRush` and their helpers, src/battle/btl_hit_reaction.c), with
 //! `BtlSuper_GetDamage` (src/battle/btl_tech.c).
 //!
-//! The volley of type 1 is in `btl_tech_volley`.
+//! The prop shot of type 6 (`EftPropShot_*`) is the same item as the beam with its differences; the volley of
+//! type 1 is in `btl_tech_volley`.
 //!
-//! Not ported: the skills' shots (slots 0, 1); the items of effect types other than 0 and 1 (their timeline runs,
+//! The sweep of type 3 is in `btl_tech_sweep`.
+//!
+//! Not ported: the skills' shots (slots 0, 1); the items of effect types other than 0, 1, 3 and 6 (their timeline runs,
 //! so flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); every emitter, stage blur, flash and sound
 //! (the beam is not drawn); the rush catches (reactions 0x1D / 0x1E) and throws (0x22) of a technique hit, which
 //! let the record pass; the beam struggle (`EftStruggle`); abilities; the battle events.
@@ -27,7 +30,8 @@ use crate::btl_chr::{
 use crate::btl_hit::guard_kind;
 use crate::btl_input::wrap_angle;
 use crate::btl_obj::mask_to_node;
-use crate::btl_tech_volley::{Shots, Volley};
+use crate::btl_tech_sweep::Sweep;
+use crate::btl_tech_volley::{Shots, Volley, scene_rand_f};
 
 /// A technique slot's effect pack (`effectPacks[slot]`): what the ported effect types read of it.
 #[derive(Clone, Debug, Default)]
@@ -86,6 +90,8 @@ pub(crate) struct TechDef {
     /// Frames from the fire to the END event.
     pub life: i32,
     pub scale: f32,
+    /// `hitScale`: the records' scale (`EftHit_GetScale`), the factor of their radius against the stage.
+    pub hit_scale: f32,
     /// Per frame (`BtlSuper_GetShotSpeed`).
     pub speed: f32,
     /// Radians per frame (`BtlSuper_GetShotTurnRate`).
@@ -114,6 +120,7 @@ impl TechDef {
             nodes: t.effect_nodes(slot),
             life: (t.shot_time(slot) * 30.0) as i32,
             scale: t.shot_scale(slot),
+            hit_scale: t.hit_scale(slot),
             speed: t.shot_speed(slot) * 10.0 * kmh(1.0),
             homing: t.shot_turn(slot) * 3.141_592_7 / 180.0 * (1.0 / 30.0),
             flags: t.flags_a(slot),
@@ -176,15 +183,18 @@ pub(crate) struct EmitNodes {
     c: [(i32, [f32; 3]); 6],
 }
 
-/// An `EftBlast` item (effect type 0).
+/// An `EftBlast` item (effect type 0), or an `EftPropShot` (type 6: the same shot carrying a prop model, without
+/// the charge's scaling or the speed track).
 #[derive(Clone, Debug)]
 struct Beam {
     id: u32,
     src: TechSrc,
+    prop: bool,
     tag: Tag,
     state: u8,
     /// 1 ending, 2 dead, 4 aborted, 8 END seen, 0x10 fired, 0x20 held by the hit pass, 0x40 started, 0x200 the
-    /// speed follows the second width, 0x800 / 0x1000 the charge does not scale it / the 0x268 scale.
+    /// speed follows the second width, 0x800 / 0x1000 the charge does not scale it / the 0x268 scale (a prop
+    /// shot: technique 0x19A, which hides part of its fighter / flag 0xA8 raised early).
     flags: u32,
     speed: f32,
     scale: f32,
@@ -218,6 +228,7 @@ pub(crate) struct TechFx {
     /// The items by fighter and slot.
     beams: [[Vec<Beam>; 5]; 2],
     volleys: [[Vec<Volley>; 5]; 2],
+    sweeps: [[Vec<Sweep>; 5]; 2],
     /// The blast objects the volleys fire (layer 3).
     pub shots: Shots,
     /// `gBtlScene->randState`: the scene's generator.
@@ -233,6 +244,7 @@ impl Default for TechFx {
             cur_slot: [0; 2],
             beams: Default::default(),
             volleys: Default::default(),
+            sweeps: Default::default(),
             shots: Shots::default(),
             rand: 0,
         }
@@ -490,13 +502,23 @@ fn step_width(width: &mut f32, t: &mut f32, keys: [f32; 3], time: f32, split: f3
 }
 
 impl Beam {
-    /// `EftBlast_Init`.
-    fn new(id: u32, src: TechSrc, chr: &Chr, set: &EmitSet) -> Self {
+    /// `EftBlast_Init` / `EftPropShot_Init` (with `EftPropShot_InitProp`, whose technique 0x165 draws two numbers
+    /// of the scene generator).
+    fn new(
+        id: u32,
+        src: TechSrc,
+        prop: bool,
+        chr: &Chr,
+        set: &EmitSet,
+        rand: &mut u32,
+        ts: bool,
+    ) -> Self {
         let def = src.def;
         let head_set = set.head;
         let mut b = Self {
             id,
             src,
+            prop,
             tag: Tag::default(),
             state: 0,
             flags: 0,
@@ -519,6 +541,24 @@ impl Beam {
             width2: head_set.width_b[0],
             time2: 0.0,
         };
+        if prop {
+            b.draw_scale = b.scale;
+            b.radius = b.scale;
+            if head_set.flags & 4 != 0 {
+                b.speed = b.width2;
+                b.flags |= 0x200;
+            }
+            b.life = f32::from(head_set.end_frames);
+            if def.id == 0x165 {
+                // The bobbing of the prop in the hand.
+                scene_rand_f(rand, ts);
+                scene_rand_f(rand, ts);
+            }
+            if def.id == 0x19A {
+                b.flags |= 0x800;
+            }
+            return b;
+        }
         if def.id == 0x268 {
             // BtlCharApi_GetSkillCount3Ratio.
             b.ratio = (chr.skill_count3 as f32 / 3.0).clamp(0.0, 1.0);
@@ -555,7 +595,7 @@ impl Beam {
     /// `EftBlast_Update`: charge (scaled by the fighter's charge), fire from the muzzle on FIRE, fly (homing),
     /// end on END; ABORT ends it at once. While it flies it adds a hit record when the definition has flag 1.
     /// Returns the record; the item is dead when flag 2 is set.
-    fn update(&mut self, w: &World, events: u32, cur_slot: i32) -> Option<HitRec> {
+    fn update(&mut self, w: &mut World, events: u32, cur_slot: i32) -> Option<HitRec> {
         let side = self.src.side;
         if stopped(w, side) {
             return None;
@@ -567,7 +607,7 @@ impl Beam {
             .update(&w.chars[side], w.data[side], &def, cur_slot, events);
         if self.flags & 0x40 == 0 {
             if test(EV_START) {
-                self.dir = aim_dir(w, side, self.hand());
+                self.dir = aim_dir(&*w, side, self.hand());
                 self.state = 0;
                 self.flags |= 0x40;
             } else if test(EV_FIRE) {
@@ -579,7 +619,7 @@ impl Beam {
         if self.flags & 0x40 != 0 {
             match self.state {
                 0 => {
-                    if self.flags & 0x800 == 0 {
+                    if !self.prop && self.flags & 0x800 == 0 {
                         self.ratio = w.chars[side].charge;
                         self.draw_scale = self.scale * (self.ratio * 0.5 + 1.0);
                         self.radius = self.scale * (self.ratio * 0.0 + 1.0);
@@ -589,9 +629,14 @@ impl Beam {
                         self.origin = self.muzzle();
                         self.head = self.origin;
                         self.tail = w.chars[side].obj.node_pos(0x11);
-                        self.dir = aim_dir_keep(w, side, self.head);
+                        self.dir = aim_dir_keep(&*w, side, self.head);
                         self.vel = scale3(self.dir, self.speed);
-                        if self.flags & 0x1000 != 0 && self.ratio > 0.0 {
+                        if self.prop {
+                            if self.flags & 0x800 != 0 {
+                                // BtlCharApi_ObjSetFlag100: model class A's nodes are hidden.
+                                w.chars[side].obj.flags |= 0x100;
+                            }
+                        } else if self.flags & 0x1000 != 0 && self.ratio > 0.0 {
                             self.scale = def.scale + self.ratio * 0.3 * 4.0;
                         }
                         self.state = 1;
@@ -599,7 +644,10 @@ impl Beam {
                 }
                 1 => advance = true,
                 2 => {
-                    if self.flags & 0x1000 != 0 && self.ratio > 0.0 && self.draw_scale < self.scale
+                    if !self.prop
+                        && self.flags & 0x1000 != 0
+                        && self.ratio > 0.0
+                        && self.draw_scale < self.scale
                     {
                         self.draw_scale = (self.draw_scale + 0.1).min(self.scale);
                     }
@@ -629,6 +677,7 @@ impl Beam {
                         self.state = 3;
                     }
                 }
+                3 if self.prop => advance = true,
                 3 => {
                     if def.flags & 0x20 != 0 {
                         self.head = add(self.head, self.vel);
@@ -643,8 +692,8 @@ impl Beam {
             }
             self.flags |= 1;
         }
-        // EftBlast_UpdateParts: the emitters are not ported.
-        if self.flags & 0x10 != 0 && self.flags & 0x200 != 0 {
+        // EftBlast_UpdateParts / EftPropShot_UpdateParts and UpdateProp: drawing only.
+        if !self.prop && self.flags & 0x10 != 0 && self.flags & 0x200 != 0 {
             let h = self.head_set;
             step_width(
                 &mut self.width2,
@@ -663,11 +712,29 @@ impl Beam {
         if self.flags & 1 != 0 {
             self.timer += 1.0;
         }
+        // Technique 0x19A's prop shot raises flag 0xA8 as soon as it ends, then waits while its fighter's model
+        // shows part 3 (`BtlCharApi_ObjHasFlags42`).
+        let wait = self.prop && self.flags & 0x800 != 0;
+        if wait && self.flags & 3 == 1 && (self.timer >= self.life || self.flags & 4 != 0) {
+            if self.flags & 0x1000 == 0 {
+                if def.kind != 0 {
+                    w.chars[side].flags.set_held(0xA8);
+                }
+                self.flags |= 0x1000;
+            } else if w.chars[side].obj.flags & 0x42 != 0x42 {
+                self.flags &= !0x1000;
+            }
+        }
         if self.flags & 2 != 0 {
+            if wait {
+                w.chars[side].obj.flags &= !0x100;
+            }
             return None;
         }
         if self.flags & 1 != 0 {
-            if self.flags & 4 != 0 || self.timer >= self.life {
+            if !(wait && self.flags & 0x1000 != 0)
+                && (self.flags & 4 != 0 || self.timer >= self.life)
+            {
                 self.flags |= 2;
             }
             return None;
@@ -704,13 +771,15 @@ impl Beam {
             return;
         }
         // EftEmit_UpdateAlive / MarkKind6: the emitters are not ported.
-        if self.tag.flags & T_HIT_CHAR != 0 {
-            if self.src.def.flags & 0x1_0000 != 0 {
-                self.flags &= !0x10;
+        if !self.prop {
+            if self.tag.flags & T_HIT_CHAR != 0 {
+                if self.src.def.flags & 0x1_0000 != 0 {
+                    self.flags &= !0x10;
+                }
+                self.flags |= 0x2000;
+            } else if self.tag.flags & T_HIT_STAGE != 0 {
+                self.flags |= 0x4000;
             }
-            self.flags |= 0x2000;
-        } else if self.tag.flags & T_HIT_STAGE != 0 {
-            self.flags |= 0x4000;
         }
         if self.tag.result & 1 != 0 {
             let d = sub(self.tag.pos, self.head);
@@ -742,7 +811,14 @@ impl TechFx {
 
     /// `BtlChar_SpawnFxBits3C` and `EftShot_Start`: effect bit 0x3C..0x40 (the highest wins) starts the shot of
     /// slot 0..4: the timeline, and an item of the effect type (type 0 only) under the slot, at most two.
-    pub(crate) fn request(&mut self, me: &Chr, data: &SideData, next_id: &mut u32) {
+    pub(crate) fn request(
+        &mut self,
+        me: &Chr,
+        opp: &Chr,
+        data: &SideData,
+        next_id: &mut u32,
+        time_stopped: bool,
+    ) {
         let mut slot = -1;
         for (bit, s) in [(0x3C, 0), (0x3D, 1), (0x3E, 2), (0x3F, 3), (0x40, 4)] {
             if me.test_fx(bit) {
@@ -778,11 +854,27 @@ impl TechFx {
             return;
         };
         match def.effect_type {
-            0 => {
+            0 | 6 => {
                 let items = &mut self.beams[side][slot as usize];
                 if items.len() < ITEMS {
                     *next_id += 1;
-                    items.push(Beam::new(*next_id, src, me, set));
+                    let prop = def.effect_type == 6;
+                    items.push(Beam::new(
+                        *next_id,
+                        src,
+                        prop,
+                        me,
+                        set,
+                        &mut self.rand,
+                        time_stopped,
+                    ));
+                }
+            }
+            3 => {
+                let items = &mut self.sweeps[side][slot as usize];
+                if items.len() < ITEMS {
+                    *next_id += 1;
+                    items.push(Sweep::new(*next_id, src, me, opp, set));
                 }
             }
             1 => {
@@ -814,6 +906,15 @@ impl TechFx {
     pub(crate) fn tag_mut(&mut self, id: u32) -> Option<&mut Tag> {
         if let Some(t) = self.shots.tag_mut(id) {
             return Some(t);
+        }
+        if let Some(s) = self
+            .sweeps
+            .iter_mut()
+            .flatten()
+            .flatten()
+            .find(|s| s.id() == id)
+        {
+            return Some(&mut s.tag);
         }
         self.beams
             .iter_mut()
@@ -863,16 +964,35 @@ impl TechFx {
                 while k < self.beams[side][slot].len() {
                     let beam = &mut self.beams[side][slot][k];
                     let rec = beam.update(w, self.events[side], self.cur_slot[side]);
+                    // EftBlast_Term / EftPropShot_Term (not technique 0x19A's prop, which raised it).
+                    let a8 = beam.src.def.kind != 0 && !(beam.prop && beam.flags & 0x800 != 0);
                     if let Some(rec) = rec
                         && records.len() < max
                     {
                         records.push(rec);
                     }
                     if beam.flags & 2 != 0 {
-                        if beam.src.def.kind != 0 {
+                        if a8 {
                             w.chars[side].flags.set_held(0xA8);
                         }
                         self.beams[side][slot].remove(k);
+                    } else {
+                        k += 1;
+                    }
+                }
+                let mut k = 0;
+                while k < self.sweeps[side][slot].len() {
+                    let s = &mut self.sweeps[side][slot][k];
+                    if let Some(rec) = s.update(w, self.events[side], self.cur_slot[side])
+                        && records.len() < max
+                    {
+                        records.push(rec);
+                    }
+                    if s.dead() {
+                        if s.src().def.kind != 0 {
+                            w.chars[side].flags.set_held(0xA8);
+                        }
+                        self.sweeps[side][slot].remove(k);
                     } else {
                         k += 1;
                     }
@@ -986,6 +1106,9 @@ impl TechFx {
                 }
                 for v in &mut self.volleys[side][slot] {
                     v.post_update(w, &self.shots);
+                }
+                for s in &mut self.sweeps[side][slot] {
+                    s.post_update(w);
                 }
             }
         }

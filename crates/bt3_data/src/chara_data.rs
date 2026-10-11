@@ -379,6 +379,10 @@ impl TechTable<'_> {
     pub fn shot_scale(&self, slot: i32) -> f32 {
         self.f32_of(0x6C, slot)
     }
+    /// The hit records' scale (+0x48, `EftShotParam.hitScale`): the factor of their radius in the stage test.
+    pub fn hit_scale(&self, slot: i32) -> f32 {
+        self.f32_of(0x48, slot)
+    }
     /// The effect's hit shape (+0x99: 0 two spheres, 1 two capsules from the muzzle), raw hit limit (+0x9C, what
     /// `hits_c` adds 1 to) and frames between two hits (+0x9F) (`EftShot_BuildParam`).
     pub fn hit_shape(&self, slot: i32) -> i32 {

@@ -269,7 +269,8 @@ impl Roster {
             cam_update_input(me, opp, data[i]);
             me.obj.calc_matrices(&data[i].obj);
             // BtlFx_UpdateAll: only the technique shots and the ki blasts it starts are ported.
-            self.scene.request_technique(me, data[i]);
+            self.scene
+                .request_technique(me, opp, data[i], env.gate.time_stopped);
             self.scene
                 .fire(me, opp, data[i], &mut self.rand, env.gate.time_stopped);
             me.obj.build_volumes(&data[i].obj);

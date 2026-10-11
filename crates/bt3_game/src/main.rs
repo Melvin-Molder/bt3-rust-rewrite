@@ -13,6 +13,7 @@ mod btl_menu;
 mod btl_mgr;
 mod btl_obj;
 mod btl_tech_fx;
+mod btl_tech_sweep;
 mod btl_tech_volley;
 mod btl_text;
 mod char_select;

@@ -60,6 +60,8 @@ const T_END: u32 = 0x3F;
 // EFT_HIT_FLAG_*.
 const H_KIND9: u32 = 0x8;
 const H_LAST: u32 = 0x10;
+const H_ALWAYS: u32 = 0x20;
+const H_NEVER: u32 = 0x40;
 const H_NO_MODE1: u32 = 0x80;
 const H_NO_LAST: u32 = 0x800;
 const T_TURN: u32 = 0xC0;
@@ -128,7 +130,7 @@ struct Shape {
     a: Sphere,
     b: Sphere,
     a_start: [f32; 3],
-    /// `EftHit_GetScale`: 0.1 for a blast, the definition's scale for a technique (the stage test's radius
+    /// `EftHit_GetScale`: 0.1 for a blast, the definition's hit scale for a technique (the stage test's radius
     /// factor).
     scale: f32,
     bounds: ColBox,
@@ -219,7 +221,7 @@ impl HitRec {
                 a,
                 b,
                 a_start: start,
-                scale: src.def.scale,
+                scale: src.def.hit_scale,
                 bounds: capsule_bounds(start, pos, radius),
                 delta: [0.0; 3],
                 dir: [0.0; 3],
@@ -644,8 +646,15 @@ impl Scene {
     }
 
     /// `BtlChar_SpawnFxBits3C`: the technique shot the fighter's effect bits ask for.
-    pub(crate) fn request_technique(&mut self, me: &Chr, data: &SideData) {
-        self.tech.request(me, data, &mut self.next_id);
+    pub(crate) fn request_technique(
+        &mut self,
+        me: &Chr,
+        opp: &Chr,
+        data: &SideData,
+        time_stopped: bool,
+    ) {
+        self.tech
+            .request(me, opp, data, &mut self.next_id, time_stopped);
     }
 
     /// `BtlScene_Update`, `EftDet_Update` and `BtlScene_PostUpdate` for the technique effects and the ki blasts;
@@ -754,6 +763,15 @@ impl Scene {
     /// `EftHit_CanHit`: whether a record may still meet the stage (mode 0), a fighter (1) or another record (2).
     fn can_hit(&mut self, i: usize, mode: u32) -> bool {
         let flags = self.task_flags(i);
+        let rflags = self.records[i].flags;
+        if mode == 0 {
+            if rflags & H_ALWAYS != 0 {
+                return self.records[i].tech.is_some() || flags & T_DEFLECTED == 0;
+            }
+            if rflags & H_NEVER != 0 {
+                return false;
+            }
+        }
         let Some(src) = self.records[i].tech else {
             let ok = if mode == 0 {
                 flags & (T_KEEP | T_HIT_STAGE) == 0

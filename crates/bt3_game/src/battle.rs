@@ -3155,6 +3155,92 @@ mod tests {
         assert_eq!(battle.roster.chars[0].act.current, 0xB);
     }
 
+    /// Fires character `chara`'s slot 2 technique (L2 + Triangle, after charging ki) at an idle character 1 for
+    /// `frames` frames: P2's health drops with its reaction, the frame the technique's end motion
+    /// (`super_anim(2, 6)`) starts, and P1's action at the end.
+    fn fire_slot_2(chara: i32, frames: usize) -> Option<(Vec<(i32, i32)>, Option<usize>, i32)> {
+        use crate::btl_input::pad::{L2, START, TRIANGLE};
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = chara;
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let mut battle = real_battle(&setup)?;
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..120 {
+            frame(&mut battle, L2);
+        }
+        for _ in 0..5 {
+            frame(&mut battle, 0);
+        }
+        let end_anim = 2 * 0x22 + 0xC1 + 6;
+        let mut health = battle.roster.chars[1].gauge.health;
+        let (mut hits, mut end_at) = (Vec::new(), None);
+        for i in 0..frames {
+            let held = match i {
+                2..4 => L2,
+                4..6 => L2 | TRIANGLE,
+                _ => 0,
+            };
+            frame(&mut battle, held);
+            let a = &battle.roster.chars[0];
+            let o = &battle.roster.chars[1];
+            if end_at.is_none() && a.anim.cur == end_anim {
+                end_at = Some(i);
+            }
+            if o.gauge.health < health {
+                hits.push((health - o.gauge.health, o.react.reaction));
+                health = o.gauge.health;
+            }
+        }
+        Some((hits, end_at, battle.roster.chars[0].act.current))
+    }
+
+    #[test]
+    fn real_prop_shot_flies_and_hits() {
+        // Character 81's slot 2 (technique 0x166, effect type 6): the disc leaves on the FIRE event and hits P2
+        // once, its last hit knocking it away; its stage test uses the radius times the hit scale (0.05), so it
+        // skims over the floor. Its end raises flag 0xA8.
+        let Some((hits, end_at, act)) = fire_slot_2(81, 150) else {
+            return;
+        };
+        assert_eq!(hits, [(7730, 0xF)]);
+        assert_eq!(end_at, Some(74));
+        assert_eq!(act, 0xB);
+    }
+
+    #[test]
+    fn real_sweep_crosses_the_opponent() {
+        // Character 118's slot 2 (technique 0x1A0, effect type 3): from the FIRE event the beam's end sweeps round
+        // the firing node and crosses P2 once, knocking it away; the sweep ends 0.6 s later, raising flag 0xA8.
+        let Some((hits, end_at, act)) = fire_slot_2(118, 150) else {
+            return;
+        };
+        assert_eq!(hits, [(6360, 0xF)]);
+        assert_eq!(end_at, Some(62));
+        assert_eq!(act, 0xB);
+    }
+
     #[test]
     fn real_charged_smash_knocks_the_opponent_away() {
         use crate::btl_input::pad::{SQUARE, START, UP};
