@@ -273,6 +273,7 @@ impl Roster {
                 .request_technique(me, opp, data[i], env.gate.time_stopped);
             self.scene
                 .fire(me, opp, data[i], &mut self.rand, env.gate.time_stopped);
+            self.scene.spawn_held_disc(me, data[i]);
             me.obj.build_volumes(&data[i].obj);
         }
         self.update_queued_damage(data, env);

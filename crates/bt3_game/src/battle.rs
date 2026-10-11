@@ -3242,6 +3242,88 @@ mod tests {
     }
 
     #[test]
+    fn real_multi_releases_its_pieces() {
+        // Character 95's slot 2 (technique 0x188, effect type 5 with flag 0x8000): two disc pieces grown in the
+        // hands on START, released one by one on FIRE along the aim; the second, the technique's last hit, knocks
+        // P2 away. Character 60's slot 2 (technique 0x1A3): one piece fired from the muzzle on FIRE.
+        let Some((hits, end_at, act)) = fire_slot_2(95, 120) else {
+            return;
+        };
+        assert_eq!(hits, [(2960, 3), (2960, 0xF)]);
+        assert_eq!(end_at, Some(56));
+        assert_eq!(act, 0xB);
+        let Some((hits, end_at, act)) = fire_slot_2(60, 120) else {
+            return;
+        };
+        assert_eq!(hits, [(5450, 0xF)]);
+        assert_eq!(end_at, Some(50));
+        assert_eq!(act, 0xB);
+    }
+
+    #[test]
+    fn real_disc_ki_blasts_grow_fly_and_hit() {
+        use crate::btl_input::pad::{START, TRIANGLE};
+        // The charged ki blast (0xAF) of character 25 is of type 4: request 0x17 grows a disc in the hand while it
+        // charges, the fire event throws it. Character 39's is of type 5: the fire event sends a disc from the
+        // event's node. Each hits the idle P2 once, knocking it away, and is gone.
+        for (chara, held_at, hit) in [(25, Some(6), (39, 1430)), (39, None, (34, 1550))] {
+            let mut setup = BattleSetup::default();
+            setup.sides[0].chara = chara;
+            setup.sides[1].chara = 1;
+            setup.sides[1].pad = 1;
+            let Some(mut battle) = real_battle(&setup) else {
+                return;
+            };
+            let mut libc = LibcRandom::new(1);
+            let mut random = GameRandom::from_key(&[1]);
+            let pads = |a: u32| {
+                [
+                    PadState {
+                        held: a,
+                        ..PadState::default()
+                    },
+                    PadState::default(),
+                ]
+            };
+            let mut frame = |battle: &mut Battle, held: u32| {
+                let start = held & START != 0 && battle.prev_held[0] & START == 0;
+                battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+            };
+            for i in 0..200 {
+                let skip =
+                    battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+                frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+                if battle.seq.state == SeqState::Fight {
+                    break;
+                }
+            }
+            let mut health = battle.roster.chars[1].gauge.health;
+            let (mut first_disc, mut hits) = (None, Vec::new());
+            for i in 0..80 {
+                frame(&mut battle, if i < 60 { TRIANGLE } else { 0 });
+                if first_disc.is_none() && !battle.roster.scene.tech.discs.of(0).is_empty() {
+                    first_disc = Some(i);
+                }
+                let o = &battle.roster.chars[1];
+                if o.gauge.health < health {
+                    hits.push((i, health - o.gauge.health, o.react.reaction));
+                    health = o.gauge.health;
+                }
+            }
+            assert_eq!(hits, [(hit.0, hit.1, 0xF)], "character {chara}");
+            if let Some(at) = held_at {
+                assert_eq!(first_disc, Some(at), "character {chara}");
+            } else {
+                assert!(
+                    first_disc.is_some_and(|f| f > 20),
+                    "character {chara}: {first_disc:?}"
+                );
+            }
+            assert!(battle.roster.scene.tech.discs.of(0).is_empty());
+        }
+    }
+
+    #[test]
     fn real_charged_smash_knocks_the_opponent_away() {
         use crate::btl_input::pad::{SQUARE, START, UP};
         let mut setup = BattleSetup::default();

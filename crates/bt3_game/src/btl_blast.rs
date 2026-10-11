@@ -11,8 +11,10 @@
 //! The technique effects (layer 1, `btl_tech_fx`) add their records before the ki blasts; the passes and the
 //! fighters' answers take both kinds (`EftHit_CanHit`, `EftHit_Clash`, `EftHit_CalcResult`).
 //!
-//! Not ported: blast types 2 (ki object), 3 (ki bomb), 4 / 5 (discs) fire nothing, nor does a character whose kind
-//! 1 / 2 list belongs to those managers; the beam struggle (`EftStruggle`: a head-on pair of beams only gets its
+//! The ki blasts of types 4 / 5 are discs (`btl_tech_disc`).
+//!
+//! Not ported: blast types 2 (ki object) and 3 (ki bomb) fire nothing, nor does a character whose kind 1 / 2 list
+//! belongs to those managers; the beam struggle (`EftStruggle`: a head-on pair of beams only gets its
 //! flags); breaking stage objects (a blast stops at every object, a rush technique's record meets none); the
 //! particles, impact effects, sounds, voices, camera shake, pad vibration and battle events; abilities.
 
@@ -196,7 +198,22 @@ impl HitRec {
         start: [f32; 3],
         radius: f32,
     ) -> Option<Self> {
-        let kind = match src.def.shape {
+        Self::technique_shape(src, task, pos, prev, vel, start, radius, src.def.shape)
+    }
+
+    /// The same with the shape given (a disc piece's records are always spheres).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn technique_shape(
+        src: TechSrc,
+        task: u32,
+        pos: [f32; 3],
+        prev: [f32; 3],
+        vel: [f32; 3],
+        start: [f32; 3],
+        radius: f32,
+        shape: i32,
+    ) -> Option<Self> {
+        let kind = match shape {
             0 => 0,
             1 => 1,
             _ => return None,
@@ -589,9 +606,15 @@ impl Scene {
                 _ => {}
             }
             arg.dir = dir;
-            // Types 5 / 4 (discs), 2 (ki object) and 3 (ki bomb) are not ported.
-            if !matches!(arg.kind_type, 2..=5) {
-                self.launch(me, data, arg);
+            // Types 2 (ki object) and 3 (ki bomb) are not ported.
+            match arg.kind_type {
+                5 => self
+                    .tech
+                    .discs
+                    .spawn_from_node(me, &arg, data, &mut self.next_id),
+                4 => self.tech.discs.throw(&arg, data, &mut self.next_id),
+                2 | 3 => {}
+                _ => self.launch(me, data, arg),
             }
         }
     }
@@ -645,6 +668,22 @@ impl Scene {
         });
     }
 
+    /// `BtlFx_SpawnHitSparkReq17` for a ki blast of type 4: request 0x17 grows a disc in the firing hand (the
+    /// other types' charge effects are drawing only).
+    pub(crate) fn spawn_held_disc(&mut self, me: &Chr, data: &SideData) {
+        if !me.test_fx(0x17) {
+            return;
+        }
+        let kind_type = if me.gauge.body_changed {
+            1
+        } else {
+            current(me, data).kind_type()
+        };
+        if kind_type == 4 {
+            self.tech.discs.spawn_held(me, data, &mut self.next_id);
+        }
+    }
+
     /// `BtlChar_SpawnFxBits3C`: the technique shot the fighter's effect bits ask for.
     pub(crate) fn request_technique(
         &mut self,
@@ -664,6 +703,10 @@ impl Scene {
         // EftHit_BeginFrame: the records are kept while time is stopped.
         if !w.paused {
             self.records.clear();
+        }
+        // The libc rand() draws of the discs the fighters created.
+        for _ in 0..std::mem::take(&mut self.tech.discs.pending_rand) {
+            w.libc.rand();
         }
         // Layer 1: the technique effects.
         self.tech
@@ -689,7 +732,8 @@ impl Scene {
                 }
             }
         }
-        // Layer 3: the blast objects, then the particle modules.
+        // Layer 3: the discs, the blast objects, then the particle modules.
+        self.tech.discs.update(w, &mut self.records, HIT_MAX);
         self.tech.update_shots(w, &mut self.records, HIT_MAX);
         let fxw = FxWorld {
             sets: std::array::from_fn(|s| w.data[s].blast_assets),
@@ -715,6 +759,7 @@ impl Scene {
                 }
             }
         }
+        self.tech.discs.post_update(w);
         self.tech.post_update_shots(w);
         for (i, chr) in w.chars.iter_mut().enumerate() {
             chr.live_blasts = [0; 2];
@@ -1258,41 +1303,53 @@ fn task_update(t: &mut Task, w: &mut World, fx: &mut Modules, stopped: bool) -> 
 
 /// `EftKiBlast_AddHitRecord` and `EftHit_Add`: two spheres at this and last frame's position.
 fn add_hit_record(t: &Task) -> HitRec {
-    let radius = t.radius * t.trail_width;
-    let a = Sphere { pos: t.pos, radius };
-    let b = Sphere {
-        pos: t.prev,
-        radius,
-    };
-    HitRec {
-        owner: t.arg.owner,
-        level: t.arg.level,
-        pos: t.pos,
-        prev: t.prev,
-        vel: t.dir,
-        turned: t.flags & W_TURNED != 0,
-        atk: t.arg,
-        seen_by_ai: false,
-        tech: None,
-        flags: 0,
-        unk54: false,
-        task: t.id,
-        shape: Shape {
-            kind: 0,
-            a,
-            b,
-            a_start: [0.0; 3],
-            scale: 0.1,
-            bounds: capsule_bounds(b.pos, a.pos, radius),
-            delta: [0.0; 3],
-            dir: [0.0; 3],
-            zone: 0,
-            hit_flags: 0,
-            stage_dist: f32::MAX,
-            dist: f32::MAX,
-            hit_pos: [0.0; 3],
-            contact: [0.0; 3],
-        },
+    let mut rec = HitRec::blast(t.arg, t.id, t.pos, t.prev, t.dir, t.radius * t.trail_width);
+    rec.turned = t.flags & W_TURNED != 0;
+    rec
+}
+
+impl HitRec {
+    /// `EftHit_Add` of a ki blast record (a blast's or a disc's): two spheres at `pos` and `prev`.
+    pub(crate) fn blast(
+        atk: Arg,
+        task: u32,
+        pos: [f32; 3],
+        prev: [f32; 3],
+        vel: [f32; 3],
+        radius: f32,
+    ) -> Self {
+        let a = Sphere { pos, radius };
+        let b = Sphere { pos: prev, radius };
+        Self {
+            owner: atk.owner,
+            level: atk.level,
+            pos,
+            prev,
+            vel,
+            turned: false,
+            atk,
+            seen_by_ai: false,
+            tech: None,
+            flags: 0,
+            unk54: false,
+            task,
+            shape: Shape {
+                kind: 0,
+                a,
+                b,
+                a_start: [0.0; 3],
+                scale: 0.1,
+                bounds: capsule_bounds(b.pos, a.pos, radius),
+                delta: [0.0; 3],
+                dir: [0.0; 3],
+                zone: 0,
+                hit_flags: 0,
+                stage_dist: f32::MAX,
+                dist: f32::MAX,
+                hit_pos: [0.0; 3],
+                contact: [0.0; 3],
+            },
+        }
     }
 }
 

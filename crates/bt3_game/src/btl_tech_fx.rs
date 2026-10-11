@@ -11,9 +11,9 @@
 //! The prop shot of type 6 (`EftPropShot_*`) is the same item as the beam with its differences; the volley of
 //! type 1 is in `btl_tech_volley`.
 //!
-//! The sweep of type 3 is in `btl_tech_sweep`.
+//! The sweep of type 3 is in `btl_tech_sweep`, the multi of type 5 (its pieces are discs) in `btl_tech_disc`.
 //!
-//! Not ported: the skills' shots (slots 0, 1); the items of effect types other than 0, 1, 3 and 6 (their timeline runs,
+//! Not ported: the skills' shots (slots 0, 1); the items of effect types other than 0, 1, 3, 5 and 6 (their timeline runs,
 //! so flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); every emitter, stage blur, flash and sound
 //! (the beam is not drawn); the rush catches (reactions 0x1D / 0x1E) and throws (0x22) of a technique hit, which
 //! let the record pass; the beam struggle (`EftStruggle`); abilities; the battle events.
@@ -30,6 +30,7 @@ use crate::btl_chr::{
 use crate::btl_hit::guard_kind;
 use crate::btl_input::wrap_angle;
 use crate::btl_obj::mask_to_node;
+use crate::btl_tech_disc::{Discs, Multi};
 use crate::btl_tech_sweep::Sweep;
 use crate::btl_tech_volley::{Shots, Volley, scene_rand_f};
 
@@ -229,6 +230,9 @@ pub(crate) struct TechFx {
     beams: [[Vec<Beam>; 5]; 2],
     volleys: [[Vec<Volley>; 5]; 2],
     sweeps: [[Vec<Sweep>; 5]; 2],
+    multis: [[Vec<Multi>; 5]; 2],
+    /// The discs: ki blasts of types 4 / 5 and the multis' pieces (layer 3).
+    pub discs: Discs,
     /// The blast objects the volleys fire (layer 3).
     pub shots: Shots,
     /// `gBtlScene->randState`: the scene's generator.
@@ -245,6 +249,8 @@ impl Default for TechFx {
             beams: Default::default(),
             volleys: Default::default(),
             sweeps: Default::default(),
+            multis: Default::default(),
+            discs: Discs::default(),
             shots: Shots::default(),
             rand: 0,
         }
@@ -267,7 +273,7 @@ fn in_skill(chr: &Chr) -> bool {
 }
 
 /// `BtlCharApi_IsInRushSequence`.
-fn in_rush_sequence(chr: &Chr) -> bool {
+pub(crate) fn in_rush_sequence(chr: &Chr) -> bool {
     matches!(chr.act.current, 0x12D..=0x12F | 0x139..=0x13B)
 }
 
@@ -877,6 +883,12 @@ impl TechFx {
                     items.push(Sweep::new(*next_id, src, me, opp, set));
                 }
             }
+            5 => {
+                let items = &mut self.multis[side][slot as usize];
+                if items.len() < ITEMS {
+                    items.push(Multi::new(src, set));
+                }
+            }
             1 => {
                 let items = &mut self.volleys[side][slot as usize];
                 if items.len() < ITEMS
@@ -905,6 +917,9 @@ impl TechFx {
 
     pub(crate) fn tag_mut(&mut self, id: u32) -> Option<&mut Tag> {
         if let Some(t) = self.shots.tag_mut(id) {
+            return Some(t);
+        }
+        if let Some(t) = self.discs.tag_mut(id) {
             return Some(t);
         }
         if let Some(s) = self
@@ -993,6 +1008,25 @@ impl TechFx {
                             w.chars[side].flags.set_held(0xA8);
                         }
                         self.sweeps[side][slot].remove(k);
+                    } else {
+                        k += 1;
+                    }
+                }
+                let mut k = 0;
+                while k < self.multis[side][slot].len() {
+                    let m = &mut self.multis[side][slot][k];
+                    m.update(
+                        w,
+                        self.events[side],
+                        self.cur_slot[side],
+                        &mut self.discs,
+                        next_id,
+                    );
+                    if m.dead() {
+                        if m.src().def.kind != 0 {
+                            w.chars[side].flags.set_held(0xA8);
+                        }
+                        self.multis[side][slot].remove(k);
                     } else {
                         k += 1;
                     }
