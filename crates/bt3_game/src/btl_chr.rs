@@ -1351,6 +1351,68 @@ pub(crate) fn opp_delta(me: &Chr, opp: &Chr) -> [f32; 3] {
     sub(opp.snap_pos(6), me.pose.pos)
 }
 
+/// `BtlMove_SteerAtOpponent`: the homing dash heads for the opponent with an offset the stick steers (pi/2 at
+/// full stick, less within two frames of contact), clamped to `yaw_max` / `pitch_max` and approached by
+/// `yaw_accel` / `pitch_accel` per frame. Without lock-on it only keeps the heading.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn steer_at_opponent(
+    me: &mut Chr,
+    opp: &Chr,
+    data: &SideData,
+    opp_data: &SideData,
+    close_speed: f32,
+    yaw_accel: f32,
+    pitch_accel: f32,
+    yaw_max: f32,
+    pitch_max: f32,
+    max_step: f32,
+) {
+    if !me.flags.test(5) {
+        me.turn_yaw(opp, 6, max_step);
+        me.turn_pitch(data, opp, opp_data, 6, max_step);
+        return;
+    }
+    let mut to = opp_delta(me, opp);
+    to[1] += data.height() * 0.5 - opp_data.height() * 0.5;
+    let dist = (length(to) - data.radius() * 0.5 - opp_data.radius() * 0.5).max(0.0);
+    let (vel, opp_vel) = (me.pose.vel, opp.pose.vel);
+    let (speed, opp_speed) = (length(vel), length(opp_vel));
+    let mut close_speed = close_speed;
+    if 0.001 < speed && 0.001 < opp_speed {
+        close_speed -= opp_speed * (dot(vel, opp_vel) / (speed * opp_speed));
+    }
+    let t = if 0.001 < close_speed {
+        dist / close_speed
+    } else {
+        1_000_000.0
+    };
+    let k = if 2.0 < t { 1.0 } else { t * 0.5 };
+    let [stick_x, stick_y] = me.input.stick();
+    let p = &mut me.pose;
+    let goal = (k * 1.570_796_3 * stick_x).clamp(-yaw_max, yaw_max);
+    p.steer_yaw = approach(p.steer_yaw, goal, (goal - p.steer_yaw).abs().min(yaw_accel));
+    let goal = wrap_angle(to[0].atan2(to[2]) + p.steer_yaw);
+    p.yaw = wrap_angle(p.yaw + wrap_angle(goal - p.yaw).clamp(-max_step, max_step));
+    let n = normalize(to);
+    let base = -n[1].clamp(-1.0, 1.0).asin();
+    let goal = (-k * 1.570_796_3 * stick_y).clamp(-pitch_max, pitch_max);
+    p.steer_pitch = approach(
+        p.steer_pitch,
+        goal,
+        (goal - p.steer_pitch).abs().min(pitch_accel),
+    );
+    let goal = wrap_angle(base + p.steer_pitch);
+    p.pitch = wrap_angle(p.pitch + wrap_angle(goal - p.pitch).clamp(-max_step, max_step));
+    if t < 1.0 {
+        p.pitch *= t;
+    }
+}
+
+/// `BtlOpp_GetGapXZ`: the horizontal distance less both radii, never negative.
+pub(crate) fn opp_gap_xz(me: &Chr, opp: &Chr, data: &SideData, opp_data: &SideData) -> f32 {
+    (opp_distance_xz(me, opp) - data.radius() - opp_data.radius()).max(0.0)
+}
+
 /// `BtlOpp_GetDistance`.
 pub(crate) fn opp_distance(me: &Chr, opp: &Chr) -> f32 {
     length(opp_delta(me, opp))

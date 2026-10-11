@@ -168,12 +168,20 @@ pub(crate) struct Body {
     pub boxes: Vec<BodyBox>,
     /// `body.box`: bounds of every part box.
     pub bounds: Aabb,
-    /// This frame's and the previous frame's body sphere (`cur`, `prev`): centre, radius.
+    /// The two body sphere records (centre, radius); `cur` / `prev` say which is this frame's and last frame's,
+    /// `index` is the record the next swap makes current.
     pub sphere: [([f32; 3], f32); 2],
     pub cur: usize,
+    pub prev: usize,
+    pub index: usize,
     /// `body.radius`: the parameter block's, or twice the model's size[3].
     pub radius: f32,
+    /// `curRadius`: the radius used against the stage, growing by 1 per frame up to `radius`, at least 4.
+    pub cur_radius: f32,
+    /// `reset` / `teleported`: no sweep from the previous position this frame.
     pub reset: bool,
+    /// How far the stage pushed the object this frame (old - new).
+    pub push: [f32; 3],
 }
 
 /// What the strikes and the stage leave in the object's work buffer.
@@ -260,9 +268,15 @@ impl Obj {
             lean: [0.0, 0.0, 0.0, 1.0],
             flags: 0,
             area: -1,
+            // BtlObjBody_Init: curRadius 4.1, then BtlObjBody_Reset (index 1, prev 0, cur 1).
             body: Body {
                 boxes,
                 radius,
+                cur_radius: 4.1,
+                index: 1,
+                prev: 0,
+                cur: 1,
+                reset: true,
                 ..Body::default()
             },
             work: Work::default(),
@@ -597,15 +611,23 @@ impl Obj {
         self.body.sphere[self.body.cur] = (c, r);
     }
 
-    /// `BtlObjBody_BeginFrame`'s swap: the sphere records change places.
+    /// `BtlObjBody_Swap` (in `BtlObjBody_BeginFrame`): the record at `index` becomes current.
     pub(crate) fn swap_body_sphere(&mut self) {
-        self.body.cur ^= 1;
+        let b = &mut self.body;
+        let old = b.index;
+        b.cur = old;
+        b.prev = old ^ 1;
+        b.index = old ^ 1;
     }
 
-    /// `BtlObjBody_Reset`: marks the body as teleported.
+    /// `BtlObjBody_Reset`: marks the body as teleported; the other record becomes current.
     pub(crate) fn reset_body(&mut self) {
-        self.body.reset = true;
-        self.body.cur ^= 1;
+        let b = &mut self.body;
+        let old = b.index;
+        b.reset = true;
+        b.index = old ^ 1;
+        b.prev = old;
+        b.cur = b.index;
     }
 
     pub(crate) fn body_sphere(&self) -> ([f32; 3], f32) {

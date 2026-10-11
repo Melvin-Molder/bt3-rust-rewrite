@@ -1972,4 +1972,130 @@ mod tests {
         assert!(seen.contains(&0x15), "{seen:X?}");
         assert!(landed, "never landed");
     }
+
+    #[test]
+    fn real_steps_and_dashes() {
+        use crate::btl_input::pad::{CROSS, DOWN, L2, LEFT, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        setup.mode = 5;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut run =
+            |battle: &mut Battle, held: u32, frames: usize| -> std::collections::BTreeSet<i32> {
+                let mut seen = std::collections::BTreeSet::new();
+                for _ in 0..frames {
+                    let pads = [
+                        PadState {
+                            held,
+                            ..PadState::default()
+                        },
+                        PadState::default(),
+                    ];
+                    battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+                    seen.insert(battle.roster.chars[0].act.current);
+                }
+                seen
+            };
+        run(&mut battle, 0, 90);
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        let gap = |b: &Battle| crate::btl_chr::opp_distance(&b.roster.chars[0], &b.roster.chars[1]);
+        while gap(&battle) > 25.0 {
+            run(&mut battle, UP, 1);
+        }
+        run(&mut battle, 0, 30);
+        // Back step: Down held, Cross tapped while close.
+        let before = gap(&battle);
+        let mut seen = run(&mut battle, DOWN, 2);
+        seen.extend(run(&mut battle, DOWN | CROSS, 2));
+        seen.extend(run(&mut battle, 0, 40));
+        assert!(seen.contains(&0x1B), "{seen:X?}");
+        assert!(gap(&battle) > before + 10.0, "{before} -> {}", gap(&battle));
+        // Side step: Left held, Cross tapped.
+        let mut seen = run(&mut battle, LEFT, 2);
+        seen.extend(run(&mut battle, LEFT | CROSS, 2));
+        seen.extend(run(&mut battle, 0, 40));
+        assert!(seen.contains(&0x1C), "{seen:X?}");
+        // Directional dash: L2 (charge) and Down held, Cross tapped; it runs away until released.
+        let before = gap(&battle);
+        let mut seen = run(&mut battle, L2 | DOWN, 2);
+        seen.extend(run(&mut battle, L2 | DOWN | CROSS, 2));
+        seen.extend(run(&mut battle, DOWN, 20));
+        assert!(seen.contains(&0x1A), "{seen:X?}");
+        assert!(gap(&battle) > before + 50.0, "{before} -> {}", gap(&battle));
+        run(&mut battle, 0, 60);
+        // Homing dash: L2 held, Cross tapped with no direction; it closes in on the opponent.
+        let ki = battle.roster.chars[0].gauge.ki;
+        let before = gap(&battle);
+        let mut seen = run(&mut battle, L2, 2);
+        seen.extend(run(&mut battle, L2 | CROSS, 2));
+        let mut min = before;
+        for _ in 0..150 {
+            seen.extend(run(&mut battle, 0, 1));
+            min = min.min(gap(&battle));
+        }
+        eprintln!(
+            "homing: {seen:X?} gap {before} -> min {min}, ki {ki} -> {}",
+            battle.roster.chars[0].gauge.ki
+        );
+        assert!(seen.contains(&0x19), "{seen:X?}");
+        assert!(min < 30.0, "{before} -> {min}");
+    }
+
+    #[test]
+    fn real_fighters_cannot_dash_through_the_terrain() {
+        use crate::btl_input::pad::{CROSS, DOWN, L2, R1, R2, UP};
+        use bt3_data::stage_col::ColBox;
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        setup.mode = 5;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        // The topmost stage surface under a point (the ground probe from far above).
+        let surface = |b: &Battle, p: [f32; 3]| {
+            let col = &b.assets.collision;
+            let zone = col.find_zone_near(-1, p) as i32;
+            let probe = ColBox::from_center_half([p[0], -5000.0, p[2]], [0.1, 1.0, 0.1]);
+            col.ground_probe(zone, &probe, p[0], p[2], -5000.0).y
+        };
+        let mut worst = f32::MIN;
+        let mut run = |battle: &mut Battle, held: u32, frames: usize, worst: &mut f32| {
+            for _ in 0..frames {
+                let pads = [
+                    PadState {
+                        held,
+                        ..PadState::default()
+                    },
+                    PadState::default(),
+                ];
+                battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+                let p = battle.roster.chars[0].pose.pos;
+                let g = surface(battle, p);
+                if g < 100_000.0 {
+                    // +Y is down: how far below the surface the fighter's feet are.
+                    *worst = worst.max(p[1] - g);
+                }
+            }
+        };
+        run(&mut battle, 0, 90, &mut worst);
+        // Fly up, then dash away and downwards (directional dash with DESCEND) for a long time.
+        run(&mut battle, R1, 40, &mut worst);
+        run(&mut battle, L2 | DOWN, 2, &mut worst);
+        run(&mut battle, L2 | DOWN | CROSS, 2, &mut worst);
+        run(&mut battle, DOWN | R2, 150, &mut worst);
+        // And the fast descent straight down.
+        run(&mut battle, 0, 30, &mut worst);
+        run(&mut battle, R1, 40, &mut worst);
+        run(&mut battle, UP | R2, 120, &mut worst);
+        eprintln!("deepest below the surface: {worst}");
+        assert!(worst < 1.0, "the fighter went {worst} below the terrain");
+    }
 }

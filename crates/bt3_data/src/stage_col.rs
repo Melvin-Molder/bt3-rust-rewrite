@@ -823,6 +823,261 @@ fn sort_entries(lo: i32, hi: i32, list: &mut [NavEntry]) {
     sort_entries(last + 1, hi, list);
 }
 
+/// `ColTri_DistSqPoint` (the Magic Software point / triangle distance): the squared distance and the parameters
+/// (s along v0 -> v1, t along v0 -> v2) of the nearest point; `None` for a degenerate triangle (the original's
+/// 1e8 with s, t unwritten).
+fn tri_dist_sq_point(p: [f32; 3], v: &[[f32; 3]; 3]) -> Option<(f32, f32, f32)> {
+    let e0 = sub(v[1], v[0]);
+    let e1 = sub(v[2], v[0]);
+    let diff = sub(v[0], p);
+    let a00 = dot(e0, e0);
+    let a01 = dot(e0, e1);
+    let a11 = dot(e1, e1);
+    let b0 = dot(diff, e0);
+    let b1 = dot(diff, e1);
+    let c = dot(diff, diff);
+    let det = (a00 * a11 - a01 * a01).abs();
+    let mut s = a01 * b1 - a11 * b0;
+    let mut t = a01 * b0 - a00 * b1;
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let inner = |s: f32, t: f32| {
+        s * (a00 * s + a01 * t + 2.0 * b0) + t * (a01 * s + a11 * t + 2.0 * b1) + c
+    };
+    let d;
+    if s + t <= det {
+        if s < 0.0 {
+            if t < 0.0 && b0 < 0.0 {
+                t = 0.0;
+                if -b0 >= a00 {
+                    s = 1.0;
+                    d = a00 + 2.0 * b0 + c;
+                } else {
+                    s = -b0 / a00;
+                    d = b0 * s + c;
+                }
+            } else {
+                s = 0.0;
+                if b1 >= 0.0 {
+                    t = 0.0;
+                    d = c;
+                } else if -b1 >= a11 {
+                    t = 1.0;
+                    d = a11 + 2.0 * b1 + c;
+                } else {
+                    t = -b1 / a11;
+                    d = b1 * t + c;
+                }
+            }
+        } else if t < 0.0 {
+            t = 0.0;
+            if b0 >= 0.0 {
+                s = 0.0;
+                d = c;
+            } else if -b0 >= a00 {
+                s = 1.0;
+                d = a00 + 2.0 * b0 + c;
+            } else {
+                s = -b0 / a00;
+                d = b0 * s + c;
+            }
+        } else {
+            let inv = 1.0 / det;
+            s *= inv;
+            t *= inv;
+            d = inner(s, t);
+        }
+    } else if s < 0.0 {
+        let (tmp0, tmp1) = (a01 + b0, a11 + b1);
+        if tmp1 > tmp0 {
+            let numer = tmp1 - tmp0;
+            let denom = a00 - 2.0 * a01 + a11;
+            if numer >= denom {
+                s = 1.0;
+                t = 0.0;
+                d = a00 + 2.0 * b0 + c;
+            } else {
+                s = numer / denom;
+                t = 1.0 - s;
+                d = inner(s, t);
+            }
+        } else {
+            s = 0.0;
+            if tmp1 <= 0.0 {
+                t = 1.0;
+                d = a11 + 2.0 * b1 + c;
+            } else if b1 >= 0.0 {
+                t = 0.0;
+                d = c;
+            } else {
+                t = -b1 / a11;
+                d = b1 * t + c;
+            }
+        }
+    } else if t < 0.0 {
+        let (tmp0, tmp1) = (a01 + b1, a00 + b0);
+        if tmp1 > tmp0 {
+            let numer = tmp1 - tmp0;
+            let denom = a00 - 2.0 * a01 + a11;
+            if numer >= denom {
+                t = 1.0;
+                s = 0.0;
+                d = a11 + 2.0 * b1 + c;
+            } else {
+                t = numer / denom;
+                s = 1.0 - t;
+                d = inner(s, t);
+            }
+        } else {
+            t = 0.0;
+            if tmp1 <= 0.0 {
+                s = 1.0;
+                d = a00 + 2.0 * b0 + c;
+            } else if b0 >= 0.0 {
+                s = 0.0;
+                d = c;
+            } else {
+                s = -b0 / a00;
+                d = b0 * s + c;
+            }
+        }
+    } else {
+        let numer = a11 + b1 - a01 - b0;
+        if numer <= 0.0 {
+            s = 0.0;
+            t = 1.0;
+            d = a11 + 2.0 * b1 + c;
+        } else {
+            let denom = a00 - 2.0 * a01 + a11;
+            if numer >= denom {
+                s = 1.0;
+                t = 0.0;
+                d = a00 + 2.0 * b0 + c;
+            } else {
+                s = numer / denom;
+                t = 1.0 - s;
+                d = inner(s, t);
+            }
+        }
+    }
+    Some((d.abs(), s, t))
+}
+
+/// `ColSphere_TestTri`: the triangle's point nearest to the centre when within the radius.
+pub fn sphere_test_tri(center: [f32; 3], radius_sq: f32, v: &[[f32; 3]; 3]) -> Option<[f32; 3]> {
+    let (d, s, t) = tri_dist_sq_point(center, v)?;
+    if d > radius_sq {
+        return None;
+    }
+    // ColTri_GetPoint: v0 + s (v1 - v0) + t (v2 - v0).
+    let (e0, e1) = (sub(v[1], v[0]), sub(v[2], v[0]));
+    Some(std::array::from_fn(|i| e0[i] * s + v[0][i] + e1[i] * t))
+}
+
+/// The body sphere being moved through the stage (`StgColPushCtx`: sphere and bounds).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PushSphere {
+    pub center: [f32; 3],
+    pub radius: f32,
+    pub bounds: ColBox,
+    /// Some triangle pushed the sphere, and the flags of the last one.
+    pub hit: bool,
+    pub poly_flags: u32,
+}
+
+impl PushSphere {
+    /// `StgCol_StepSphere`: moves by `step`, bounds of radius + 0.1.
+    pub fn step(&mut self, step: [f32; 3]) {
+        self.center = [
+            self.center[0] + step[0],
+            self.center[1] + step[1],
+            self.center[2] + step[2],
+        ];
+        let e = self.radius + 0.1;
+        self.bounds = ColBox::from_center_half(self.center, [e; 3]);
+    }
+
+    /// `StgCol_PushSphere`: away from a contact point until it lies on the surface, bounds of radius + 1.1.
+    fn push(&mut self, point: [f32; 3]) {
+        let d = sub(self.center, point);
+        let len = dot(d, d).sqrt();
+        let k = (self.radius - len) / len;
+        self.center = [
+            self.center[0] + d[0] * k,
+            self.center[1] + d[1] * k,
+            self.center[2] + d[2] * k,
+        ];
+        let e = self.radius + 1.1;
+        self.bounds = ColBox::from_center_half(self.center, [e; 3]);
+    }
+}
+
+impl ColMesh {
+    /// `ColMesh_WalkBox` with `StgCol_PushCb`: every solid triangle the sphere touches pushes it out, in walk order;
+    /// the walk reads the bounds the pushes keep moving.
+    fn push_walk(&self, idx: i32, sphere: &mut PushSphere) -> bool {
+        let Some(node) = usize::try_from(idx).ok().and_then(|i| self.nodes.get(i)) else {
+            return false;
+        };
+        let nb = ColBox {
+            min: node.min,
+            max: node.max,
+        };
+        if !sphere.bounds.overlaps(&nb) {
+            return false;
+        }
+        if node.right == -1 {
+            let Some(poly) = usize::try_from(node.left)
+                .ok()
+                .and_then(|i| self.polys.get(i))
+            else {
+                return false;
+            };
+            if poly.flags & POLY_NO_SOLID != 0 {
+                return false;
+            }
+            let v = poly
+                .vtx
+                .map(|i| self.vertices.get(i as usize).copied().unwrap_or([0.0; 3]));
+            let r = sphere.radius;
+            return match sphere_test_tri(sphere.center, r * r, &v) {
+                Some(point) => {
+                    sphere.push(point);
+                    sphere.poly_flags = poly.flags;
+                    sphere.hit = true;
+                    true
+                }
+                None => false,
+            };
+        }
+        let a = self.push_walk(node.left, sphere);
+        let b = self.push_walk(node.right, sphere);
+        a || b
+    }
+}
+
+impl StageCollision {
+    /// `StgCol_QueryZone` (mode 0, every object standing) with `StgCol_PushCb`: the zone's static mesh, then the
+    /// whole objects' meshes. Returns whether anything pushed, and the mask of the objects that did.
+    pub fn push_sphere(&self, zone: usize, sphere: &mut PushSphere) -> (bool, u64) {
+        let Some(z) = self.zones.get(zone) else {
+            return (false, 0);
+        };
+        let mut hit = !z.mesh.nodes.is_empty() && z.mesh.push_walk(0, sphere);
+        let mut mask = 0u64;
+        for rec in z.recs.iter().filter(|r| !r.broken) {
+            if !rec.mesh.nodes.is_empty() && rec.mesh.push_walk(0, sphere) {
+                hit = true;
+                if rec.obj < 64 {
+                    mask |= 1 << rec.obj;
+                }
+            }
+        }
+        (hit, mask)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,12 +6,12 @@
 //! the sight test between the fighters (flag 0xBA), holds, partners, member changes, camera cuts, head tracking,
 //! effects, sounds and battle events.
 
-use bt3_data::stage_col::ColBox;
+use bt3_data::stage_col::{ColBox, PushSphere};
 
 use crate::btl_act::Ctx;
 use crate::btl_chr::{
-    Chr, Env, SideData, apply_orbit, cam_update_input, clamp_to_stage, length, push_out,
-    update_lock_on,
+    Chr, Env, SideData, apply_orbit, cam_update_input, clamp_to_stage, length, push_out, scale3,
+    sub, update_lock_on,
 };
 use crate::btl_hit::Pair;
 use crate::btl_input::PadState;
@@ -204,10 +204,9 @@ impl Roster {
             clamp_to_stage(me, data[i], env);
             me.pose_to_obj(false);
             me.obj.calc_matrices(&data[i].obj);
-            // StgCol_UpdateFighter up to its push-out: the contact word and the body sphere.
-            me.obj.work.hit_flags = 0;
-            me.obj.swap_body_sphere();
-            me.obj.update_body_sphere();
+            // The body warp of flag 0x55 is not ported: the sphere always follows the model.
+            let grow = self.started && !env.gate.time_stopped;
+            update_fighter_stage(me, data[i], env, true, grow);
             update_ground(me, env);
             me.obj_to_pose();
         }
@@ -355,6 +354,85 @@ fn update_seq_flags(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideDat
     if !me.flags.test(0xAF) {
         me.flags.clear(0x80);
     }
+}
+
+/// `StgCol_UpdateFighter`: the body sphere swept from last frame's position to this frame's in steps of at most
+/// half its radius, pushed out of the stage after every step; when pushed, the object moves back by the
+/// correction and the contact word gets bit 0x20. No object breaks yet (`StgCol_FighterBreakObj`).
+fn update_fighter_stage(me: &mut Chr, data: &SideData, env: &Env, keep_sphere: bool, grow: bool) {
+    // BtlObjBody_BeginFrame.
+    me.obj.work.hit_flags = 0;
+    me.obj.swap_body_sphere();
+    if keep_sphere {
+        me.obj.update_body_sphere();
+    } else {
+        let (cur, r) = (me.obj.body.cur, me.obj.body.radius);
+        me.obj.body.sphere[cur].1 = r;
+    }
+    let body = &mut me.obj.body;
+    if grow {
+        body.cur_radius = (body.cur_radius + 1.0).min(body.radius);
+    }
+    if body.cur_radius < 4.0 {
+        body.cur_radius = 4.0;
+    }
+    let r = body.cur_radius;
+    body.sphere[body.prev].1 = r;
+    body.sphere[body.cur].1 = r;
+    let (cur, prev) = (body.sphere[body.cur], body.sphere[body.prev]);
+    let area = me.obj.area;
+    let zone = env.col.find_zone_near(area, cur.0) as i32;
+    let (start, delta) = if body.reset {
+        body.reset = false;
+        (cur, [0.0; 3])
+    } else {
+        (prev, sub(cur.0, prev.0))
+    };
+    let dist = length(delta);
+    // StgCol_SplitStep: steps of at most half a radius.
+    let n = (dist / (start.1 * 0.5)) as i32;
+    let (steps, step) = if n == 0 {
+        (1, delta)
+    } else {
+        (n + 1, scale3(delta, 1.0 / (n + 1) as f32))
+    };
+    let mut sphere = PushSphere {
+        center: start.0,
+        radius: start.1,
+        bounds: ColBox::from_center_half(start.0, [0.0; 3]),
+        hit: false,
+        poly_flags: 0,
+    };
+    // StgCol_MoveFighter: the zone is looked up again every step when the fighter changed zones.
+    let cross = zone != area;
+    let mut z = area;
+    for _ in 0..steps {
+        sphere.step(step);
+        if cross {
+            z = env.col.find_zone_near(z, sphere.center) as i32;
+        }
+        if let Ok(zi) = usize::try_from(z) {
+            env.col.push_sphere(zi, &mut sphere);
+        }
+    }
+    if sphere.hit {
+        me.obj.work.hit_flags |= 0x20;
+        let cur_center = me.obj.body.sphere[me.obj.body.cur].0;
+        let push = sub(cur_center, sphere.center);
+        me.obj.body.push = push;
+        me.obj.pos = sub(me.obj.pos, push);
+        me.obj.xf_update();
+        me.obj.calc_matrices(&data.obj);
+        if keep_sphere {
+            me.obj.update_body_sphere();
+        } else {
+            let c = me.obj.body.cur;
+            me.obj.body.sphere[c].0 = sphere.center;
+        }
+    } else {
+        me.obj.body.push = [0.0; 3];
+    }
+    me.obj.area = zone;
 }
 
 /// `StgGround_UpdateFighter`: the ground under the object's position, below the body sphere's centre.

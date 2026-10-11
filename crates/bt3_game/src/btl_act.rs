@@ -16,7 +16,7 @@ use std::f32::consts::PI;
 
 use crate::btl_chr::{
     Chr, Env, SideData, anim_flag, begin_rise_to_opponent, deg, is_blocked_by_opponent, kmh,
-    opp_yaw_from_facing, scale_speed_by_approach,
+    opp_gap_xz, opp_yaw, opp_yaw_from_facing, scale_speed_by_approach, steer_at_opponent,
 };
 use crate::btl_input::{DIR_MASK, wrap_angle};
 
@@ -41,7 +41,7 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x18 | 0x37 | 0x38 | 0x3A | 0x44
+        1..=3 | 0xB..=0x1D | 0x37 | 0x38 | 0x3A | 0x44
         | 0xBD | 0xC0..=0xCA | 0xCF..=0xD3 | 0xD8 | 0xD9 | 0xDA..=0xDE | 0xE0..=0xE6)
 }
 
@@ -512,6 +512,9 @@ impl Ctx<'_, '_> {
             0x15 => self.descend(phase),
             0x16 => self.hop(phase),
             0x17 | 0x18 => self.fast_vertical(phase),
+            0x19 => self.homing_dash(phase),
+            0x1A => self.dragon_dash(phase),
+            0x1B..=0x1D => self.side_step(phase),
             0x37 => self.charge(phase),
             0x38 => self.guard(phase),
             0x44 => self.rush(phase),
@@ -1733,6 +1736,393 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// `BtlMoveParam_GetTurnAccel` / `GetTurnMax`: tables +0x80 (degrees per second) and +0x90 (degrees).
+    fn turn_accel(&self, n: usize) -> f32 {
+        self.data.tables.moves.turn_accel[n] * PI / 180.0 * (1.0 / 30.0)
+    }
+
+    fn turn_max(&self, n: usize) -> f32 {
+        self.data.tables.moves.turn_max[n] * PI / 180.0
+    }
+
+    /// Action 0x19 (`BtlAct_HomingDashHandler`): the ki-draining dash that homes on the opponent, motions 0x18 /
+    /// 0x2D (start) -> 0x19 (loop) -> 0x1A or 0x15 (stop). work[2] counts slow frames. The voices, sounds and
+    /// vibration are not ported.
+    fn homing_dash(&mut self, phase: u32) {
+        if phase == ENTER {
+            let prev = self.me.act.prev;
+            let motion = if (0x70..0x70 + 0x3E).contains(&prev) {
+                self.me.dash_count += 1;
+                0x19
+            } else {
+                match prev {
+                    0x47..=0x57 | 0x5A..=0x5D | 0x6B..=0x6F => {
+                        self.me.dash_count += 1;
+                        0x19
+                    }
+                    0x1A | 0x28 | 0x2A | 0xD7 => 0x19,
+                    0x17 | 0x18 => 0x2D,
+                    _ => 0x18,
+                }
+            };
+            self.play(motion, 0.15);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let (mut lean, mut moving, mut face_opp, mut first) = (0.0, true, true, false);
+            match self.anim_id() {
+                0x18 | 0x2D => {
+                    self.me.anim_advance_then(0x19, 0.2, 0);
+                    lean = self.me.anim_progress();
+                    moving = false;
+                    if 0.5 < self.me.anim_progress() {
+                        self.set(0x47);
+                    }
+                }
+                0x19 => {
+                    self.me.anim_advance_loop(0);
+                    if self.me.anim_is_new() {
+                        first = true;
+                        self.set(0xD1);
+                        if self.me.height_above_ground() < 20.0 {
+                            self.me.set_fx(0x35);
+                        }
+                    }
+                    self.set(0x47);
+                    lean = 1.0;
+                }
+                0x15 | 0x1A => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                        self.me.pose.speed = 0.0;
+                    }
+                    moving = false;
+                    face_opp = false;
+                    lean = 1.0 - self.me.anim_progress();
+                }
+                _ => {}
+            }
+            if moving {
+                let speed = self.me.move_speed(self.data, self.env, 6);
+                let (mut yaw_accel, mut pitch_accel) = (self.turn_accel(0), self.turn_accel(1));
+                let (yaw_max, pitch_max) = (self.turn_max(0), self.turn_max(1));
+                let mut model_turn = deg(36.0);
+                if first {
+                    pitch_accel = PI;
+                    yaw_accel = PI;
+                    model_turn = PI;
+                }
+                let near =
+                    (opp_gap_xz(self.me, self.opp, self.data, self.opp_data) * 0.01).min(1.0);
+                steer_at_opponent(
+                    self.me,
+                    self.opp,
+                    self.data,
+                    self.opp_data,
+                    speed,
+                    yaw_accel,
+                    pitch_accel,
+                    yaw_max * near,
+                    pitch_max * near,
+                    PI,
+                );
+                self.me.turn_model_yaw(model_turn, 0.5);
+                self.me.set_direction(3);
+                self.me.advance(speed, 10000.0);
+                self.me.apply_gravity();
+                self.set(9);
+                self.set(0x50);
+                self.set(0x51);
+                self.me.set_fx(4);
+                self.me.set_fx(9);
+            } else {
+                if self.blocked() {
+                    self.me.pose.speed = 0.0;
+                }
+                self.step(if face_opp { 2 } else { 6 }, 6, 7, 0.0, kmh(100.0));
+                self.me.apply_gravity();
+            }
+            self.set(0x89);
+            let pitch = self.me.pose.pitch;
+            self.me.set_lean_x(pitch * lean);
+            self.me.request_orbit(50.0, 100.0);
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            match self.anim_id() {
+                0x19 => {
+                    let mut stop = self.blocked() && self.opp_seen_action() != 0xD5;
+                    if crate::btl_chr::length(self.me.pose.moved) < kmh(100.0) {
+                        self.me.work[2] += 1;
+                        if self.me.work[2] >= 16 {
+                            stop = true;
+                        }
+                    } else {
+                        self.me.work[2] = 0;
+                    }
+                    if !self.flag(5) {
+                        stop = true;
+                    }
+                    let cost = self.move_ki_cost(0);
+                    stop |= self.me.spend_ki(cost, false);
+                    if self.me.test(0x16, true) {
+                        self.request_anim(0x15, 0.0);
+                    }
+                    if self.me.test(0x15, true) {
+                        self.request_anim(0x15, 0.0);
+                        self.me.work[0] |= 1;
+                    }
+                    if self.decide_main(0x800_0000) != 0 {
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                    if stop {
+                        self.request_anim(0x1A, 0.0);
+                        self.me.pose.speed *= 0.5;
+                    }
+                }
+                0x1A => {
+                    if self.blocked() {
+                        self.me.pose.speed = 0.0;
+                    }
+                }
+                0x15 => {
+                    if self.me.test(0x18, true) {
+                        self.me.work[0] |= 1;
+                    }
+                    if 0.5 < self.me.anim_progress() && self.me.work[0] & 1 != 0 {
+                        self.request(0x1A);
+                    }
+                    if self.decide_main(0x800_0000) != 0 {
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                }
+                _ => {}
+            }
+            self.decide_main(0x1800);
+            match self.anim_id() {
+                0x19 => {
+                    self.decide_attack(0x2000);
+                }
+                0x1A => {
+                    self.decide_attack(3);
+                }
+                _ => {}
+            }
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Action 0x1A (`BtlAct_DragonDashHandler`): the dash in the direction held, motions 0x18 / 0x2D (start) ->
+    /// 0x19 (loop) -> 0x1A or 0x15 (stop); ASCEND / DESCEND move up and down. It stops when blocked, slower than
+    /// 100 km/h for 16 frames (work[2]) or out of ki. The sounds and vibration are not ported.
+    fn dragon_dash(&mut self, phase: u32) {
+        if phase == ENTER {
+            let mut anim = if matches!(self.me.act.prev, 0x19 | 0x1A) {
+                0x19
+            } else {
+                0x2D
+            };
+            if self.me.unk_ff0 > 0 {
+                anim = 0x18;
+            }
+            self.play(anim, 0.15);
+            self.held(0xE);
+            self.me.turn_yaw(self.opp, 0, PI);
+        }
+        if phase == RUN {
+            let mut moving = true;
+            match self.anim_id() {
+                0x18 | 0x2D => {
+                    self.me.anim_advance_then(0x19, 0.2, 0);
+                    moving = false;
+                }
+                0x19 => self.me.anim_advance_loop(0),
+                0x15 | 0x1A => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                        self.me.pose.speed = 0.0;
+                    }
+                    moving = false;
+                }
+                _ => {}
+            }
+            if moving {
+                let speed = self.me.move_speed(self.data, self.env, 7);
+                let turn = self.me.turn_rate(self.data, 2);
+                let vspeed = self.me.move_speed(self.data, self.env, 8);
+                self.me.turn_yaw(self.opp, 0, turn);
+                self.me
+                    .turn_pitch(self.data, self.opp, self.opp_data, 5, PI);
+                self.me.turn_model_yaw(deg(36.0), 0.3);
+                self.me.set_direction(3);
+                self.me.advance(speed, 10000.0);
+                if self.me.input.is_held(crate::btl_input::ASCEND) {
+                    self.me.move_vertical(-vspeed, kmh(100.0));
+                } else if self.me.input.is_held(crate::btl_input::DESCEND) {
+                    self.me.move_vertical(vspeed, kmh(100.0));
+                } else {
+                    self.me.apply_gravity();
+                }
+                self.set(9);
+                self.set(0x50);
+                self.set(0x51);
+                self.me.set_fx(4);
+            } else {
+                self.step(6, 5, 3, 0.0, kmh(100.0));
+                self.me.apply_gravity();
+            }
+            self.me.request_orbit(50.0, 100.0);
+            self.set(0x1A);
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            match self.anim_id() {
+                0x19 => {
+                    let mut stop = self.blocked();
+                    if crate::btl_chr::length(self.me.pose.moved) < kmh(100.0) {
+                        self.me.work[2] += 1;
+                        if self.me.work[2] >= 0x10 {
+                            stop = true;
+                        }
+                    } else {
+                        self.me.work[2] = 0;
+                    }
+                    let cost = self.move_ki_cost(1);
+                    stop |= self.me.spend_ki(cost, false);
+                    if self.me.test(0x16, true) {
+                        self.request_anim(0x15, 0.0);
+                    }
+                    if self.me.test(0x14, true) {
+                        self.request_anim(0x15, 0.0);
+                        self.me.work[0] |= 1;
+                    }
+                    if self.me.test(0x15, true) {
+                        self.request_anim(0x15, 0.0);
+                        self.me.work[0] |= 2;
+                    }
+                    if stop {
+                        self.request_anim(0x1A, 0.0);
+                        self.me.pose.speed *= 0.5;
+                    }
+                }
+                0x1A => {
+                    if self.blocked() {
+                        self.me.pose.speed = 0.0;
+                    }
+                }
+                0x15 => {
+                    if self.me.test(0x17, true) {
+                        self.me.work[0] |= 1;
+                    }
+                    if self.me.test(0x18, true) {
+                        self.me.work[0] |= 2;
+                    }
+                    if self.me.anim_progress() > 0.5 {
+                        if self.me.work[0] & 1 != 0 && self.flag(5) {
+                            self.request(0x19);
+                        }
+                        if self.me.work[0] & 2 != 0 {
+                            self.request(0x1A);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            self.decide_main(0x1800);
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Actions 0x1B (back), 0x1C / 0x1D (left / right of the line to the opponent) (`BtlAct_StepHandler`): a step,
+    /// motions 0x1C..0x1E on the ground, 0x28..0x2A in the air. It moves between 10 % and 60 % of the motion. The
+    /// sounds and voices are not ported.
+    fn side_step(&mut self, phase: u32) {
+        if phase == ENTER {
+            if self.me.height_above_ground() < 5.0 {
+                self.clear(0xE);
+            }
+            let air = self.flag(0xE);
+            let mut yaw = opp_yaw(self.me, self.opp);
+            let anim = match self.current() {
+                0x1B => {
+                    yaw = wrap_angle(yaw + PI);
+                    if air { 0x28 } else { 0x1C }
+                }
+                0x1C => {
+                    yaw = wrap_angle(yaw - PI / 2.0);
+                    if air { 0x29 } else { 0x1D }
+                }
+                _ => {
+                    yaw = wrap_angle(yaw + PI / 2.0);
+                    if air { 0x2A } else { 0x1E }
+                }
+            };
+            self.play(anim, 0.15);
+            self.me.pose.dir = [yaw.sin(), 0.0, yaw.cos()];
+        }
+        if phase == RUN {
+            let progress = self.me.anim_progress();
+            if self.me.anim_advance(0) {
+                self.me.work[1] = 1;
+            }
+            if self.me.anim_progress() < 0.2 {
+                self.set(0x42);
+            }
+            let window = 0.1 < progress && progress < 0.6;
+            let speed = match self.anim_id() {
+                0x1C | 0x28 if window => self.me.move_speed(self.data, self.env, 0xB),
+                0x1D | 0x1E | 0x29 | 0x2A if window => {
+                    let speed = self.me.move_speed(self.data, self.env, 0xC);
+                    let frames = self.me.obj.layers[0].length / self.me.obj.step;
+                    scale_speed_by_dist(self.me, self.opp, speed, PI / 2.0, frames * (0.6 - 0.1))
+                }
+                _ => 0.0,
+            };
+            self.step(2, 5, 6, speed, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0x88);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            if self.me.gauge.low_health_idle {
+                self.set(0x96);
+            }
+            self.me.request_orbit(5.0, 10.0);
+        }
+        if phase == DECIDE {
+            // BtlParam_GetBackStepCancelRatio (+0x6C) / BtlParam_GetStepCancelRatio (+0x68).
+            let p = &self.data.tables.params;
+            let cancel = if self.anim_id() == 0x1C {
+                p.f32_at(0x6C)
+            } else {
+                p.f32_at(0x68)
+            };
+            if self.me.work[1] != 0 {
+                self.request(0xB);
+                let mask = if self.me.input.is_held(crate::btl_input::DOWN) {
+                    0x11
+                } else {
+                    1
+                };
+                self.decide_main(mask);
+                let q = self.queued();
+                self.request(q);
+            }
+            if !self.has_queued() && self.me.anim_progress() > 0.4 {
+                self.decide_main(0x1_4000);
+                self.decide_attack(0x83);
+            }
+            if cancel < self.me.anim_progress() {
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
     /// Action 0x38 (`BtlAct_GuardHandler`): guard poses 0xEF (middle), 0xF1 (action input 36) and 0xF3 (input 37),
     /// each with its recoil at +1, and 0xF5 after flag 0x67. Forced by flags 0x68 / 0x69 / 0x6A when a hit is
     /// guarded (it opens on the recoil 0xF2 / 0xF4 / 0xF0). A pose change needs three frames of the new input
@@ -2807,6 +3197,21 @@ impl Ctx<'_, '_> {
             }
             None => false,
         }
+    }
+}
+
+/// `BtlAct_ScaleSpeedByDist`: under lock-on, `frames` frames of the speed travel at most `range` times the
+/// horizontal distance to the opponent.
+fn scale_speed_by_dist(me: &Chr, opp: &Chr, speed: f32, range: f32, frames: f32) -> f32 {
+    if !me.flags.test(5) {
+        return speed;
+    }
+    let travel = speed * frames;
+    let limit = range * crate::btl_chr::opp_distance_xz(me, opp);
+    if limit < travel && 0.01 < travel {
+        speed * (limit / travel)
+    } else {
+        speed
     }
 }
 
