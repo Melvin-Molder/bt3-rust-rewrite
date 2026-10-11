@@ -669,7 +669,7 @@ impl Ai<'_, '_, '_, '_> {
 
     /// `BtlCharApi_GetAttackAttr`: the flag word of the attack in use.
     fn attack_attr(&self, i: usize) -> u32 {
-        let id = crate::btl_hit::attack_id(self.chr(i), self.c.env);
+        let id = crate::btl_hit::attack_id(self.chr(i), self.c.data[i], self.c.env);
         usize::try_from(id)
             .ok()
             .filter(|&id| id < bt3_data::chara_data::ATTACK_COUNT)

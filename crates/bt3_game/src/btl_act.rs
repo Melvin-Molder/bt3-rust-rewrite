@@ -49,8 +49,8 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x2A | 0x37 | 0x38 | 0x3A | 0x44 | 0xAE..=0xB1
-        | 0xBD | 0xC0..=0xCA | 0xCF..=0xD3 | 0xD8 | 0xD9 | 0xDA..=0xDE | 0xE0..=0xE6)
+        1..=3 | 0xB..=0x2A | 0x37 | 0x38 | 0x3A | 0x44 | 0x47..=0x52 | 0xAE..=0xB1
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE6)
 }
 
 impl Ctx<'_, '_> {
@@ -584,6 +584,14 @@ impl Ctx<'_, '_> {
             0x20..=0x23 => self.vanish_step(phase),
             0x24 => self.vanish_behind(phase),
             0x25..=0x2A => self.recover_air(phase),
+            0x47..=0x4C => self.smash_charge(phase),
+            0x4D..=0x52 => self.smash_full(phase),
+            0xCB | 0xCC => self.reel(phase),
+            0xCD => self.ground_bounce(phase),
+            0xCE => self.launched(phase),
+            0xD4 => self.knock_back(phase),
+            0xD5 | 0xD6 | 0xDF => self.blow_away(phase),
+            0xD7 => self.blow_recover(phase),
             0x37 => self.charge(phase),
             0x38 => self.guard(phase),
             0xAE => self.ki_blast(phase),
@@ -619,7 +627,7 @@ impl Ctx<'_, '_> {
             self.me.work = [0; 0x14];
             self.me.action_frame = 0;
             self.me.charge = 0.0;
-            self.me.charge_timer = 0;
+            self.me.charge_timer = 0.0;
             self.me.charge_full_frames = 0;
             self.me.blast_charge = 0.0;
             self.pop_queue();
@@ -2450,6 +2458,786 @@ impl Ctx<'_, '_> {
         }
         if phase == LEAVE {
             self.set(0x33);
+        }
+    }
+
+    // ---- the smashes (btl_act_1.c) ---------------------------------------------------------------------------
+
+    /// `workF[k]`: the float scratch shares its words with `work[6 + k]`.
+    fn work_f(&self, k: usize) -> f32 {
+        f32::from_bits(self.me.work[6 + k] as u32)
+    }
+
+    fn set_work_f(&mut self, k: usize, v: f32) {
+        self.me.work[6 + k] = v.to_bits() as i32;
+    }
+
+    /// The character's two charge rates (parameters +0x74 / +0x78) blended by the gauge at +0xD80.
+    fn blended_charge_rate(&self) -> f32 {
+        let t = self.me.charge_gauge as f32 / 100_000.0;
+        let p = &self.data.tables.params;
+        (1.0 - t) * p.f32_at(0x74) + t * p.f32_at(0x78)
+    }
+
+    /// `BtlAct_GetChargeRate`: at least 0.1 (ability 0x4A is not ported).
+    fn charge_rate(&self) -> f32 {
+        self.blended_charge_rate().max(0.1)
+    }
+
+    /// `BtlAct_StepCharge`: one frame of the charge timer; true once the charge level reached 1.
+    fn step_charge(&mut self) -> bool {
+        let rate = self.charge_rate();
+        self.me.charge_timer = (self.me.charge_timer + rate * (1.0 / 22.5)).min(1.0);
+        self.me.charge = if self.me.charge_timer < 1.0 {
+            self.me.charge_timer / rate
+        } else {
+            1.0
+        };
+        1.0 <= self.me.charge
+    }
+
+    /// `BtlAct_SetChargeAnimDuration`: 1.5 s at rate 1, at least 0.75 s.
+    fn set_charge_anim_duration(&mut self) {
+        let d = (1.5 / self.charge_rate()).max(0.75);
+        self.me.anim_set_duration(d);
+    }
+
+    /// `BtlAct_SetChargeAnimStep`: twice the blended rate.
+    fn set_charge_anim_step(&mut self) {
+        let step = self.blended_charge_rate() * 2.0;
+        self.me.anim_set_step(step);
+    }
+
+    /// `BtlAct_CancelOnOppC9`: under flag 0x5D with the opponent seen in 0xC9, a follow-up started past `after`.
+    fn cancel_on_opp_c9(&mut self, after: f32) {
+        if self.flag(0x5D) && self.opp_seen_action() == 0xC9 {
+            if !self.has_queued() {
+                self.decide_attack(1);
+            }
+            if after < self.me.anim_progress() {
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
+    /// The release motion's follow-up after a connecting smash (flag 0x5B): attack inputs (or, against a
+    /// knock-back, main input 8), started past `cancelAt`.
+    fn smash_follow_up(&mut self, knock_back_too: bool) {
+        if !self.flag(0x5B) {
+            return;
+        }
+        self.set(0x3D);
+        let seen = self.opp_seen_action();
+        if !self.has_queued() {
+            if seen == 0xD5 {
+                if self.decide_attack(0x18_0000) != 0 {
+                    self.set_work_f(0, 0.7);
+                }
+            } else if knock_back_too {
+                if seen == 0xD4 {
+                    if self.decide_main(8) != 0 {
+                        self.set_work_f(0, 0.7);
+                    }
+                } else if self.decide_attack(1) != 0 {
+                    self.set_work_f(0, 0.6);
+                }
+            }
+        }
+        if self.has_queued() && self.work_f(0) < self.me.anim_progress() {
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Actions 0x47..0x4C (`BtlAct_SmashChargeHandler`): the charged smash, motions wind-up -> hold -> release
+    /// (0x50.., 0x53.., 0x56.., 0x59.., 0x4A.., 0x4D..). Holding charges it (the rate of the character, faster with
+    /// the gauge); a full charge held one frame becomes the instant smash (flag 0x84: seven untouchable frames at
+    /// 3500 km/h), held longer the full smash 0x4D..0x52 under powered skill 0x200. The sounds, the voice and the
+    /// vibration are not ported.
+    fn smash_charge(&mut self, phase: u32) {
+        if phase == ENTER {
+            let anim = match self.current() {
+                0x47 => 0x50,
+                0x48 => 0x53,
+                0x49 => 0x56,
+                0x4A => 0x59,
+                0x4B => 0x4A,
+                _ => 0x4D,
+            };
+            self.play(anim, 0.15);
+            begin_rise_to_opponent(self.me, self.opp, self.data, self.opp_data);
+        }
+        if phase == RUN {
+            let mut speed = 0.0;
+            let mut accel = kmh(100.0);
+            let mut turn = speed;
+            let mut yaw_mode = 6;
+            let mut pitch_mode = 5;
+            let mut charging = false;
+            if self.flag(0x81) {
+                speed = kmh(50.0);
+                yaw_mode = 2;
+                turn = deg(1.8);
+            }
+            let id = self.anim_id();
+            match id {
+                0x4A | 0x4D | 0x50 | 0x53 | 0x56 | 0x59 => {
+                    self.set_charge_anim_step();
+                    if !self.flag(0x84) {
+                        self.me.anim_advance_then(id + 1, 0.0, 0);
+                    } else {
+                        self.me.anim_advance(0);
+                    }
+                    charging = true;
+                }
+                0x4B | 0x4E | 0x51 | 0x54 | 0x57 | 0x5A => {
+                    self.set_charge_anim_duration();
+                    if !self.flag(0x84) {
+                        if self.me.anim_advance(0) {
+                            self.me.work[0] |= 1;
+                        }
+                    } else {
+                        self.me.anim_advance(0);
+                    }
+                    charging = true;
+                }
+                0x4C | 0x4F | 0x52 | 0x55 | 0x58 | 0x5B => {
+                    if self.me.anim_is_new() {
+                        self.me.pose.speed =
+                            crate::btl_hit::launch_speed(self.me, self.data, self.env);
+                    }
+                    self.me.obj.rate = self.me.charge + 1.0;
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                    speed = 0.0;
+                    yaw_mode = 6;
+                    turn = speed;
+                    if self.blocked() && (self.flag(0x5B) || self.flag(0x5D)) {
+                        turn = PI;
+                        yaw_mode = 2;
+                    }
+                }
+                _ => {}
+            }
+            if charging {
+                if !self.flag(0x84) {
+                    if self.step_charge() {
+                        self.me.set_fx(0x1E);
+                        self.me.charge_full_frames += 1;
+                    }
+                } else {
+                    let frames = self.me.work[2];
+                    if frames == 0 {
+                        self.me.set_fx(0xC);
+                    }
+                    if frames >= 2 {
+                        self.set(0xB);
+                        speed = kmh(3500.0);
+                        yaw_mode = 2;
+                        accel = 10000.0;
+                        pitch_mode = 4;
+                        turn = PI;
+                    }
+                    if frames >= 6 {
+                        self.request_anim(id + 1, 0.0);
+                    }
+                    self.me.work[2] += 1;
+                    for f in 0x42..=0x46 {
+                        self.set(f);
+                    }
+                }
+            }
+            self.me.turn_yaw(self.opp, yaw_mode, turn);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, pitch_mode, PI);
+            self.me.turn_model_yaw(deg(36.0), 0.3);
+            self.me.set_direction(3);
+            self.me.advance(speed, accel);
+            self.me.apply_gravity();
+            self.set(0xD5);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+        if phase == DECIDE {
+            let id = self.anim_id();
+            match id {
+                0x4A | 0x4B | 0x4D | 0x4E | 0x50 | 0x51 | 0x53 | 0x54 | 0x56 | 0x57 | 0x59
+                | 0x5A => {
+                    if !self.flag(0x84) {
+                        // Input 0x3F: the smash button let go.
+                        if self.test(0x3F) {
+                            self.me.work[0] |= 1;
+                        }
+                        if self.me.work[0] & 1 != 0 {
+                            let full = self.me.charge_full_frames;
+                            if full == 1 {
+                                self.held(0x84);
+                            } else if full > 0 && self.powered_skill(0x200) && self.flag(0x13) {
+                                let next = match self.current() {
+                                    0x49 => 0x4F,
+                                    0x4A => 0x50,
+                                    0x47 => 0x4D,
+                                    0x48 => 0x4E,
+                                    0x4C => 0x52,
+                                    _ => 0x51,
+                                };
+                                self.request(next);
+                            } else {
+                                self.me.work[0] |= 2;
+                            }
+                        }
+                        if self.me.work[0] & 2 != 0 {
+                            self.request_anim(id + 1, 0.0);
+                        }
+                    }
+                }
+                0x4C | 0x4F | 0x52 | 0x55 | 0x58 | 0x5B => {
+                    self.smash_follow_up(true);
+                    self.cancel_on_opp_c9(0.6);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Actions 0x4D..0x52 (`BtlAct_SmashFullHandler`): the fully charged smash, the wind-up and hold played fast
+    /// with hit-stop flag 0x125. The fighter camera cut (`ChrCam_RequestCut`), the voice, the sound and the
+    /// vibration are not ported.
+    fn smash_full(&mut self, phase: u32) {
+        if phase == ENTER {
+            let anim = match self.current() {
+                0x4D => 0x50,
+                0x4E => 0x53,
+                0x4F => 0x56,
+                0x50 => 0x59,
+                0x51 => 0x4A,
+                _ => 0x4D,
+            };
+            self.play(anim, 0.0);
+            begin_rise_to_opponent(self.me, self.opp, self.data, self.opp_data);
+        }
+        if phase == RUN {
+            let mut mode = 2;
+            let id = self.anim_id();
+            match id {
+                0x4A | 0x4B | 0x4D | 0x4E | 0x50 | 0x51 | 0x53 | 0x54 | 0x56 | 0x57 | 0x59
+                | 0x5A => {
+                    if matches!(id, 0x4B | 0x4E | 0x51 | 0x54 | 0x57 | 0x5A) {
+                        self.me.anim_set_duration(0.2);
+                    }
+                    self.me.anim_advance_then(id + 1, 0.0, 0);
+                    self.set(0x125);
+                    self.set(0x12A);
+                    self.me.charge = 1.0;
+                }
+                0x4C | 0x4F | 0x52 | 0x55 | 0x58 | 0x5B => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                    if self.me.anim_is_new() {
+                        self.me.pose.speed =
+                            crate::btl_hit::launch_speed(self.me, self.data, self.env);
+                    }
+                    if self.flag(0x5C) {
+                        mode = 6;
+                    }
+                }
+                _ => {}
+            }
+            self.step(mode, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xD5);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+        if phase == DECIDE && matches!(self.anim_id(), 0x4C | 0x4F | 0x52 | 0x55 | 0x58 | 0x5B) {
+            self.smash_follow_up(false);
+        }
+    }
+
+    // ---- the reactions a smash gives (btl_act_1.c) ---------------------------------------------------------------
+
+    /// `BtlActB_UpdateMashRate`: each press of an action button (`ANY_FACE`) adds to the motion's step, kept in
+    /// 1..4 and drifting to twice the addend by 4 a second; scaled, past 20% the addend is 0.5 + 0.5 * (1 -
+    /// reaction scale). Flag 0xE7 while free.
+    fn update_mash_rate(&mut self, scaled: bool) {
+        let mut add = 1.0;
+        if scaled && self.me.anim_progress() > 0.2 {
+            add = (1.0 - self.me.react.scale) * 0.5 + 0.5;
+        }
+        let target = add * 2.0;
+        let mut rate = self.work_f(0);
+        if self.me.is_free() {
+            self.set(0xE7);
+            if self.me.input.is_pressed(crate::btl_input::ANY_FACE) {
+                rate += add;
+            }
+        }
+        rate = rate.clamp(1.0, 4.0);
+        self.me.anim_set_step(rate);
+        let step = 4.0 / 30.0;
+        rate = if rate < target {
+            (rate + step).min(target)
+        } else {
+            (rate - step).max(target)
+        };
+        self.set_work_f(0, rate);
+    }
+
+    /// `BtlAct_QueueFlag21Action`: flags 0x21 / 0x22 (the air recovery inputs) queue 0x25 / 0x27, or 0x28 under
+    /// lock-on for 0x22.
+    fn queue_flag21_action(&mut self) -> bool {
+        let fly = if self.data.can_fly() { 0x27 } else { 0x25 };
+        if self.flag(0x21) {
+            self.set_queue(0, fly);
+            return true;
+        }
+        if self.flag(0x22) {
+            self.set_queue(0, if self.flag(5) { 0x28 } else { fly });
+            return true;
+        }
+        false
+    }
+
+    /// `BtlAct_QueueFlag21ActionB`: the same against a wall, 0x29 / 0x2A.
+    fn queue_flag21_action_b(&mut self) -> bool {
+        if self.flag(0x21) {
+            self.set_queue(0, 0x29);
+            return true;
+        }
+        if self.flag(0x22) {
+            self.set_queue(0, if self.flag(5) { 0x2A } else { 0x29 });
+            return true;
+        }
+        false
+    }
+
+    /// Actions 0xCB, 0xCC (`BtlAct_ActionCBtoCC`): motion 0xAE (air 0xAF) at the mash rate; 0xCC leans back and
+    /// straightens. Then the idle follow-up; main inputs 0x10000000 / 0x800000 cut it short.
+    fn reel(&mut self, phase: u32) {
+        if phase == ENTER {
+            let air = self.me.is_air_motion(self.env, true);
+            self.play(if air { 0xAF } else { 0xAE }, 0.0);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.set_work_f(0, 2.0);
+        }
+        if phase == RUN {
+            let air = self.me.is_air_motion(self.env, false);
+            let cb = self.current() == 0xCB;
+            self.update_mash_rate(cb);
+            if self.me.anim_advance(0) {
+                let next = self.idle_follow_up();
+                self.request(next);
+            }
+            self.step(6, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.reaction_flags();
+            self.set(0x41);
+            if !cb {
+                let t = 1.0 - self.me.anim_progress();
+                let lean = if air { t * deg(45.0) } else { t * -deg(90.0) };
+                self.me.set_lean_x(lean);
+            }
+        }
+        if phase == DECIDE {
+            for mask in [0x1000_0000, 0x80_0000] {
+                if self.decide_main(mask) != 0 {
+                    let q = self.queued();
+                    self.request(q);
+                }
+            }
+        }
+        if phase == LEAVE {
+            self.me.unk_ff0 = 15;
+        }
+    }
+
+    /// Action 0xCD (`BtlAct_GroundBounceHandler`): hits the ground, motions 0xDC then 0xDD at the mash rate,
+    /// sliding on at 50 km/h; then the down action 0xDB, in flight 0xE6 / 0xD9, or with a direction held a
+    /// recovery (0x25 up / down, 0xE2 left, 0xE3 right; an air set turns round first).
+    fn ground_bounce(&mut self, phase: u32) {
+        if phase == ENTER {
+            if self.me.is_air_motion(self.env, true) {
+                self.me.work[0] |= 1;
+            }
+            self.play(0xDC, 0.0);
+            self.set_work_f(0, 2.0);
+        }
+        if phase == RUN {
+            self.update_mash_rate(true);
+            match self.anim_id() {
+                0xDC => {
+                    self.me.anim_advance_then(0xDD, 0.0, 0);
+                }
+                0xDD => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            let dir = if self.me.work[0] & 1 != 0 { 2 } else { 4 };
+            self.step(6, 5, dir, kmh(50.0), kmh(100.0));
+            self.me.apply_gravity();
+            self.reaction_flags();
+            self.set(0x41);
+            if self.env.stage_4_or_27 && self.flag(0x17) {
+                self.held(0xE);
+            }
+        }
+        if phase == DECIDE {
+            if self.decide_main(0x1000_0000) != 0 {
+                let q = self.queued();
+                self.request(q);
+            }
+            if self.me.work[1] != 0 {
+                let mut next = 0xDB;
+                if self.flag(0xE) {
+                    next = if self.me.is_free() { 0xE6 } else { 0xD9 };
+                } else if self.me.is_free() && !self.flag(0x1E) {
+                    let held = |s: &Self, m: u32| s.me.input.is_held(m);
+                    let mut id = -1;
+                    if held(self, 0x20) || held(self, 0x10) {
+                        id = 0x25;
+                    }
+                    if held(self, 0x40) {
+                        id = 0xE2;
+                    }
+                    if held(self, 0x80) {
+                        id = 0xE3;
+                    }
+                    if id >= 0 {
+                        if self.me.work[0] & 1 != 0 {
+                            self.me.pose.yaw = wrap_angle(self.me.pose.yaw + PI);
+                        }
+                        next = id;
+                    }
+                }
+                self.request(next);
+            }
+        }
+    }
+
+    /// An air recovery with a direction held by a free fighter (0x25, or 0x27 when it can fly).
+    fn request_air_recovery(&mut self) {
+        if self.me.is_free() && !self.flag(0x1E) && self.me.input.is_held(DIR_MASK) {
+            self.request(if self.data.can_fly() { 0x27 } else { 0x25 });
+        }
+    }
+
+    /// Action 0xCE (`BtlAct_LaunchedHandler`): knocked upward (up to 1200 km/h, 70% plus 30% of the reaction
+    /// scale), motion 0xDA rising and 0xDB falling at 1000 km/h. Falling it lands into 0xDC (or an air recovery),
+    /// meets a wall (0xE7 / 0xE8 / 0xDC), lands in water or on the stage limits; from the ninth frame a free
+    /// fighter recovers with input 0x2F (0xE6) or 0x30 (0x68).
+    fn launched(&mut self, phase: u32) {
+        if phase == ENTER {
+            if self.me.is_air_motion(self.env, true) {
+                self.me.work[0] |= 1;
+            }
+            self.play(0xDA, 0.0);
+            self.me.pose.fall_speed = (self.me.react.scale * 0.3 + 0.7) * -kmh(1200.0);
+            self.clear(0xE);
+        }
+        if phase == RUN {
+            self.me.fall();
+            match self.anim_id() {
+                0xDA => {
+                    self.me.anim_advance_loop(0);
+                    if self.me.pose.fall_speed > 0.0 {
+                        self.request_anim(0xDB, 0.4);
+                    }
+                }
+                0xDB => self.me.anim_advance_loop(0),
+                _ => {}
+            }
+            let dir = if self.me.work[0] & 1 != 0 { 2 } else { 4 };
+            self.step(6, 5, dir, kmh(1000.0), kmh(100.0));
+            self.reaction_flags();
+            self.me.set_fx(0x3B);
+        }
+        if phase == DECIDE {
+            if self.decide_main(0x1000_0000) != 0 {
+                let q = self.queued();
+                self.request(q);
+            }
+            if self.anim_id() == 0xDB {
+                if self.me.frames_to_ground() < 2.0 || self.me.is_heading_into_floor(-6.283_185_3) {
+                    if !self.env.stage_4_or_27 || self.me.ground_y() < -10.0 {
+                        self.request(0xDC);
+                        self.request_air_recovery();
+                    } else if self.flag(7) {
+                        self.request(0xDC);
+                    }
+                }
+                if self.me.is_heading_into_wall(-6.283_185_3) {
+                    if self.me.obj.work.contact_flags & 0x40 != 0 {
+                        self.request(if self.me.is_free() { 0xE8 } else { 0xE7 });
+                    } else if self.me.work[0] & 1 != 0 {
+                        self.request(0xDC);
+                        self.request_air_recovery();
+                    } else {
+                        self.request(0xE7);
+                        if self.me.is_free() && !self.flag(0x1E) && self.me.input.is_held(DIR_MASK)
+                        {
+                            self.request(0x29);
+                        }
+                    }
+                }
+                if self.flag(0x11) {
+                    let d = self.down_action();
+                    self.request(d);
+                }
+                if self.flag(0x16) && self.me.is_free() {
+                    self.request(0xE6);
+                }
+                if self.env.stage_4_or_27 && self.flag(0x17) && self.me.is_free() {
+                    self.request(0xE6);
+                }
+            }
+            if self.me.action_frame > 8 && self.me.is_free() {
+                if self.test(0x2F) {
+                    self.request(0xE6);
+                }
+                if self.test(0x30) {
+                    self.held(0xE);
+                    self.request(0x68);
+                }
+            }
+        }
+    }
+
+    /// Action 0xD4 (`BtlAct_KnockBackHandler`): knocked back at 700 km/h (on stages 4 / 27 scaled by the health
+    /// lost), motions 0xBD start, 0xBE loop, 0xBF end (0xC0.. for an air set). The loop lasts the reaction scale
+    /// times 15 frames and deflects at the stage limit; a free fighter holding a direction then recovers (0xE6).
+    /// The end gives the down action, or 0xD9 higher than the body size past 60%. The sound is not ported.
+    fn knock_back(&mut self, phase: u32) {
+        if phase == ENTER {
+            let air = self.me.is_air_motion(self.env, true);
+            self.play(if air { 0xC0 } else { 0xBD }, 0.0);
+            let mut timer = (self.me.react.scale * 15.0) as i32;
+            if self.env.stage_4_or_27 {
+                timer = (timer as f32 * (1.0 - self.me.health_ratio())) as i32;
+            }
+            self.me.work[2] = timer;
+            self.me.pose.fall_speed = 0.0;
+            self.clear(0xE);
+            // BtlAct_GetPrev reads a word nobody writes: never a throw's 0xB8 / 0xBA.
+        }
+        if phase == RUN {
+            let mut speed = kmh(700.0);
+            if self.env.stage_4_or_27 {
+                speed *= (1.0 - self.me.health_ratio()) * 0.5 + 0.5;
+            }
+            let id = self.anim_id();
+            match id {
+                0xBD | 0xC0 => {
+                    self.me.anim_advance_then(id + 1, 0.0, 0);
+                }
+                0xBE | 0xC1 => {
+                    if self.me.work[2] > 0 {
+                        self.me.anim_advance_loop(0);
+                        self.me.work[2] -= 1;
+                    } else if self.me.anim_advance_then(id + 1, 0.0, 0)
+                        && self.me.is_free()
+                        && !self.flag(0x1D)
+                        && (self.me.input.is_held(DIR_MASK) || self.env.stage_4_or_27)
+                    {
+                        self.request(0xE6);
+                    }
+                    if self.me.action_frame > 0 {
+                        let back = self.me.is_air_motion(self.env, false);
+                        self.me.deflect_at_stage_limit(back);
+                    }
+                }
+                0xBF | 0xC2 => {
+                    if self.me.anim_advance(0) {
+                        let d = self.down_action();
+                        self.request(d);
+                    }
+                    if self.data.height() < self.me.height_above_ground()
+                        && self.me.anim_progress() > 0.6
+                    {
+                        self.request(0xD9);
+                    }
+                }
+                _ => {}
+            }
+            let dir = if self.me.is_air_motion(self.env, false) {
+                3
+            } else {
+                5
+            };
+            self.step(6, 6, dir, speed, 10000.0);
+            self.me.brake_vertical();
+            self.set(0x1B);
+            self.reaction_flags();
+            self.me.set_fx(0x3B);
+        }
+        if phase == DECIDE && self.decide_main(0x1000_0000) != 0 {
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Actions 0xD5, 0xD6, 0xDF (`BtlAct_BlowAwayHandler`): blown away in flight for 50 / 15 / 32 frames at
+    /// 1000 / 2000 / 2000 km/h (1000 on stages 4 / 27), motion 0xC3 (0xC6 for 0xDF, the next for an air set);
+    /// 0xD5 leans with the pitch, 0xD6 spins. A free fighter recovers in the air (inputs 0x28 / 0x29 raise flags
+    /// 0x21 / 0x22, with the ki for it) or, with parameter bit 0x40, mashes out (0xD7). Into the floor: the air
+    /// recovery or 500 damage and 0xDD; into a wall: 0xE8 / 0xE7 or the wall recovery; at the stage limit 0xE8 /
+    /// 0xE7; into the opponent 0xE9 / 0xE7. The sound, camera shake and rumble are not ported.
+    fn blow_away(&mut self, phase: u32) {
+        if phase == ENTER {
+            let air = self.me.is_air_motion(self.env, true);
+            let (timer, anim, bits) = match self.current() {
+                0xD5 => (50, if air { 0xC4 } else { 0xC3 }, 3),
+                0xD6 => (15, if air { 0xC4 } else { 0xC3 }, 6),
+                _ => (32, if air { 0xC7 } else { 0xC6 }, 8),
+            };
+            self.me.work[0] |= bits;
+            let mut timer = timer;
+            if self.env.stage_4_or_27 {
+                timer = (timer as f32 * (1.0 - self.me.health_ratio())) as i32;
+            }
+            self.me.work[2] = timer;
+            self.play(anim, 0.0);
+            self.held(0xE);
+            self.me.pose.fall_speed = 0.0;
+            // Bit 1 also marks a throw (previous action 0xB8 / 0xBA), which BtlAct_GetPrev never reports.
+        }
+        if phase == RUN {
+            let air = self.me.is_air_motion(self.env, false);
+            self.me.anim_advance_loop(0);
+            self.me.work[2] -= 1;
+            if self.me.work[2] < 0 {
+                if self.env.stage_4_or_27 && self.me.is_free() {
+                    self.request(0xE6);
+                } else {
+                    self.request(0xD9);
+                }
+            }
+            if self.me.action_frame > 0 {
+                let back = self.me.is_air_motion(self.env, false);
+                self.me.deflect_at_stage_limit(back);
+            }
+            let speed = match (self.current(), self.env.stage_4_or_27) {
+                (0xD5, _) | (_, true) => kmh(1000.0),
+                _ => kmh(2000.0),
+            };
+            self.step(6, 6, if air { 3 } else { 5 }, speed, 10000.0);
+            self.me.apply_gravity();
+            for f in [0x1B, 0xA, 0x2A] {
+                self.set(f);
+            }
+            self.reaction_flags();
+            self.me.set_fx(0x3B);
+            if self.me.work[0] & 2 != 0 {
+                let pitch = self.me.pose.pitch;
+                self.me.set_lean_x(pitch);
+            }
+            if self.me.work[0] & 4 != 0 {
+                let spin = wrap_angle(self.work_f(0) + deg(48.0));
+                self.set_work_f(0, spin);
+                self.me.set_lean_z(spin);
+            }
+            if self.me.work[0] & 1 != 0 {
+                self.set(0x138);
+            }
+        }
+        if phase == DECIDE {
+            if self.me.is_free() {
+                if self.decide_main(0x1000_0000) != 0 {
+                    let q = self.queued();
+                    self.request(q);
+                }
+                let cost = self.data.tables.params.s32_at(0x48);
+                if !self.flag(0x1E) && self.me.action_frame > 8 && self.me.has_ki(cost) {
+                    self.add_action_bit(0x25);
+                    self.add_action_bit(0x2A);
+                    if self.test(0x28) {
+                        self.set(0x21);
+                    }
+                    if self.test(0x29) {
+                        self.set(0x22);
+                    }
+                }
+                if !self.flag(0x1D) && self.flags2() & 0x40 != 0 {
+                    self.add_action_bit(0xD7);
+                    self.set(0xE7);
+                    if self.me.input.is_pressed(crate::btl_input::ANY_FACE) {
+                        self.me.work[3] += 1;
+                        let need = ((1.0 - self.me.health_ratio()) * 12.0) as i32 + 4;
+                        if self.me.work[3] >= need {
+                            self.request(0xD7);
+                        }
+                    }
+                }
+            }
+            if self.me.is_heading_into_floor(PI * 70.0 / 180.0) {
+                if self.queue_flag21_action() {
+                    let q = self.queued();
+                    self.request(q);
+                } else {
+                    self.me.damage(self.env, self.data, 500, 0);
+                    if self.me.work[0] & 8 != 0 {
+                        self.me.pose.speed = 0.0;
+                    }
+                    self.request(0xDD);
+                }
+            } else if self.me.is_heading_into_wall(PI * 70.0 / 180.0) {
+                if self.me.obj.work.contact_flags & 0x40 != 0 {
+                    self.request(if self.me.is_free() { 0xE8 } else { 0xE7 });
+                } else if self.queue_flag21_action_b() {
+                    let q = self.queued();
+                    self.request(q);
+                } else {
+                    self.me.damage(self.env, self.data, 500, 0);
+                    self.request(0xE7);
+                }
+            } else if self.flag(0x14) {
+                let a = normalize(self.me.pose.pos);
+                let b = normalize(self.me.pose.vel);
+                if a[0] * b[0] + a[1] * b[1] + a[2] * b[2] > 0.7 {
+                    self.request(if self.me.is_free() { 0xE8 } else { 0xE7 });
+                }
+            } else if self.blocked() {
+                let air = self.me.is_air_motion(self.env, false);
+                let ahead = opp_yaw_from_facing(self.me, self.opp).abs() < deg(90.0);
+                if ahead == air {
+                    self.request(if self.me.is_free() { 0xE9 } else { 0xE7 });
+                }
+            }
+        }
+    }
+
+    /// Action 0xD7 (`BtlAct_BlowRecoverHandler`): stops being blown away, motion 0x18D / 0x18E at half the speed,
+    /// braking by 50 km/h a frame while the lean follows the pitch; then 0x19 with up held, else 0xB. The sound is
+    /// not ported.
+    fn blow_recover(&mut self, phase: u32) {
+        if phase == ENTER {
+            let air = self.me.is_air_motion(self.env, false);
+            self.play(if air { 0x18E } else { 0x18D }, 0.15);
+            self.me.pose.speed *= 0.5;
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let air = self.me.is_air_motion(self.env, false);
+            if self.me.anim_advance(0) {
+                self.request(if self.me.input.is_held(0x10) {
+                    0x19
+                } else {
+                    0xB
+                });
+            }
+            self.step(6, 6, if air { 3 } else { 5 }, 0.0, kmh(50.0));
+            self.me.apply_gravity();
+            let t = 1.0 - self.me.anim_progress();
+            let pitch = self.me.pose.pitch;
+            self.me.set_lean_x(pitch * t);
         }
     }
 

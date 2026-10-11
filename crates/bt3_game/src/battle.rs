@@ -2446,6 +2446,62 @@ mod tests {
     }
 
     #[test]
+    fn real_charged_smash_knocks_the_opponent_away() {
+        use crate::btl_input::pad::{SQUARE, START, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..300 {
+            if battle.roster.chars[0].flags.test(0x13) {
+                break;
+            }
+            frame(&mut battle, UP);
+        }
+        for _ in 0..20 {
+            frame(&mut battle, 0);
+        }
+        // Hold the rush button (the smash after six frames), charge, let go.
+        let (mut mine, mut theirs) = (Vec::new(), Vec::new());
+        let health = battle.roster.chars[1].gauge.health;
+        for i in 0..120 {
+            frame(&mut battle, if i < 30 { SQUARE } else { 0 });
+            mine.push(battle.roster.chars[0].act.current);
+            theirs.push(battle.roster.chars[1].act.current);
+        }
+        mine.dedup();
+        theirs.dedup();
+        // The smash (0x4B) blows the defender away (0xD5) into the floor (0xDD), down (0xDB) and lying (0xD8).
+        assert_eq!(mine, [0xB, 0x4B, 0xB], "{mine:x?}");
+        assert_eq!(&theirs[..5], &[0xB, 0xD5, 0xDD, 0xDB, 0xD8], "{theirs:x?}");
+        assert!(battle.roster.chars[1].gauge.health < health);
+    }
+
+    #[test]
     fn real_pause_menu_shows_the_fighters_skill_list() {
         use crate::btl_input::pad::{CROSS, DOWN, RIGHT, START, TRIANGLE};
         let setup = BattleSetup::default();

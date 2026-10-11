@@ -274,7 +274,7 @@ pub(crate) struct Chr {
     pub status: HitStatus,
     /// The attack-charge level (0..1) and its timers.
     pub charge: f32,
-    pub charge_timer: i32,
+    pub charge_timer: f32,
     pub charge_gauge: i32,
     pub charge_full_frames: i32,
     /// `blastCharge`: progress of the charged ki blast's hold motion (0..1).
@@ -391,7 +391,7 @@ impl Chr {
                 contact: 0,
             },
             charge: 0.0,
-            charge_timer: 0,
+            charge_timer: 0.0,
             charge_gauge: 0,
             charge_full_frames: 0,
             blast_charge: 0.0,
@@ -864,6 +864,81 @@ impl Chr {
     /// `BtlMember_HasHealth`.
     pub(crate) fn has_health(&self, amount: i32) -> bool {
         self.gauge.health >= amount
+    }
+
+    /// `BtlMember_GetHealthRatio`.
+    pub(crate) fn health_ratio(&self) -> f32 {
+        if self.gauge.health_max > 0 {
+            self.gauge.health as f32 / self.gauge.health_max as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// `BtlMove_TestContact`: the ground (flag 0xF) and the last stage polygon (flag 0x1F without 0x20), as a
+    /// floor (normal within 45 degrees of straight up, `floor`) or a wall; true when one of the wanted kind is
+    /// there and the direction of travel points into it by more than cos(angle) (-2 pi: any direction).
+    fn test_contact(&self, floor: bool, angle: f32) -> bool {
+        for i in 0..2 {
+            let n = match i {
+                0 if self.flags.test(0xF) => self.pose.ground_nrm,
+                1 if self.flags.test(0x1F) && !self.flags.test(0x20) => self.obj.work.contact_nrm,
+                _ => continue,
+            };
+            let is_floor = n[1] <= -0.707;
+            if is_floor != floor {
+                continue;
+            }
+            if angle == -6.283_185_3 {
+                return true;
+            }
+            let d = -(n[0] * self.pose.dir[0] + n[1] * self.pose.dir[1] + n[2] * self.pose.dir[2]);
+            if angle.cos() < d {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `BtlMove_IsHeadingIntoFloor`.
+    pub(crate) fn is_heading_into_floor(&self, angle: f32) -> bool {
+        self.test_contact(true, angle)
+    }
+
+    /// `BtlMove_IsHeadingIntoWall`.
+    pub(crate) fn is_heading_into_wall(&self, angle: f32) -> bool {
+        self.test_contact(false, angle)
+    }
+
+    /// `BtlMove_DeflectAtStageLimit`: at the side limit (flag 0x14) heads along it (by the turn of the last
+    /// movement, or the reverse with `back`); at the top / bottom (0x15 / 0x16) drops the pitch into it.
+    pub(crate) fn deflect_at_stage_limit(&mut self, back: bool) {
+        let p = &mut self.pose;
+        if self.flags.test(0x14) && 0.0 < (p.pos[0] * p.pos[0] + p.pos[2] * p.pos[2]).sqrt() {
+            let mut a = if 0.0 < p.pos[0] * p.vel[2] - p.pos[2] * p.vel[0] {
+                p.pos[2].atan2(-p.pos[0])
+            } else {
+                (-p.pos[2]).atan2(p.pos[0])
+            };
+            if back {
+                a = wrap_angle(a + PI);
+            }
+            p.yaw = a;
+        }
+        let up = self.flags.test(0x15);
+        let down = self.flags.test(0x16);
+        let p = &mut self.pose;
+        if up && ((back && 0.0 < p.pitch) || (!back && p.pitch < 0.0)) {
+            p.pitch = 0.0;
+        }
+        if down && ((back && p.pitch < 0.0) || (!back && 0.0 < p.pitch)) {
+            p.pitch = 0.0;
+        }
+    }
+
+    /// `BtlMove_SetLeanZ`.
+    pub(crate) fn set_lean_z(&mut self, angle: f32) {
+        self.pose.lean_z = angle;
     }
 
     /// `BtlMember_AddKi`.

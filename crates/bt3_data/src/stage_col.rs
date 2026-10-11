@@ -981,9 +981,10 @@ pub struct PushSphere {
     pub center: [f32; 3],
     pub radius: f32,
     pub bounds: ColBox,
-    /// Some triangle pushed the sphere, and the flags of the last one.
+    /// Some triangle pushed the sphere, and the flags and plane of the last one.
     pub hit: bool,
     pub poly_flags: u32,
+    pub poly_nrm: [f32; 4],
 }
 
 impl PushSphere {
@@ -1045,6 +1046,7 @@ impl ColMesh {
                 Some(point) => {
                     sphere.push(point);
                     sphere.poly_flags = poly.flags;
+                    sphere.poly_nrm = poly.nrm;
                     sphere.hit = true;
                     true
                 }

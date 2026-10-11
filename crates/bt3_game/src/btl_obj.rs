@@ -197,6 +197,9 @@ pub(crate) struct Work {
     /// `hitFlags`: bit 0x18 + n my strike touched object n, bit 0x1C + n object n's strike touched me; the low
     /// bits are the stage contact word.
     pub hit_flags: u32,
+    /// `contact`: the flags and plane of the polygon the body sphere was last pushed out of.
+    pub contact_flags: u32,
+    pub contact_nrm: [f32; 4],
     /// The ground under the fighter (`work->ground`).
     pub ground: Option<bt3_data::stage_col::Ground>,
     pub ground_pos: [f32; 3],

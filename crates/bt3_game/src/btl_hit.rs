@@ -15,10 +15,13 @@ use crate::btl_chr::{Chr, Env, SideData, kmh, opp_yaw, opp_yaw_from_facing};
 use crate::btl_input::wrap_angle;
 use crate::btl_obj::body_hit_test;
 
+/// `BTL_ATK_CHARGE_MID` / `BTL_ATK_CHARGE_FULL`: the weak / medium / full tiers of a charged attack.
+const CHARGE_MID: f32 = 0.3;
+const CHARGE_FULL: f32 = 0.99;
+
 /// `BtlAtk_GetId`: the attack record the fighter's current action / motion uses, -1 when it is not attacking.
-/// The attack actions 0x70.. take theirs from the roster's table; the other cases are the original's, of which
-/// only the rush steps can be reached so far.
-pub(crate) fn attack_id(me: &Chr, env: &Env) -> i32 {
+/// The attack actions 0x70.. take theirs from the roster's table; then by action, then by motion, as the original.
+pub(crate) fn attack_id(me: &Chr, data: &SideData, env: &Env) -> i32 {
     let action = me.act.current;
     if (0x70..0x70 + 0x3E).contains(&action) {
         return env
@@ -27,6 +30,72 @@ pub(crate) fn attack_id(me: &Chr, env: &Env) -> i32 {
             .get((action - 0x70) as usize)
             .map_or(-1, |row| i32::from(row[3]));
     }
+    let charge = me.charge;
+    let tier = |a: i32, b: i32, c: i32| {
+        if charge < CHARGE_MID {
+            a
+        } else if charge < CHARGE_FULL {
+            b
+        } else {
+            c
+        }
+    };
+    let alt = me.dash_count != 0;
+    let frame = me.obj.frame;
+    let last = me.obj.query_event(&data.obj, 1, 0, 2) as f32;
+    match action {
+        0x46 => {
+            return match me.anim.cur {
+                0x3C => 0x4E,
+                0x3D => 0x4F,
+                0x3E => 0x50,
+                0x3F => 0x51,
+                0x40 => 0x52,
+                _ => -1,
+            };
+        }
+        0xB4 | 0xB5 | 0xB7 | 0xBB => return 0x55,
+        0xB6 | 0xB9 => return 0x56,
+        0x60 => return tier(0xB, 0xC, 0xD),
+        0x5A => return 0x43,
+        0x5B => return 0x44,
+        0x5C => return 0x45,
+        0x5D => return 0x46,
+        0x6B => return if alt { 0x3E } else { 0x34 },
+        0x6C => return if alt { 0x3F } else { 0x35 },
+        0x6D => return if alt { 0x40 } else { 0x36 },
+        0x6E => return if alt { 0x41 } else { 0x37 },
+        0x6F => return if alt { 0x42 } else { 0x38 },
+        0x64 => return tier(0x59, 0x5B, 0x5D),
+        0x65 => return tier(0x5A, 0x5C, 0x5E),
+        0x61 => return tier(0x2E, 0x2F, 0x30),
+        0x62 => return tier(0x31, 0x32, 0x33),
+        0x37 | 0x42 => return 0x66,
+        0x4F => return 0x67,
+        0x50 => return 0x68,
+        0x4D => return 0x69,
+        0x4E => return 0x6A,
+        0x51 | 0x52 => return 0x6B,
+        _ => {}
+    }
+    // The smash's release motion: the instant (flag 0x84) record, else by charge.
+    let smash = |instant: i32, a: i32, b: i32, c: i32| {
+        if me.flags.test(0x84) {
+            instant
+        } else {
+            tier(a, b, c)
+        }
+    };
+    let charged = |alt_id: i32, low: i32, full: i32| {
+        if alt {
+            alt_id
+        } else if charge < CHARGE_FULL {
+            low
+        } else {
+            full
+        }
+    };
+    let two = |early: i32, late: i32| if frame < last { early } else { late };
     match me.anim.cur {
         0x37 => {
             // The first rush hit is record 1 when its motion has a second window that has begun.
@@ -38,13 +107,55 @@ pub(crate) fn attack_id(me: &Chr, env: &Env) -> i32 {
             }
         }
         0x38..=0x40 => me.anim.cur - 0x36,
+        0x93 => two(0x11, 0x12),
+        0x58 => smash(0x67, 0x13, 0x18, 0x1D),
+        0x5B => smash(0x68, 0x14, 0x19, 0x1E),
+        0x52 => smash(0x69, 0x15, 0x1A, 0x1F),
+        0x55 => smash(0x6A, 0x16, 0x1B, 0x20),
+        0x4C | 0x4F => smash(0x6B, 0x17, 0x1C, 0x21),
+        0x67 => charged(0x3E, 0x34, 0x39),
+        0x6A => charged(0x3F, 0x35, 0x3A),
+        0x61 => charged(0x40, 0x36, 0x3B),
+        0x64 => charged(0x41, 0x37, 0x3C),
+        0x5E => charged(0x42, 0x38, 0x3D),
+        0x43 => tier(0x48, 0x49, 0x4A),
+        0x46 => tier(0x4B, 0x4C, 0x4D),
+        0x6D => {
+            if charge < CHARGE_MID {
+                two(0x22, 0x23)
+            } else if charge < CHARGE_FULL {
+                two(0x24, 0x25)
+            } else {
+                two(0x26, 0x27)
+            }
+        }
+        0x70 => {
+            if charge < CHARGE_MID {
+                two(0x28, 0x29)
+            } else if charge < CHARGE_FULL {
+                two(0x2A, 0x2B)
+            } else {
+                two(0x2C, 0x2D)
+            }
+        }
+        0xF8 => 0x57,
+        0x19B => {
+            let h = &me.obj.hit;
+            if h.index == 0 {
+                tier(0x7E, 0x81, 0x84)
+            } else if h.index < h.count - 1 {
+                tier(0x7F, 0x82, 0x85)
+            } else {
+                tier(0x80, 0x83, 0x86)
+            }
+        }
         _ => -1,
     }
 }
 
 /// `BtlAtk_GetRecord`: ids outside 0..0xA2 give record 0.
 fn record<'a>(me: &Chr, data: &'a SideData, env: &Env) -> (&'a AttackRecord, usize) {
-    let id = attack_id(me, env);
+    let id = attack_id(me, data, env);
     let n = if (0..ATTACK_COUNT as i32).contains(&id) {
         id as usize
     } else {
@@ -233,7 +344,7 @@ impl Pair<'_, '_> {
         let (env, frame) = (self.env, self.frame);
         let (data, opp_data) = (self.data[a], self.data[a ^ 1]);
         let (me, opp) = split(self.chars, a);
-        if me.flags.test(0x60) || attack_id(me, env) == -1 {
+        if me.flags.test(0x60) || attack_id(me, data, env) == -1 {
             return;
         }
         if me.obj.work.hit_flags & 0xF00_0000 != 0 || me.flags.test(0x65) {
@@ -241,7 +352,7 @@ impl Pair<'_, '_> {
             let ok = opp_yaw_from_facing(me, opp).abs() < 1.570_796_3 || flags & 8 != 0;
             if ok {
                 me.flags.set_held(0x60);
-                if is_void(me, opp, env)
+                if is_void(me, data, opp, env)
                     || check_dodge(me, opp, data, env, frame)
                     || check_armor(me, opp, data, env)
                     || check_repel(me, opp)
@@ -561,11 +672,11 @@ fn check_touch(a: &mut Chr, b: &Chr, data: &SideData, opp_data: &SideData) {
 }
 
 /// `BtlHit_IsVoid`: attacker flag 0xBA, defender flag 0x42 (0x43 for a throw), a grab from behind.
-fn is_void(atk: &Chr, def: &Chr, env: &Env) -> bool {
+fn is_void(atk: &Chr, data: &SideData, def: &Chr, env: &Env) -> bool {
     if atk.flags.test(0xBA) {
         return true;
     }
-    let id = attack_id(atk, env);
+    let id = attack_id(atk, data, env);
     if def.flags.test(if id == 0x55 { 0x43 } else { 0x42 }) {
         return true;
     }
@@ -681,7 +792,7 @@ fn check_guard(atk: &mut Chr, def: &mut Chr, data: &SideData, env: &Env) -> Opti
     if is_from_behind(atk, def) {
         return None;
     }
-    if def.flags.test(0x40) && (attack_id(atk, env) as u32) < 0xB {
+    if def.flags.test(0x40) && (attack_id(atk, data, env) as u32) < 0xB {
         apply_guard(atk, def, &rec, 1);
         return Some(true);
     }

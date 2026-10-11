@@ -436,6 +436,7 @@ fn update_fighter_stage(me: &mut Chr, data: &SideData, env: &Env, keep_sphere: b
         bounds: ColBox::from_center_half(start.0, [0.0; 3]),
         hit: false,
         poly_flags: 0,
+        poly_nrm: [0.0; 4],
     };
     // StgCol_MoveFighter: the zone is looked up again every step when the fighter changed zones.
     let cross = zone != area;
@@ -451,6 +452,8 @@ fn update_fighter_stage(me: &mut Chr, data: &SideData, env: &Env, keep_sphere: b
     }
     if sphere.hit {
         me.obj.work.hit_flags |= 0x20;
+        me.obj.work.contact_flags = sphere.poly_flags;
+        me.obj.work.contact_nrm = sphere.poly_nrm;
         let cur_center = me.obj.body.sphere[me.obj.body.cur].0;
         let push = sub(cur_center, sphere.center);
         me.obj.body.push = push;
