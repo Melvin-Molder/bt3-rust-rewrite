@@ -14,6 +14,7 @@ use crate::btl_chr::{
     Chr, Env, SideData, apply_orbit, cam_update_input, clamp_to_stage, length, push_out, scale3,
     sub, update_lock_on,
 };
+use crate::btl_clash::{Clash, place_on_path};
 use crate::btl_hit::Pair;
 use crate::btl_input::PadState;
 use crate::btl_obj::DEFAULT_STEP;
@@ -29,6 +30,8 @@ pub(crate) struct Roster {
     pub rand: u32,
     /// The ki blasts of the effect scene and its record list.
     pub scene: Scene,
+    /// The clash sequences (`clashState`, `clashB`, `clashC`).
+    pub clash: Clash,
     cpu: [bool; 2],
 }
 
@@ -44,6 +47,7 @@ impl Roster {
             started: false,
             rand: 0,
             scene: Scene::default(),
+            clash: Clash::default(),
             cpu,
         }
     }
@@ -52,9 +56,11 @@ impl Roster {
     fn reset_all(&mut self, data: [&SideData; 2], env: &Env) {
         let started = self.started;
         let scene = std::mem::take(&mut self.scene);
+        let clash = self.clash;
         *self = Self::new(data, env, self.cpu);
         self.started = started;
         self.scene = scene;
+        self.clash = clash;
     }
 
     /// `BtlChars_CheckStart`: the first frame the sequence is in Ready or Fight resets the roster (not in mode 1).
@@ -160,6 +166,7 @@ impl Roster {
     pub(crate) fn update_main(&mut self, data: [&SideData; 2], env: &Env) {
         let frame = self.frame;
         let blasts = &self.scene.records;
+        let clash = &self.clash.c;
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
             if me.is_frozen() {
@@ -177,10 +184,12 @@ impl Roster {
                 frame,
                 time_stopped: env.gate.time_stopped,
                 blasts,
+                clash,
             }
             .update();
             me.anim_apply_blend();
-            // The seven placement requests (flags 0xF3..0xFD) come from actions not ported.
+            // Of the seven placement requests (flags 0xF3..0xFD) only the stage path's comes from a ported action.
+            place_on_path(me, data[i], env, clash);
             me.pose_to_obj(true);
             me.obj.sample_pose(&data[i].obj);
             me.obj.update_events(&data[i].obj);
@@ -269,6 +278,8 @@ impl Roster {
                 chr.flags.set_stage(10);
             }
         }
+        self.clash
+            .update(&mut self.chars, env, &mut self.rand, self.frame);
     }
 
     /// `BtlChars_UpdateHold`: a held fighter (flag 0x97) and its holder (0x8B) are moved so that the holder's node

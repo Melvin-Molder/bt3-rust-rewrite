@@ -20,6 +20,18 @@ pub struct StageResource {
     /// flip): the direction `BtlObj_UpdateAll` gives the battle objects' light every frame. `None` when the
     /// stage has no light.
     pub light_dir: Option<[f32; 3]>,
+    /// The stage paths (`StgPathTable`, file word 0x18; `BtlStage_GetPath`): the clash C exchanges are placed on
+    /// them and its camera looks along them.
+    pub paths: Vec<StagePath>,
+}
+
+/// `StgPath`: points `first .. end` are the usable ones; each point is 12 floats (x, y, z, ?, then the angles at
+/// 4 / 5 the clash camera looks along).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StagePath {
+    pub end: i32,
+    pub first: i32,
+    pub points: Vec<[f32; 12]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,6 +103,8 @@ impl StageResource {
             Some(read_game_position(bytes, light + 0x10)?)
         };
 
+        let paths = parse_paths(bytes)?;
+
         Ok(Self {
             stage_id,
             flags,
@@ -101,8 +115,39 @@ impl StageResource {
             starting_placements,
             alternate_starting_placements,
             light_dir,
+            paths,
         })
     }
+}
+
+/// `BtlStage_BindPaths` / `StgPathTable_Relocate`: the table at file word 0x18 (offsets from the table); none
+/// when the word is 0. A path keeps its points up to `end` (at least the first, which the camera reads).
+fn parse_paths(bytes: &[u8]) -> io::Result<Vec<StagePath>> {
+    let table = align_word(read_u32(bytes, 0x60)?)?;
+    if table == 0 {
+        return Ok(Vec::new());
+    }
+    let count = read_count(bytes, table + 8, "stage path")?;
+    let list = table + align_word(read_u32(bytes, table + 0xC)?)?;
+    let mut paths = Vec::new();
+    for i in 0..count {
+        let rec = list + i * 0x10;
+        let end = read_i32(bytes, rec)?;
+        let points_at = table + align_word(read_u32(bytes, rec + 4)?)?;
+        let first = read_i32(bytes, rec + 8)?;
+        let n = usize::try_from(end.max(1)).unwrap_or(1);
+        let mut points = Vec::new();
+        for k in 0..n {
+            let p = points_at + k * 0x30;
+            let mut point = [0.0; 12];
+            for (j, v) in point.iter_mut().enumerate() {
+                *v = read_f32(bytes, p + j * 4)?;
+            }
+            points.push(point);
+        }
+        paths.push(StagePath { end, first, points });
+    }
+    Ok(paths)
 }
 
 fn parse_placements(

@@ -2825,6 +2825,78 @@ mod tests {
     }
 
     #[test]
+    fn real_homing_dashes_clash_and_the_faster_masher_wins() {
+        use crate::btl_input::pad::{CROSS, L2, START, UP};
+        // Both fighters homing dash (L2 + Cross) into each other: clash B (both in 0xFA). The side that taps a
+        // direction counts more and wins (0x175); the other loses (0x176), takes damage and is blown away (0xD5).
+        for masher in 0..2 {
+            let mut setup = BattleSetup::default();
+            setup.sides[1].chara = 1;
+            setup.sides[1].pad = 1;
+            let Some(mut battle) = real_battle(&setup) else {
+                return;
+            };
+            let mut libc = LibcRandom::new(1);
+            let mut random = GameRandom::from_key(&[1]);
+            let pads = |a: u32, b: u32| {
+                [
+                    PadState {
+                        held: a,
+                        ..PadState::default()
+                    },
+                    PadState {
+                        held: b,
+                        ..PadState::default()
+                    },
+                ]
+            };
+            let mut frame = |battle: &mut Battle, a: u32, b: u32| {
+                let start = a & START != 0 && battle.prev_held[0] & START == 0;
+                battle.run_frame(start, pads(a, b), 0, &mut libc, &mut random, None, false);
+            };
+            for i in 0..200 {
+                let skip =
+                    battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+                frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 }, 0);
+                if battle.seq.state == SeqState::Fight {
+                    break;
+                }
+            }
+            for _ in 0..20 {
+                frame(&mut battle, 0, 0);
+            }
+            let health = [0, 1].map(|i| battle.roster.chars[i].gauge.health);
+            let mut acts = [Vec::new(), Vec::new()];
+            let mut states = Vec::new();
+            for i in 0..140 {
+                let dash = if i < 2 { CROSS | L2 } else { 0 };
+                let tap = if i > 10 && i % 4 == 0 { UP } else { 0 };
+                let (a, b) = if masher == 0 {
+                    (dash | tap, dash)
+                } else {
+                    (dash, dash | tap)
+                };
+                frame(&mut battle, a, b);
+                for (k, v) in acts.iter_mut().enumerate() {
+                    v.push((
+                        battle.roster.chars[k].act.current,
+                        battle.roster.chars[k].anim.cur,
+                    ));
+                }
+                states.push(battle.roster.clash.state);
+            }
+            states.dedup();
+            assert_eq!(&states[..4], &[0, 7, 8, 0], "{states:?}");
+            let (w, l) = (masher, masher ^ 1);
+            assert!(acts[w].contains(&(0xFA, 0x175)), "{:x?}", acts[w]);
+            assert!(acts[l].contains(&(0xFA, 0x176)), "{:x?}", acts[l]);
+            assert!(acts[l].iter().any(|a| a.0 == 0xD5), "{:x?}", acts[l]);
+            assert!(battle.roster.chars[l].gauge.health < health[l]);
+            assert_eq!(battle.roster.chars[w].gauge.health, health[w]);
+        }
+    }
+
+    #[test]
     fn real_charged_smash_knocks_the_opponent_away() {
         use crate::btl_input::pad::{SQUARE, START, UP};
         let mut setup = BattleSetup::default();

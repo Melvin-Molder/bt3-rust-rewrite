@@ -22,6 +22,7 @@ use crate::btl_chr::{
     opp_yaw_from_its_facing, scale_speed_by_approach, scale3, snap_to_opponent, steer_at_opponent,
     sub, warp_ahead_of_opponent, warp_behind_opponent,
 };
+use crate::btl_clash::{ClashC, count_and_mark};
 use crate::btl_input::{DIR_MASK, wrap_angle};
 use crate::btl_obj::{mask_to_node, node_side};
 
@@ -53,13 +54,15 @@ pub(crate) struct Ctx<'a, 'd> {
     pub time_stopped: bool,
     /// The effect scene's ki blast records of the last frame (`EftHit_GetList`).
     pub blasts: &'a [HitRec],
+    /// The clash C block (`gBtlChars->clashC`).
+    pub clash: &'a ClashC,
 }
 
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9)
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xFA..=0xFC)
 }
 
 impl Ctx<'_, '_> {
@@ -796,6 +799,9 @@ impl Ctx<'_, '_> {
             0xE6 => self.recover(phase),
             0xE7 => self.wall_slam(phase),
             0xE8 | 0xE9 => self.wall_recover(phase),
+            0xFA => self.clash_blows(phase),
+            0xFB => self.clash_vanish(phase),
+            0xFC => self.clash_exchange(phase),
             _ => {}
         }
     }
@@ -5919,6 +5925,220 @@ impl Ctx<'_, '_> {
         }
     }
 
+    // ---- the clashes (btl_act_2.c) -----------------------------------------------------------------------------
+
+    /// Action 0xFA (`BtlAct_ClashBlowsHandler`, forced by flag 0x61): clash B, trading blows (motion 0x173 / 0x174
+    /// by player) while spinning round the opponent; every direction input counts, and one in four frames counts by
+    /// itself (abilities 0x12..0x14 and 0x68..0x6A are not ported; the technique bonus needs `BtlAct_GetPrev`, which
+    /// is never a technique). Won (flag 0xBF) motion 0x175 then 0xB, lost (0xC0) 0x176 with the damage of the
+    /// winner's count, then blown away. The vibration is not ported.
+    fn clash_blows(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(if self.me.player == 0 { 0x173 } else { 0x174 }, 0.15);
+            self.me.clash_count_b = 0;
+            self.me.flags.clear_range(0xBF, 0xC3);
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0x173 | 0x174 => {
+                    self.me.anim_advance_loop(0);
+                    self.set(0xE6);
+                    self.set(0xED);
+                    if self.test(0x33) || self.me.action_frame % 4 == 0 {
+                        count_and_mark(self.me, self.opp);
+                    }
+                    self.me.combo.timer = 30;
+                    if self.flag(0xBF) {
+                        self.request_anim(0x175, 0.15);
+                        count_and_mark(self.me, self.opp);
+                        self.me.combo.timer = 0;
+                    }
+                    if self.flag(0xC0) {
+                        self.request_anim(0x176, 0.15);
+                    }
+                }
+                0x175 => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                }
+                0x176 => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xD5);
+                    }
+                    if self.me.anim_passed_ratio(0.5) {
+                        let dmg = self.opp.clash_count_b * 60;
+                        self.me.damage(self.env, self.data, dmg, 8);
+                    }
+                    self.set(0x95);
+                    self.set(0x96);
+                }
+                _ => {}
+            }
+            steer_at_opponent(
+                self.me,
+                self.opp,
+                self.data,
+                self.opp_data,
+                kmh(100.0),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                PI / 4.0,
+            );
+            self.me.turn_model_yaw(deg(36.0), 0.3);
+            self.me.pose.yaw = wrap_angle(self.me.pose.yaw + 0.5);
+            self.me.set_direction(3);
+            self.me.advance(kmh(100.0), 10000.0);
+            self.me.apply_gravity();
+            for f in [
+                0xBB, 0x128, 0xD2, 0x134, 0xEE, 0x13B, 0x42, 0x43, 0x44, 0x45, 0x46,
+            ] {
+                self.set(f);
+            }
+        }
+        if phase == LEAVE {
+            self.me.clash_count_b = 0;
+            self.me.flags.clear_range(0xBF, 0xC3);
+        }
+    }
+
+    /// Action 0xFB (`BtlAct_ClashVanishHandler`, forced by flag 0x62): the start of clash C, vanishing (motion
+    /// 0xF6), then the exchange 0xFC seven frames after the motion ends. The sound is not ported.
+    fn clash_vanish(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xF6, 0.1);
+            self.me.clash_count_b = 0;
+            self.me.set_fx(0xC);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.set(0xB);
+                self.me.work[2] += 1;
+                if self.me.work[2] >= 7 {
+                    self.request(0xFC);
+                }
+            }
+            self.step(2, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            for f in [0xBB, 0x128, 0x42, 0x43, 0x44, 0x45, 0x46] {
+                self.set(f);
+            }
+        }
+    }
+
+    /// Action 0xFC (`BtlAct_ClashExchangeHandler`): one exchange of clash C, placed on the clash's stage path
+    /// (flag 0xF8). After a wait by the clash level the fighter strikes at 2000 km/h (motion 0x4C: the exchange
+    /// counter that would turn it to 0x3B / 0x4F / 0x40 is reset on every entry, `BtlAct_GetPrev` never being
+    /// 0xFC); the frame the asked button is pressed is the answer (-2 for a wrong one). The sequence answers with
+    /// 0xC5 (again), 0xC6 (over), 0xC7 (won: 0x175) and 0xC8 (lost: 0x176, damage by the winner's count). The
+    /// sounds and the vibration are not ported.
+    fn clash_exchange(&mut self, phase: u32) {
+        let c = *self.clash;
+        if phase == ENTER {
+            self.play(0x4C, 0.15);
+            // BtlAnim_EnableHandle: the motion's root translation zeroed.
+            self.me.obj.zero_root(&self.data.obj);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.held(0xE);
+            self.set(0xF8);
+            self.me.clash_answer_frame = -1;
+        }
+        if phase == RUN {
+            let (duration, wait) = match c.level {
+                0 => (0.5, 18),
+                2 => (0.3, 12),
+                _ => (0.4, 15),
+            };
+            let mut speed = 0.0;
+            match self.anim_id() {
+                0x3B | 0x40 | 0x4C | 0x4F => {
+                    if self.me.work[2] < wait {
+                        self.me.work[2] += 1;
+                        self.set(0xB);
+                    } else {
+                        self.me.anim_set_duration(duration);
+                        self.me.anim_advance(0);
+                        if self.me.anim_progress() < 0.1 {
+                            self.set(0xB);
+                        } else {
+                            speed = kmh(2000.0);
+                        }
+                        if self.me.anim_passed_ratio(0.1) {
+                            self.me.set_fx(0xC);
+                            if self.me.player == 0 {
+                                self.me.set_fx(0x2D);
+                            }
+                        }
+                        if self.me.anim_progress() > 0.7 {
+                            self.set(0xB);
+                            self.set(0xC4);
+                        }
+                    }
+                    if self.me.action_frame > 0 {
+                        self.set((c.pick + 0xE9) as u32);
+                        if self.me.clash_answer_frame == -1 && self.me.input.is_pressed(0x7800_0000)
+                        {
+                            if self.me.input.is_pressed(0x800_0000 << c.pick) {
+                                self.me.clash_answer_frame = self.me.action_frame;
+                            } else if c.prev_pick < 0
+                                || !self.me.input.is_pressed(0x800_0000 << c.prev_pick)
+                            {
+                                self.me.clash_answer_frame = -2;
+                            }
+                        }
+                    }
+                    self.set(0x18);
+                    self.me.combo.timer = 30;
+                }
+                0x175 => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                }
+                0x176 => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xD5);
+                    }
+                    if self.me.anim_passed_ratio(0.5) {
+                        let dmg = self.opp.clash_count_b * 600;
+                        self.me.damage(self.env, self.data, dmg, 8);
+                    }
+                    self.set(0x95);
+                    self.set(0x96);
+                }
+                _ => {}
+            }
+            self.step(2, 5, 2, speed, 10000.0);
+            self.me.apply_gravity();
+            for f in [0xBB, 0x128, 0x134, 0xEE, 0x42, 0x43, 0x44, 0x45, 0x46, 0x91] {
+                self.set(f);
+            }
+        }
+        if phase == DECIDE {
+            if self.flag(0xC5) {
+                self.request(0xFC);
+            }
+            if self.flag(0xC6) {
+                self.request(0xB);
+            }
+            if self.flag(0xC7) {
+                self.request_anim(0x175, 0.0);
+                self.me.combo.timer = 0;
+            }
+            if self.flag(0xC8) {
+                self.request_anim(0x176, 0.0);
+            }
+        }
+        if phase == LEAVE && self.requested() != 0xFC {
+            self.me.clash_count_b = 0;
+        }
+    }
+
     // ---- the reactions a smash gives (btl_act_1.c) ---------------------------------------------------------------
 
     /// `BtlActB_UpdateMashRate`: each press of an action button (`ANY_FACE`) adds to the motion's step, kept in
@@ -8083,7 +8303,7 @@ mod tests {
         ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [0xEC, 0xFA, 0xF6] {
+        for id in [0xEC, 0xFD, 0xF6] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

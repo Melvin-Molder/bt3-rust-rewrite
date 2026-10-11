@@ -402,6 +402,18 @@ impl Obj {
         self.borrowed = Some(m);
     }
 
+    /// `BtlAnim_EnableHandle` (`BtlObjAnim_ZeroRootAxes(handle, 1, 1, 1)`): layer 0's motion, as this object
+    /// plays it, without the root's translation.
+    pub(crate) fn zero_root(&mut self, data: &ObjData) {
+        let Some(m) = layer_motion(&self.layers[0], self.borrowed.as_ref(), data) else {
+            return;
+        };
+        let mut m = m.clone();
+        m.apply_table_flags(0x4000_0000);
+        self.layers[0].borrowed = true;
+        self.borrowed = Some(m);
+    }
+
     /// The yaw of the first key of layer 0's root rotation track (`BtlActThrow_TurnByRootYaw`); `None` without one.
     pub(crate) fn root_key_yaw(&self, data: &ObjData) -> Option<f32> {
         let m = layer_motion(&self.layers[0], self.borrowed.as_ref(), data)?;

@@ -216,6 +216,11 @@ impl SideData<'_> {
         self.obj.model.header.size[0]
     }
 
+    /// `BtlCharApi_GetCenterHeight`: the model header's size[2], what a placement adds to a path point's y.
+    pub(crate) fn center_height(&self) -> f32 {
+        self.obj.model.header.size[2]
+    }
+
     /// `BtlCharApi_GetRadius`: the parameter's +0xC when positive, else the body data's base radius * 1.8.
     pub(crate) fn radius(&self) -> f32 {
         let r = self.tables.params.f32_at(0xC);
@@ -357,6 +362,10 @@ pub(crate) struct Chr {
     pub search_range: f32,
     /// The damage queued against the opponent (`queue`).
     pub queue: DamageQueue,
+    /// `clashCountB`: the inputs counted in clashes B and C.
+    pub clash_count_b: i32,
+    /// `clashAnswerFrame`: the clash C answer, -1 none yet, -2 a wrong button, else the frame it came.
+    pub clash_answer_frame: i32,
     /// `boostStock` (0..10): raised by the throws of character 0x6E.
     pub boost_stock: i32,
     /// `burstNode`: the node the finisher 0x66's burst effect follows.
@@ -480,6 +489,8 @@ impl Chr {
             search_angle: 0.0,
             search_range: 0.0,
             queue: DamageQueue::default(),
+            clash_count_b: 0,
+            clash_answer_frame: 0,
             boost_stock: 0,
             burst_node: 0,
             next_attack: Attack::default(),
