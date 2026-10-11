@@ -15,6 +15,9 @@ mod char_select;
 mod dialog;
 mod draw;
 mod duel_menu;
+mod eft;
+mod eft_ptcl;
+mod eft_ribbon;
 mod fade;
 mod flash;
 mod font;
@@ -172,6 +175,9 @@ struct Game {
     /// The stage texture file and this frame's stage triangles.
     stage_textures: Vec<RgbaTexture>,
     stage_batches: Vec<stage_draw::StageBatch>,
+    /// The fighters' effect textures and this frame's effect triangles in draw order.
+    effect_textures: Vec<RgbaTexture>,
+    effects: Vec<eft::EffectTri>,
     /// The HUD sheets of the battle and this frame's HUD sprites.
     hud_textures: Vec<RgbaTexture>,
     hud_prims: Vec<hud::HudPrim>,
@@ -365,6 +371,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model_batches: Vec::new(),
             stage_textures: Vec::new(),
             stage_batches: Vec::new(),
+            effect_textures: Vec::new(),
+            effects: Vec::new(),
             hud_textures: Vec::new(),
             hud_prims: Vec::new(),
             hud_layer: None,
@@ -415,6 +423,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_quads,
                 model_draw::sync_models,
                 model_draw::sync_stage,
+                model_draw::sync_effects,
                 model_draw::sync_hud,
                 model_draw::sync_frame_buffers,
                 apply_volumes,
@@ -889,6 +898,7 @@ fn run_frames(
                 );
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
+                game.effects = frame.effects;
                 // The menu texts, then the screen fade over everything.
                 let mut quads = Vec::new();
                 game.font.flush(&mut quads);
@@ -931,6 +941,7 @@ fn leave_battle(
     stop_all(game, commands);
     game.model_batches.clear();
     game.stage_batches.clear();
+    game.effects.clear();
     game.hud_prims.clear();
     game.hud_layer = None;
     game.xfade_alpha = 0;
@@ -982,6 +993,7 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
     });
     game.model_batches.clear();
     game.stage_batches.clear();
+    game.effects.clear();
     game.hud_prims.clear();
     game.hud_layer = None;
     game.scene = Scene::BattleLoad(Box::new(BattleLoad {
@@ -1015,6 +1027,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     };
     game.model_textures = (assets.base_textures.clone(), assets.shade_textures.clone());
     game.stage_textures = assets.stage_textures.clone();
+    game.effect_textures = assets.effect_textures.clone();
     game.hud_textures = assets.hud_textures.clone();
     game.hud_clamp_from = assets.menu_sheet.base;
     game.scene = Scene::Battle(Box::new(battle::Battle::new(assets)));

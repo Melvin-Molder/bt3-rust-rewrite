@@ -7,7 +7,8 @@
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
-use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables, EffectPack};
+use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables};
+use bt3_data::eft_pack::EffectPack;
 use bt3_data::stage::StageResource;
 use bt3_data::stage_col::StageCollision;
 
@@ -154,7 +155,9 @@ pub(crate) struct SideData<'a> {
     pub obj: ObjData<'a>,
     pub tables: &'a CharaTables,
     pub entry: CharaEntry,
-    pub effect: Option<EffectPack>,
+    pub effect: Option<&'a EffectPack>,
+    /// The decoded textures and sprite packs of the two blast lists' emitter sets.
+    pub blast_assets: [Option<&'a crate::eft::SetAssets>; 2],
 }
 
 impl SideData<'_> {

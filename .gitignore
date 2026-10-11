@@ -3,6 +3,7 @@
 !/Cargo.toml
 !/Cargo.lock
 !/README.md
+!/AGENTS.md
 !/bt3-format-research.md
 !/crates/
 /crates/*
@@ -56,8 +57,13 @@
 !/crates/bt3_game/src/save.rs
 !/crates/bt3_game/src/battle.rs
 !/crates/bt3_game/src/btl_blast.rs
+!/crates/bt3_game/src/eft.rs
+!/crates/bt3_game/src/eft_ptcl.rs
+!/crates/bt3_game/src/eft_ribbon.rs
+!/crates/bt3_data/src/eft_pack.rs
 !/crates/bt3_game/src/model_draw.rs
 !/crates/bt3_game/src/gs_model.wgsl
+!/crates/bt3_game/src/gs_effect.wgsl
 !/crates/bt3_game/src/stage_draw.rs
 !/crates/bt3_game/src/gs_stage.wgsl
 !/crates/bt3_game/src/battle_seq.rs

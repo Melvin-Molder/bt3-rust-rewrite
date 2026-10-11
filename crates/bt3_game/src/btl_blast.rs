@@ -15,13 +15,16 @@
 
 use std::f32::consts::PI;
 
-use bt3_data::chara_data::{EmitSetHead, KiBlastRecord};
+use bt3_data::chara_data::KiBlastRecord;
+use bt3_data::eft_pack::EmitSet;
 use bt3_data::stage_col::{ColBox, ColPoly, POLY_NO_SOLID};
 
 use crate::btl_chr::{Chr, Env, SideData, add, dot, kmh, length, opp_delta, scale3, sub};
 use crate::btl_hit::{guard_kind, raise_first_clash};
 use crate::btl_input::wrap_angle;
 use crate::btl_obj::mask_to_node;
+use crate::eft::{EmitState, FxWorld, Modules, Nodes, SetRef, SpawnCtx, spawn};
+use crate::rng::LibcRandom;
 
 /// `EFT_HIT_MAX`.
 const HIT_MAX: usize = 64;
@@ -157,6 +160,12 @@ struct Task {
     trail_width: f32,
     end_timer: f32,
     end_frames: f32,
+    /// The blast list (kind 1 or 2) whose emitter set draws it.
+    list: usize,
+    /// The emitter set's instance state, its node slots and the phases happening this frame (`mask`).
+    state: EmitState,
+    nodes: Nodes,
+    mask: u32,
 }
 
 /// The ki blast part of the effect scene: per fighter the kind 1 and kind 2 lists, and this frame's records.
@@ -166,6 +175,8 @@ pub(crate) struct Scene {
     next_id: u32,
     /// `gEftHitList`: emptied by `BtlScene_Update`, read until the next one.
     pub records: Vec<HitRec>,
+    /// The particle modules the blasts' emitters start.
+    pub fx: Modules,
 }
 
 /// What a scene pass needs of the battle.
@@ -177,6 +188,8 @@ pub(crate) struct World<'a, 'd> {
     pub rand: &'a mut u32,
     /// `BtlChars_IsTimeStopped`.
     pub time_stopped: bool,
+    /// libc `rand()` (the effects' random numbers).
+    pub libc: &'a mut LibcRandom,
 }
 
 // ---- vectors ------------------------------------------------------------------------------------------------------
@@ -367,15 +380,15 @@ fn has_type(data: &SideData, t: i8) -> bool {
 
 /// The set header of the fighter's kind 1 / 2 list, `None` when the fighter has no such list of ki blasts
 /// (`EftChar_Init`: pack bit `kind`, replaced by the ki object / ki bomb managers).
-fn list_head(data: &SideData, list: usize) -> Option<EmitSetHead> {
-    let pack = data.effect.as_ref()?;
+fn list_head<'a>(data: &SideData<'a>, list: usize) -> Option<&'a EmitSet> {
+    let pack = data.effect?;
     if pack.kind_bits & (1 << (list + 1)) == 0 {
         return None;
     }
     if (list == 0 && has_type(data, 2)) || (list == 1 && has_type(data, 3)) {
         return None;
     }
-    pack.blast_sets[list]
+    pack.blast_sets[list].as_ref()
 }
 
 /// `BtlObj_GetNodeSide`.
@@ -497,7 +510,7 @@ impl Scene {
         if arg.kind_type != 0 {
             flags |= W_TYPED;
         }
-        if head.flags & 4 != 0 {
+        if head.head.flags & 4 != 0 {
             // EftEmit_GetWidth2 reads the state before EftEmit_InitState: 0.
             arg.speed = 0.0;
             flags |= W_WIDTH2;
@@ -506,6 +519,9 @@ impl Scene {
             flags |= W_HOMING;
         }
         let pos = me.obj.node_pos(arg.node);
+        let mut nodes = Nodes::default();
+        nodes.set_node(1, arg.node);
+        nodes.refresh(|n| me.obj.node_pos(n));
         self.next_id += 1;
         tasks.push(Task {
             id: self.next_id,
@@ -518,9 +534,13 @@ impl Scene {
             arg,
             life: arg.life,
             radius: arg.radius,
-            trail_width: head.width0,
+            trail_width: head.head.width[0],
             end_timer: 0.0,
-            end_frames: f32::from(head.end_frames),
+            end_frames: f32::from(head.head.end_frames),
+            list,
+            state: EmitState::new(head),
+            nodes,
+            mask: 2,
         });
     }
 
@@ -535,7 +555,7 @@ impl Scene {
                 let mut i = 0;
                 while i < self.lists[side][list].len() {
                     let task = &mut self.lists[side][list][i];
-                    let rec = task_update(task, w, stopped);
+                    let rec = task_update(task, w, &mut self.fx, stopped);
                     if let Some(rec) = rec
                         && self.records.len() < HIT_MAX
                     {
@@ -549,6 +569,12 @@ impl Scene {
                 }
             }
         }
+        // Layer 3: the particle modules.
+        let fxw = FxWorld {
+            sets: std::array::from_fn(|s| w.data[s].blast_assets),
+            any_frozen: stopped,
+        };
+        self.fx.update(&fxw, w.libc);
         self.clamp_to_stage(w.env);
         // EftDet_Update.
         self.prepare(w.env);
@@ -559,7 +585,7 @@ impl Scene {
         for side in 0..2 {
             for list in 0..2 {
                 for task in &mut self.lists[side][list] {
-                    task_post_update(task, w);
+                    task_post_update(task, w, &mut self.fx);
                 }
             }
         }
@@ -770,7 +796,7 @@ impl Scene {
 /// `EftKiBlast_Update`: homing, one step along the direction (not on the first frame), the lifetime, the end
 /// animation, and this frame's hit record while the blast is neither ending nor ended. Nothing while any fighter
 /// is in hit-stop.
-fn task_update(t: &mut Task, w: &World, stopped: bool) -> Option<HitRec> {
+fn task_update(t: &mut Task, w: &mut World, fx: &mut Modules, stopped: bool) -> Option<HitRec> {
     let mut rec = None;
     if !stopped {
         if t.flags & W_STOPPED == 0 {
@@ -799,6 +825,7 @@ fn task_update(t: &mut Task, w: &World, stopped: bool) -> Option<HitRec> {
         if t.life <= 0 {
             t.flags |= W_ENDING;
         }
+        spawn_parts(t, w, fx, false);
         if t.flags & W_ENDED != 0 {
             t.flags |= W_KILL;
         } else if t.flags & W_ENDING != 0 {
@@ -850,12 +877,20 @@ fn add_hit_record(t: &Task) -> HitRec {
 
 /// `EftKiBlast_PostUpdate`: an end report stops the blast where it was reported; a deflection or reflection (not
 /// after a deflection) turns it from there.
-fn task_post_update(t: &mut Task, w: &mut World) {
+fn task_post_update(t: &mut Task, w: &mut World, fx: &mut Modules) {
+    if let Some(set) = list_head(w.data[t.arg.src], t.list) {
+        t.state.update_alive(set, fx);
+    }
+    t.mask = 0;
     if t.hit & T_END != 0 {
         t.life = 0;
         t.flags |= W_ENDING;
         if t.flags & W_STOPPED == 0 {
             t.pos = t.hit_pos;
+        }
+        spawn_parts(t, w, fx, true);
+        if t.flags & W_STOPPED == 0 {
+            end_trail(t, w);
         }
         t.flags |= W_STOPPED;
     } else if t.hit & T_TURN != 0 && t.flags & W_DEFLECTED == 0 {
@@ -872,8 +907,72 @@ fn task_post_update(t: &mut Task, w: &mut World) {
             t.life = t.arg.life;
         }
         t.pos = t.hit_pos;
+        spawn_parts(t, w, fx, true);
+        end_trail(t, w);
         t.flags |= W_TURNED;
         t.hit &= !T_TURN;
+    }
+}
+
+/// `EftKiBlast_SpawnParts`: every emitter of the set gets this frame's flags (from the phase mask and the end,
+/// or the reset flags after a hit or a turn) and is driven at the blast with its radius as the scale.
+fn spawn_parts(t: &mut Task, w: &mut World, fx: &mut Modules, reset: bool) {
+    let src = t.arg.src;
+    let data = w.data[src];
+    let (Some(set), Some(assets)) = (list_head(data, t.list), data.blast_assets[t.list]) else {
+        return;
+    };
+    let opp = src ^ 1;
+    let ctx = SpawnCtx {
+        chr: src,
+        set,
+        assets,
+        set_ref: SetRef {
+            side: src,
+            list: t.list,
+        },
+        char_scale: [data.height() / 19.35, w.data[opp].height() / 19.35],
+        opp_chara_flags: w.data[opp].tables.params.chara_flags(),
+        opp_node3: w.chars[opp].obj.node_pos(3),
+    };
+    let ending = t.flags & W_ENDING != 0;
+    for kind in 0..0x13u8 {
+        if set.head.mask & (1 << kind) == 0 {
+            continue;
+        }
+        let Some(g) = set.groups[usize::from(kind)] else {
+            continue;
+        };
+        for sub in 0..g.count {
+            let n = g.first + sub;
+            let f = if reset {
+                t.state.reset_flags(set, kind, n)
+            } else {
+                t.state.flags_from_mask(set, kind, n, ending, false, t.mask)
+            };
+            if f != 0 {
+                spawn(
+                    fx,
+                    &mut t.state,
+                    &t.nodes,
+                    &ctx,
+                    t.pos,
+                    t.dir,
+                    kind,
+                    sub,
+                    f,
+                    t.radius,
+                    w.libc,
+                );
+            }
+        }
+    }
+}
+
+/// `EftKiBlast_EndTrail`: the ribbon emitters (group 17) restart.
+fn end_trail(t: &mut Task, w: &World) {
+    if let Some(set) = list_head(w.data[t.arg.src], t.list) {
+        t.state.end_trail(set);
     }
 }
 

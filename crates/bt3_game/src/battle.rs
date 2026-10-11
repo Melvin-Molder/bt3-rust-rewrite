@@ -10,9 +10,11 @@
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
 
+use crate::eft::{DrawCtx, EffectTri, FxWorld, OrderTable, SetAssets};
 use bt3_data::ai_data::{AiData, AiTables};
 use bt3_data::cam_anim::CamAnim;
-use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables, EffectPack};
+use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables};
+use bt3_data::eft_pack::EffectPack;
 use bt3_data::elf::Elf;
 use bt3_data::gs::{
     RgbaTexture, decode_clut256_upload, decode_sprite_texture, decode_sprite_texture_raw,
@@ -102,6 +104,8 @@ pub struct BattleAssets {
     pub shade_textures: Vec<RgbaTexture>,
     /// The stage texture file, decoded (`StgModel_SetTexture` uploads one at a time to block 0x2A00).
     pub stage_textures: Vec<RgbaTexture>,
+    /// The effect textures of the fighters' emitter sets (raw GS colours; bilinear, clamped).
+    pub effect_textures: Vec<RgbaTexture>,
     pub(crate) fighters: Vec<FighterModel>,
     stage: StageResource,
     stage_model: StageModel,
@@ -159,6 +163,8 @@ pub(crate) struct FighterModel {
     pub(crate) gauge: SideGauge,
     /// The character's effect pack (`BtlCharApi_GetPlayerCharPack`) as far as the simulation reads it.
     pub(crate) effect: Option<EffectPack>,
+    /// The textures and sprite packs of its two ki blast emitter sets.
+    pub(crate) blast_assets: [Option<SetAssets>; 2],
 }
 
 /// Reads what the battle draws so far. `read` returns a file of the AFS archives by id.
@@ -231,6 +237,7 @@ pub fn load(
         base_textures: Vec::new(),
         shade_textures: Vec::new(),
         stage_textures,
+        effect_textures: Vec::new(),
         fighters: Vec::new(),
         stage,
         stage_model,
@@ -293,6 +300,14 @@ pub fn load(
             .unwrap_or_default();
         // BtlRes_Request: the second animation file is chara * 10 + 0x599.
         fighter.effect = EffectPack::parse(&read(MOTION_FILE + 1 + side.chara.max(0) as u32 * 10)?);
+        if let Some(pack) = &fighter.effect {
+            for (list, set) in pack.blast_sets.iter().enumerate() {
+                if let Some(set) = set {
+                    fighter.blast_assets[list] =
+                        Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
+                }
+            }
+        }
         let motions = read(MOTION_FILE + side.chara.max(0) as u32 * 10)?;
         let word = |n: usize| {
             motions
@@ -542,6 +557,7 @@ fn load_fighter(
         talk: Vec::new(),
         gauge: SideGauge::default(),
         effect: None,
+        blast_assets: [None, None],
     })
 }
 
@@ -578,6 +594,8 @@ pub struct BattleFrame {
     pub sounds: Vec<TitleSound>,
     /// The battle is over: the result's reason bits (`BattleResult_GetReason`), which pick the next screen.
     pub exit: Option<u32>,
+    /// `BtlScene_Draw` and `Ot_Draw`: the effects' triangles in the order the GS draws them, after the fighters.
+    pub effects: Vec<EffectTri>,
 }
 
 /// The battle as far as it is ported.
@@ -613,7 +631,8 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         },
         tables: &f.tables,
         entry: f.entry,
-        effect: f.effect,
+        effect: f.effect.as_ref(),
+        blast_assets: std::array::from_fn(|i| f.blast_assets[i].as_ref()),
     }
 }
 
@@ -818,7 +837,7 @@ impl Battle {
             roster.sample_input(&pads, env);
             roster.update_input(data, env);
             roster.update_main(data, env);
-            roster.update_scene(data, env);
+            roster.update_scene(data, env, &mut *input.libc);
             roster.post_scene(data, env);
             false
         });
@@ -867,6 +886,24 @@ impl Battle {
             .map(|(textures, vertices)| ModelBatch { textures, vertices })
             .collect();
         batches.sort_by_key(|batch| batch.textures);
+        // BtlScene_Draw(1), then Ot_Draw.
+        let effects = {
+            let ctx = DrawCtx::new(view.world2screen, view.world2view);
+            let mut ot = OrderTable::new();
+            let fxw = FxWorld {
+                sets: std::array::from_fn(|s| {
+                    std::array::from_fn(|l| self.assets.fighters[s].blast_assets[l].as_ref())
+                }),
+                any_frozen: self.roster.chars.iter().any(|c| c.is_frozen()),
+            };
+            // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else side 0's view.
+            let demo = self.demo.is_active();
+            self.roster
+                .scene
+                .fx
+                .draw(&fxw, &mut ot, &ctx, |chr| demo || chr == 0);
+            ot.into_list()
+        };
         let mut hud = self.hud.draw(libc, shown);
         // BtlGame_Draw: the menu over the HUD.
         if let Some(menu) = &self.menu {
@@ -889,6 +926,7 @@ impl Battle {
             hud,
             sounds,
             exit: self.seq.left.then_some(self.seq.reason),
+            effects,
         }
     }
 }
@@ -1010,6 +1048,8 @@ pub(crate) fn keep_behind_head(node: [f32; 3], height: f32, eye: &mut [f32; 3], 
 
 /// `View_SetTransform` + `View_UpdateMatrices` with `View_InitLayout(VIEW_LAYOUT_FULL)`'s projection.
 pub(crate) struct View {
+    /// `view->view` (+0x40): world to view.
+    pub(crate) world2view: Mtx,
     pub(crate) world2screen: Mtx,
     pub(crate) world2clip: Mtx,
     /// `view->clip2screen` (+0x100), what `StgModel_Draw` loads program 4 with.
@@ -1025,6 +1065,7 @@ impl View {
     pub(crate) fn from_world_to_view(world2view: Mtx) -> Self {
         let (view2screen, view2clip, clip2screen) = projection();
         Self {
+            world2view,
             world2screen: mul(&world2view, &view2screen),
             world2clip: mul(&world2view, &view2clip),
             clip2screen,
@@ -2214,5 +2255,66 @@ mod tests {
         eprintln!("charged kinds {kinds:?}");
         assert!(charged, "no charged ki blast");
         assert!(kinds.iter().any(|k| (1..=3).contains(k)), "no charged shot");
+    }
+
+    #[test]
+    fn real_ki_blast_draws_its_effects() {
+        use crate::btl_input::pad::TRIANGLE;
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, pads(0), 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        let mut most = 0;
+        let mut particles = 0;
+        for i in 0..30 {
+            let p1 = if i < 2 { TRIANGLE } else { 0 };
+            let frame = battle.run_frame(false, pads(p1), 0, &mut libc, &mut random, None, false);
+            if i % 3 == 0 || !frame.effects.is_empty() && most == 0 {
+                eprintln!(
+                    "frame {i}: {} effect tris, first {:?}",
+                    frame.effects.len(),
+                    frame.effects.first().map(|t| (
+                        t.texture,
+                        t.blend,
+                        t.vertices.map(|v| v.position),
+                        t.vertices.map(|v| v.rgba)
+                    ))
+                );
+            }
+            most = most.max(frame.effects.len());
+            particles = particles.max(battle.roster.scene.fx.particles_used());
+            for t in &frame.effects {
+                for v in &t.vertices {
+                    assert!(v.position[0].is_finite() && v.position[1].is_finite());
+                }
+            }
+        }
+        assert!(most > 0, "the ki blast drew nothing");
+        assert!(particles > 0, "the ki blast emitted no particles");
+        assert_eq!(
+            battle.roster.scene.fx.particles_used(),
+            0,
+            "particles leaked from the pool"
+        );
     }
 }

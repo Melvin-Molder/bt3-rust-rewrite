@@ -1,0 +1,591 @@
+//! Effect packs: emitter sets (`EftEmit_LoadSet`, src/battle/eft_emit.c: a header, groups of one particle module
+//! each, their emitters and the resources that follow) and the "V000" keyframed sprite packs the kind 14 module
+//! plays (`EftSprPack_*`, src/battle/eft_sprite_anim.c).
+
+use std::io;
+
+/// `EFT_EMIT_TYPES`: group kinds (one per particle module).
+pub const SET_KINDS: usize = 19;
+
+fn invalid_data(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn u32_at(b: &[u8], o: usize) -> u32 {
+    b.get(o..o + 4)
+        .map_or(0, |w| u32::from_le_bytes(w.try_into().unwrap()))
+}
+
+fn f32_at(b: &[u8], o: usize) -> f32 {
+    f32::from_bits(u32_at(b, o))
+}
+
+/// `BtlScene_GetPackEntry`: the offset of entry `n` (no emptiness test).
+fn entry_offset(pack: &[u8], n: usize) -> usize {
+    (u32_at(pack, n * 4) & !3) as usize
+}
+
+/// `EftSetHead` / `EftEmitHdr` (0x40 bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SetHead {
+    /// Bit per group kind present.
+    pub mask: u32,
+    /// The trail width animation: width0 -> width1 -> width2 over `width_time` seconds, or `width_step` per frame.
+    pub width: [f32; 3],
+    pub width_time: f32,
+    pub width_split: f32,
+    pub width_step: f32,
+    /// Frames the end animation of a shot runs.
+    pub end_frames: u8,
+    /// 4: the second width animation is used.
+    pub flags: u8,
+    /// Bit per phase the set has emitters for.
+    pub phase_mask: u8,
+}
+
+/// `EftEmitDef` (0x40 bytes): one emitter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmitPart(pub [u8; 0x40]);
+
+impl EmitPart {
+    /// 0x02: the second point is written without a move (kinds 15 / 17) or never moved; 0x08: the node comes from
+    /// the c[] slots; 0x20: an extra module call; 0x40: at the node, not offset along the direction; 0x80: write
+    /// the direction.
+    pub fn flags(&self) -> u8 {
+        self.0[0]
+    }
+    /// Resource index inside the group.
+    pub fn res(&self) -> usize {
+        usize::from(self.0[1])
+    }
+    /// Texture index inside the resource.
+    pub fn tex(&self) -> u8 {
+        self.0[2]
+    }
+    pub fn count(&self) -> u8 {
+        self.0[3]
+    }
+    pub fn mode(&self) -> u8 {
+        self.0[4]
+    }
+    pub fn delay(&self) -> u8 {
+        self.0[5]
+    }
+    pub fn hold(&self) -> u8 {
+        self.0[6]
+    }
+    pub fn fade(&self) -> u8 {
+        self.0[7]
+    }
+    /// The phase that starts it: 0, 1, 3, 4, 5 by event; 2 at the end; 6 never stopped.
+    pub fn phase(&self) -> u8 {
+        self.0[8]
+    }
+    /// The event that stops it: 1, 2, 4, 5, 6.
+    pub fn end_phase(&self) -> u8 {
+        self.0[9]
+    }
+    /// Index into `gEftEmitNodeSlot`; 6 = the opponent's node 3.
+    pub fn node(&self) -> u8 {
+        self.0[0xA]
+    }
+    /// 0 dir, 1 -dir, 2 / 3 perpendicular, 4 up, 5 down.
+    pub fn dir_mode(&self) -> u8 {
+        self.0[0xB]
+    }
+    pub fn spread(&self) -> f32 {
+        f32_at(&self.0, 0xC)
+    }
+    pub fn offset(&self) -> f32 {
+        f32_at(&self.0, 0x10)
+    }
+    pub fn offset2(&self) -> f32 {
+        f32_at(&self.0, 0x14)
+    }
+    pub fn rate(&self) -> f32 {
+        f32_at(&self.0, 0x18)
+    }
+    /// Scale animation: scale0 -> scale1 -> scale2 over `scale_time` seconds, or `scale_step` per frame.
+    pub fn scale(&self, i: usize) -> f32 {
+        f32_at(&self.0, 0x1C + i * 4)
+    }
+    pub fn scale_time(&self) -> f32 {
+        f32_at(&self.0, 0x28)
+    }
+    pub fn scale_split(&self) -> f32 {
+        f32_at(&self.0, 0x2C)
+    }
+    pub fn scale_step(&self) -> f32 {
+        f32_at(&self.0, 0x30)
+    }
+    /// 0x01 depends on the opponent's parameter flag 0x80 (0x10: wanted set), 0x04 has a condition, 0x08 an extra
+    /// module call.
+    pub fn flags2(&self) -> u8 {
+        self.0[0x34]
+    }
+    pub fn cond(&self) -> u8 {
+        self.0[0x35]
+    }
+    pub fn alt_node(&self) -> u8 {
+        self.0[0x36]
+    }
+    /// 0 the caller's scale, 1 the owner's body scale, 2 the opponent's.
+    pub fn scale_mode(&self) -> u8 {
+        self.0[0x37]
+    }
+}
+
+/// `EftSetGroup`: the emitters of one kind and where its resources are.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EmitGroup {
+    pub kind: u8,
+    /// Index of the group's first emitter in `parts` (and in the handle tables).
+    pub first: usize,
+    pub count: usize,
+    /// Index of its first emitter in `pairs` (kind 0 emitters have none).
+    pub first_pair: usize,
+    /// `EftEmit_TypeToResKind`: which of the four texture-set arrays its resources go to.
+    pub cat: usize,
+    /// Index of its first resource in that array.
+    pub cat_first: usize,
+    pub res_count: usize,
+}
+
+/// `EftEmit_TypeToResKind`: 3 for kind 2; 1 for 5, 10, 12, 15..18; 2 for 9; else 0 (sets of 32 / 16 / 8 / 4).
+pub fn res_kind(kind: u8) -> usize {
+    match kind {
+        2 => 3,
+        5 | 10 | 12 | 15..=18 => 1,
+        9 => 2,
+        _ => 0,
+    }
+}
+
+/// A parsed emitter set: entry `head` of `data` is the header, the entries after it the resources (texture packs)
+/// and the emitters' definition blocks, in group order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EmitSet {
+    pub head: SetHead,
+    /// By kind.
+    pub groups: [Option<EmitGroup>; SET_KINDS],
+    pub parts: Vec<EmitPart>,
+    /// The texture packs of each resource category, in order (offsets into `data`).
+    pub textures: [Vec<usize>; 4],
+    /// Per emitter that has them (kind 0 has none): its one or two definition blocks (offsets into `data`); kinds
+    /// 2 and 14 have only the first.
+    pub pairs: Vec<(usize, Option<usize>)>,
+    pub data: Vec<u8>,
+}
+
+impl EmitSet {
+    /// `EftEmit_LoadSet` of a pack whose header is entry `idx`.
+    pub fn parse(pack: &[u8], idx: usize) -> io::Result<Self> {
+        let h_ofs = entry_offset(pack, idx);
+        let h = pack
+            .get(h_ofs..h_ofs + 0x40)
+            .ok_or_else(|| invalid_data("emitter set header is outside the pack"))?;
+        let head = SetHead {
+            mask: u32_at(h, 0),
+            width: [f32_at(h, 8), f32_at(h, 0xC), f32_at(h, 0x10)],
+            width_time: f32_at(h, 0x14),
+            width_split: f32_at(h, 0x18),
+            width_step: f32_at(h, 0x1C),
+            end_frames: h[0x20],
+            flags: h[0x21],
+            phase_mask: h[0x27],
+        };
+        let (n_groups, n_parts) = (usize::from(h[4]), usize::from(h[5]));
+        if n_groups > SET_KINDS || n_parts > 40 {
+            return Err(invalid_data("emitter set has too many groups or emitters"));
+        }
+        let defs = h_ofs + 0x40;
+        let part_base = defs + n_groups * 0x20;
+        let parts = (0..n_parts)
+            .map(|i| {
+                pack.get(part_base + i * 0x40..part_base + i * 0x40 + 0x40)
+                    .map(|b| EmitPart(b.try_into().unwrap()))
+                    .ok_or_else(|| invalid_data("emitter is outside the pack"))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut groups = [None; SET_KINDS];
+        let mut count = [0usize; 4];
+        let (mut n_part, mut n_pair) = (0, 0);
+        let mut order = Vec::new();
+        for g in 0..n_groups {
+            let d = &pack[defs + g * 0x20..defs + g * 0x20 + 3];
+            let (kind, n, res) = (d[0], usize::from(d[1]), usize::from(d[2]));
+            if usize::from(kind) >= SET_KINDS {
+                return Err(invalid_data("emitter group of an unknown kind"));
+            }
+            let cat = res_kind(kind);
+            groups[usize::from(kind)] = Some(EmitGroup {
+                kind,
+                first: n_part,
+                count: n,
+                first_pair: n_pair,
+                cat,
+                cat_first: count[cat],
+                res_count: res,
+            });
+            n_part += n;
+            if kind != 0 {
+                n_pair += n;
+                count[cat] += res;
+            }
+            order.push(kind);
+        }
+        let mut textures: [Vec<usize>; 4] = Default::default();
+        let mut pairs = vec![(0, None); n_pair];
+        let mut next = idx + 1;
+        for kind in order {
+            if kind == 0 {
+                continue;
+            }
+            let g = groups[usize::from(kind)].unwrap();
+            for _ in 0..g.res_count {
+                textures[g.cat].push(entry_offset(pack, next));
+                next += 1;
+            }
+            let two = !matches!(kind, 2 | 0xE);
+            for j in 0..g.count {
+                let a = entry_offset(pack, next);
+                next += 1;
+                let b = two.then(|| {
+                    next += 1;
+                    entry_offset(pack, next - 1)
+                });
+                pairs[g.first_pair + j] = (a, b);
+            }
+        }
+        Ok(Self {
+            head,
+            groups,
+            parts,
+            textures,
+            pairs,
+            data: pack.to_vec(),
+        })
+    }
+
+    /// The bytes from an offset `textures` or `pairs` gave.
+    pub fn at(&self, offset: usize) -> &[u8] {
+        self.data.get(offset..).unwrap_or_default()
+    }
+}
+
+/// `EftSprKey` (0x40 bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SprKey {
+    /// Offset from the object, in the object's frame.
+    pub pos: [f32; 3],
+    /// Degrees; with the spin flag the first key's is a spin per frame.
+    pub rot: [f32; 3],
+    pub scale: [f32; 3],
+    /// 0..255 per channel.
+    pub color: [u8; 4],
+    pub frame: i32,
+}
+
+/// `EftSprLayerDef` with its keys.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SprLayer {
+    pub tex: u8,
+    /// Ordering-table layer; >= 2 the second GS context.
+    pub ot_layer: u8,
+    /// Frames advance by speed * 2 per step.
+    pub speed: u8,
+    pub loop_end_key: u8,
+    pub loop_start_key: u8,
+    pub loop_count: i8,
+    pub length: i16,
+    pub jitter_period: i16,
+    /// 0: 2x2, 1: 4x2, 2: 4x4, 3: 3x3.
+    pub grid: i8,
+    pub blink_on: i8,
+    pub blink_off: i8,
+    pub grid_step: i8,
+    /// `EFT_SPR_LAYER_*`.
+    pub flags: u32,
+    pub fade: i32,
+    pub jitter: [i16; 2],
+    pub keys: Vec<SprKey>,
+}
+
+/// A "V000" pack (`EftSprPack`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SprPack {
+    /// Restart when every layer has finished.
+    pub looped: bool,
+    pub layers: Vec<SprLayer>,
+}
+
+impl SprPack {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.get(0..4) != Some(b"V000") {
+            return Err(invalid_data("sprite pack has no V000 magic"));
+        }
+        let n = usize::from(b[4]);
+        let mut key = u32_at(b, 8) as usize;
+        let mut layers = Vec::with_capacity(n);
+        for i in 0..n {
+            let d = b
+                .get(0x20 + i * 0x20..0x40 + i * 0x20)
+                .ok_or_else(|| invalid_data("sprite layer is outside the pack"))?;
+            let s16 = |o: usize| i16::from_le_bytes([d[o], d[o + 1]]);
+            // EftSprPack_Bind: the keys of the layers follow each other.
+            let count = usize::from(d[4]);
+            let keys = (0..count)
+                .map(|k| {
+                    let o = key + k * 0x40;
+                    let r = b
+                        .get(o..o + 0x40)
+                        .ok_or_else(|| invalid_data("sprite key is outside the pack"))?;
+                    let v = |at: usize| [f32_at(r, at), f32_at(r, at + 4), f32_at(r, at + 8)];
+                    Ok(SprKey {
+                        pos: v(0),
+                        rot: v(0x10),
+                        scale: v(0x20),
+                        color: [r[0x30], r[0x31], r[0x32], r[0x33]],
+                        frame: u32_at(r, 0x34) as i32,
+                    })
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            key += count * 0x40;
+            layers.push(SprLayer {
+                tex: d[0],
+                ot_layer: d[2],
+                speed: d[3],
+                loop_end_key: d[5],
+                loop_start_key: d[6],
+                loop_count: d[7] as i8,
+                length: s16(8),
+                jitter_period: s16(0xA),
+                grid: d[0xC] as i8,
+                blink_on: d[0xD] as i8,
+                blink_off: d[0xE] as i8,
+                grid_step: d[0xF] as i8,
+                flags: u32_at(d, 0x10),
+                fade: u32_at(d, 0x18) as i32,
+                jitter: [s16(0x1C), s16(0x1E)],
+                keys,
+            });
+        }
+        Ok(Self {
+            looped: b[5] != 0,
+            layers,
+        })
+    }
+}
+
+/// What the battle reads from a character's effect pack (entry 6 of the character's second animation file,
+/// `BtlCharApi_GetPlayerCharPack`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EffectPack {
+    /// The first word of entry 1 of entry 1 (`BtlScene_TestCharPackBit`): bit n - 1 creates the manager of kind n.
+    pub kind_bits: u32,
+    /// The emitter sets of the ki blast managers (`EftKiBlastMgr_Init`): kind 1 is entry 3, kind 2 entry 4; each
+    /// header is entry 1 of its entry. `None` when it cannot be read.
+    pub blast_sets: [Option<EmitSet>; 2],
+}
+
+/// `BObjFile_GetEntry`: entry `n` of a pack, `None` when it is empty.
+fn pack_entry(pack: &[u8], n: usize) -> Option<&[u8]> {
+    let start = entry_offset(pack, n);
+    let end = entry_offset(pack, n + 1);
+    (start != end).then(|| pack.get(start..)).flatten()
+}
+
+impl EffectPack {
+    /// From the character's second animation file (`chara * 10 + 0x599`); `None` without the pack.
+    pub fn parse(anim_file: &[u8]) -> Option<Self> {
+        let pack = pack_entry(anim_file, 6)?;
+        let kind_bits = pack
+            .get(entry_offset(pack, 1)..)
+            .and_then(|e| e.get(entry_offset(e, 1)..))
+            .map_or(0, |w| u32_at(w, 0));
+        let set = |n: usize| {
+            let p = pack.get(entry_offset(pack, n)..)?;
+            EmitSet::parse(p, 1).ok()
+        };
+        Some(Self {
+            kind_bits,
+            blast_sets: [set(3), set(4)],
+        })
+    }
+}
+
+/// `EftRbnPrm`: a ribbon's parameter block (the emitter's first definition block). "[3]" is the value at the three
+/// keys of its animation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RibbonPrm {
+    /// 1 animated, 2 random mirror, 4 scroll (second layer), 8 width pulse, 0x10 colour pulse.
+    pub flags: i32,
+    /// Ordering-table layer of its triangles.
+    pub blend: u8,
+    /// 0 a strip between two points, 1 and 2 trails.
+    pub kind: u8,
+    /// Seconds.
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub anim_time: f32,
+    pub anim_split: f32,
+    pub width: [f32; 3],
+    pub width_lo: [f32; 3],
+    pub width_hi: [f32; 3],
+    /// Seconds.
+    pub width_time: [f32; 3],
+    pub alpha: [f32; 3],
+    pub scroll: [f32; 3],
+}
+
+/// `EftRbnAnim`: a ribbon's colours and colour pulse at the three keys (its second definition block).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RibbonAnim {
+    pub color: [[f32; 4]; 3],
+    /// Low and high value of the pulse per key, for red, green and blue.
+    pub pulse: [[[f32; 2]; 3]; 3],
+    /// Seconds.
+    pub pulse_time: [f32; 3],
+}
+
+impl RibbonPrm {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x60 {
+            return Err(invalid_data("ribbon parameters are truncated"));
+        }
+        let three = |o: usize| [f32_at(b, o), f32_at(b, o + 4), f32_at(b, o + 8)];
+        Ok(Self {
+            flags: u32_at(b, 0) as i32,
+            blend: b[4],
+            kind: b[5],
+            fade_in: f32_at(b, 8),
+            fade_out: f32_at(b, 0xC),
+            anim_time: f32_at(b, 0x10),
+            anim_split: f32_at(b, 0x14),
+            width: three(0x18),
+            width_lo: three(0x24),
+            width_hi: three(0x30),
+            width_time: three(0x3C),
+            alpha: three(0x48),
+            scroll: three(0x54),
+        })
+    }
+}
+
+impl RibbonAnim {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0xB4 {
+            return Err(invalid_data("ribbon colours are truncated"));
+        }
+        let color = std::array::from_fn(|k| std::array::from_fn(|i| f32_at(b, k * 0x10 + i * 4)));
+        let pulse = std::array::from_fn(|c| {
+            std::array::from_fn(|k| {
+                std::array::from_fn(|i| f32_at(b, 0x60 + c * 0x18 + k * 8 + i * 4))
+            })
+        });
+        Ok(Self {
+            color,
+            pulse,
+            pulse_time: [f32_at(b, 0xA8), f32_at(b, 0xAC), f32_at(b, 0xB0)],
+        })
+    }
+}
+
+/// `EftPtclDef`: a particle emitter's first definition block (0x2B0 bytes); every animated value has three keys.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PtclDef {
+    /// 1 keyed, 2 no x16 / clipped draws, 4 sheet, 8 width / height pulse, 0x10 random pulse phase, 0x20 colour
+    /// pulse, 0x40 random spin direction, 0x80 quads start at the particle, 0x100 fixed axis.
+    pub flags: i32,
+    pub reverse: u8,
+    /// 0 quads along the axis, 1 squares, 2 sprites.
+    pub shape: u8,
+    pub flip: u8,
+    pub centred: u8,
+    pub origin_kind: u8,
+    pub accel_kind: u8,
+    pub layer: u8,
+    pub cols: u8,
+    pub rows: u8,
+    pub anim_time: f32,
+    pub key_time: f32,
+    pub key_split: f32,
+    pub count: [i16; 3],
+    pub count_range: [i16; 3],
+    /// Emitter angles and spins (half turns): x, x range, spin x, spin x range, then y, then z.
+    pub ang: [f32; 12],
+    raw: Vec<u8>,
+}
+
+/// `EftPtclDef2`: colours and colour pulse at the three keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PtclDef2 {
+    pub color: [[f32; 4]; 3],
+    pub color_range: [[f32; 4]; 3],
+    pub color_end: [[f32; 4]; 3],
+    pub color_end_range: [[f32; 4]; 3],
+    /// Low and high factor per key, for red, green and blue.
+    pub pulse: [[[f32; 2]; 3]; 3],
+    pub pulse_time: [f32; 3],
+}
+
+impl PtclDef {
+    /// The float at `o` for key `k` of a three-key value.
+    pub fn key(&self, o: usize, k: usize) -> f32 {
+        f32_at(&self.raw, o + k * 4)
+    }
+
+    /// The float at `o` for key `k` and stage `s` of a [key][stage] table.
+    pub fn stage(&self, o: usize, k: usize, s: usize) -> f32 {
+        f32_at(&self.raw, o + k * 12 + s * 4)
+    }
+
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x2B0 {
+            return Err(invalid_data("particle definition is truncated"));
+        }
+        let s16 = |o: usize| i16::from_le_bytes([b[o], b[o + 1]]);
+        Ok(Self {
+            flags: u32_at(b, 0) as i32,
+            reverse: b[4],
+            shape: b[5],
+            flip: b[6],
+            centred: b[7],
+            origin_kind: b[8],
+            accel_kind: b[9],
+            layer: b[0xA],
+            cols: b[0xE],
+            rows: b[0xF],
+            anim_time: f32_at(b, 0x10),
+            key_time: f32_at(b, 0x14),
+            key_split: f32_at(b, 0x18),
+            count: [s16(0x1C), s16(0x1E), s16(0x20)],
+            count_range: [s16(0x22), s16(0x24), s16(0x26)],
+            ang: std::array::from_fn(|i| f32_at(b, 0x280 + i * 4)),
+            raw: b[..0x2B0].to_vec(),
+        })
+    }
+}
+
+impl PtclDef2 {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x114 {
+            return Err(invalid_data("particle colours are truncated"));
+        }
+        let v4 = |o: usize| -> [[f32; 4]; 3] {
+            std::array::from_fn(|k| std::array::from_fn(|i| f32_at(b, o + k * 0x10 + i * 4)))
+        };
+        Ok(Self {
+            color: v4(0),
+            color_range: v4(0x30),
+            color_end: v4(0x60),
+            color_end_range: v4(0x90),
+            pulse: std::array::from_fn(|c| {
+                std::array::from_fn(|k| {
+                    std::array::from_fn(|i| f32_at(b, 0xC0 + c * 0x18 + k * 8 + i * 4))
+                })
+            }),
+            pulse_time: [f32_at(b, 0x108), f32_at(b, 0x10C), f32_at(b, 0x110)],
+        })
+    }
+}

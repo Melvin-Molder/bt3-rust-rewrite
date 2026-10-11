@@ -2,8 +2,7 @@
 //! (`BtlChar_AllocAll`, src/battle/btl_char_mgr.c): the parameter block (section 0x12, `BtlParam`), the attack
 //! records (section 0x13, `BtlAtkRecord`), the ki blast records (section 0x14, `BtlKiBlastData`), the movement
 //! table (section 0x15, `BtlMoveData`) and the body volumes (section 2, `BobjBodyData`); the roster's motion flags,
-//! attack actions and character table; and the ki blast emitter set headers of the character's effect pack
-//! (`EftKiBlastMgr_Init`).
+//! attack actions and character table.
 
 use std::io;
 
@@ -373,63 +372,6 @@ impl CommonTables {
             motion_flags,
             attack_actions,
             charas,
-        })
-    }
-}
-
-/// The header of an emitter set (`EftSetHead`, 0x40 bytes) as far as the simulation reads it.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct EmitSetHead {
-    /// `width0`: the trail width a ki blast's hit radius is scaled by (the blast never steps that animation).
-    pub width0: f32,
-    /// `endFrames`: frames the end animation runs.
-    pub end_frames: u8,
-    /// Bit 4: the second width animation is used (`EftEmit_HasWidth2`).
-    pub flags: u8,
-}
-
-/// What the battle reads from a character's effect pack (entry 6 of the character's second animation file,
-/// `BtlCharApi_GetPlayerCharPack`).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct EffectPack {
-    /// The first word of entry 1 of entry 1 (`BtlScene_TestCharPackBit`): bit n - 1 creates the manager of kind n.
-    pub kind_bits: u32,
-    /// The set headers of the ki blast managers (`EftKiBlastMgr_Init`): kind 1 is entry 3, kind 2 entry 4; each
-    /// header is entry 1 of its entry. `None` when it lies outside the file.
-    pub blast_sets: [Option<EmitSetHead>; 2],
-}
-
-/// `BObjFile_GetEntry`: entry `n` of a pack, `None` when it is empty.
-fn pack_entry(pack: &[u8], n: usize) -> Option<&[u8]> {
-    let start = (u32_at(pack, n * 4) & !3) as usize;
-    let end = (u32_at(pack, n * 4 + 4) & !3) as usize;
-    (start != end).then(|| pack.get(start..)).flatten()
-}
-
-/// `BtlScene_GetPackEntry`: entry `n` without the emptiness test.
-fn pack_entry_any(pack: &[u8], n: usize) -> Option<&[u8]> {
-    pack.get((u32_at(pack, n * 4) & !3) as usize..)
-}
-
-impl EffectPack {
-    /// From the character's second animation file (`chara * 10 + 0x599`); `None` without the pack.
-    pub fn parse(anim_file: &[u8]) -> Option<Self> {
-        let pack = pack_entry(anim_file, 6)?;
-        let kind_bits = pack_entry_any(pack, 1)
-            .and_then(|e| pack_entry_any(e, 1))
-            .map_or(0, |w| u32_at(w, 0));
-        let head = |n: usize| {
-            let set = pack_entry_any(pack, n)?;
-            let h = pack_entry_any(set, 1)?;
-            Some(EmitSetHead {
-                width0: f32_at(h, 8),
-                end_frames: *h.get(0x20)?,
-                flags: *h.get(0x21)?,
-            })
-        };
-        Some(Self {
-            kind_bits,
-            blast_sets: [head(3), head(4)],
         })
     }
 }

@@ -8,6 +8,7 @@ pub mod ai_data;
 pub mod bpe;
 pub mod cam_anim;
 pub mod chara_data;
+pub mod eft_pack;
 pub mod elf;
 pub mod fod;
 pub mod font;

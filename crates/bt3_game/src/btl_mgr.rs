@@ -264,13 +264,19 @@ impl Roster {
     }
 
     /// `BtlScene_Update`, `EftDet_Update` and `BtlScene_PostUpdate` (`Battle_Update`, after the main passes).
-    pub(crate) fn update_scene(&mut self, data: [&SideData; 2], env: &Env) {
+    pub(crate) fn update_scene(
+        &mut self,
+        data: [&SideData; 2],
+        env: &Env,
+        libc: &mut crate::rng::LibcRandom,
+    ) {
         let mut world = World {
             chars: &mut self.chars,
             data,
             env,
             rand: &mut self.rand,
             time_stopped: env.gate.time_stopped,
+            libc,
         };
         self.scene.update(&mut world);
     }

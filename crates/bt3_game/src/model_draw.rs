@@ -22,6 +22,7 @@ use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlug
 use bt3_data::gs::RgbaTexture;
 
 use crate::battle::ModelBatch;
+use crate::eft::{EffectBlend, EffectTri};
 use crate::hud::{HudBlend, HudPrim};
 use crate::stage_draw::StageBatch;
 use crate::{Game, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -29,6 +30,7 @@ use crate::{Game, SCREEN_HEIGHT, SCREEN_WIDTH};
 const GS_MODEL_SHADER: Handle<Shader> = uuid_handle!("6f0b8f0e-4a8e-4c1e-9d55-2b6a1c3e9a71");
 const GS_STAGE_SHADER: Handle<Shader> = uuid_handle!("2b7f4c1d-8e3a-4f6b-a5c9-1d0e7f3b6a24");
 const GS_HUD_SHADER: Handle<Shader> = uuid_handle!("9c3e5a71-0d2b-4e8f-b6a4-7f15c2d8e903");
+const GS_EFFECT_SHADER: Handle<Shader> = uuid_handle!("d41c7e2a-5b93-4f06-8e1d-3a7c9b2f6e58");
 /// GS Z is 24 bits.
 const GS_Z_RANGE: f32 = 16_777_216.0;
 /// Sort positions in the 2D pass: stage groups from -900 (100 apart), the fighters after them.
@@ -36,6 +38,8 @@ const STAGE_SORT: f32 = -900.0;
 const FIGHTER_SORT: f32 = -100.0;
 /// The HUD comes after the fighters (`BtlGame_Draw`), in the order of its sprites.
 const HUD_SORT: f32 = 100.0;
+/// The effects' sorted pass (`Ot_Draw`) between the fighters and the HUD, in the order of its batches.
+const EFFECT_SORT: f32 = 0.0;
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct GsModelMaterial {
@@ -211,6 +215,229 @@ impl Material2d for GsHudMaterial {
     }
 }
 
+/// A run of effect triangles with one texture and one blend equation.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[bind_group_data(GsEffectKey)]
+pub struct GsEffectMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    texture: Handle<Image>,
+    #[uniform(2)]
+    params: Vec4,
+    blend: EffectBlend,
+    order: u16,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GsEffectKey {
+    blend: EffectBlend,
+}
+
+impl From<&GsEffectMaterial> for GsEffectKey {
+    fn from(material: &GsEffectMaterial) -> Self {
+        Self {
+            blend: material.blend,
+        }
+    }
+}
+
+impl Material2d for GsEffectMaterial {
+    fn fragment_shader() -> ShaderRef {
+        GS_EFFECT_SHADER.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    fn depth_bias(&self) -> f32 {
+        EFFECT_SORT + f32::from(self.order) * 0.001
+    }
+
+    /// `Ot_AddEnv`: depth test without writes; the layer's ALPHA_1 / ALPHA_2. The frame's alpha is left alone.
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let keep_alpha = BlendComponent {
+            src_factor: BlendFactor::Zero,
+            dst_factor: BlendFactor::One,
+            operation: BlendOperation::Add,
+        };
+        let colour = |src_factor, dst_factor, operation| BlendComponent {
+            src_factor,
+            dst_factor,
+            operation,
+        };
+        let color = match key.bind_group_data.blend {
+            EffectBlend::Alpha => colour(
+                BlendFactor::SrcAlpha,
+                BlendFactor::OneMinusSrcAlpha,
+                BlendOperation::Add,
+            ),
+            EffectBlend::Subtract => colour(
+                BlendFactor::One,
+                BlendFactor::One,
+                BlendOperation::ReverseSubtract,
+            ),
+            EffectBlend::Add => colour(BlendFactor::One, BlendFactor::One, BlendOperation::Add),
+            EffectBlend::AddDest => colour(BlendFactor::Dst, BlendFactor::One, BlendOperation::Add),
+        };
+        set_pipeline_state(
+            descriptor,
+            Some(BlendState {
+                color,
+                alpha: keep_alpha,
+            }),
+            false,
+        );
+        Ok(())
+    }
+}
+
+/// The battle's effect textures as uploaded so far, a blank one for untextured triangles, and the materials.
+#[derive(Resource, Default)]
+pub struct EffectTextures {
+    /// Each texture clamped (CLAMP 5) and wrapping (the sorted pass's CLAMP 0).
+    images: Vec<[Handle<Image>; 2]>,
+    blank: Option<Handle<Image>>,
+    materials: HashMap<(Option<usize>, bool, EffectBlend, u16), Handle<GsEffectMaterial>>,
+}
+
+#[derive(Component)]
+pub struct EffectSlot(usize);
+
+/// One mesh per run of triangles that share a texture and a blend, in the order of the sorted pass.
+pub fn sync_effects(
+    mut commands: Commands,
+    game: Res<Game>,
+    mut images: ResMut<Assets<Image>>,
+    mut textures: ResMut<EffectTextures>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<GsEffectMaterial>>,
+    mut slots: Query<(
+        &EffectSlot,
+        &Mesh2d,
+        &mut MeshMaterial2d<GsEffectMaterial>,
+        &mut Visibility,
+    )>,
+) {
+    if !game.is_changed() {
+        return;
+    }
+    if game.effect_textures.len() < textures.images.len() {
+        *textures = EffectTextures::default();
+    }
+    while textures.images.len() < game.effect_textures.len() {
+        let texture = &game.effect_textures[textures.images.len()];
+        // TEX1 0x60 bilinear.
+        let clamped = images.add(model_image(texture, ImageAddressMode::ClampToEdge));
+        let wrapped = images.add(model_image(texture, ImageAddressMode::Repeat));
+        textures.images.push([clamped, wrapped]);
+    }
+    let blank = textures
+        .blank
+        .get_or_insert_with(|| {
+            images.add(model_image(
+                &RgbaTexture {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0xFF; 4],
+                },
+                ImageAddressMode::ClampToEdge,
+            ))
+        })
+        .clone();
+    let mut batches: Vec<(Option<usize>, bool, EffectBlend, Vec<&EffectTri>)> = Vec::new();
+    for tri in &game.effects {
+        match batches.last_mut() {
+            Some((t, c, b, list)) if *t == tri.texture && *c == tri.clamp && *b == tri.blend => {
+                list.push(tri)
+            }
+            _ => batches.push((tri.texture, tri.clamp, tri.blend, vec![tri])),
+        }
+    }
+    let mut material = |index: usize,
+                        texture: Option<usize>,
+                        clamp: bool,
+                        blend: EffectBlend,
+                        textures: &mut EffectTextures| {
+        let key = (texture, clamp, blend, index as u16);
+        if let Some(handle) = textures.materials.get(&key) {
+            return handle.clone();
+        }
+        let image = texture
+            .and_then(|i| textures.images.get(i))
+            .map(|pair| pair[usize::from(!clamp)].clone())
+            .unwrap_or_else(|| blank.clone());
+        let handle = materials.add(GsEffectMaterial {
+            texture: image,
+            params: Vec4::new(
+                if texture.is_some() { 1.0 } else { 0.0 },
+                if blend == EffectBlend::AddDest {
+                    1.0
+                } else {
+                    0.0
+                },
+                if matches!(blend, EffectBlend::Add | EffectBlend::Subtract) {
+                    1.0
+                } else {
+                    0.0
+                },
+                0.0,
+            ),
+            blend,
+            order: index as u16,
+        });
+        textures.materials.insert(key, handle.clone());
+        handle
+    };
+    let mut existing = 0;
+    for (slot, mesh, mut handle, mut visibility) in &mut slots {
+        existing = existing.max(slot.0 + 1);
+        let Some((texture, clamp, blend, tris)) = batches.get(slot.0) else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
+            write_effect_mesh(&mut mesh, tris);
+        }
+        let wanted = material(slot.0, *texture, *clamp, *blend, &mut textures);
+        if handle.0 != wanted {
+            handle.0 = wanted;
+        }
+        *visibility = Visibility::Visible;
+    }
+    for (index, (texture, clamp, blend, tris)) in batches.iter().enumerate().skip(existing) {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        write_effect_mesh(&mut mesh, tris);
+        commands.spawn((
+            EffectSlot(index),
+            Mesh2d(meshes.add(mesh)),
+            MeshMaterial2d(material(index, *texture, *clamp, *blend, &mut textures)),
+            Transform::default(),
+        ));
+    }
+}
+
+fn write_effect_mesh(mesh: &mut Mesh, tris: &[&EffectTri]) {
+    let vertices = || tris.iter().flat_map(|t| t.vertices.iter());
+    let positions: Vec<[f32; 3]> = vertices().map(|v| screen_position(v.position)).collect();
+    let stq: Vec<[f32; 4]> = vertices()
+        .map(|v| [v.stq[0], v.stq[1], v.stq[2], 0.0])
+        .collect();
+    let colors: Vec<[f32; 4]> = vertices().map(|v| v.rgba.map(f32::from)).collect();
+    let count = positions.len() as u32;
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, stq);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32((0..count).collect()));
+}
+
 fn set_pipeline_state(
     descriptor: &mut RenderPipelineDescriptor,
     blend: Option<BlendState>,
@@ -261,14 +488,17 @@ pub fn add_to(app: &mut App) {
     load_internal_asset!(app, GS_MODEL_SHADER, "gs_model.wgsl", Shader::from_wgsl);
     load_internal_asset!(app, GS_STAGE_SHADER, "gs_stage.wgsl", Shader::from_wgsl);
     load_internal_asset!(app, GS_HUD_SHADER, "gs_hud.wgsl", Shader::from_wgsl);
+    load_internal_asset!(app, GS_EFFECT_SHADER, "gs_effect.wgsl", Shader::from_wgsl);
     app.add_plugins((
         Material2dPlugin::<GsModelMaterial>::default(),
         Material2dPlugin::<GsStageMaterial>::default(),
         Material2dPlugin::<GsHudMaterial>::default(),
+        Material2dPlugin::<GsEffectMaterial>::default(),
     ))
     .init_resource::<ModelTextures>()
     .init_resource::<StageTextures>()
     .init_resource::<HudTextures>()
+    .init_resource::<EffectTextures>()
     .add_systems(Startup, spawn_cameras);
 }
 
