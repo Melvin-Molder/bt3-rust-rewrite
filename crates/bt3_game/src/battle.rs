@@ -41,7 +41,7 @@ use crate::font::Font;
 use crate::hud::{HUD_FILE, Hud, HudFrame, HudSheet, SHEET_WORDS};
 use crate::hud_gauge::{HudTextures, SideGauge};
 use crate::loading::Quad;
-use crate::rng::{GameRandom, LibcRandom};
+use crate::rng::{GameRandom, LibcRandom, Vu0Random};
 use crate::stage_draw::{StageBatch, draw_stage};
 use crate::title::TitleSound;
 
@@ -619,6 +619,8 @@ pub struct Battle {
     pub(crate) menu: Option<PauseMenu>,
     /// Last frame's buttons per pad, for the menus' pressed words.
     prev_held: [u32; 2],
+    /// The VU0 R register: seeded at boot and shared by every battle (the game moves it in and out).
+    pub vu0: Vu0Random,
 }
 
 /// What a side's files give the fighter simulation.
@@ -709,6 +711,7 @@ impl Battle {
             ai,
             menu,
             prev_held: [0; 2],
+            vu0: Vu0Random::default(),
         }
     }
 
@@ -833,14 +836,16 @@ impl Battle {
             };
             self.ai.update(&mut ctx);
         }
+        let mut vu0 = self.vu0;
         self.with_roster(|roster, data, env| {
             roster.sample_input(&pads, env);
             roster.update_input(data, env);
             roster.update_main(data, env);
-            roster.update_scene(data, env, &mut *input.libc);
+            roster.update_scene(data, env, &mut *input.libc, &mut vu0);
             roster.post_scene(data, env);
             false
         });
+        self.vu0 = vu0;
         let cam = self.roster.chars[0].cam;
         let mut view = View::new(cam.eye, cam.rot);
         if self.demo.is_active() {
@@ -2259,8 +2264,69 @@ mod tests {
 
     #[test]
     fn real_ki_blast_draws_its_effects() {
+        ki_blast_draws_its_effects(0);
+    }
+
+    #[test]
+    fn real_ki_blast_of_character_2_draws_its_sprites() {
+        ki_blast_draws_its_effects(2);
+    }
+
+    #[test]
+    fn real_charged_ki_blast_of_character_6_emits_quads() {
         use crate::btl_input::pad::TRIANGLE;
         let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 6;
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        // Its charged blast (action 0xAF) is in the kind 2 list, whose set has a kind 9 emitter.
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, pads(0), 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        let (mut quads, mut emitters, mut most) = (0, 0, 0);
+        for i in 0..150 {
+            let p1 = if i < 45 { TRIANGLE } else { 0 };
+            let frame = battle.run_frame(false, pads(p1), 0, &mut libc, &mut random, None, false);
+            let (q, e) = battle.roster.scene.fx.quads_used();
+            quads = quads.max(q);
+            emitters = emitters.max(e);
+            most = most.max(frame.effects.len());
+        }
+        assert!(
+            emitters > 0 && quads > 0,
+            "emitters {emitters}, quads {quads}"
+        );
+        assert!(most > 0);
+        assert_eq!(
+            battle.roster.scene.fx.quads_used(),
+            (0, 0),
+            "quads outlived the blast"
+        );
+    }
+
+    /// Side 0 (character `chara`) fires a tap blast at the idle second player.
+    fn ki_blast_draws_its_effects(chara: i32) {
+        use crate::btl_input::pad::TRIANGLE;
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = chara;
         setup.sides[1].chara = 1;
         setup.sides[1].pad = 1;
         let Some(mut battle) = real_battle(&setup) else {
@@ -2286,6 +2352,7 @@ mod tests {
         }
         let mut most = 0;
         let mut particles = 0;
+        let mut bills = 0;
         for i in 0..30 {
             let p1 = if i < 2 { TRIANGLE } else { 0 };
             let frame = battle.run_frame(false, pads(p1), 0, &mut libc, &mut random, None, false);
@@ -2303,6 +2370,7 @@ mod tests {
             }
             most = most.max(frame.effects.len());
             particles = particles.max(battle.roster.scene.fx.particles_used());
+            bills = bills.max(battle.roster.scene.fx.bills_alive());
             for t in &frame.effects {
                 for v in &t.vertices {
                     assert!(v.position[0].is_finite() && v.position[1].is_finite());
@@ -2315,6 +2383,13 @@ mod tests {
             battle.roster.scene.fx.particles_used(),
             0,
             "particles leaked from the pool"
+        );
+        // Character 2's tap blast set has a kind 16 sprite (Goku's has none).
+        assert_eq!(bills > 0, chara == 2, "sprites: {bills}");
+        assert_eq!(
+            battle.roster.scene.fx.bills_alive(),
+            0,
+            "a sprite outlived its blast"
         );
     }
 }

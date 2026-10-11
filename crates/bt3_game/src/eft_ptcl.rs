@@ -5,11 +5,10 @@
 
 use bt3_data::eft_pack::{PtclDef, PtclDef2};
 
-use crate::battle::{IDENTITY, Mtx, apply, inverse_rt};
+use crate::battle::{IDENTITY, Mtx, apply};
 use crate::eft::{
-    ClipVtx, DrawCtx, EffectBlend, EffectTri, EffectVertex, OFFSET_X, OFFSET_Y, OrderTable, Prim,
-    SetRef, V3, V4, ZSort, add, cross, depth_slot, draw_sprite, mtx_mul, norm, point,
-    queue_tri_clip, scale3, sub, wrap_angle, xyz,
+    ClipVtx, DrawCtx, OrderTable, Prim, SetRef, V3, V4, ZSort, add, cross, draw_sprite, norm,
+    point, quad_depth, queue_strip, queue_tri_clip, scale3, sub, wrap_angle, xyz,
 };
 use crate::rng::LibcRandom;
 
@@ -247,7 +246,7 @@ fn rot_xy(pitch: f32, yaw: f32) -> Mtx {
     rot_y(&rx, sy, cy)
 }
 
-fn rot_y(m: &Mtx, s: f32, c: f32) -> Mtx {
+pub(crate) fn rot_y(m: &Mtx, s: f32, c: f32) -> Mtx {
     let ry: Mtx = [
         [c, 0.0, -s, 0.0],
         [0.0, 1.0, 0.0, 0.0],
@@ -257,7 +256,7 @@ fn rot_y(m: &Mtx, s: f32, c: f32) -> Mtx {
     std::array::from_fn(|i| apply(&ry, m[i]))
 }
 
-fn rot_z(m: &Mtx, a: f32) -> Mtx {
+pub(crate) fn rot_z(m: &Mtx, a: f32) -> Mtx {
     let (s, c) = a.sin_cos();
     let rz: Mtx = [
         [c, s, 0.0, 0.0],
@@ -268,7 +267,7 @@ fn rot_z(m: &Mtx, a: f32) -> Mtx {
     std::array::from_fn(|i| apply(&rz, m[i]))
 }
 
-fn rot_x(m: &Mtx, a: f32) -> Mtx {
+pub(crate) fn rot_x(m: &Mtx, a: f32) -> Mtx {
     let (s, c) = a.sin_cos();
     let rx: Mtx = [
         [1.0, 0.0, 0.0, 0.0],
@@ -940,66 +939,19 @@ impl Emitter {
         ot: &mut OrderTable,
         ctx: &DrawCtx,
     ) {
-        // (x, y in 1/16 pixel, z, w).
-        let mut scr = [(0i32, 0i32, 0i32, 0i32); 4];
-        for (k, c) in quad.iter().enumerate() {
-            // Vu0Cur_ProjectPoints: stops at the first point outside 0 < x, y < 4096 or behind (w <= 0).
-            let v = apply(&ctx.world2screen, point(*c));
-            let q = 1.0 / v[3];
-            let (x, y) = (v[0] * q, v[1] * q);
-            if !(0.0 < x && x < 4096.0 && 0.0 < y && y < 4096.0 && v[3] > 0.0) {
-                return;
-            }
-            scr[k] = (
-                (x * 16.0) as i32,
-                (y * 16.0) as i32,
-                (v[2] * q) as i32,
-                v[3] as i32,
-            );
-        }
         let uv = self.quad_uv(p, 0.0);
-        let col = p.color.map(|c| c as i32 as u8);
-        let z = scr[0]
-            .2
-            .wrapping_add(scr[1].2)
-            .wrapping_add(scr[2].2)
-            .wrapping_add(scr[3].2)
-            >> 10;
-        let front = self.flags & W_FRONT != 0;
-        let vert = |k: usize| {
-            let q = 1.0 / scr[k].3 as f32;
-            EffectVertex {
-                position: [
-                    scr[k].0 as f32 / 16.0 - OFFSET_X,
-                    scr[k].1 as f32 / 16.0 - OFFSET_Y,
-                    if front {
-                        0xFF_FFFF as f32
-                    } else {
-                        (scr[k].2 & 0xFF_FFFF) as f32
-                    },
-                ],
-                stq: [uv[k][0] * q, uv[k][1] * q, q],
-                rgba: col,
-            }
-        };
-        let layer = if def.layer >= 2 {
-            def.layer - 2
-        } else {
-            def.layer
-        };
-        let blend = EffectBlend::of(usize::from(layer), def.layer >= 2);
-        for k in 0..2 {
-            ot.add(
-                depth_slot(z),
-                usize::from(layer),
-                EffectTri {
-                    texture: self.texture,
-                    blend,
-                    clamp: false,
-                    vertices: [vert(k), vert(k + 1), vert(k + 2)],
-                },
-            );
-        }
+        queue_strip(
+            ot,
+            ctx,
+            quad,
+            std::array::from_fn(|k| [uv[k][0], uv[k][1]]),
+            p.color,
+            def.layer,
+            self.texture,
+            self.flags & W_FRONT != 0,
+            false,
+            false,
+        );
     }
 }
 
@@ -1021,55 +973,5 @@ fn pulse(v: &mut f32, t: &mut f32, flags: &mut u32, down: u32, lo: f32, range: f
             *t = 0.0;
             *flags &= !down;
         }
-    }
-}
-
-/// `EftPrim_DrawQuadDepth`: a w x h quad (half sizes) facing the camera, rotated about the view axis, as two
-/// clipped triangles in the depth slot of its centre.
-#[allow(clippy::too_many_arguments)]
-fn quad_depth(
-    ot: &mut OrderTable,
-    ctx: &DrawCtx,
-    pos: V3,
-    color: V4,
-    layer: u8,
-    front: bool,
-    texture: Option<usize>,
-    size: [f32; 2],
-    uv: [f32; 4],
-    rot: f32,
-) {
-    let (w, h) = (size[0], size[1]);
-    let mut inv = inverse_rt(&ctx.world2view);
-    inv[3] = [0.0, 0.0, 0.0, inv[3][3]];
-    // Mtx_Mul(m, inv, Rz(rot)): the rotation first.
-    let m = mtx_mul(&inv, &rot_z(&IDENTITY, rot));
-    let corners = [[-w, -h, 0.0], [w, -h, 0.0], [-w, h, 0.0], [w, h, 0.0]]
-        .map(|c| add(mul_point(&m, c), pos));
-    let (_, _, sz) = ctx.project(pos);
-    if sz < 0 {
-        return;
-    }
-    let st: [V4; 4] = [
-        [uv[0], uv[1], 1.0, 0.0],
-        [uv[2], uv[1], 1.0, 0.0],
-        [uv[0], uv[3], 1.0, 0.0],
-        [uv[2], uv[3], 1.0, 0.0],
-    ];
-    for i in 0..2 {
-        let tri = std::array::from_fn(|k| ClipVtx {
-            pos: point(corners[i + k]),
-            uv: st[i + k],
-            col: color,
-        });
-        let prim = Prim {
-            texture,
-            ot_layer: layer,
-            z: ZSort::Fixed(sz >> 8),
-            front,
-            clamp: false,
-            alpha_min: 0.01,
-        };
-        queue_tri_clip(ot, ctx, tri, prim);
     }
 }

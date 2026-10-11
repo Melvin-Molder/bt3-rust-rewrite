@@ -567,6 +567,235 @@ impl PtclDef {
     }
 }
 
+/// `EftBillDef` (`EftLineDef`): a sprite's definition block (0x90 bytes); the animated values have three keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BillDef {
+    /// 1 key animation, 2 depth-sorted / clipped quads, 4 size pulse, 8 sheet animation, 0x10 colour pulse.
+    pub flags: i32,
+    /// The ordering-table layer (2 and 3: layers 0 and 1 in GS context 2).
+    pub layer: u8,
+    /// 0 a camera-facing sprite, 1 a quad along the direction.
+    pub shape: u8,
+    pub cols: u8,
+    pub rows: u8,
+    /// Seconds per sheet frame.
+    pub frame_time: f32,
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub key_time: f32,
+    pub key_split: f32,
+    /// Half turns per frame.
+    pub spin: [f32; 3],
+    /// Width (the quad's half width) and height (its length).
+    pub w: [f32; 3],
+    pub h: [f32; 3],
+    /// Size pulses: low and high factor, seconds per half period.
+    pub pulse_w: [[f32; 3]; 3],
+    pub pulse_h: [[f32; 3]; 3],
+    pub spin_range: f32,
+    pub angle_range: f32,
+}
+
+/// `EftLineDef2`: colours and colour pulse at the three keys (0x84 bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BillDef2 {
+    pub color: [[f32; 4]; 3],
+    /// Low and high factor per key, for red, green and blue.
+    pub pulse: [[[f32; 2]; 3]; 3],
+    pub pulse_time: [f32; 3],
+}
+
+impl BillDef {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x90 {
+            return Err(invalid_data("sprite definition is truncated"));
+        }
+        let k3 = |o: usize| -> [f32; 3] { std::array::from_fn(|k| f32_at(b, o + k * 4)) };
+        Ok(Self {
+            flags: u32_at(b, 0) as i32,
+            layer: b[4],
+            shape: b[5],
+            cols: b[6],
+            rows: b[7],
+            frame_time: f32_at(b, 8),
+            fade_in: f32_at(b, 0xC),
+            fade_out: f32_at(b, 0x10),
+            key_time: f32_at(b, 0x14),
+            key_split: f32_at(b, 0x18),
+            spin: k3(0x1C),
+            w: k3(0x28),
+            h: k3(0x34),
+            pulse_w: [k3(0x40), k3(0x4C), k3(0x58)],
+            pulse_h: [k3(0x64), k3(0x70), k3(0x7C)],
+            spin_range: f32_at(b, 0x88),
+            angle_range: f32_at(b, 0x8C),
+        })
+    }
+}
+
+impl BillDef2 {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x84 {
+            return Err(invalid_data("sprite colours are truncated"));
+        }
+        Ok(Self {
+            color: std::array::from_fn(|k| std::array::from_fn(|i| f32_at(b, k * 0x10 + i * 4))),
+            pulse: std::array::from_fn(|c| {
+                std::array::from_fn(|k| {
+                    std::array::from_fn(|i| f32_at(b, 0x30 + c * 0x18 + k * 8 + i * 4))
+                })
+            }),
+            pulse_time: [f32_at(b, 0x78), f32_at(b, 0x7C), f32_at(b, 0x80)],
+        })
+    }
+}
+
+/// `EftQuadDef` (`EftPart9Def`): a quad emitter's definition block (0x244 bytes); the animated values have three
+/// keys, each `[key][component]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct QuadDef {
+    /// Size factor per quad: start, middle, end (`a`) and their ranges (`b`).
+    pub size_mul: [[f32; 3]; 3],
+    pub size_mul_range: [[f32; 3]; 3],
+    /// Speed factor per quad: start, middle, end (`c`) and their ranges (`d`).
+    pub speed_mul: [[f32; 3]; 3],
+    pub speed_mul_range: [[f32; 3]; 3],
+    /// Start angles (turns) and ranges (`e`, `f`).
+    pub rot: [[f32; 3]; 3],
+    pub rot_range: [[f32; 3]; 3],
+    /// Emitter angle step per emitted quad, half turns (`g`).
+    pub spin: [[f32; 3]; 3],
+    /// Spin per frame, half turns, and ranges (`i`, `j`).
+    pub rot_vel: [[f32; 3]; 3],
+    pub rot_vel_range: [[f32; 3]; 3],
+    /// Size oscillation low / high (`k`) and seconds per half period (`l`).
+    pub size_osc: [[f32; 2]; 3],
+    pub size_osc_time: [f32; 3],
+    /// Direction around the emitter's axis, half turns, and range (`m`, `n`).
+    pub arc: [f32; 3],
+    pub arc_range: [f32; 3],
+    /// Start offset: x, x range, y, y range, z, z range (`o` .. `t`).
+    pub offset: [[f32; 6]; 3],
+    /// Life in seconds and range (`u`, `v`), speed (`w`).
+    pub life: [f32; 3],
+    pub life_range: [f32; 3],
+    pub speed: [f32; 3],
+    pub key_time: f32,
+    pub key_split: f32,
+    pub fade_in_end: f32,
+    pub fade_out_start: f32,
+    /// Fraction of a quad's life after which the second speed / size step applies.
+    pub speed_split: f32,
+    pub base_size: f32,
+    pub base_size_range: f32,
+    pub base_speed: f32,
+    pub base_speed_range: f32,
+    /// 1 reverse spin, 2 random spin direction, 4 mirror U while spinning back, 8 size oscillation, 0x10 keyed,
+    /// 0x20 clipped draws, 0x40 four quarter quads, 0x80 colour oscillation, 0x100 / 0x200 / 0x400 random sign of
+    /// the start angle x / y / z.
+    pub flags: i32,
+    pub interval: [u8; 3],
+    pub count: [u8; 3],
+    pub layer: u8,
+    pub cols: u8,
+    pub rows: u8,
+    pub frame_step: u8,
+    /// 1 static colour, 2 static colour on a coin flip.
+    pub color_mode: u8,
+}
+
+/// `EftQuadDef2`: colours, the colour ramp and the colour oscillation at the three keys (0x12C bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct QuadDef2 {
+    pub color: [[f32; 4]; 3],
+    pub color_range: [[f32; 4]; 3],
+    pub end_color: [[f32; 4]; 3],
+    pub end_color_range: [[f32; 4]; 3],
+    /// The part of the life the colour ramps over.
+    pub ramp_start: [f32; 3],
+    pub ramp_end: [f32; 3],
+    /// Colour multiplier oscillation per channel: [channel][key] = {low, high}.
+    pub osc: [[[f32; 2]; 3]; 3],
+    /// Seconds per half period.
+    pub osc_time: [f32; 3],
+}
+
+impl QuadDef {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x243 {
+            return Err(invalid_data("quad definition is truncated"));
+        }
+        let v3 = |o: usize| -> [[f32; 3]; 3] {
+            std::array::from_fn(|k| std::array::from_fn(|i| f32_at(b, o + k * 12 + i * 4)))
+        };
+        let k3 = |o: usize| -> [f32; 3] { std::array::from_fn(|k| f32_at(b, o + k * 4)) };
+        Ok(Self {
+            size_mul: v3(0),
+            size_mul_range: v3(0x24),
+            speed_mul: v3(0x48),
+            speed_mul_range: v3(0x6C),
+            rot: v3(0x90),
+            rot_range: v3(0xB4),
+            spin: v3(0xD8),
+            rot_vel: v3(0x120),
+            rot_vel_range: v3(0x144),
+            size_osc: std::array::from_fn(|k| [f32_at(b, 0x168 + k * 8), f32_at(b, 0x16C + k * 8)]),
+            size_osc_time: k3(0x180),
+            arc: k3(0x18C),
+            arc_range: k3(0x198),
+            offset: std::array::from_fn(|k| {
+                std::array::from_fn(|i| f32_at(b, 0x1A4 + i * 12 + k * 4))
+            }),
+            life: k3(0x1EC),
+            life_range: k3(0x1F8),
+            speed: k3(0x204),
+            key_time: f32_at(b, 0x210),
+            key_split: f32_at(b, 0x214),
+            fade_in_end: f32_at(b, 0x218),
+            fade_out_start: f32_at(b, 0x21C),
+            speed_split: f32_at(b, 0x220),
+            base_size: f32_at(b, 0x224),
+            base_size_range: f32_at(b, 0x228),
+            base_speed: f32_at(b, 0x22C),
+            base_speed_range: f32_at(b, 0x230),
+            flags: u32_at(b, 0x234) as i32,
+            interval: [b[0x238], b[0x239], b[0x23A]],
+            count: [b[0x23B], b[0x23C], b[0x23D]],
+            layer: b[0x23E],
+            cols: b[0x23F],
+            rows: b[0x240],
+            frame_step: b[0x241],
+            color_mode: b[0x242],
+        })
+    }
+}
+
+impl QuadDef2 {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x12C {
+            return Err(invalid_data("quad colours are truncated"));
+        }
+        let v4 = |o: usize| -> [[f32; 4]; 3] {
+            std::array::from_fn(|k| std::array::from_fn(|i| f32_at(b, o + k * 0x10 + i * 4)))
+        };
+        let k3 = |o: usize| -> [f32; 3] { std::array::from_fn(|k| f32_at(b, o + k * 4)) };
+        Ok(Self {
+            color: v4(0),
+            color_range: v4(0x30),
+            end_color: v4(0x60),
+            end_color_range: v4(0x90),
+            ramp_start: k3(0xC0),
+            ramp_end: k3(0xCC),
+            osc: std::array::from_fn(|c| {
+                std::array::from_fn(|k| {
+                    std::array::from_fn(|i| f32_at(b, 0xD8 + c * 0x18 + k * 8 + i * 4))
+                })
+            }),
+            osc_time: k3(0x120),
+        })
+    }
+}
+
 impl PtclDef2 {
     pub fn parse(b: &[u8]) -> io::Result<Self> {
         if b.len() < 0x114 {

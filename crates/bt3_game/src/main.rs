@@ -16,7 +16,9 @@ mod dialog;
 mod draw;
 mod duel_menu;
 mod eft;
+mod eft_bill;
 mod eft_ptcl;
+mod eft_quad;
 mod eft_ribbon;
 mod fade;
 mod flash;
@@ -167,6 +169,8 @@ struct Game {
     random: GameRandom,
     /// newlib `rand()`, behind `Rand_IntRange`.
     libc_random: LibcRandom,
+    /// The VU0 R register (`Rand_FloatRange`), seeded at boot by `Vu0_Init`; a battle holds it while it runs.
+    vu0_random: rng::Vu0Random,
     /// The loading screen type shown last (`Load_InitScreen` avoids repeating it).
     last_loading_type: Option<u16>,
     /// The battle's model textures (material, shading rows) and this frame's model triangles.
@@ -366,6 +370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             iso_path: image_path,
             random,
             libc_random,
+            vu0_random: rng::Vu0Random::default(),
             last_loading_type: None,
             model_textures: (Vec::new(), Vec::new()),
             model_batches: Vec::new(),
@@ -939,6 +944,9 @@ fn leave_battle(
     reason: u32,
 ) {
     stop_all(game, commands);
+    if let Scene::Battle(battle) = &game.scene {
+        game.vu0_random = battle.vu0;
+    }
     game.model_batches.clear();
     game.stage_batches.clear();
     game.effects.clear();
@@ -1030,7 +1038,9 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     game.effect_textures = assets.effect_textures.clone();
     game.hud_textures = assets.hud_textures.clone();
     game.hud_clamp_from = assets.menu_sheet.base;
-    game.scene = Scene::Battle(Box::new(battle::Battle::new(assets)));
+    let mut battle = battle::Battle::new(assets);
+    battle.vu0 = game.vu0_random;
+    game.scene = Scene::Battle(Box::new(battle));
     play_bgm(game, commands, battle::BGM_FIRST + setup.bgm.max(0) as u32);
 }
 

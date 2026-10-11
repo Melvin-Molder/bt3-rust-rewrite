@@ -110,6 +110,60 @@ impl LibcRandom {
     }
 }
 
+/// The VU0 R register (`Rand_Float01` / `Rand_FloatRange`, src/sys/rand_util.c): the PS2's 23-bit shift-register
+/// generator, kept as the float pattern `0x3F800000 | mantissa` it hands out. `VRNEXT` shifts the mantissa left by
+/// one and feeds back bit 4 xor bit 22 (the feedback taps are PCSX2's, `AdvanceLFSR`, not the decompilation's);
+/// `VRINIT` takes a float's mantissa.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Vu0Random(u32);
+
+/// `Vu0_Init`: `Rand_SeedFloat(0.1234141f)` at boot.
+pub const VU0_BOOT_SEED: f32 = 0.123_414_1;
+
+impl Default for Vu0Random {
+    fn default() -> Self {
+        Self::seeded(VU0_BOOT_SEED)
+    }
+}
+
+impl Vu0Random {
+    /// `VRINIT R, seed`.
+    pub fn seeded(seed: f32) -> Self {
+        Self(0x3F80_0000 | (seed.to_bits() & 0x007F_FFFF))
+    }
+
+    /// `VRNEXT`.
+    fn next(&mut self) -> u32 {
+        let r = self.0;
+        let feed = ((r >> 4) ^ (r >> 22)) & 1;
+        self.0 = ((r << 1) ^ feed) & 0x007F_FFFF | 0x3F80_0000;
+        self.0
+    }
+
+    /// `Rand_Float01`: seven steps, `VRINIT` from the value just made (which leaves R as it is), seven more, minus
+    /// 1.0.
+    pub fn float01(&mut self) -> f32 {
+        for _ in 0..7 {
+            self.next();
+        }
+        let v = self.0;
+        *self = Self(0x3F80_0000 | (v & 0x007F_FFFF));
+        for _ in 0..7 {
+            self.next();
+        }
+        f32::from_bits(self.0) - 1.0
+    }
+
+    /// `Rand_FloatRange(a, b)`: b itself when a == b, else low + Rand_Float01() * (high - low).
+    pub fn float_range(&mut self, a: f32, b: f32) -> f32 {
+        if b == a {
+            return b;
+        }
+        let (lo, hi) = if b < a { (b, a) } else { (a, b) };
+        lo + self.float01() * (hi - lo)
+    }
+}
+
 /// `Rand_Init`: libc rand is seeded from the timer, then four of its values seed the shared generator.
 pub fn init_from_timer(timer: u32) -> (GameRandom, LibcRandom) {
     let mut libc = LibcRandom::new(timer);
@@ -119,7 +173,21 @@ pub fn init_from_timer(timer: u32) -> (GameRandom, LibcRandom) {
 
 #[cfg(test)]
 mod tests {
-    use super::{GameRandom, LibcRandom, temper};
+    use super::{GameRandom, LibcRandom, Vu0Random, temper};
+
+    #[test]
+    fn vu0_random_stays_in_its_float_range() {
+        let mut r = Vu0Random::default();
+        let first = r.float01();
+        for _ in 0..1000 {
+            let v = r.float01();
+            assert!((0.0..1.0).contains(&v));
+        }
+        assert_ne!(first, r.float01());
+        assert_eq!(r.float_range(3.0, 3.0), 3.0);
+        let v = r.float_range(5.0, 2.0);
+        assert!((2.0..5.0).contains(&v));
+    }
 
     #[test]
     fn libc_rand_matches_the_linked_lcg() {

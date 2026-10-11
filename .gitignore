@@ -58,7 +58,9 @@
 !/crates/bt3_game/src/battle.rs
 !/crates/bt3_game/src/btl_blast.rs
 !/crates/bt3_game/src/eft.rs
+!/crates/bt3_game/src/eft_bill.rs
 !/crates/bt3_game/src/eft_ptcl.rs
+!/crates/bt3_game/src/eft_quad.rs
 !/crates/bt3_game/src/eft_ribbon.rs
 !/crates/bt3_data/src/eft_pack.rs
 !/crates/bt3_game/src/model_draw.rs

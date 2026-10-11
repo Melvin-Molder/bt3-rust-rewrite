@@ -190,6 +190,8 @@ pub(crate) struct World<'a, 'd> {
     pub time_stopped: bool,
     /// libc `rand()` (the effects' random numbers).
     pub libc: &'a mut LibcRandom,
+    /// The VU0 R register (`Rand_FloatRange`).
+    pub vu0: &'a mut crate::rng::Vu0Random,
 }
 
 // ---- vectors ------------------------------------------------------------------------------------------------------
@@ -574,7 +576,7 @@ impl Scene {
             sets: std::array::from_fn(|s| w.data[s].blast_assets),
             any_frozen: stopped,
         };
-        self.fx.update(&fxw, w.libc);
+        self.fx.update(&fxw, w.libc, w.vu0);
         self.clamp_to_stage(w.env);
         // EftDet_Update.
         self.prepare(w.env);

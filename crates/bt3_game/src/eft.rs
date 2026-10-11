@@ -13,12 +13,17 @@
 
 use std::f32::consts::PI;
 
-use bt3_data::eft_pack::{EmitSet, PtclDef, PtclDef2, RibbonAnim, RibbonPrm, SprPack};
+use bt3_data::eft_pack::{
+    BillDef, BillDef2, EmitSet, PtclDef, PtclDef2, QuadDef, QuadDef2, RibbonAnim, RibbonPrm,
+    SprPack,
+};
 
 use crate::battle::{IDENTITY, Mtx, apply, inverse_rt};
+use crate::eft_bill::{B_DEAD, B_FRONT, BILLS, Bill};
 use crate::eft_ptcl::{EMITTERS, Emitter, W_DEAD, W_DETACH, W_FRONT};
+use crate::eft_quad::{E_DEAD, E_OWN_ORIGIN, E_VIEW_ONLY, Pool, QuadEmitter, Rng};
 use crate::eft_ribbon::{R_DEAD, R_STOP, RIBBON_NODES, RIBBONS, Ribbon};
-use crate::rng::LibcRandom;
+use crate::rng::{LibcRandom, Vu0Random};
 
 pub(crate) type V3 = [f32; 3];
 pub(crate) type V4 = [f32; 4];
@@ -524,6 +529,154 @@ pub(crate) fn draw_sprite(
     }
 }
 
+/// `Vu0Cur_ProjectPoints` of four points as a strip packet: dropped unless every corner is on the GS area; the
+/// depth slot is the sum of the four depths >> 10. `front`: Z forced to the nearest; `front_slot`: forced before
+/// the slot is taken (`EftLine_DrawSprite`) rather than after it (`EftPtcl_DrawAxisQuads`, `EftQuad_DrawSprite`).
+/// `float_q`: Q is 1 / w of the projection (`Vu0Cur_ProjectPointsStq`) rather than 1 / the integer w.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn queue_strip(
+    ot: &mut OrderTable,
+    ctx: &DrawCtx,
+    quad: &[V3; 4],
+    st: [[f32; 2]; 4],
+    color: V4,
+    layer: u8,
+    texture: Option<usize>,
+    front: bool,
+    front_slot: bool,
+    float_q: bool,
+) {
+    // (x, y in 1/16 pixel, z, w).
+    let mut scr = [(0i32, 0i32, 0i32, 0i32); 4];
+    let mut qs = [0.0f32; 4];
+    for (k, c) in quad.iter().enumerate() {
+        // Vu0Cur_ProjectPoints: stops at the first point outside 0 < x, y < 4096 or behind (w <= 0).
+        let v = apply(&ctx.world2screen, point(*c));
+        let q = 1.0 / v[3];
+        let (x, y) = (v[0] * q, v[1] * q);
+        if !(0.0 < x && x < 4096.0 && 0.0 < y && y < 4096.0 && v[3] > 0.0) {
+            return;
+        }
+        scr[k] = (
+            (x * 16.0) as i32,
+            (y * 16.0) as i32,
+            (v[2] * q) as i32,
+            v[3] as i32,
+        );
+        qs[k] = if float_q { q } else { 1.0 / scr[k].3 as f32 };
+    }
+    let sum = |scr: &[(i32, i32, i32, i32); 4]| {
+        scr[0]
+            .2
+            .wrapping_add(scr[1].2)
+            .wrapping_add(scr[2].2)
+            .wrapping_add(scr[3].2)
+            >> 10
+    };
+    if front {
+        let z = sum(&scr);
+        for v in &mut scr {
+            v.2 = 0xFF_FFFF;
+        }
+        if !front_slot {
+            return queue_strip_at(ot, &scr, qs, st, color, layer, texture, z);
+        }
+    }
+    let z = sum(&scr);
+    queue_strip_at(ot, &scr, qs, st, color, layer, texture, z);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_strip_at(
+    ot: &mut OrderTable,
+    scr: &[(i32, i32, i32, i32); 4],
+    qs: [f32; 4],
+    st: [[f32; 2]; 4],
+    color: V4,
+    layer: u8,
+    texture: Option<usize>,
+    z: i32,
+) {
+    let col = color.map(|c| c as i32 as u8);
+    let vert = |k: usize| {
+        let q = qs[k];
+        EffectVertex {
+            position: [
+                scr[k].0 as f32 / 16.0 - OFFSET_X,
+                scr[k].1 as f32 / 16.0 - OFFSET_Y,
+                (scr[k].2 & 0xFF_FFFF) as f32,
+            ],
+            stq: [st[k][0] * q, st[k][1] * q, q],
+            rgba: col,
+        }
+    };
+    let l = if layer >= 2 { layer - 2 } else { layer };
+    let blend = EffectBlend::of(usize::from(l), layer >= 2);
+    // A triangle strip: (0, 1, 2) and (1, 2, 3).
+    for k in 0..2 {
+        ot.add(
+            depth_slot(z),
+            usize::from(l),
+            EffectTri {
+                texture,
+                blend,
+                clamp: false,
+                vertices: [vert(k), vert(k + 1), vert(k + 2)],
+            },
+        );
+    }
+}
+
+/// `EftPrim_DrawQuadDepth`: a w x h quad (half sizes) facing the camera, rotated about the view axis, as two
+/// clipped triangles in the depth slot of its centre.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quad_depth(
+    ot: &mut OrderTable,
+    ctx: &DrawCtx,
+    pos: V3,
+    color: V4,
+    layer: u8,
+    front: bool,
+    texture: Option<usize>,
+    size: [f32; 2],
+    uv: [f32; 4],
+    rot: f32,
+) {
+    let (w, h) = (size[0], size[1]);
+    let mut inv = inverse_rt(&ctx.world2view);
+    inv[3] = [0.0, 0.0, 0.0, inv[3][3]];
+    // Mtx_Mul(m, inv, Rz(rot)): the rotation first.
+    let m = mtx_mul(&inv, &rotate_xyz(&IDENTITY, [0.0, 0.0, rot]));
+    let corners = [[-w, -h, 0.0], [w, -h, 0.0], [-w, h, 0.0], [w, h, 0.0]]
+        .map(|c| add(xyz(apply(&m, point(c))), pos));
+    let (_, _, sz) = ctx.project(pos);
+    if sz < 0 {
+        return;
+    }
+    let st: [V4; 4] = [
+        [uv[0], uv[1], 1.0, 0.0],
+        [uv[2], uv[1], 1.0, 0.0],
+        [uv[0], uv[3], 1.0, 0.0],
+        [uv[2], uv[3], 1.0, 0.0],
+    ];
+    for i in 0..2 {
+        let tri = std::array::from_fn(|k| ClipVtx {
+            pos: point(corners[i + k]),
+            uv: st[i + k],
+            col: color,
+        });
+        let prim = Prim {
+            texture,
+            ot_layer: layer,
+            z: ZSort::Fixed(sz >> 8),
+            front,
+            clamp: false,
+            alpha_min: 0.01,
+        };
+        queue_tri_clip(ot, ctx, tri, prim);
+    }
+}
+
 // ---- textures --------------------------------------------------------------------------------------------------
 
 /// The decoded textures of one emitter set: per resource category (sets of 32 / 16 / 8 / 4) and resource, the
@@ -536,6 +689,10 @@ pub(crate) struct SetAssets {
     pub ribbon: Vec<Option<(RibbonPrm, RibbonAnim)>>,
     /// The definitions of kind 5 emitters.
     pub ptcl: Vec<Option<(PtclDef, PtclDef2)>>,
+    /// The definitions of kind 16 sprites.
+    pub bill: Vec<Option<(BillDef, BillDef2)>>,
+    /// The definitions of kind 9 quad emitters.
+    pub quad: Vec<Option<(QuadDef, QuadDef2)>>,
 }
 
 impl SetAssets {
@@ -583,11 +740,33 @@ impl SetAssets {
                 }
             }
         }
+        let mut bill = vec![None; set.pairs.len()];
+        if let Some(g) = set.groups[16] {
+            for j in 0..g.count {
+                if let (a, Some(b)) = set.pairs[g.first_pair + j] {
+                    bill[g.first_pair + j] = BillDef::parse(set.at(a))
+                        .ok()
+                        .zip(BillDef2::parse(set.at(b)).ok());
+                }
+            }
+        }
+        let mut quad = vec![None; set.pairs.len()];
+        if let Some(g) = set.groups[9] {
+            for j in 0..g.count {
+                if let (a, Some(b)) = set.pairs[g.first_pair + j] {
+                    quad[g.first_pair + j] = QuadDef::parse(set.at(a))
+                        .ok()
+                        .zip(QuadDef2::parse(set.at(b)).ok());
+                }
+            }
+        }
         Ok(Self {
             tex,
             spr,
             ribbon,
             ptcl,
+            bill,
+            quad,
         })
     }
 }
@@ -1063,6 +1242,8 @@ pub(crate) enum Handle {
     Anim(u32),
     Ribbon(u32),
     Ptcl(u32),
+    Bill(u32),
+    Quad(u32),
 }
 
 /// What the modules read of the battle while they update or draw.
@@ -1083,6 +1264,10 @@ pub(crate) struct Modules {
     ptcls: Vec<Emitter>,
     /// `gEftPtcl->used`: particles of the pool in use.
     ptcl_used: usize,
+    bills: Vec<Bill>,
+    quads: Vec<QuadEmitter>,
+    /// `gEftQuadMgr`'s quads.
+    quad_pool: Pool,
     next_id: u32,
 }
 
@@ -1094,6 +1279,9 @@ impl Default for Modules {
             ribbon_nodes_free: RIBBON_NODES,
             ptcls: Vec::new(),
             ptcl_used: 0,
+            bills: Vec::new(),
+            quads: Vec::new(),
+            quad_pool: Pool::default(),
             next_id: 0,
         }
     }
@@ -1170,10 +1358,30 @@ impl Modules {
         self.ribbons.iter_mut().find(|r| r.id == h)
     }
 
+    /// Quads of the pool in use and live quad emitters (kind 9).
+    #[cfg(test)]
+    pub(crate) fn quads_used(&self) -> (usize, usize) {
+        (self.quad_pool.used(), self.quads.len())
+    }
+
+    /// Live sprites (kind 16).
+    #[cfg(test)]
+    pub(crate) fn bills_alive(&self) -> usize {
+        self.bills.len()
+    }
+
     /// Particles of the pool in use (`gEftPtcl->used`).
     #[cfg(test)]
     pub(crate) fn particles_used(&self) -> usize {
         self.ptcl_used
+    }
+
+    fn quad_mut(&mut self, h: u32) -> Option<&mut QuadEmitter> {
+        self.quads.iter_mut().find(|e| e.id == h && e.alive())
+    }
+
+    fn bill_mut(&mut self, h: u32) -> Option<&mut Bill> {
+        self.bills.iter_mut().find(|b| b.id == h && b.alive())
     }
 
     fn ptcl_mut(&mut self, h: u32) -> Option<&mut Emitter> {
@@ -1186,6 +1394,8 @@ impl Modules {
             Handle::Anim(id) => self.anim_alive(id),
             Handle::Ribbon(id) => self.ribbons.iter().any(|r| r.id == id),
             Handle::Ptcl(id) => self.ptcls.iter().any(|e| e.id == id && e.alive()),
+            Handle::Bill(id) => self.bills.iter().any(|b| b.id == id && b.alive()),
+            Handle::Quad(id) => self.quads.iter().any(|e| e.id == id && e.alive()),
         }
     }
 
@@ -1207,11 +1417,21 @@ impl Modules {
                     e.flags |= W_DEAD;
                 }
             }
+            Handle::Bill(id) => {
+                if let Some(b) = self.bill_mut(id) {
+                    b.flags |= B_DEAD;
+                }
+            }
+            Handle::Quad(id) => {
+                if let Some(e) = self.quad_mut(id) {
+                    e.kill();
+                }
+            }
         }
     }
 
     /// The modules' turn in `BtlScene_Update`, in layer 3's order.
-    pub(crate) fn update(&mut self, w: &FxWorld, libc: &mut LibcRandom) {
+    pub(crate) fn update(&mut self, w: &FxWorld, libc: &mut LibcRandom, vu0: &mut Vu0Random) {
         let mut i = 0;
         while i < self.anim.len() {
             let p = &mut self.anim[i];
@@ -1253,6 +1473,41 @@ impl Modules {
             if e.flags & W_DEAD != 0 {
                 e.free(&mut self.ptcl_used);
                 self.ptcls.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        // EftQuad_Update (entry 22 of the module table); a dead emitter's task ends (EftQuad_Term).
+        let mut i = 0;
+        while i < self.quads.len() {
+            let e = &mut self.quads[i];
+            match w.sets[e.set.side][e.set.list].and_then(|s| s.quad[e.pair].as_ref()) {
+                Some((def, def2)) => {
+                    let mut rng = Rng {
+                        vu0: &mut *vu0,
+                        libc: &mut *libc,
+                    };
+                    e.update(def, def2, w.any_frozen, &mut self.quad_pool, &mut rng);
+                }
+                None => e.flags |= E_DEAD,
+            }
+            if e.flags & E_DEAD != 0 {
+                e.free(&mut self.quad_pool);
+                self.quads.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        // EftBill_Update (entry 25 of the module table).
+        let mut i = 0;
+        while i < self.bills.len() {
+            let b = &mut self.bills[i];
+            match w.sets[b.set.side][b.set.list].and_then(|s| s.bill[b.pair].as_ref()) {
+                Some((def, def2)) => b.update(def, def2, w.any_frozen),
+                None => b.flags |= B_DEAD,
+            }
+            if b.flags & B_DEAD != 0 {
+                self.bills.remove(i);
             } else {
                 i += 1;
             }
@@ -1317,6 +1572,32 @@ impl Modules {
                 w.sets[e.set.side][e.set.list].and_then(|s| s.ptcl[e.pair].as_ref())
             {
                 e.draw(def, ot, ctx);
+            }
+        }
+        // EftQuad_Draw: a view-only emitter only while its fighter is in view.
+        for e in &self.quads {
+            if e.flags & E_VIEW_ONLY != 0 && !cam_shown(e.chr()) {
+                continue;
+            }
+            let Some(assets) = w.sets[e.set.side][e.set.list] else {
+                continue;
+            };
+            if let (Some((def, _)), Some(table)) = (
+                assets.quad[e.pair].as_ref(),
+                e.table.and_then(|t| assets.tex[2].get(t)),
+            ) {
+                e.draw(def, &self.quad_pool, table, ot, ctx);
+            }
+        }
+        // EftBill_Draw: a front sprite only while its fighter is in view.
+        for b in &self.bills {
+            if b.flags & B_FRONT != 0 && !cam_shown(b.chr()) {
+                continue;
+            }
+            if let Some((def, _)) =
+                w.sets[b.set.side][b.set.list].and_then(|s| s.bill[b.pair].as_ref())
+            {
+                b.draw(def, ot, ctx);
             }
         }
     }
@@ -1699,6 +1980,8 @@ pub(crate) fn spawn(
         let handles = &mut state.handles[half];
         match kind {
             5 => spawn_type5(fx, handles, flags, c, n, idx, size, scale, rate, p, d, libc),
+            16 => spawn_type16(fx, handles, flags, c, n, idx, size, scale, rate, p, d, libc),
+            9 => spawn_type9(fx, handles, flags, c, n, idx, size, scale, rate, p, d),
             14 => spawn_type14(fx, handles, flags, c, n, idx, size, scale, rate, p, d),
             17 => spawn_type17(
                 fx, handles, flags, c, n, idx, size, scale, rate, p, pos, d, libc,
@@ -1744,6 +2027,166 @@ pub(crate) fn spawn(
                 }
             }
         }
+    }
+}
+
+/// `EftEmit_SpawnType9`: a quad emitter at the node, offset along the direction.
+#[allow(clippy::too_many_arguments)]
+fn spawn_type9(
+    fx: &mut Modules,
+    handles: &mut [Option<Handle>; 40],
+    flags: u32,
+    c: &SpawnCtx,
+    n: usize,
+    idx: usize,
+    size: f32,
+    scale: f32,
+    rate: f32,
+    pos: V3,
+    dir: V3,
+) {
+    let Some(g) = c.set.groups[9] else {
+        return;
+    };
+    let part = &c.set.parts[n];
+    let p = add(scale3(dir, part.offset() * scale), pos);
+    let pair = g.first_pair + idx;
+    // The texture table: resource `res` of the set's packs of 8.
+    let table = g.cat_first + part.res();
+    if flags & SPAWN_START != 0
+        && handles[n].is_none()
+        && fx.quads.len() < crate::eft_quad::EMITTERS
+        && let Some((def, def2)) = c.assets.quad.get(pair).and_then(Option::as_ref)
+    {
+        let at = if part.flags() & 0x40 != 0 { pos } else { p };
+        fx.next_id += 1;
+        let table = (table < c.assets.tex[2].len()).then_some(table);
+        let mut e = QuadEmitter::new(
+            fx.next_id, c.chr, c.set_ref, pair, table, at, dir, size, rate, def, def2,
+        );
+        e.delay = f32::from(part.delay());
+        e.stop_delay = f32::from(part.hold());
+        e.set_fade(f32::from(part.fade()));
+        e.set_tex(table, part.tex(), part.tex());
+        if part.flags() & 0x20 != 0 {
+            e.flags |= E_VIEW_ONLY;
+        }
+        if part.flags2() & 8 != 0 {
+            e.flags |= E_OWN_ORIGIN;
+        }
+        fx.quads.push(e);
+        handles[n] = Some(Handle::Quad(fx.next_id));
+    }
+    let Some(Handle::Quad(id)) = handles[n] else {
+        return;
+    };
+    let Some(def) = c
+        .assets
+        .quad
+        .get(pair)
+        .and_then(Option::as_ref)
+        .map(|d| d.0)
+    else {
+        return;
+    };
+    let Modules {
+        quads, quad_pool, ..
+    } = fx;
+    let Some(e) = quads.iter_mut().find(|e| e.id == id && e.alive()) else {
+        return;
+    };
+    if flags & SPAWN_MOVE != 0 {
+        if flags & SPAWN_WARP != 0 {
+            e.warp(&def, quad_pool, p);
+        } else {
+            e.set_pos(p);
+        }
+    }
+    if flags & SPAWN_SCALE != 0 {
+        e.set_size(size);
+    }
+    if flags & SPAWN_DIR != 0 {
+        e.set_dir(dir);
+    }
+    if flags & SPAWN_KILL != 0 {
+        e.kill();
+        handles[n] = None;
+    } else if flags & SPAWN_STOP != 0 {
+        if flags & SPAWN_FADE != 0 {
+            e.stop_delay = 0.0;
+        }
+        e.stop();
+    }
+}
+
+/// `EftEmit_SpawnType16`: a sprite at the node, offset along the direction.
+#[allow(clippy::too_many_arguments)]
+fn spawn_type16(
+    fx: &mut Modules,
+    handles: &mut [Option<Handle>; 40],
+    flags: u32,
+    c: &SpawnCtx,
+    n: usize,
+    idx: usize,
+    size: f32,
+    scale: f32,
+    rate: f32,
+    pos: V3,
+    dir: V3,
+    libc: &mut LibcRandom,
+) {
+    let Some(g) = c.set.groups[16] else {
+        return;
+    };
+    let part = &c.set.parts[n];
+    let p = add(scale3(dir, part.offset() * scale), pos);
+    let pair = g.first_pair + idx;
+    if flags & SPAWN_START != 0
+        && handles[n].is_none()
+        && fx.bills.len() < BILLS
+        && let Some((def, def2)) = c.assets.bill.get(pair).and_then(Option::as_ref)
+    {
+        // EftLine_SetTex: image texIdx of the set's resource.
+        let texture = c.assets.tex[1]
+            .get(g.cat_first + part.res())
+            .and_then(|t| t.get(usize::from(part.tex())))
+            .copied();
+        let at = if part.flags() & 0x40 != 0 { pos } else { p };
+        fx.next_id += 1;
+        let mut b = Bill::new(
+            fx.next_id, c.chr, c.set_ref, pair, texture, at, dir, rate, size, def, def2, libc,
+        );
+        b.delay = f32::from(part.delay());
+        b.end_delay = f32::from(part.hold());
+        if part.flags() & 0x20 != 0 {
+            b.flags |= B_FRONT;
+        }
+        fx.bills.push(b);
+        handles[n] = Some(Handle::Bill(fx.next_id));
+    }
+    let Some(Handle::Bill(id)) = handles[n] else {
+        return;
+    };
+    let Some(b) = fx.bill_mut(id) else {
+        return;
+    };
+    if flags & SPAWN_MOVE != 0 {
+        b.set_pos(p);
+    }
+    if flags & SPAWN_SCALE != 0 {
+        b.set_size(size);
+    }
+    if flags & SPAWN_DIR != 0 {
+        b.set_dir(dir);
+    }
+    if flags & SPAWN_KILL != 0 {
+        b.flags |= B_DEAD;
+        handles[n] = None;
+    } else if flags & SPAWN_STOP != 0 {
+        if flags & SPAWN_FADE != 0 {
+            b.end_delay = 0.0;
+        }
+        b.stop();
     }
 }
 
