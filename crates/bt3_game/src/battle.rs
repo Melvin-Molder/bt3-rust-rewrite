@@ -3458,6 +3458,74 @@ mod tests {
     }
 
     #[test]
+    fn real_ki_objects_and_bombs() {
+        use crate::btl_input::pad::{START, TRIANGLE};
+        // Character 55: the tap blast (0xAE) is a thrown object (type 2): it lobs from the hand under gravity
+        // (over the idle P2), breaks where it lands and is gone 15 frames later. The charged blast (0xAF) is of
+        // type 3: two bombs, thrown with the VU0 generator's jitter, bounce, come to rest and explode.
+        for (hold, bomb) in [(2, false), (60, true)] {
+            let mut setup = BattleSetup::default();
+            setup.sides[0].chara = 55;
+            setup.sides[1].chara = 1;
+            setup.sides[1].pad = 1;
+            let Some(mut battle) = real_battle(&setup) else {
+                return;
+            };
+            let mut libc = LibcRandom::new(1);
+            let mut random = GameRandom::from_key(&[1]);
+            let pads = |a: u32| {
+                [
+                    PadState {
+                        held: a,
+                        ..PadState::default()
+                    },
+                    PadState::default(),
+                ]
+            };
+            let mut frame = |battle: &mut Battle, held: u32| {
+                let start = held & START != 0 && battle.prev_held[0] & START == 0;
+                battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+            };
+            for i in 0..200 {
+                let skip =
+                    battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+                frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+                if battle.seq.state == SeqState::Fight {
+                    break;
+                }
+            }
+            let list = usize::from(bomb);
+            let (mut most, mut created, mut gone, mut still) = (0, None, None, 0);
+            let mut last = Vec::new();
+            for i in 0..200 {
+                frame(&mut battle, if i < hold { TRIANGLE } else { 0 });
+                let objs = &battle.roster.scene.ki_objs[0][list];
+                most = most.max(objs.len());
+                if created.is_none() && !objs.is_empty() {
+                    created = Some(i);
+                }
+                if created.is_some() && gone.is_none() && objs.is_empty() {
+                    gone = Some(i);
+                }
+                let pos: Vec<_> = objs.iter().map(|o| o.pos()).collect();
+                if !pos.is_empty() && pos == last {
+                    still += 1;
+                }
+                last = pos;
+            }
+            let (created, gone) = (created.unwrap(), gone.expect("never ended"));
+            assert_eq!(most, if bomb { 2 } else { 1 });
+            assert!(still >= 10, "it never stopped: {still}");
+            if bomb {
+                assert!(gone - created > 60, "{created} {gone}");
+            } else {
+                assert!(gone - created < 40, "{created} {gone}");
+            }
+            assert_eq!(battle.roster.chars[1].gauge.health, 40000);
+        }
+    }
+
+    #[test]
     fn real_charged_smash_knocks_the_opponent_away() {
         use crate::btl_input::pad::{SQUARE, START, UP};
         let mut setup = BattleSetup::default();

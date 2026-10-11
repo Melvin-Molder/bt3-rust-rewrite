@@ -11,10 +11,10 @@
 //! The technique effects (layer 1, `btl_tech_fx`) add their records before the ki blasts; the passes and the
 //! fighters' answers take both kinds (`EftHit_CanHit`, `EftHit_Clash`, `EftHit_CalcResult`).
 //!
-//! The ki blasts of types 4 / 5 are discs (`btl_tech_disc`).
+//! The ki blasts of types 4 / 5 are discs (`btl_tech_disc`), those of types 2 / 3 thrown objects and bombs
+//! (`btl_ki_obj`).
 //!
-//! Not ported: blast types 2 (ki object) and 3 (ki bomb) fire nothing, nor does a character whose kind 1 / 2 list
-//! belongs to those managers; the struggle's spark; breaking stage objects (a blast stops at every object, a rush technique's record meets none); the
+//! Not ported: the struggle's spark; breaking stage objects (a blast stops at every object, a rush technique's record meets none); the
 //! particles, impact effects, sounds, voices, camera shake, pad vibration and battle events; abilities.
 
 use std::f32::consts::PI;
@@ -26,6 +26,7 @@ use bt3_data::stage_col::{ColBox, ColPoly, POLY_NO_SOLID};
 use crate::btl_chr::{Chr, Env, SideData, add, dot, kmh, length, opp_delta, scale3, sub};
 use crate::btl_hit::{guard_kind, raise_first_clash};
 use crate::btl_input::wrap_angle;
+use crate::btl_ki_obj::{KiObj, LIST_MAX};
 use crate::btl_obj::mask_to_node;
 use crate::btl_tech_fx::{
     TechFx, TechSrc, absorb_amount, guard_rush, hit_by_rush, tech_outclasses, try_dodge_tech,
@@ -303,6 +304,20 @@ pub(crate) struct Scene {
     pub tech: TechFx,
     /// The beam struggle (`EftStruggle`, layer 3).
     pub struggle: Option<Struggle>,
+    /// The thrown objects (kind 1) and bombs (kind 2) of the ki blasts of types 2 / 3, by fighter, in the place of
+    /// those lists.
+    pub ki_objs: [[Vec<KiObj>; 2]; 2],
+    /// The effect generators' draws made in the fighters' pass, taken in order at the start of the scene update.
+    deferred: Vec<Deferred>,
+}
+
+/// A generator draw made outside the scene update.
+#[derive(Clone, Copy, Debug)]
+enum Deferred {
+    /// libc `rand()`.
+    Libc,
+    /// A bomb's throw: three VU0 draws, then two libc ones.
+    Bomb(usize, u32),
 }
 
 /// One side of a beam struggle: a copy of its record.
@@ -662,16 +677,51 @@ impl Scene {
                 _ => {}
             }
             arg.dir = dir;
-            // Types 2 (ki object) and 3 (ki bomb) are not ported.
             match arg.kind_type {
                 5 => self
                     .tech
                     .discs
                     .spawn_from_node(me, &arg, data, &mut self.next_id),
                 4 => self.tech.discs.throw(&arg, data, &mut self.next_id),
-                2 | 3 => {}
+                // EftKiObj_Create: one object; EftKiBomb_Fire: two bombs.
+                2 => self.launch_ki_obj(me, data, arg, false),
+                3 => {
+                    self.launch_ki_obj(me, data, arg, true);
+                    self.launch_ki_obj(me, data, arg, true);
+                }
                 _ => self.launch(me, data, arg),
             }
+            self.defer_disc_draws();
+        }
+    }
+
+    /// The disc's libc draws, in order with the others.
+    fn defer_disc_draws(&mut self) {
+        for _ in 0..std::mem::take(&mut self.tech.discs.pending_rand) {
+            self.deferred.push(Deferred::Libc);
+        }
+    }
+
+    /// A thrown object or a bomb in the owner's kind 1 / 2 list, unless the list is full or the character's pack has
+    /// no such manager.
+    fn launch_ki_obj(&mut self, me: &Chr, data: &SideData, arg: Arg, bomb: bool) {
+        let list = usize::from(bomb);
+        let has = data
+            .effect
+            .is_some_and(|p| p.kind_bits & (1 << (list + 1)) != 0);
+        let objs = &mut self.ki_objs[arg.owner][list];
+        if !has || objs.len() >= LIST_MAX {
+            return;
+        }
+        self.next_id += 1;
+        objs.push(KiObj::new(self.next_id, me, arg, bomb));
+        self.deferred.push(if bomb {
+            Deferred::Bomb(arg.owner, self.next_id)
+        } else {
+            Deferred::Libc
+        });
+        if !bomb {
+            self.deferred.push(Deferred::Libc);
         }
     }
 
@@ -779,6 +829,9 @@ impl Scene {
         for list in &mut self.lists[side] {
             list.clear();
         }
+        for list in &mut self.ki_objs[side] {
+            list.clear();
+        }
         self.tech.reset_side(chars, side);
     }
 
@@ -795,6 +848,7 @@ impl Scene {
         };
         if kind_type == 4 {
             self.tech.discs.spawn_held(me, data, &mut self.next_id);
+            self.defer_disc_draws();
         }
     }
 
@@ -818,9 +872,20 @@ impl Scene {
         if !w.paused {
             self.records.clear();
         }
-        // The libc rand() draws of the discs the fighters created.
-        for _ in 0..std::mem::take(&mut self.tech.discs.pending_rand) {
-            w.libc.rand();
+        // The generator draws of the discs, objects and bombs the fighters created.
+        for d in std::mem::take(&mut self.deferred) {
+            match d {
+                Deferred::Libc => {
+                    w.libc.rand();
+                }
+                Deferred::Bomb(side, id) => {
+                    if let Some(o) = self.ki_objs[side][1].iter_mut().find(|o| o.id == id) {
+                        o.jitter(w.vu0);
+                    }
+                    w.libc.rand();
+                    w.libc.rand();
+                }
+            }
         }
         // Layer 1: the technique effects.
         self.tech
@@ -842,6 +907,26 @@ impl Scene {
                         self.lists[side][list].remove(i);
                     } else {
                         i += 1;
+                    }
+                }
+                // The thrown objects / bombs in this list's place.
+                if !stopped {
+                    let opp = &w.chars[side ^ 1];
+                    let opp_pos = add(opp.pose.pos, opp.pose.disp);
+                    let bottom = w.env.stage.bounds.bottom;
+                    let mut i = 0;
+                    while i < self.ki_objs[side][list].len() {
+                        let o = &mut self.ki_objs[side][list][i];
+                        if let Some(rec) = o.update(opp_pos, bottom, w.libc, w.paused)
+                            && self.records.len() < HIT_MAX
+                        {
+                            self.records.push(rec);
+                        }
+                        if o.dead() {
+                            self.ki_objs[side][list].remove(i);
+                        } else {
+                            i += 1;
+                        }
                     }
                 }
             }
@@ -874,6 +959,15 @@ impl Scene {
                 for task in &mut self.lists[side][list] {
                     task_post_update(task, w, &mut self.fx);
                 }
+                for k in 0..self.ki_objs[side][list].len() {
+                    if list == 1 {
+                        self.ki_objs[side][list][k].post_bomb(w.libc);
+                    } else {
+                        let mut o = self.ki_objs[side][list][k].clone();
+                        o.post_obj_with(w);
+                        self.ki_objs[side][list][k] = o;
+                    }
+                }
             }
         }
         self.tech.discs.post_update(w);
@@ -901,6 +995,15 @@ impl Scene {
             .find(|t| t.id == id)
         {
             return Some(&mut t.tag);
+        }
+        if let Some(o) = self
+            .ki_objs
+            .iter_mut()
+            .flatten()
+            .flatten()
+            .find(|o| o.id == id)
+        {
+            return Some(&mut o.tag);
         }
         self.tech.tag_mut(id)
     }
@@ -1143,14 +1246,14 @@ impl Scene {
                             } else {
                                 sub(hit, scale3(n, r))
                             };
-                            found = Some((hit, contact));
+                            found = Some((hit, contact, n));
                             true
                         }
                         _ => false,
                     }
                 });
             // Stage objects do not break yet: a blast stops at them as at the static mesh.
-            let Some((hit, contact)) = found else {
+            let Some((hit, contact, nrm)) = found else {
                 continue;
             };
             s.hit_pos = hit;
@@ -1158,8 +1261,8 @@ impl Scene {
             s.hit_flags |= D_STAGE;
             let from = if s.kind == 0 { s.b.pos } else { s.a_start };
             s.stage_dist = length(sub(from, hit));
-            // EftHit_IsStoppedByHit; the contact sound, EftKiBomb_SetContact and a technique's camera shake and
-            // vibration are not ported.
+            // EftHit_IsStoppedByHit and EftHit_NotifyBlastTask (a bomb keeps the triangle's normal); the contact sound
+            // and a technique's camera shake and vibration are not ported.
             let stops = tech.is_none_or(|t| {
                 if t.def.kind == 0 {
                     t.def.sub != 4
@@ -1169,6 +1272,16 @@ impl Scene {
             });
             if stops {
                 self.set_task_flag(i, T_HIT_STAGE, contact);
+                let id = self.records[i].task;
+                if let Some(o) = self
+                    .ki_objs
+                    .iter_mut()
+                    .flatten()
+                    .flatten()
+                    .find(|o| o.id == id)
+                {
+                    o.contact_nrm = nrm;
+                }
             }
         }
     }
@@ -1614,7 +1727,7 @@ pub(crate) fn home(
 
 /// `BtlCharApi_GetDeflectDir`: the fighter's facing turned by two random angles that depend on its motion, else a
 /// cone of 0.3 rad round the direction to its opponent.
-fn deflect_dir(w: &mut World, by: usize) -> [f32; 3] {
+pub(crate) fn deflect_dir(w: &mut World, by: usize) -> [f32; 3] {
     let ts = w.time_stopped;
     let mut r = || rand_f(w.rand, ts);
     let chr = &w.chars[by];

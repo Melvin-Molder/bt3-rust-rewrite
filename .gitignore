@@ -81,6 +81,7 @@
 !/crates/bt3_game/src/btl_chr.rs
 !/crates/bt3_game/src/btl_hit.rs
 !/crates/bt3_game/src/btl_input.rs
+!/crates/bt3_game/src/btl_ki_obj.rs
 !/crates/bt3_game/src/btl_menu.rs
 !/crates/bt3_game/src/btl_text.rs
 !/crates/bt3_game/src/btl_mgr.rs
