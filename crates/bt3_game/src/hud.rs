@@ -665,16 +665,36 @@ impl Hud {
         self.flags = if on { SHOW_ALL } else { 0 };
     }
 
-    /// `HudNotice_Show(0)` (READY) or `(1)` (FIGHT), with the announcer's line on streamed-SE player 0.
+    /// `HudNotice_Show`: READY (0) and FIGHT (1) are drawn; the finish announcements 2..5 only play their
+    /// announcer line (on streamed-SE player 0) so far, and 6 / 7 (win / lose) have none.
     pub(crate) fn show_notice(&mut self, id: u32, sounds: &mut Vec<TitleSound>) {
-        let kind = match id {
-            0 => Notice::Ready,
-            1 => Notice::Fight,
-            _ => return,
-        };
-        self.notice.show(kind);
-        let line = ANNOUNCER_BASE + self.announcer.max(0) as u32 * ANNOUNCER_LINES + id;
-        sounds.push(TitleSound::StreamSe(line));
+        match id {
+            0 => self.notice.show(Notice::Ready),
+            1 => self.notice.show(Notice::Fight),
+            _ => self.notice.kind = None,
+        }
+        if id <= 5 {
+            let line = ANNOUNCER_BASE + self.announcer.max(0) as u32 * ANNOUNCER_LINES + id;
+            sounds.push(TitleSound::StreamSe(line));
+        }
+    }
+
+    /// `Hud_ShowGauges`.
+    pub(crate) fn show_gauges(&mut self, on: bool) {
+        if on {
+            self.flags |= SHOW_GAUGES;
+        } else {
+            self.flags &= !SHOW_GAUGES;
+        }
+    }
+
+    /// `Hud_ShowTimer`.
+    pub(crate) fn show_timer(&mut self, on: bool) {
+        if on {
+            self.flags |= SHOW_TIMER;
+        } else {
+            self.flags &= !SHOW_TIMER;
+        }
     }
 
     /// `Hud_Draw`: each part that is switched on updates, then draws: the gauges of both sides, the clock, the

@@ -10,25 +10,34 @@
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
 
+use bt3_data::ai_data::{AiData, AiTables};
 use bt3_data::cam_anim::CamAnim;
+use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables};
+use bt3_data::elf::Elf;
 use bt3_data::gs::{
     RgbaTexture, decode_clut256_upload, decode_sprite_texture, decode_sprite_texture_raw,
     psmt8_row_from_upload,
 };
 use bt3_data::model::{CharaModel, ModelPart, TEXTURE_SECTION, tex0_cbp, tex0_tbp};
-use bt3_data::motion::{Motion, NODE_MAX};
+use bt3_data::motion::{MOTION_COUNT, Motion};
 use bt3_data::pack_section;
 use bt3_data::stage::StageResource;
+use bt3_data::stage_col::{StageCollision, StageNav};
 use bt3_data::stage_model::StageModel;
 use bt3_data::tex::TextureResource;
 
-use crate::battle_seq::{DemoCam, ScrXfade, Seq, SeqInput, SeqState};
+use crate::battle_seq::{DemoCam, ScrXfade, Seq, SeqInput};
+use crate::btl_ai::{AiMgr, Ctx as AiCtx};
+use crate::btl_chr::{Env, SideData};
+use crate::btl_input::{InputGate, PadState};
+use crate::btl_mgr::Roster;
+use crate::btl_obj::ObjData;
 use crate::char_select::BattleSetup;
 use crate::fade::Fade;
 use crate::hud::{HUD_FILE, Hud, HudFrame, HudSheet, SHEET_WORDS};
 use crate::hud_gauge::{HudTextures, SideGauge};
 use crate::loading::Quad;
-use crate::rng::LibcRandom;
+use crate::rng::{GameRandom, LibcRandom};
 use crate::stage_draw::{StageBatch, draw_stage};
 use crate::title::TitleSound;
 
@@ -37,29 +46,34 @@ pub const CHARA_FILE: u32 = 0x590;
 /// The character's motion table (`slot->file[1]`): `0x598 + chara * 10`.
 const MOTION_FILE: u32 = 0x598;
 /// `BtlAct_GetIdleMotion` on the ground at full health.
-pub(crate) const IDLE_MOTION: usize = 0;
-/// Action 1 (the entrance pose): motion 0x180, then 0x181 looping.
-pub(crate) const ENTRANCE_MOTION: usize = 0x180;
-pub(crate) const ENTRANCE_LOOP_MOTION: usize = 0x181;
+#[cfg(test)]
+const IDLE_MOTION: usize = 0;
 /// `BtlObj_BindTables`: `mdl.camAnims[0]` (character file section 0x29) and `mdl.unk924`, the talk table
 /// (section 0x16, read as `BtlSeqObj.talkTbl`).
 const ENTRANCE_CUT_SECTION: usize = 0x29;
 const TALK_TABLE_SECTION: usize = 0x16;
 /// `mdl->unk38` (object + 0x50): the HUD's face pictures.
 const FACE_SECTION: usize = 1;
-/// `gBattleTimeLimitTbl` (0x2C3480): the rule's time limit in seconds, -1 for none.
-const TIME_LIMITS: [i32; 8] = [-1, 60, 90, 180, 240, 45, 0, 0];
+/// `gBattleTimeLimitTbl`: the rule's time limit in seconds (s16, -1 for none), in the executable.
+const TIME_LIMIT_TABLE: u32 = 0x2C_3480;
+/// `gBtlStatCurve`: 13 rows {value at level 80, at 0, at -20}, in the executable.
+const STAT_CURVE: u32 = 0x2E_E7C0;
 /// `BtlStage_GetFileMember(idx)`: the stage's intro cuts are stage file sections 3..5.
 const STAGE_CUT_SECTION: usize = 3;
-/// `BtlObj_GetDefaultAnimStep`: frames per update.
-const ANIM_STEP: f32 = 2.0;
 /// `BTL_FILE_STAGE`: `0x171 + stage`.
 pub const STAGE_FILE: u32 = 0x171;
 /// `Battle_ResetWork`: `Bgm_Play(Battle_GetBgm() + 0x10B16)`.
 pub const BGM_FIRST: u32 = 0x10B16;
 /// `BtlObjLight_Init`: section 1 of common file 2 is the light's texture file.
 const COMMON_LIGHT_FILE: u32 = 2;
+/// Common file 4: the character table (`ChrTblEntry`, 0x3C bytes, header word 1) and the item table
+/// (`ItemTblEntry`, 0x28 bytes, header word 2).
+const CHARA_TABLE_FILE: u32 = 4;
+/// `ITEMTBL_TYPE_AI` and `ITEMTBL_AI_FIRST`.
+const ITEM_TYPE_AI: u8 = 2;
+const ITEM_AI_FIRST: i32 = 0x87;
 /// `ChrCam_KeepBehindHead` keeps the camera behind this node.
+#[cfg(test)]
 const HEAD_NODE: u16 = 0x30;
 /// `BtlObjLight_Init`'s direction, used until the stage gives one.
 const DEFAULT_LIGHT: [f32; 3] = [0.34, -0.006, 0.941];
@@ -101,6 +115,19 @@ pub struct BattleAssets {
     announcer: i32,
     /// `Battle_GetTimeLimit` in seconds, -1 for none.
     pub(crate) time_limit: i32,
+    /// The roster's tables of common file 2.
+    pub(crate) common: CommonTables,
+    pub(crate) stat_curve: [[f32; 3]; 13],
+    pub(crate) collision: StageCollision,
+    /// `Battle_GetSetup()->side[n].cpu`.
+    pub(crate) cpu: [bool; 2],
+    /// The CPU player's data and the executable's rule tables, the stage's way points.
+    pub(crate) ai: AiData,
+    pub(crate) ai_tables: AiTables,
+    pub(crate) nav: StageNav,
+    /// The active members' `cpuLevel` and `aiType`.
+    pub(crate) cpu_level: [i32; 2],
+    pub(crate) ai_type: [usize; 2],
 }
 
 pub(crate) struct FighterModel {
@@ -108,9 +135,14 @@ pub(crate) struct FighterModel {
     model: CharaModel,
     /// Per part, per batch: the material texture and the shading row.
     batch_textures: Vec<Vec<[usize; 2]>>,
-    /// The motions played so far, by id, with `BtlAnim_Play`'s table flags applied.
-    motions: HashMap<usize, Motion>,
-    pub(crate) entrance_cut: Option<CamAnim>,
+    /// Every motion of the character's table by id (`None` for an empty section), with `BtlAnim_Play`'s table
+    /// flags applied.
+    pub(crate) motions: Vec<Option<Motion>>,
+    pub(crate) tables: CharaTables,
+    /// `gBtlChars->paramTbl[chara]`.
+    pub(crate) entry: CharaEntry,
+    /// `mdl.camAnims`: character file sections 0x29..0x2B (entrance, win, lose).
+    pub(crate) cam_cuts: [Option<CamAnim>; 3],
     pub(crate) talk: Vec<u8>,
     /// `BtlMember_LoadParams` at the start of the battle.
     pub(crate) gauge: SideGauge,
@@ -119,6 +151,7 @@ pub(crate) struct FighterModel {
 /// Reads what the battle draws so far. `read` returns a file of the AFS archives by id.
 pub fn load(
     read: &mut dyn FnMut(u32) -> Result<Vec<u8>, String>,
+    elf: &Elf,
     setup: &BattleSetup,
 ) -> Result<BattleAssets, String> {
     let error = |e: std::io::Error| e.to_string();
@@ -153,6 +186,22 @@ pub fn load(
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
     let (hud_textures, hud_sheets, hud_cpu) = load_hud(&read(HUD_FILE)?).map_err(error)?;
+    let common_tables = CommonTables::parse(&common).map_err(error)?;
+    let collision = StageCollision::parse(&stage_file).map_err(error)?;
+    let nav = StageNav::parse(&stage_file).map_err(error)?;
+    let ai = AiData::parse(&common).map_err(error)?;
+    let ai_tables = AiTables::read(elf).map_err(error)?;
+    let chara_table = read(CHARA_TABLE_FILE)?;
+    let ai_type = setup
+        .sides
+        .map(|side| member_ai_type(&chara_table, &side.items));
+    let curve = elf.f32s(STAT_CURVE, 39).map_err(error)?;
+    let stat_curve = std::array::from_fn(|r| [curve[r * 3], curve[r * 3 + 1], curve[r * 3 + 2]]);
+    let limits = elf.read(TIME_LIMIT_TABLE, 16).map_err(error)?;
+    let time_limit = usize::try_from(setup.time_limit)
+        .ok()
+        .and_then(|i| limits.get(i * 2..i * 2 + 2))
+        .map_or(0, |b| i32::from(i16::from_le_bytes([b[0], b[1]])));
     let mut assets = BattleAssets {
         base_textures: Vec::new(),
         shade_textures: Vec::new(),
@@ -167,10 +216,16 @@ pub fn load(
         hud_sheets,
         hud_cpu,
         announcer: setup.announcer,
-        time_limit: TIME_LIMITS
-            .get(setup.time_limit.max(0) as usize)
-            .copied()
-            .unwrap_or(0),
+        time_limit,
+        common: common_tables,
+        stat_curve,
+        collision,
+        cpu: [setup.sides[0].control == 2, setup.sides[1].control == 2],
+        ai,
+        ai_tables,
+        nav,
+        cpu_level: setup.sides.map(|side| side.cpu_level),
+        ai_type,
     };
     for side in setup.sides {
         let file_id = CHARA_FILE + side.chara.max(0) as u32 * 10 + side.costume.max(0) as u32;
@@ -178,12 +233,14 @@ pub fn load(
         let mut fighter = load_fighter(&file, &ramp, &mut assets)
             .map_err(|e| format!("character file 0x{file_id:X}: {e}"))?;
         fighter.chara = side.chara;
-        fighter.entrance_cut = pack_section(&file, ENTRANCE_CUT_SECTION)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(CamAnim::parse)
-            .transpose()
-            .map_err(error)?;
+        for (i, cut) in fighter.cam_cuts.iter_mut().enumerate() {
+            *cut = pack_section(&file, ENTRANCE_CUT_SECTION + i)
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(CamAnim::parse)
+                .transpose()
+                .map_err(error)?;
+        }
         fighter.talk = pack_section(&file, TALK_TABLE_SECTION)
             .map(<[u8]>::to_vec)
             .unwrap_or_default();
@@ -197,19 +254,67 @@ pub fn load(
                 let entry = res.entries.get(index)?;
                 decode_sprite_texture_raw(entry, entry).ok()
             });
+        fighter.tables = CharaTables::parse(&file).map_err(error)?;
+        fighter.entry = assets
+            .common
+            .charas
+            .get(side.chara.max(0) as usize)
+            .copied()
+            .unwrap_or_default();
         let motions = read(MOTION_FILE + side.chara.max(0) as u32 * 10)?;
-        for id in [IDLE_MOTION, ENTRANCE_MOTION, ENTRANCE_LOOP_MOTION] {
+        let word = |n: usize| {
+            motions
+                .get(n * 4..n * 4 + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) & !3)
+        };
+        for id in 0..MOTION_COUNT {
+            // BObjFile_GetEntry: equal offsets mean the section is empty.
+            let (Some(start), Some(end)) = (word(id + 1), word(id + 2)) else {
+                fighter.motions.push(None);
+                continue;
+            };
+            if start == end {
+                fighter.motions.push(None);
+                continue;
+            }
             let packed = pack_section(&motions, id + 1).map_err(error)?;
-            let mut motion =
-                Motion::parse(&bt3_data::bpe::decode(packed).map_err(error)?).map_err(error)?;
+            let raw = bt3_data::bpe::decode(packed).map_err(error)?;
+            // Some sections are streams that decode to nothing (motions the character never plays).
+            if raw.is_empty() {
+                fighter.motions.push(None);
+                continue;
+            }
+            let mut motion = Motion::parse(&raw).map_err(error)?;
             // BtlAnim_Play: BtlAnim_ApplyTableFlags and BtlAnim_HideModelNodes.
             motion.apply_table_flags(motion_flags(&common, id));
             motion.hide_model_nodes(side.chara);
-            fighter.motions.insert(id, motion);
+            fighter.motions.push(Some(motion));
         }
         assets.fighters.push(fighter);
     }
     Ok(assets)
+}
+
+/// `BtlMember_ApplyItems`' AI type (`ItemSet_GetStats`): the last AI item's, else the character table's entry of
+/// character 0 (the member's character is still 0 when the items are applied).
+fn member_ai_type(table: &[u8], items: &[u16; 8]) -> usize {
+    let word = |o: usize| {
+        table
+            .get(o..o + 4)
+            .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let item_base = (word(8) & !3) as usize;
+    let mut kind = 0;
+    for &id in items.iter().filter(|&&id| id != 0) {
+        let entry = item_base + (usize::from(id) - 1) * 0x28;
+        if table.get(entry) == Some(&ITEM_TYPE_AI) {
+            kind = i32::from(id) - ITEM_AI_FIRST;
+        }
+    }
+    if kind == 0 {
+        kind = word((word(4) & !3) as usize) as i32;
+    }
+    kind.max(0) as usize
 }
 
 /// `Hud_Init`'s sheets. Entries with no image (palettes only) become a transparent texel. Sheet 0 is also kept
@@ -367,8 +472,10 @@ fn load_fighter(
         chara: 0,
         model,
         batch_textures,
-        motions: HashMap::new(),
-        entrance_cut: None,
+        motions: Vec::new(),
+        tables: CharaTables::default(),
+        entry: CharaEntry::default(),
+        cam_cuts: [None, None, None],
         talk: Vec::new(),
         gauge: SideGauge::default(),
     })
@@ -407,123 +514,92 @@ pub struct BattleFrame {
     pub sounds: Vec<TitleSound>,
 }
 
-/// The fighter's action as far as the intro needs it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action {
-    /// Action 0xB: the idle motion looping.
-    Neutral,
-    /// Action 1: motion 0x180 once, then 0x181 looping, until flag 0xF0.
-    Entrance,
-}
-
-/// A fighter object as far as the draw needs it.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Fighter {
-    pos: [f32; 3],
-    yaw: f32,
-    /// The stage's starting place (`BtlChar_PlaceAtStart`).
-    start: ([f32; 3], f32),
-    action: Action,
-    /// `anim.cur`, `anim.frame` and layer 0's per-node key cursors.
-    motion: usize,
-    frame: f32,
-    cursors: [u16; NODE_MAX],
-}
-
-impl Fighter {
-    fn new(pos: [f32; 3], yaw: f32) -> Self {
-        let mut fighter = Self {
-            pos,
-            yaw,
-            start: (pos, yaw),
-            action: Action::Neutral,
-            motion: IDLE_MOTION,
-            frame: 0.0,
-            cursors: [0; NODE_MAX],
-        };
-        fighter.reset();
-        fighter
-    }
-
-    /// `BtlChar_Reset`: back at the starting place with the idle motion from frame 0.
-    fn reset(&mut self) {
-        (self.pos, self.yaw) = self.start;
-        self.action = Action::Neutral;
-        self.play(IDLE_MOTION);
-    }
-
-    /// `BtlObjAnim_Play(obj, 0, motion, 1)`.
-    fn play(&mut self, motion: usize) {
-        self.motion = motion;
-        self.frame = 0.0;
-        self.cursors = [0; NODE_MAX];
-    }
-
-    /// `BtlCtrl_StartEntrance`: flag 0xEF forces action 1, which plays motion 0x180.
-    pub(crate) fn start_entrance(&mut self) {
-        self.action = Action::Entrance;
-        self.play(ENTRANCE_MOTION);
-    }
-
-    /// `BtlCtrl_EndEntrance`: flag 0xF0 sends action 1 to the neutral state, which plays the idle motion.
-    pub(crate) fn end_entrance(&mut self) {
-        if self.action == Action::Entrance {
-            self.action = Action::Neutral;
-            self.play(IDLE_MOTION);
-        }
-    }
-
-    /// `BtlCtrl_IsPoseReached` for the entrance: motion 0x181 is playing.
-    pub(crate) fn pose_reached(&self) -> bool {
-        self.motion == ENTRANCE_LOOP_MOTION
-    }
-
-    /// The action's run phase: `BtlAnim_AdvanceThen` / `BtlAnim_AdvanceLoop` by the default step.
-    fn advance(&mut self, length: f32) {
-        self.frame += ANIM_STEP;
-        if self.frame >= length - 0.1 {
-            if self.motion == ENTRANCE_MOTION {
-                self.play(ENTRANCE_LOOP_MOTION);
-            } else {
-                self.frame = 0.0;
-            }
-        }
-    }
-}
-
 /// The battle as far as it is ported.
 pub struct Battle {
     pub assets: BattleAssets,
-    pub(crate) fighters: [Fighter; 2],
+    /// `gBtlChars`.
+    pub(crate) roster: Roster,
     light_dir: [f32; 3],
     pub(crate) seq: Seq,
     pub(crate) demo: DemoCam,
     pub(crate) xfade: ScrXfade,
     pub(crate) hud: Hud,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
-    fade: Fade,
+    pub(crate) fade: Fade,
     /// Node 0's world matrix of each fighter from the last pose (`DemoCam_SetBase` reads it before the new pose).
     roots: [Mtx; 2],
     started: bool,
+    /// `gBtlAi`.
+    ai: AiMgr,
+}
+
+/// What a side's files give the fighter simulation.
+pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
+    SideData {
+        obj: ObjData {
+            model: &f.model,
+            motions: &f.motions,
+            body: f.tables.body.as_ref(),
+        },
+        tables: &f.tables,
+        entry: f.entry,
+    }
+}
+
+impl BattleAssets {
+    /// What the fighters share: the roster's tables, the stage, the sequence state and the input gate.
+    pub(crate) fn env(&self, seq_state: i32, gate: InputGate) -> Env<'_> {
+        Env {
+            common: &self.common,
+            stat_curve: &self.stat_curve,
+            stage: &self.stage,
+            col: &self.collision,
+            mode: self.mode,
+            stage_4_or_27: matches!(self.stage_id, 4 | 27),
+            seq_state,
+            gate,
+        }
+    }
 }
 
 impl Battle {
     pub fn new(assets: BattleAssets) -> Self {
-        // The stage's starting places (`StgDataA.starts`, one per player): each fighter faces its target.
-        let fighters: [Fighter; 2] = std::array::from_fn(|side| {
-            let place = assets.stage.starting_placements.get(side);
-            let pos = place.map_or([0.0; 3], |p| p.position);
-            let target = place.map_or([0.0, 0.0, 1.0], |p| p.target);
-            Fighter::new(pos, (target[0] - pos[0]).atan2(target[2] - pos[2]))
-        });
         // BtlObj_UpdateAll: BtlObjLight_SetDir(BtlStage_GetLightVecB), which normalises it.
         let light_dir = normalize(assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
-        let roots = std::array::from_fn(|side| object_matrix(&fighters[side]));
         let seq = Seq::new(assets.mode, assets.time_limit);
+        let roster = {
+            let data = [
+                side_data(&assets.fighters[0]),
+                side_data(&assets.fighters[1]),
+            ];
+            let env = assets.env(seq.state_id(), seq.input_gate(assets.stage_id));
+            Roster::new([&data[0], &data[1]], &env, assets.cpu)
+        };
+        let mut roster = roster;
+        let ai = {
+            let data = [
+                side_data(&assets.fighters[0]),
+                side_data(&assets.fighters[1]),
+            ];
+            let env = assets.env(seq.state_id(), seq.input_gate(assets.stage_id));
+            // Resetting the sides draws no random number.
+            let mut unused = GameRandom::from_key(&[0]);
+            let mut ctx = AiCtx {
+                chars: &mut roster.chars,
+                data: [&data[0], &data[1]],
+                env: &env,
+                ai: &assets.ai,
+                tab: &assets.ai_tables,
+                nav: &assets.nav,
+                rng: &mut unused,
+            };
+            AiMgr::new(&mut ctx, assets.cpu_level, assets.ai_type)
+        };
+        let roots = std::array::from_fn(|side| roster.chars[side].obj.mtx);
         let hud = Hud::new(&assets.hud_sheets, assets.hud_cpu.clone(), assets.announcer);
         Self {
             assets,
-            fighters,
+            roster,
             light_dir,
             seq,
             demo: DemoCam::default(),
@@ -532,19 +608,35 @@ impl Battle {
             fade: Fade::start_in(1.0),
             roots,
             started: false,
+            ai,
         }
     }
 
+    /// The fighter phases with both sides' data and the shared state.
+    fn with_roster(&mut self, f: impl FnOnce(&mut Roster, [&SideData; 2], &Env) -> bool) -> bool {
+        let data = [
+            side_data(&self.assets.fighters[0]),
+            side_data(&self.assets.fighters[1]),
+        ];
+        let env = self.assets.env(
+            self.seq.state_id(),
+            self.seq.input_gate(self.assets.stage_id),
+        );
+        f(&mut self.roster, [&data[0], &data[1]], &env)
+    }
+
     /// One iteration of `Battle_Loop`: `Gfx_BeginFrame` (the fade), `BtlChars_CheckStart`, the sequence's
-    /// preUpdate, `Battle_Update` (the fighters' actions, the cameras with the demo camera last, the poses), the
-    /// sequence's update, then `Battle_Draw`: the stage, the fighters, the HUD, the overlay pass and the fade.
-    /// `start` is START going down on a pad; `voice_stat` the voice player's status; `shown` whether the frame is
-    /// the one presented (an unseen frame skips the HUD's pixels).
+    /// preUpdate, `BtlChars_SampleInput`, `Battle_Update` (the fighters' phases, the cameras with the demo camera
+    /// last), the sequence's update, then `Battle_Draw`: the stage, the fighters, the HUD, the overlay pass and the
+    /// fade. `start` is START going down on a pad; `pads` the two pads; `voice_stat` the voice player's status;
+    /// `shown` whether the frame is the one presented (an unseen frame skips the HUD's pixels).
     pub fn run_frame(
         &mut self,
         start: bool,
+        pads: [PadState; 2],
         voice_stat: i32,
         libc: &mut LibcRandom,
+        random: &mut GameRandom,
         shown: bool,
     ) -> BattleFrame {
         let mut sounds = Vec::new();
@@ -558,66 +650,76 @@ impl Battle {
             self.seq_start(&mut input);
         }
         self.fade.update();
-        if matches!(self.seq.state, SeqState::Ready | SeqState::Fight)
-            && !std::mem::replace(&mut self.seq.started, true)
-            && self.assets.mode != 1
-        {
-            for fighter in &mut self.fighters {
-                fighter.reset();
-            }
+        if self.with_roster(|roster, data, env| roster.check_start(data, env)) {
+            self.seq.started = true;
         }
-        let sides = [self.assets.fighters[0].gauge, self.assets.fighters[1].gauge];
+        let sides = [
+            self.roster.chars[0].hud_gauge(),
+            self.roster.chars[1].hud_gauge(),
+        ];
         self.hud.pre_update(self.seq.time_left(), &sides);
         self.seq_pre_update(&mut input);
-        let mut poses = Vec::with_capacity(2);
-        for (side, fighter) in self.fighters.iter_mut().enumerate() {
-            let model = &self.assets.fighters[side];
-            let length = model.motions.get(&fighter.motion).map_or(0, |m| m.length);
-            fighter.advance(f32::from(length));
-            let object = object_matrix(fighter);
-            let empty = Motion {
-                length: 0,
-                tracks: Vec::new(),
+        {
+            // BtlAiMgr_Update, after Battle_UpdateWork and before the fighters sample their input.
+            let data = [
+                side_data(&self.assets.fighters[0]),
+                side_data(&self.assets.fighters[1]),
+            ];
+            let env = self.assets.env(
+                self.seq.state_id(),
+                self.seq.input_gate(self.assets.stage_id),
+            );
+            let mut ctx = AiCtx {
+                chars: &mut self.roster.chars,
+                data: [&data[0], &data[1]],
+                env: &env,
+                ai: &self.assets.ai,
+                tab: &self.assets.ai_tables,
+                nav: &self.assets.nav,
+                rng: &mut *random,
             };
-            poses.push(pose(
-                &model.model,
-                model.motions.get(&fighter.motion).unwrap_or(&empty),
-                fighter.frame,
-                &mut fighter.cursors,
-                &object,
-            ));
+            self.ai.update(&mut ctx);
         }
-        let mut view = self.camera_view(0, &poses[0]);
+        self.with_roster(|roster, data, env| {
+            roster.sample_input(&pads, env);
+            roster.update_input(data, env);
+            roster.update_main(data, env);
+            roster.post_scene(data, env);
+            false
+        });
+        let cam = self.roster.chars[0].cam;
+        let mut view = View::new(cam.eye, cam.rot);
         if self.demo.is_active() {
             let base = self.demo.attached().map(|side| self.roots[side]);
             if let Some(demo) = self.demo.update(base) {
                 view = demo;
             }
         }
-        for (side, nodes) in poses.iter().enumerate() {
-            let parts = &self.assets.fighters[side].model.parts;
-            if let Some(i) = parts.iter().position(|p| p.node == 0) {
-                self.roots[side] = nodes[i].0;
+        self.roster.end_frame();
+        for side in 0..2 {
+            if let Some(n) = self.roster.chars[side].obj.node(0) {
+                self.roots[side] = n.mtx;
             }
         }
         self.seq_update(&mut input);
         let stage = draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view);
         let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
-        for (side, nodes) in poses.iter().enumerate() {
+        for side in 0..2 {
             let model = &self.assets.fighters[side];
+            let nodes = &self.roster.chars[side].obj.nodes;
             let parts = model
                 .model
                 .parts
                 .iter()
                 .zip(&model.batch_textures)
                 .zip(nodes);
-            for ((part, textures), (mtx_a, mtx_b)) in parts {
+            for ((part, textures), node) in parts {
                 if part.enabled && node_shown(model.model.header.flags, part.node) {
                     draw_part(
                         part,
                         textures,
-                        mtx_a,
-                        mtx_b,
+                        &node.mtx,
+                        &node.parent,
                         self.light_dir,
                         &view,
                         &mut groups,
@@ -642,55 +744,6 @@ impl Battle {
             sounds,
         }
     }
-
-    /// `ChrCam_Update` with the lock-on camera (`ChrCam_CalcLockOn`) of a fighter standing still and facing its
-    /// opponent: `cam->yaw` has reached the opponent's direction and `cam->side` is still 0. No shake, no bob.
-    fn camera_view(&self, side: usize, own_pose: &[(Mtx, Mtx)]) -> View {
-        let own = self.fighters[side];
-        let opp = self.fighters[side ^ 1];
-        let own_model = &self.assets.fighters[side].model;
-        let height = own_model.header.size[0];
-        let opp_height = self.assets.fighters[side ^ 1].model.header.size[0];
-        let stage = &self.assets.stage;
-        let cam_yaw = (opp.pos[0] - own.pos[0]).atan2(opp.pos[2] - own.pos[2]);
-        let (mut eye, rot, mut target) = lock_on_camera(&LockOn {
-            pos: own.pos,
-            height,
-            side_slope: own_model.header.size[3],
-            opp_pos: opp.pos,
-            opp_height,
-            stage_bottom: stage.bounds.bottom,
-            yaw: cam_yaw,
-            side: 0.0,
-        });
-        // The eye and target stay inside the stage's radius.
-        for point in [&mut eye, &mut target] {
-            let len = point[0].hypot(point[2]);
-            if stage.bounds.radius < len {
-                let k = stage.bounds.radius / len;
-                point[0] *= k;
-                point[2] *= k;
-            }
-        }
-        // ChrCam_KeepBehindHead: node 0x30's world position.
-        if let Some(index) = own_model.parts.iter().position(|p| p.node == HEAD_NODE) {
-            let head = own_pose[index].0[3];
-            keep_behind_head([head[0], head[1], head[2]], height, &mut eye, rot);
-        }
-        View::new(eye, rot)
-    }
-}
-
-/// The fighter object's placement (`BtlObjXf_Update`): the model faces -Z, so the yaw is turned by pi, then
-/// `Vu0Cur_RotateZXY` and the position.
-fn object_matrix(fighter: &Fighter) -> Mtx {
-    let (s, c) = wrap_angle(fighter.yaw + PI).sin_cos();
-    [
-        [c, 0.0, -s, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [s, 0.0, c, 0.0],
-        [fighter.pos[0], fighter.pos[1], fighter.pos[2], 1.0],
-    ]
 }
 
 /// `BtlObj_IsNodeShown` with all of the object's part flags clear (`visible && partN` never holds): the
@@ -710,89 +763,26 @@ fn node_shown(model_flags: u32, node: u16) -> bool {
     }
 }
 
-/// `BtlObjAnim_SamplePose` (layer 0 only, no blend) and `BtlObjPose_CalcMatrices`: per mesh record, the node's
-/// world matrix and its parent's (what `ObjDraw_DrawParts` hands program 0 as bones A and B). The records are
-/// the skeleton in parent-first order; each pushes the current matrix and pops `pop` after itself.
-fn pose(
-    model: &CharaModel,
-    motion: &Motion,
-    frame: f32,
-    cursors: &mut [u16; NODE_MAX],
-    object: &Mtx,
-) -> Vec<(Mtx, Mtx)> {
-    let mut stack = Vec::new();
-    let mut current = *object;
-    let mut nodes = Vec::with_capacity(model.parts.len());
-    for part in &model.parts {
-        let id = usize::from(part.node);
-        let rest = [part.rest[0], part.rest[1], part.rest[2]];
-        let track = motion.tracks.get(id).and_then(Option::as_ref);
-        let (pos, rot) = match track {
-            Some(track) if id < NODE_MAX => {
-                let (pos, rot) = track.sample(&mut cursors[id], frame);
-                (pos.unwrap_or(rest), rot)
-            }
-            _ => (rest, [0.0, 0.0, 0.0, 1.0]),
-        };
-        let mut local = quat_to_mtx(rot);
-        local[3] = [pos[0], pos[1], pos[2], 1.0];
-        stack.push(current);
-        let parent = current;
-        current = mul(&local, &parent);
-        nodes.push((current, parent));
-        for _ in 0..part.pop {
-            current = stack.pop().unwrap_or(*object);
-        }
-    }
-    nodes
-}
-
-/// `Quat_ToMtx`.
-fn quat_to_mtx([x, y, z, w]: [f32; 4]) -> Mtx {
-    let (xx, yy, zz) = (x * x, y * y, z * z);
-    [
-        [
-            1.0 - 2.0 * yy - 2.0 * zz,
-            2.0 * x * y + 2.0 * w * z,
-            2.0 * x * z - 2.0 * w * y,
-            0.0,
-        ],
-        [
-            2.0 * x * y - 2.0 * w * z,
-            1.0 - 2.0 * xx - 2.0 * zz,
-            2.0 * y * z + 2.0 * w * x,
-            0.0,
-        ],
-        [
-            2.0 * x * z + 2.0 * w * y,
-            2.0 * y * z - 2.0 * w * x,
-            1.0 - 2.0 * xx - 2.0 * yy,
-            0.0,
-        ],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
-}
-
 /// What `ChrCam_CalcLockOn` reads.
-struct LockOn {
-    pos: [f32; 3],
-    height: f32,
-    side_slope: f32,
-    opp_pos: [f32; 3],
-    opp_height: f32,
-    stage_bottom: f32,
-    yaw: f32,
-    side: f32,
+pub(crate) struct LockOn {
+    pub pos: [f32; 3],
+    pub height: f32,
+    pub side_slope: f32,
+    pub opp_pos: [f32; 3],
+    pub opp_height: f32,
+    pub stage_bottom: f32,
+    pub yaw: f32,
+    pub side: f32,
 }
 
 /// `ChrCam_GetOffset` for distance preset 0: the offset behind the fighter and the pitch.
-fn camera_offset(height: f32) -> ([f32; 3], f32) {
+pub(crate) fn camera_offset(height: f32) -> ([f32; 3], f32) {
     let dist = (height * 0.5 + 1.0).max(10.0);
     ([0.0, -dist * 1.2, -dist * 2.4], height * -0.001 + -0.05)
 }
 
 /// `ChrCam_CalcLockOn`: returns the eye, the rotation (pitch, yaw, 0) and the target.
-fn lock_on_camera(cam: &LockOn) -> ([f32; 3], [f32; 3], [f32; 3]) {
+pub(crate) fn lock_on_camera(cam: &LockOn) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let scale = cam.height;
     let mut pos = cam.pos;
     let floor_y = cam.stage_bottom + scale * 0.5;
@@ -861,7 +851,7 @@ fn lock_on_camera(cam: &LockOn) -> ([f32; 3], [f32; 3], [f32; 3]) {
 }
 
 /// `ChrCam_KeepBehindHead`: pushes the eye back onto a vertical plane behind the head.
-fn keep_behind_head(node: [f32; 3], height: f32, eye: &mut [f32; 3], rot: [f32; 3]) {
+pub(crate) fn keep_behind_head(node: [f32; 3], height: f32, eye: &mut [f32; 3], rot: [f32; 3]) {
     let margin = height * 0.15;
     let dir = [rot[1].sin(), 0.0, rot[1].cos()];
     let w = -dot(dir, node) + margin * (rot[0].cos() + 1.0) + 10.0;
@@ -1110,6 +1100,7 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::battle_seq::SeqState;
 
     #[test]
     fn projection_puts_the_view_axis_at_the_screen_centre_and_near_at_z_max() {
@@ -1156,6 +1147,9 @@ mod tests {
         let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
             return;
         };
+        let cnf = image.read_file("SYSTEM.CNF").unwrap();
+        let exe = bt3_data::elf::boot_path(&cnf).unwrap();
+        let elf = Elf::parse(image.read_file(&exe).unwrap()).unwrap();
         let mut read = |id: u32| -> Result<Vec<u8>, String> {
             let location = bt3_data::afs::partition_entry_for_id(id);
             let archive = bt3_data::afs::AfsArchive::open(
@@ -1171,12 +1165,26 @@ mod tests {
         setup.sides[0].chara = 0;
         setup.sides[1].chara = 1;
         setup.stage = 0;
-        let assets = load(&mut read, &setup).unwrap();
+        let assets = load(&mut read, &elf, &setup).unwrap();
         let mut battle = Battle::new(assets);
-        assert_eq!(battle.assets.fighters[0].motions[&IDLE_MOTION].length, 67);
+        assert_eq!(
+            battle.assets.fighters[0].motions[IDLE_MOTION]
+                .as_ref()
+                .unwrap()
+                .length,
+            67
+        );
         let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
         // Mode 0 opens on the stage intro: cut 0 films the stage through the demo camera, under the fade-in.
-        let frame = battle.run_frame(false, 0, &mut libc, true);
+        let frame = battle.run_frame(
+            false,
+            [PadState::default(); 2],
+            0,
+            &mut libc,
+            &mut random,
+            true,
+        );
         assert_eq!(battle.seq.state, SeqState::StageIntro);
         assert!(battle.demo.is_active());
         assert_eq!(frame.quads.len(), 1);
@@ -1184,8 +1192,15 @@ mod tests {
         assert!(stage_vertices > 1000, "{stage_vertices} stage vertices");
         // Mode 5 starts at Ready, in side 0's camera.
         setup.mode = 5;
-        let mut battle = Battle::new(load(&mut read, &setup).unwrap());
-        let frame = battle.run_frame(false, 0, &mut libc, true);
+        let mut battle = Battle::new(load(&mut read, &elf, &setup).unwrap());
+        let frame = battle.run_frame(
+            false,
+            [PadState::default(); 2],
+            0,
+            &mut libc,
+            &mut random,
+            true,
+        );
         assert_eq!(battle.seq.state, SeqState::Ready);
         assert!(!battle.demo.is_active());
         // Stage 0's ground, sky and buildings are in view behind the fighters.
@@ -1208,32 +1223,32 @@ mod tests {
         // The idle stance: ankles (node 11) on the ground, hips (node 2) lowered, the head (node 0x30) above them
         // and leaning forward (-Z is the model's front); y points down.
         let fighter = &battle.assets.fighters[0];
-        let mut cursors = [0; NODE_MAX];
-        let nodes = pose(
-            &fighter.model,
-            &fighter.motions[&IDLE_MOTION],
-            10.0,
-            &mut cursors,
-            &IDENTITY,
-        );
-        let at = |id: u16| {
-            let i = fighter
-                .model
-                .parts
-                .iter()
-                .position(|p| p.node == id)
-                .unwrap();
-            nodes[i].0[3]
+        let data = side_data(fighter);
+        let mut obj = crate::btl_obj::Obj::new(&data.obj, 0.0);
+        obj.play(&data.obj, 0, IDLE_MOTION, true);
+        obj.frame = 10.0;
+        obj.sample_pose(&data.obj);
+        obj.calc_matrices(&data.obj);
+        let at = |id: u32| {
+            let n = obj.node(id).unwrap();
+            n.mtx[3]
         };
         assert!((at(11)[1] + 1.2).abs() < 0.5);
         assert!(at(2)[1] > -8.0 && at(2)[1] < -5.0);
-        assert!(at(HEAD_NODE)[1] < at(2)[1] - 3.0 && at(HEAD_NODE)[2] < -2.0);
+        assert!(at(u32::from(HEAD_NODE))[1] < at(2)[1] - 3.0 && at(u32::from(HEAD_NODE))[2] < -2.0);
         // 0.8 s into Ready: READY with announcer 0's line 0, drawn from sheet 1 of the HUD file.
         let mut sounds = Vec::new();
         let mut hud_frames = 0;
         let mut gauges = false;
         for _ in 0..40 {
-            let frame = battle.run_frame(false, 0, &mut libc, true);
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                true,
+            );
             sounds.extend(frame.sounds);
             if frame.hud.prims.iter().any(|p| p.texture.is_some()) {
                 hud_frames += 1;
@@ -1253,13 +1268,27 @@ mod tests {
         // An unseen frame updates the HUD but draws nothing.
         assert!(
             battle
-                .run_frame(false, 0, &mut libc, false)
+                .run_frame(
+                    false,
+                    [PadState::default(); 2],
+                    0,
+                    &mut libc,
+                    &mut random,
+                    false
+                )
                 .hud
                 .layer
                 .is_none()
         );
         let layer = battle
-            .run_frame(false, 0, &mut libc, true)
+            .run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                true,
+            )
             .hud
             .layer
             .unwrap();
@@ -1274,5 +1303,249 @@ mod tests {
         assert!(covered(312, 512, 0, 80) > 2000);
         assert!(covered(230, 282, 20, 50) > 200);
         assert!(covered(0, 512, 120, 448) < 100);
+    }
+
+    /// The battle of a setup read from the ISO, `None` without it.
+    fn real_battle(setup: &BattleSetup) -> Option<Battle> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let mut image = bt3_data::Iso9660::open(&path).ok()?;
+        let cnf = image.read_file("SYSTEM.CNF").unwrap();
+        let exe = bt3_data::elf::boot_path(&cnf).unwrap();
+        let elf = Elf::parse(image.read_file(&exe).unwrap()).unwrap();
+        let mut read = |id: u32| -> Result<Vec<u8>, String> {
+            let location = bt3_data::afs::partition_entry_for_id(id);
+            let archive = bt3_data::afs::AfsArchive::open(
+                &mut image,
+                format!("DATA/PZS3US{}.AFS", location.partition),
+            )
+            .map_err(|e| e.to_string())?;
+            archive
+                .read_entry(&mut image, location.index)
+                .map_err(|e| e.to_string())
+        };
+        Some(Battle::new(load(&mut read, &elf, setup).unwrap()))
+    }
+
+    #[test]
+    fn real_fighters_walk_and_rush_in_the_fight() {
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].control = 2;
+        setup.mode = 5;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        let pad = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        // Ready: 0.8 s, then READY for 2 s; the fighters stand on the ground in the neutral action.
+        for _ in 0..90 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, false);
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        for chr in &battle.roster.chars {
+            assert_eq!(chr.act.current, 0xB);
+            assert!(chr.flags.test(0xF), "on the ground");
+            assert!(chr.flags.test(3) && chr.flags.test(5));
+        }
+        let gap = |b: &Battle| crate::btl_chr::opp_distance(&b.roster.chars[0], &b.roster.chars[1]);
+        let start = gap(&battle);
+        // Up walks towards the opponent (the camera looks at it): action 0xD, or 0xE once close.
+        for _ in 0..20 {
+            battle.run_frame(
+                false,
+                pad(crate::btl_input::pad::UP),
+                0,
+                &mut libc,
+                &mut random,
+                false,
+            );
+        }
+        let current = battle.roster.chars[0].act.current;
+        assert!(matches!(current, 0xD | 0xE), "action 0x{current:X}");
+        assert!(gap(&battle) < start - 10.0, "{start} -> {}", gap(&battle));
+        // Close in, then Square taps: rush steps that hit and take health.
+        for _ in 0..60 {
+            if gap(&battle) < 25.0 {
+                break;
+            }
+            battle.run_frame(
+                false,
+                pad(crate::btl_input::pad::UP),
+                0,
+                &mut libc,
+                &mut random,
+                false,
+            );
+        }
+        let health = battle.roster.chars[1].gauge.health;
+        let mut rushed = false;
+        let mut reacted = false;
+        for i in 0..90 {
+            let held = if i % 6 < 2 {
+                crate::btl_input::pad::SQUARE
+            } else {
+                0
+            };
+            battle.run_frame(false, pad(held), 0, &mut libc, &mut random, false);
+            rushed |= battle.roster.chars[0].act.current == 0x44;
+            reacted |= matches!(battle.roster.chars[1].act.current, 0xC0..=0xC6 | 0xD0);
+        }
+        assert!(rushed, "no rush");
+        assert!(reacted, "no hit reaction");
+        assert!(
+            battle.roster.chars[1].gauge.health < health,
+            "{health} -> {}",
+            battle.roster.chars[1].gauge.health
+        );
+    }
+
+    #[test]
+    fn real_battle_ends_by_ko_and_by_time_up() {
+        use crate::battle_seq::{REASON_KO, REASON_TIME_UP, WIN_P1};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].control = 2;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pad = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        // START skips the stage intro and the talk.
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, pad(0), 0, &mut libc, &mut random, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        // One rush step from close by on an opponent with 100 health left: K.O.
+        battle.roster.chars[1].gauge.health = 100;
+        for _ in 0..120 {
+            let near =
+                crate::btl_chr::opp_distance(&battle.roster.chars[0], &battle.roster.chars[1])
+                    < 25.0;
+            let held = if near {
+                crate::btl_input::pad::SQUARE
+            } else {
+                crate::btl_input::pad::UP
+            };
+            battle.run_frame(false, pad(held), 0, &mut libc, &mut random, false);
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, false);
+            if battle.seq.state != SeqState::Fight {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::Finish);
+        assert_eq!((battle.seq.winner, battle.seq.reason), (WIN_P1, REASON_KO));
+        // The defeated fighter goes down; 3.5 s later the winner poses (action 2) under its camera, then the end.
+        let mut posed = false;
+        let mut downed = false;
+        for _ in 0..600 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, false);
+            posed |= battle.roster.chars[0].act.current == 2;
+            downed |= matches!(
+                battle.roster.chars[1].act.current,
+                0xCF | 0xD8 | 0xD9 | 0xDB | 0xDC
+            );
+            if battle.seq.state == SeqState::End {
+                break;
+            }
+        }
+        assert!(downed && posed, "downed {downed} posed {posed}");
+        assert_eq!(battle.seq.state, SeqState::End);
+        // Time up: 45 s with both standing, the healthier side wins.
+        setup.time_limit = 5;
+        setup.mode = 5;
+        let mut battle = real_battle(&setup).unwrap();
+        for _ in 0..90 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, false);
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        battle.roster.chars[0].gauge.health -= 1000;
+        let mut frames = 0;
+        while battle.seq.state == SeqState::Fight && frames < 2000 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, false);
+            frames += 1;
+        }
+        assert_eq!(battle.seq.state, SeqState::Finish);
+        assert_eq!(battle.seq.reason, REASON_TIME_UP);
+        assert_eq!(battle.seq.winner, crate::battle_seq::WIN_P2);
+        // 45 s at 30 frames a second, give or take the clock's 34 / 32 ms steps.
+        assert!((1340..=1360).contains(&frames), "{frames}");
+    }
+
+    #[test]
+    fn real_cpu_closes_in_rushes_and_knocks_out_an_idle_player() {
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].control = 2;
+        setup.sides[1].cpu_level = 13;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, idle, 0, &mut libc, &mut random, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        let gap = |b: &Battle| crate::btl_chr::opp_distance(&b.roster.chars[0], &b.roster.chars[1]);
+        let start_gap = gap(&battle);
+        let health = battle.roster.chars[0].gauge.health;
+        let mut actions = std::collections::BTreeSet::new();
+        let mut pressed = 0u32;
+        let mut min_gap = start_gap;
+        for _ in 0..5400 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, false);
+            actions.insert(battle.roster.chars[1].act.current);
+            pressed |= battle.roster.chars[1].input.inject_buttons;
+            min_gap = min_gap.min(gap(&battle));
+            if battle.seq.state != SeqState::Fight {
+                break;
+            }
+        }
+        eprintln!(
+            "cpu actions {:X?} buttons {pressed:X} gap {start_gap} -> min {min_gap}; p1 health {health} -> {}",
+            actions, battle.roster.chars[0].gauge.health
+        );
+        assert!(pressed != 0, "the CPU pressed nothing");
+        assert!(min_gap < start_gap - 10.0, "the CPU did not close in");
+        assert!(
+            battle.roster.chars[0].gauge.health < health,
+            "the CPU never hit"
+        );
+        // The idle player is knocked out: the round ends for the CPU side.
+        assert!(actions.contains(&0x44), "no rush step");
+        assert_eq!(battle.seq.state, SeqState::Finish);
+        assert_eq!(
+            (battle.seq.winner, battle.seq.reason),
+            (crate::battle_seq::WIN_P2, crate::battle_seq::REASON_KO)
+        );
     }
 }

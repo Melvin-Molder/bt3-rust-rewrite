@@ -4,8 +4,11 @@ use std::path::Path;
 
 pub mod adx;
 pub mod afs;
+pub mod ai_data;
 pub mod bpe;
 pub mod cam_anim;
+pub mod chara_data;
+pub mod elf;
 pub mod fod;
 pub mod font;
 pub mod gs;
@@ -13,6 +16,7 @@ pub mod model;
 pub mod motion;
 pub mod snd;
 pub mod stage;
+pub mod stage_col;
 pub mod stage_model;
 pub mod tex;
 

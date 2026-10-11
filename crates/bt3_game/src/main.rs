@@ -1,6 +1,14 @@
 mod anim;
 mod battle;
 mod battle_seq;
+mod btl_act;
+mod btl_ai;
+mod btl_chr;
+mod btl_flags;
+mod btl_hit;
+mod btl_input;
+mod btl_mgr;
+mod btl_obj;
 mod char_select;
 mod dialog;
 mod draw;
@@ -147,6 +155,8 @@ struct Game {
     samplers: Vec<Sampling>,
     accumulator: f32,
     pressed_latch: u32,
+    /// `PAD_*` bits pressed since the last battle frame.
+    battle_latch: u32,
     quads: Vec<ScreenQuad>,
     iso_path: PathBuf,
     random: GameRandom,
@@ -340,6 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             samplers,
             accumulator: 0.0,
             pressed_latch: 0,
+            battle_latch: 0,
             quads: Vec::new(),
             iso_path: image_path,
             random,
@@ -540,6 +551,44 @@ const BUTTONS: [(KeyCode, GamepadButton, u32); 7] = [
     (KeyCode::Enter, GamepadButton::Start, title::PAD_START),
 ];
 
+/// Pad 0's `PAD_*` bits in battle: the d-pad on the arrows; Z, X, C, V for Square, Cross, Circle, Triangle (Space is
+/// Cross as in the menus); Q / E for L1 / R1, A / D for L2 / R2; Enter for Start.
+const BATTLE_KEYS: [(KeyCode, u32); 14] = [
+    (KeyCode::ArrowUp, btl_input::pad::UP),
+    (KeyCode::ArrowDown, btl_input::pad::DOWN),
+    (KeyCode::ArrowLeft, btl_input::pad::LEFT),
+    (KeyCode::ArrowRight, btl_input::pad::RIGHT),
+    (KeyCode::KeyZ, btl_input::pad::SQUARE),
+    (KeyCode::KeyX, btl_input::pad::CROSS),
+    (KeyCode::Space, btl_input::pad::CROSS),
+    (KeyCode::KeyC, btl_input::pad::CIRCLE),
+    (KeyCode::KeyV, btl_input::pad::TRIANGLE),
+    (KeyCode::KeyQ, btl_input::pad::L1),
+    (KeyCode::KeyE, btl_input::pad::R1),
+    (KeyCode::KeyA, btl_input::pad::L2),
+    (KeyCode::KeyD, btl_input::pad::R2),
+    (KeyCode::Enter, btl_input::pad::START),
+];
+
+/// The same from a gamepad.
+const BATTLE_BUTTONS: [(GamepadButton, u32); 15] = [
+    (GamepadButton::DPadUp, btl_input::pad::UP),
+    (GamepadButton::DPadDown, btl_input::pad::DOWN),
+    (GamepadButton::DPadLeft, btl_input::pad::LEFT),
+    (GamepadButton::DPadRight, btl_input::pad::RIGHT),
+    (GamepadButton::West, btl_input::pad::SQUARE),
+    (GamepadButton::South, btl_input::pad::CROSS),
+    (GamepadButton::East, btl_input::pad::CIRCLE),
+    (GamepadButton::North, btl_input::pad::TRIANGLE),
+    (GamepadButton::LeftTrigger, btl_input::pad::L1),
+    (GamepadButton::RightTrigger, btl_input::pad::R1),
+    (GamepadButton::LeftTrigger2, btl_input::pad::L2),
+    (GamepadButton::RightTrigger2, btl_input::pad::R2),
+    (GamepadButton::Select, btl_input::pad::SELECT),
+    (GamepadButton::LeftThumb, btl_input::pad::L3),
+    (GamepadButton::RightThumb, btl_input::pad::R3),
+];
+
 /// `Voice_GetStat(0)`: 2 while the file is decoded, 3 while it sounds, 5 once it played to its end, else 0.
 fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
     if game.pending_voice.is_some() {
@@ -615,6 +664,38 @@ fn run_frames(
     mut audio: ResMut<Assets<AudioSource>>,
     mut game: ResMut<Game>,
 ) {
+    // Pad 0 for the battle: `Pad.held` with a latch that keeps a press shorter than a frame for one frame, and the
+    // left stick as `Pad_Update` reads it (y down).
+    let mut battle_held = 0;
+    for (key, bit) in BATTLE_KEYS {
+        if keyboard.just_pressed(key) {
+            game.battle_latch |= bit;
+        }
+        if keyboard.pressed(key) {
+            battle_held |= bit;
+        }
+    }
+    let mut battle_stick = [0.0f32; 2];
+    for pad in gamepads.iter() {
+        for (button, bit) in BATTLE_BUTTONS {
+            if pad.just_pressed(button) {
+                game.battle_latch |= bit;
+            }
+            if pad.pressed(button) {
+                battle_held |= bit;
+            }
+        }
+        if let (Some(x), Some(y)) = (
+            pad.get(GamepadAxis::LeftStickX),
+            pad.get(GamepadAxis::LeftStickY),
+        ) {
+            let raw = |v: f32| (v * 127.5 + 127.5).clamp(0.0, 255.0) as u8;
+            let s = btl_input::stick_from_raw(raw(x), raw(-y));
+            if s != [0.0; 2] {
+                battle_stick = s;
+            }
+        }
+    }
     let mut held = 0;
     for (key, button, bit) in BUTTONS {
         if keyboard.just_pressed(key) || gamepads.iter().any(|pad| pad.just_pressed(button)) {
@@ -631,8 +712,11 @@ fn run_frames(
     let pad2 = gamepads.iter().count() >= 2;
     if std::mem::take(&mut game.skip_to_title) {
         if game.skip_to_battle {
+            // 1P vs COM: pad 0 against the computer.
             let mut setup = BattleSetup::default();
             setup.sides[1].chara = 1;
+            setup.sides[1].control = 2;
+            setup.sides[1].pad = 1;
             start_battle(&mut game, setup);
         } else if game.skip_to_menu {
             load_menu_bank(&mut game);
@@ -782,7 +866,20 @@ fn run_frames(
                 }
             }
             Scene::Battle(battle) => {
-                let frame = battle.run_frame(start, stat, &mut game.libc_random, shown);
+                let pad = btl_input::PadState {
+                    held: battle_held | std::mem::take(&mut game.battle_latch),
+                    left: battle_stick,
+                    status: 0,
+                };
+                let pads = [pad, btl_input::PadState::default()];
+                let frame = battle.run_frame(
+                    start,
+                    pads,
+                    stat,
+                    &mut game.libc_random,
+                    &mut game.random,
+                    shown,
+                );
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
                 game.quads = into_screen(frame.quads);
@@ -831,8 +928,15 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
     let iso_path = game.iso_path.clone();
     let job = std::thread::spawn(move || {
         let mut image = Iso9660::open(&iso_path).map_err(|e| e.to_string())?;
+        // The executable SYSTEM.CNF boots holds the battle's constant tables.
+        let cnf = image.read_file("SYSTEM.CNF").map_err(|e| e.to_string())?;
+        let exe = bt3_data::elf::boot_path(&cnf).ok_or("SYSTEM.CNF names no executable")?;
+        let elf = image
+            .read_file(&exe)
+            .and_then(bt3_data::elf::Elf::parse)
+            .map_err(|e| e.to_string())?;
         let mut read = |id: u32| read_file(&mut image, id).map_err(|e| e.to_string());
-        battle::load(&mut read, &setup)
+        battle::load(&mut read, &elf, &setup)
     });
     game.model_batches.clear();
     game.stage_batches.clear();

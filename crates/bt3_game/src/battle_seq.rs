@@ -5,6 +5,7 @@
 use bt3_data::cam_anim::CamAnim;
 
 use crate::battle::{Battle, IDENTITY, Mtx, View, inverse_rt, mul};
+use crate::btl_input::InputGate;
 use crate::rng::LibcRandom;
 use crate::title::TitleSound;
 
@@ -211,7 +212,27 @@ pub(crate) enum SeqState {
     IntroTalk,
     Ready,
     Fight,
+    /// The finish announcement (K.O. / time up), 3.5 s.
+    Finish,
+    /// The winner's (or the defeated player's) pose and line.
+    WinTalk,
+    /// Result handling and the fade out.
+    End,
+    /// `BTL_SEQ_EXIT`: the battle scene is left.
+    Exit,
 }
+
+/// `BattleResult.winner` bits.
+pub(crate) const WIN_P1: u32 = 1;
+pub(crate) const WIN_P2: u32 = 2;
+pub(crate) const DRAW: u32 = 4;
+pub(crate) const ABORT: u32 = 8;
+/// `BattleResult.reason` bits.
+pub(crate) const REASON_KO: u32 = 1;
+pub(crate) const REASON_TIME_UP: u32 = 2;
+pub(crate) const REASON_FLAG7: u32 = 4;
+/// Either bit: restart the battle instead of leaving.
+pub(crate) const REASON_RESTART: u32 = 0x1_8000;
 
 /// `gBtlSeq` and its handler context.
 #[derive(Debug)]
@@ -227,6 +248,15 @@ pub(crate) struct Seq {
     clock: Clock,
     /// `Battle_GetTimeLimit` in seconds, -1 for none.
     time_limit: i32,
+    /// `BATTLE_FLAG_DEMO`: the fighters' input is neutral.
+    demo_flag: bool,
+    /// `BATTLE_FLAG_READY`: the fighters' input is masked.
+    ready_flag: bool,
+    /// `BattleResult`: the winner bits and the reason bits.
+    pub(crate) winner: u32,
+    pub(crate) reason: u32,
+    /// `BATTLE_FLAG_RESTART`: the battle restarts once the sequence has left.
+    pub(crate) restart: bool,
 }
 
 /// `BtlClock`: hours, minutes, seconds and milliseconds of fight.
@@ -285,6 +315,40 @@ impl Seq {
                 ..Clock::default()
             },
             time_limit,
+            demo_flag: false,
+            ready_flag: false,
+            winner: 0,
+            reason: 0,
+            restart: false,
+        }
+    }
+
+    /// `BtlSeq_GetState`.
+    pub(crate) fn state_id(&self) -> i32 {
+        match self.state {
+            SeqState::StageIntro => 0,
+            SeqState::IntroTalk => 1,
+            SeqState::Ready => 2,
+            SeqState::Fight => 3,
+            SeqState::Finish => 4,
+            SeqState::WinTalk => 5,
+            SeqState::End => 6,
+            SeqState::Exit => 99,
+        }
+    }
+
+    /// `BattleResult_GetWinnerSide`.
+    pub(crate) fn winner_side(&self) -> usize {
+        usize::from(self.winner & WIN_P1 == 0 && self.winner & WIN_P2 != 0)
+    }
+
+    /// What the battle flags let through to the fighters' input (`BtlInput_Fetch`).
+    pub(crate) fn input_gate(&self, stage_id: i32) -> InputGate {
+        InputGate {
+            block: self.demo_flag,
+            filter: self.ready_flag,
+            stage_4_or_27: matches!(stage_id, 4 | 27),
+            time_stopped: false,
         }
     }
 
@@ -335,11 +399,19 @@ impl Battle {
             SeqState::StageIntro => self.seq.step = 0,
             SeqState::IntroTalk => self.intro_talk_setup(input),
             SeqState::Ready => {
+                self.seq.demo_flag = true;
                 self.seq.step = 0;
                 self.seq.timer.start(0.8, 0.0, 1.0);
                 self.hud.show_all(true);
             }
-            SeqState::Fight => {}
+            SeqState::Fight => {
+                self.seq.demo_flag = false;
+                self.seq.ready_flag = false;
+            }
+            SeqState::Finish => self.finish_enter(input),
+            SeqState::WinTalk => self.win_talk_enter(input),
+            SeqState::End => self.end_enter(),
+            SeqState::Exit => {}
         }
     }
 
@@ -353,13 +425,21 @@ impl Battle {
             }
             SeqState::IntroTalk => {
                 self.demo.stop();
+                // BtlCtrl_EndEntrance: flag 0xF0 sends action 1 to the neutral state.
                 let sides = self.seq.side;
                 for side in sides {
-                    self.fighters[side].end_entrance();
+                    self.roster.chars[side].flags.set(0xF0);
                 }
             }
             SeqState::Ready => self.hud.show_notice(1, input.sounds),
-            SeqState::Fight => {}
+            // BtlSeq_StopTalk (not in mode 1).
+            SeqState::WinTalk if self.assets.mode != 1 => input.sounds.push(TitleSound::VoiceStop),
+            SeqState::End => {
+                if self.demo.is_active() {
+                    self.demo.stop();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -376,7 +456,8 @@ impl Battle {
                 if matches!(self.seq.step, 0 | 2) {
                     let i = self.seq.step as usize / 2;
                     let side = self.seq.side[i];
-                    self.fighters[side].start_entrance();
+                    // BtlCtrl_StartEntrance: flag 0xEF forces action 1.
+                    self.roster.chars[side].flags.set(0xEF);
                     self.seq.timer.start(10.0, 0.0, 1.0);
                     self.play_entrance_cut(side);
                     let voice = VOICE_CHARA_BASE
@@ -386,7 +467,8 @@ impl Battle {
                     self.seq.step += 1;
                 }
             }
-            SeqState::Ready | SeqState::Fight => {}
+            SeqState::WinTalk => self.win_talk_pre_update(input),
+            _ => {}
         }
     }
 
@@ -396,16 +478,262 @@ impl Battle {
             SeqState::StageIntro => self.stage_intro_update(input),
             SeqState::IntroTalk => self.intro_talk_update(input),
             SeqState::Ready => self.ready_update(input),
-            SeqState::Fight => {
-                // BtlSeqFight_Update: BtlSeq_CheckBattleEnd ticks the clock; the finish is not ported yet.
-                self.seq.tick_clock();
-                SeqState::Fight
-            }
+            SeqState::Fight => self.fight_update(input),
+            SeqState::Finish => self.finish_update(),
+            SeqState::WinTalk => self.win_talk_update(input),
+            SeqState::End => self.end_update(),
+            SeqState::Exit => SeqState::Exit,
+        };
+        // A state the mode's table leaves out is never entered: modes 5..7 have no winner scene.
+        let next = if next == SeqState::WinTalk && (5..=7).contains(&self.assets.mode) {
+            SeqState::End
+        } else {
+            next
         };
         if next != self.seq.state {
             self.seq_exit(input);
             self.seq.state = next;
+            if next == SeqState::Exit {
+                // A rematch asked for from the result menu restarts the battle (BATTLE_FLAG_RESTART).
+                if self.seq.reason & REASON_RESTART != 0 {
+                    self.seq.restart = true;
+                }
+                return;
+            }
             self.seq_enter(input);
+        }
+    }
+
+    /// `BtlSeqFight_Update` without the pause menu: the end of the battle goes to the finish (state 6 without a
+    /// finish scene).
+    fn fight_update(&mut self, input: &mut SeqInput) -> SeqState {
+        if self.check_battle_end(input) {
+            if self.assets.mode == 7 || self.seq.winner & ABORT != 0 {
+                return SeqState::End;
+            }
+            return SeqState::Finish;
+        }
+        SeqState::Fight
+    }
+
+    /// `BtlSeq_CheckBattleEnd`: ticks the clock and decides whether the battle is over.
+    fn check_battle_end(&mut self, input: &mut SeqInput) -> bool {
+        if self.seq.winner & 0x1F != 0 {
+            return true;
+        }
+        if self.roster.chars.iter().any(|c| c.flags.test(0x128)) {
+            return false;
+        }
+        let time_up = self.seq.tick_clock();
+        if self.assets.mode == 1 {
+            return false;
+        }
+        if time_up {
+            self.seq.reason = REASON_TIME_UP;
+            self.judge_by_health(input);
+            return true;
+        }
+        let flag7 = [0, 1].map(|i| self.roster.chars[i].flags.test(7));
+        if flag7[0] && flag7[1] {
+            self.seq.reason = REASON_FLAG7;
+            self.judge_by_health(input);
+            return true;
+        }
+        if flag7[1] || flag7[0] {
+            self.seq.winner = if flag7[1] { WIN_P1 } else { WIN_P2 };
+            self.seq.reason = REASON_FLAG7;
+            return true;
+        }
+        // BtlCtrl_IsTeamDead: one member per side.
+        let dead = [0, 1].map(|i| self.roster.chars[i].gauge.health <= 0);
+        if dead[0] && dead[1] {
+            self.seq.reason = REASON_KO;
+            self.judge_by_health(input);
+            return true;
+        }
+        if dead[1] || dead[0] {
+            self.seq.winner = if dead[1] { WIN_P1 } else { WIN_P2 };
+            self.seq.reason = REASON_KO;
+            return true;
+        }
+        false
+    }
+
+    /// `BtlSeq_JudgeByHealth`: more health wins; a tie goes to the side that landed the battle's first hit
+    /// (event 0x3C), a draw after a mode-0 time up, side 1 in mode 8, else `rand()`.
+    fn judge_by_health(&mut self, input: &mut SeqInput) {
+        let health = [0, 1].map(|i| self.roster.chars[i].gauge.health);
+        self.seq.winner = if health[0] == health[1] {
+            if self.roster.chars[0].first_hit {
+                WIN_P1
+            } else if self.roster.chars[1].first_hit {
+                WIN_P2
+            } else if self.seq.reason & REASON_TIME_UP != 0 && self.assets.mode == 0 {
+                DRAW
+            } else if self.assets.mode == 8 || input.libc.rand() & 1 == 0 {
+                WIN_P2
+            } else {
+                WIN_P1
+            }
+        } else if health[1] < health[0] {
+            WIN_P1
+        } else {
+            WIN_P2
+        };
+    }
+
+    /// `BtlSeqFinish_Enter`: the fighters held, 3.5 s, the announcement of the reason (K.O. 2, or 3 when the
+    /// winner took no damage; time up 5; reason bit 2 gives 4).
+    fn finish_enter(&mut self, input: &mut SeqInput) {
+        self.seq.demo_flag = true;
+        self.seq.timer.start(3.5, 0.0, 1.0);
+        if self.seq.reason & REASON_KO != 0 {
+            let winner = self.seq.winner_side();
+            let id = if self.roster.chars[winner].took_damage {
+                2
+            } else {
+                3
+            };
+            self.hud.show_notice(id, input.sounds);
+        } else if self.seq.reason & REASON_TIME_UP != 0 {
+            self.hud.show_notice(5, input.sounds);
+        } else if self.seq.reason & REASON_FLAG7 != 0 {
+            self.hud.show_notice(4, input.sounds);
+        }
+    }
+
+    /// `BtlSeqFinish_Update`: the winner scene when a side won and the mode is not 8, else the end.
+    fn finish_update(&mut self) -> SeqState {
+        if self.seq.timer.step() {
+            if self.assets.mode != 8 && self.seq.winner & (WIN_P1 | WIN_P2) != 0 {
+                return SeqState::WinTalk;
+            }
+            return SeqState::End;
+        }
+        SeqState::Finish
+    }
+
+    /// `BattleResult_IsPlayerWin`: side 0 won (always in modes 8 and 1).
+    fn player_won(&self) -> bool {
+        matches!(self.assets.mode, 8 | 1) || self.seq.winner & WIN_P1 != 0
+    }
+
+    /// `BtlSeqWinTalk_Enter` with `BtlSeqWinTalk_Setup`: the winner's line (its special line against the loser,
+    /// else line 3 or 4) when the player won, else the defeated player's line 0x2A; the gauges and the clock hidden.
+    fn win_talk_enter(&mut self, input: &mut SeqInput) {
+        self.seq.demo_flag = true;
+        self.xfade.capture_and_start();
+        let winner = self.seq.winner_side();
+        let loser = usize::from(winner == 0);
+        if self.player_won() {
+            let chara = self.assets.fighters[winner].chara;
+            let opp = self.assets.fighters[loser].chara;
+            let special = self.assets.fighters[winner]
+                .talk
+                .get(opp.max(0) as usize * 4 + 2)
+                .copied()
+                .filter(|&b| b != 0xFF);
+            self.seq.side[0] = winner;
+            self.seq.chara[0] = chara;
+            self.seq.line[0] = match special {
+                Some(b) => i32::from(b) + 0x1E,
+                None => input.libc.rand() % 2 + 3,
+            };
+            self.hud.show_notice(6, input.sounds);
+        } else {
+            self.seq.side[0] = loser;
+            self.seq.chara[0] = self.assets.fighters[loser].chara;
+            self.seq.line[0] = 0x2A;
+            self.hud.show_notice(7, input.sounds);
+        }
+        self.seq.step = 0;
+        self.seq.timer.start(10.0, 0.0, 1.0);
+        self.hud.show_gauges(false);
+        self.hud.show_timer(false);
+    }
+
+    /// `BtlSeqWinTalk_PreUpdate`: the pose, its camera and the line; then a 1.5 s hold.
+    fn win_talk_pre_update(&mut self, input: &mut SeqInput) {
+        match self.seq.step {
+            0 => {
+                let side = self.seq.side[0];
+                if self.player_won() {
+                    // BtlCtrl_StartWinPose: flag 0xF1 forces action 2.
+                    self.roster.chars[side].flags.set(0xF1);
+                    self.play_fighter_cut(side, 1);
+                } else {
+                    // BtlCtrl_StartLosePose: flag 0xF2 forces action 3.
+                    self.roster.chars[side].flags.set(0xF2);
+                    self.play_fighter_cut(side, 2);
+                }
+                self.seq.timer.start(10.0, 0.0, 1.0);
+                let voice = VOICE_CHARA_BASE
+                    + (self.seq.chara[0].max(0) as u32 * VOICE_CHARA_LINES
+                        + self.seq.line[0] as u32);
+                input.sounds.push(TitleSound::Voice(voice));
+                self.seq.step += 1;
+            }
+            2 => {
+                self.seq.timer.start(1.5, 0.0, 1.0);
+                self.seq.step += 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// `BtlSeqWinTalk_Update`: the line (or 10 s), 1.5 s, then the end; START skips.
+    fn win_talk_update(&mut self, input: &mut SeqInput) -> SeqState {
+        let stopped = input.voice_stat == 0 || input.voice_stat == crate::anim::VOICE_PLAYEND;
+        match self.seq.step {
+            0 | 1 => {
+                if self.roster.chars[self.seq.side[0]].pose_reached()
+                    && (stopped || self.seq.timer.step())
+                {
+                    self.seq.step = 2;
+                }
+            }
+            2 | 3 => {
+                if self.seq.timer.step() {
+                    self.seq.step = 4;
+                }
+            }
+            4 => return SeqState::End,
+            _ => {}
+        }
+        if input.start {
+            input.sounds.push(TitleSound::VoiceStop);
+            return SeqState::End;
+        }
+        SeqState::WinTalk
+    }
+
+    /// `BtlSeqEnd_Enter`: mode 0 with a finished battle opens the result menu (not ported: the battle waits
+    /// there); otherwise the 1.2 s fade out.
+    fn end_enter(&mut self) {
+        self.seq.demo_flag = true;
+        if self.seq.winner & ABORT != 0 || self.assets.mode != 0 {
+            self.fade = crate::fade::Fade::start_out(1.0);
+            self.seq.timer.start(1.2, 0.0, 1.0);
+            self.seq.step = 1;
+        } else {
+            self.seq.step = 0;
+        }
+    }
+
+    /// `BtlSeqEnd_Update`.
+    fn end_update(&mut self) -> SeqState {
+        if self.seq.step == 1 && self.seq.timer.step() {
+            return SeqState::Exit;
+        }
+        SeqState::End
+    }
+
+    /// `DemoCam_PlayObjAnim(side, idx)`: the fighter's camera animation `idx`, relative to its node 0.
+    fn play_fighter_cut(&mut self, side: usize, idx: usize) {
+        if let Some(Some(anim)) = self.assets.fighters[side].cam_cuts.get(idx) {
+            self.demo.set_anim(anim.clone());
+            self.demo.attached = Some(side);
+            self.demo.flags = DEMO_PLAYING | DEMO_AUTO;
         }
     }
 
@@ -419,11 +747,7 @@ impl Battle {
 
     /// `DemoCam_PlayObjAnim(side, 0)`: the fighter's camera cut, relative to its node 0, holding its last frame.
     fn play_entrance_cut(&mut self, side: usize) {
-        if let Some(anim) = &self.assets.fighters[side].entrance_cut {
-            self.demo.set_anim(anim.clone());
-            self.demo.attached = Some(side);
-            self.demo.flags = DEMO_PLAYING | DEMO_AUTO;
-        }
+        self.play_fighter_cut(side, 0);
     }
 
     fn stage_intro_update(&mut self, input: &SeqInput) -> SeqState {
@@ -487,7 +811,7 @@ impl Battle {
         let stopped = input.voice_stat == 0 || input.voice_stat == crate::anim::VOICE_PLAYEND;
         match self.seq.step {
             0 | 1 => {
-                if self.fighters[self.seq.side[0]].pose_reached()
+                if self.roster.chars[self.seq.side[0]].pose_reached()
                     && (stopped || self.seq.timer.step())
                 {
                     self.xfade.capture_and_start();
@@ -495,7 +819,7 @@ impl Battle {
                 }
             }
             2 | 3 => {
-                if self.fighters[self.seq.side[1]].pose_reached()
+                if self.roster.chars[self.seq.side[1]].pose_reached()
                     && (stopped || self.seq.timer.step())
                 {
                     self.xfade.capture_and_start();
@@ -522,6 +846,8 @@ impl Battle {
             0 => {
                 if self.seq.timer.step() {
                     self.hud.show_notice(0, input.sounds);
+                    self.seq.demo_flag = false;
+                    self.seq.ready_flag = true;
                     self.seq.timer.start(2.0, 0.0, 1.0);
                     self.seq.step += 1;
                 }

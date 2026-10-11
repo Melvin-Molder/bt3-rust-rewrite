@@ -16,11 +16,26 @@ pub enum Track {
     Full(Vec<(u32, [f32; 3], u64)>),
 }
 
+/// `BobjAnimEvent`: an attribute word at a frame. Bit 0 opens a hit window (`arg` = attack nodes, `shape` its volume,
+/// attribute bit 32 = sphere), bit 1 closes it; other bits are plain events whose `arg` is OR-ed per attribute.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionEvent {
+    pub attr: u64,
+    pub frame: u16,
+    pub arg: u32,
+    /// The volume record `shape` names: offset x, y, z in the node's space, then r0, r1, r2.
+    pub shape: Option<[f32; 6]>,
+}
+
+pub const EV_HIT_BEGIN: u64 = 1;
+pub const EV_HIT_END: u64 = 2;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Motion {
     /// Last frame; the player's frame runs 0..length.
     pub length: u16,
     pub tracks: Vec<Option<Track>>,
+    pub events: Vec<MotionEvent>,
 }
 
 impl Motion {
@@ -42,6 +57,34 @@ impl Motion {
             Ok(u64::from(u32_at(o)?) | (u64::from(u32_at(o + 4)?) << 32))
         };
         let length = u16_at(2)?;
+        let event_count = usize::from(bytes.get(1).copied().unwrap_or(0));
+        let f32_at = |o: usize| u32_at(o).map(f32::from_bits);
+        let events = (0..event_count)
+            .map(|i| {
+                let e = 0x94 + i * 0x10;
+                let attr = u64_at(e)?;
+                let shape = usize::from(u16_at(e + 0xA)?) * 4;
+                // Only a hit window's opening event names a volume.
+                let shape = if attr & EV_HIT_BEGIN != 0 {
+                    Some([
+                        f32_at(shape)?,
+                        f32_at(shape + 4)?,
+                        f32_at(shape + 8)?,
+                        f32_at(shape + 0x10)?,
+                        f32_at(shape + 0x14)?,
+                        f32_at(shape + 0x18)?,
+                    ])
+                } else {
+                    None
+                };
+                Ok(MotionEvent {
+                    attr,
+                    frame: u16_at(e + 8)?,
+                    arg: u32_at(e + 0xC)?,
+                    shape,
+                })
+            })
+            .collect::<io::Result<_>>()?;
         let mut tracks = Vec::with_capacity(NODE_MAX);
         for node in 0..NODE_MAX {
             let offset = usize::from(u16_at(6 + node * 2)?) * 4;
@@ -75,7 +118,11 @@ impl Motion {
                 )
             }));
         }
-        Ok(Self { length, tracks })
+        Ok(Self {
+            length,
+            tracks,
+            events,
+        })
     }
 
     /// `BtlAnim_ApplyTableFlags`: flag 0x40000000 zeroes the root's translation, else 0x80000000 makes it start

@@ -18,6 +18,8 @@
 !/crates/bt3_data/src/tex.rs
 !/crates/bt3_data/src/gs.rs
 !/crates/bt3_data/src/stage.rs
+!/crates/bt3_data/src/stage_col.rs
+!/crates/bt3_data/src/ai_data.rs
 !/crates/bt3_data/src/fod.rs
 !/crates/bt3_data/src/font.rs
 !/crates/bt3_data/src/snd.rs
@@ -25,6 +27,8 @@
 !/crates/bt3_data/src/motion.rs
 !/crates/bt3_data/src/stage_model.rs
 !/crates/bt3_data/src/cam_anim.rs
+!/crates/bt3_data/src/chara_data.rs
+!/crates/bt3_data/src/elf.rs
 !/crates/bt3_game/
 !/crates/bt3_game/Cargo.toml
 !/crates/bt3_game/src/
@@ -56,6 +60,14 @@
 !/crates/bt3_game/src/stage_draw.rs
 !/crates/bt3_game/src/gs_stage.wgsl
 !/crates/bt3_game/src/battle_seq.rs
+!/crates/bt3_game/src/btl_flags.rs
+!/crates/bt3_game/src/btl_act.rs
+!/crates/bt3_game/src/btl_ai.rs
+!/crates/bt3_game/src/btl_chr.rs
+!/crates/bt3_game/src/btl_hit.rs
+!/crates/bt3_game/src/btl_input.rs
+!/crates/bt3_game/src/btl_mgr.rs
+!/crates/bt3_game/src/btl_obj.rs
 !/crates/bt3_game/src/hud.rs
 !/crates/bt3_game/src/hud_gauge.rs
 !/crates/bt3_game/src/hud_gs.rs
