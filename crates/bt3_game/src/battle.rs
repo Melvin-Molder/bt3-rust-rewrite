@@ -2446,6 +2446,89 @@ mod tests {
     }
 
     #[test]
+    fn real_flying_kick_dash_smash_and_smash_vanish() {
+        use crate::btl_input::pad::{CROSS, L2, SQUARE, START, TRIANGLE, UP};
+        let run = |pad: &dyn Fn(usize) -> u32| {
+            let mut setup = BattleSetup::default();
+            setup.sides[1].chara = 1;
+            setup.sides[1].pad = 1;
+            let mut battle = real_battle(&setup)?;
+            let mut libc = LibcRandom::new(1);
+            let mut random = GameRandom::from_key(&[1]);
+            let pads = |a: u32| {
+                [
+                    PadState {
+                        held: a,
+                        ..PadState::default()
+                    },
+                    PadState::default(),
+                ]
+            };
+            let mut frame = |battle: &mut Battle, held: u32| {
+                let start = held & START != 0 && battle.prev_held[0] & START == 0;
+                battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+            };
+            for i in 0..200 {
+                let skip =
+                    battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+                frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+                if battle.seq.state == SeqState::Fight {
+                    break;
+                }
+            }
+            for _ in 0..20 {
+                frame(&mut battle, 0);
+            }
+            let (mut mine, mut anims, mut theirs) = (Vec::new(), Vec::new(), Vec::new());
+            let mut vanished = 0;
+            for i in 0..150 {
+                frame(&mut battle, pad(i));
+                let (a, b) = (&battle.roster.chars[0], &battle.roster.chars[1]);
+                mine.push(a.act.current);
+                anims.push(a.anim.cur);
+                theirs.push(b.act.current);
+                vanished = vanished.max(a.vanish_count);
+            }
+            mine.dedup();
+            anims.dedup();
+            theirs.dedup();
+            Some((mine, anims, theirs, vanished))
+        };
+        // A dash (Cross), then the rush button: the flying kick 0x58 (wind-up, hold, strike) staggers the opponent.
+        let Some((mine, anims, theirs, _)) = run(&|i| match i {
+            0..2 => CROSS,
+            4..6 => SQUARE,
+            _ => 0,
+        }) else {
+            return;
+        };
+        assert_eq!(mine, [0xF, 0x58, 0xB], "{mine:x?}");
+        assert!(
+            anims.windows(3).any(|w| w == [0x6B, 0x6C, 0x6D]),
+            "{anims:x?}"
+        );
+        assert_eq!(theirs, [0xB, 0xC6, 0xB], "{theirs:x?}");
+        // The homing dash (L2 + Cross), the rush button held: the dash smash 0x57 blows the opponent away (0xD5);
+        // up and the blast button then: the vanishing smash 0x5C strikes it again on its way down.
+        let Some((mine, anims, theirs, vanished)) = run(&|i| match i {
+            0..2 => CROSS | L2,
+            20..60 => SQUARE,
+            60..70 if i % 2 == 0 => TRIANGLE | UP,
+            _ => 0,
+        }) else {
+            return;
+        };
+        assert_eq!(&mine[..4], &[0x19, 0x57, 0x5C, 0xB], "{mine:x?}");
+        assert!(
+            anims.windows(3).any(|w| w == [0x5C, 0x5D, 0x5E]),
+            "{anims:x?}"
+        );
+        assert!(anims.windows(2).any(|w| w == [0x5F, 0x61]), "{anims:x?}");
+        assert_eq!(&theirs[..4], &[0xB, 0xD5, 0xDD, 0xDB], "{theirs:x?}");
+        assert_eq!(vanished, 1);
+    }
+
+    #[test]
     fn real_charged_smash_knocks_the_opponent_away() {
         use crate::btl_input::pad::{SQUARE, START, UP};
         let mut setup = BattleSetup::default();

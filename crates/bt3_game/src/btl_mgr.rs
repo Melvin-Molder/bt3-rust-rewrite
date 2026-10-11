@@ -213,9 +213,13 @@ impl Roster {
             clamp_to_stage(me, data[i], env);
             me.pose_to_obj(false);
             me.obj.calc_matrices(&data[i].obj);
-            // The body warp of flag 0x55 is not ported: the sphere always follows the model.
+            let mut keep_sphere = true;
+            if me.flags.test(0x55) {
+                me.obj.warp_body(me.body_warp_pos);
+                keep_sphere = false;
+            }
             let grow = self.started && !env.gate.time_stopped;
-            update_fighter_stage(me, data[i], env, true, grow);
+            update_fighter_stage(me, data[i], env, keep_sphere, grow);
             update_ground(me, env);
             me.obj_to_pose();
         }

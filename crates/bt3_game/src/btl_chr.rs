@@ -297,6 +297,10 @@ pub(crate) struct Chr {
     pub dash_limit: i32,
     pub vanish_count: i32,
     pub vanish_limit: i32,
+    /// `attackId`: the attack last prepared (read by `BtlAct_QueueComboFinish`, which is not ported).
+    pub attack_id: i32,
+    /// `bodyWarpPos`: where flag 0x55 puts the body sphere this frame (`BtlChar_RequestBodyWarp`).
+    pub body_warp_pos: [f32; 3],
     pub evasion_count: i32,
     pub blast_shots: i32,
     pub blast_shots_timer: i32,
@@ -406,6 +410,8 @@ impl Chr {
             dash_limit: 0,
             vanish_count: 0,
             vanish_limit: 0,
+            attack_id: 0,
+            body_warp_pos: [0.0; 3],
             evasion_count: 0,
             blast_shots: 0,
             blast_shots_timer: 0,
@@ -1557,6 +1563,58 @@ pub(crate) fn warp_behind_opponent(
     let yaw = opp.snap_rot(6)[1];
     let d = data.radius() + opp_data.radius() + gap;
     me.pose.pos = add(at, [-yaw.sin() * d, 0.0, -yaw.cos() * d]);
+}
+
+/// `BtlMove_WarpAheadOfOpponent`, under lock-on only: on the opponent's path `lead` frames ahead (its movement, at
+/// least 500 km/h along its facing), both radii further along it in x / z, pulled inside the stage radius.
+pub(crate) fn warp_ahead_of_opponent(
+    me: &mut Chr,
+    data: &SideData,
+    opp: &Chr,
+    opp_data: &SideData,
+    env: &Env,
+    lead: f32,
+) {
+    if !me.flags.test(5) {
+        return;
+    }
+    let min = kmh(500.0);
+    let mut at = opp.snap_pos(6);
+    at[1] += data.height() * 0.5 - opp_data.height() * 0.5;
+    let mut vel = opp.pose.vel;
+    if length(vel) < min {
+        let yaw = opp.snap_rot(6)[1];
+        vel = [-yaw.sin() * min, 0.0, -yaw.cos() * min];
+    }
+    at = add(at, scale3(vel, lead));
+    let mut ofs = vel;
+    let len = ofs[0].hypot(ofs[2]);
+    if 0.0001 < len {
+        let k = (data.radius() + opp_data.radius()) / len;
+        ofs[0] *= k;
+        ofs[2] *= k;
+    }
+    me.pose.pos = add(at, ofs);
+    let rad = env.inner_radius() - me.obj.body_sphere().1;
+    let lim = me.pose.pos[0].hypot(me.pose.pos[2]);
+    if rad < lim {
+        me.pose.pos = scale3(me.pose.pos, rad / lim);
+    }
+}
+
+/// `BtlMove_SnapToOpponent`: moves the fighter so that its body sphere's centre is on the opponent's, stopped, with
+/// the body warped there (flag 0x55), no push-out (0x3F) and no velocity this frame (0x24).
+pub(crate) fn snap_to_opponent(me: &mut Chr, opp: &Chr) {
+    let own = me.obj.body_sphere().0;
+    let at = opp.obj.body_sphere().0;
+    me.pose.pos = add(me.pose.pos, sub(at, own));
+    me.pose.speed = 0.0;
+    me.pose.fall_speed = 0.0;
+    me.pose.impulse = [0.0; 3];
+    me.body_warp_pos = at;
+    me.flags.set(0x55);
+    me.flags.set(0x3F);
+    me.flags.set(0x24);
 }
 
 /// `BtlOpp_GetYawFromFacing`: relative to the own model yaw plus the root yaw.

@@ -627,6 +627,13 @@ impl Obj {
         b.index = old ^ 1;
     }
 
+    /// `BtlObjBody_Warp`: both sphere records at `pos`, teleported (a fighter's body always exists).
+    pub(crate) fn warp_body(&mut self, pos: [f32; 3]) {
+        self.body.sphere[0].0 = pos;
+        self.body.sphere[1].0 = pos;
+        self.reset_body();
+    }
+
     /// `BtlObjBody_Reset`: marks the body as teleported; the other record becomes current.
     pub(crate) fn reset_body(&mut self) {
         let b = &mut self.body;
