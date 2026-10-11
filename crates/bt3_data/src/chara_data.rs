@@ -332,6 +332,62 @@ pub struct CharaEntry {
     pub blast_stocks: i32,
 }
 
+/// One attack action's record (`BtlActAttackRec`, roster + 0x2C, by action id - 0x70).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AttackRec {
+    /// +0x00: the advance speed in 10 km/h.
+    pub speed: u8,
+    /// +0x01: the lead-in actions `BtlDecide_QueueAttack` queues first (0..9); also the effect level 1..3.
+    pub lead_in: u8,
+    /// +0x02: the input that starts it (`BtlDecide_QueueAttack`: 1..9 -> inputs 0x4F..0x57, else none).
+    pub input_kind: i8,
+    /// +0x03: the hit record `BtlAtk_GetId` reads.
+    pub hit_id: u8,
+    /// +0x04: motions played one after another (motion, motion + 2, ...).
+    pub parts: i8,
+    /// +0x05: the opponent state the attack needs (0 none, 1..8 a reaction).
+    pub kind: i8,
+    /// +0x06.
+    pub motion: u16,
+    /// +0x08: the progress past which a follow-up starts.
+    pub cancel_at: f32,
+    /// +0x0C: the motion rate in tenths (0: 1.0).
+    pub rate: i8,
+    /// +0x0D / +0x0F: follow-up records (index from 0x70; < 0 none), the second pair for the powered-up mode.
+    pub follow: [i8; 2],
+    pub follow_alt: [i8; 2],
+    /// +0x11 / +0x12: the camera cuts.
+    pub cut: i8,
+    pub cut_alt: i8,
+    /// +0x13: the skill bit the attack needs (flags2 bits 0..31, flags3 32..63; < 0 none).
+    pub need_skill: i8,
+    /// +0x14.
+    pub flags: u16,
+}
+
+impl AttackRec {
+    pub fn parse(r: &[u8; 0x18]) -> Self {
+        let s8 = |o: usize| r[o] as i8;
+        Self {
+            speed: r[0],
+            lead_in: r[1],
+            input_kind: s8(2),
+            hit_id: r[3],
+            parts: s8(4),
+            kind: s8(5),
+            motion: u16::from_le_bytes([r[6], r[7]]),
+            cancel_at: f32::from_le_bytes([r[8], r[9], r[10], r[11]]),
+            rate: s8(0xC),
+            follow: [s8(0xD), s8(0xE)],
+            follow_alt: [s8(0xF), s8(0x10)],
+            cut: s8(0x11),
+            cut_alt: s8(0x12),
+            need_skill: s8(0x13),
+            flags: u16::from_le_bytes([r[0x14], r[0x15]]),
+        }
+    }
+}
+
 /// The roster's tables of common file 2 (`BtlChar_AllocAll`).
 #[derive(Clone, Debug, Default)]
 pub struct CommonTables {
@@ -344,6 +400,11 @@ pub struct CommonTables {
 }
 
 impl CommonTables {
+    /// The record of attack action `0x70 + index`.
+    pub fn attack_rec(&self, index: usize) -> Option<AttackRec> {
+        self.attack_actions.get(index).map(AttackRec::parse)
+    }
+
     pub fn parse(common: &[u8]) -> io::Result<Self> {
         let table = |word: usize| {
             let start = (u32_at(common, word * 4) & !3) as usize;

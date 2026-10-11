@@ -16,13 +16,18 @@ use std::f32::consts::PI;
 
 use crate::btl_blast::{blast_limit_a, can_fire, hits_of, ki_cost, ki_cost_of};
 use crate::btl_chr::{
-    Chr, Env, SideData, anim_flag, begin_rise_to_opponent, deg, is_blocked_by_opponent, kmh,
-    length, normalize, opp_delta, opp_gap_xz, opp_yaw, opp_yaw_from_facing,
-    scale_speed_by_approach, snap_to_opponent, steer_at_opponent, sub, warp_ahead_of_opponent,
-    warp_behind_opponent,
+    Attack, Chr, Env, SideData, add, anim_flag, begin_rise_to_opponent, calc_approach_point, deg,
+    is_blocked_by_opponent, kmh, length, normalize, opp_closing_time, opp_delta, opp_gap_xz,
+    opp_pitch_adjusted, opp_yaw, opp_yaw_from_facing, scale_speed_by_approach, scale3,
+    snap_to_opponent, steer_at_opponent, sub, warp_ahead_of_opponent, warp_behind_opponent,
 };
 use crate::btl_input::{DIR_MASK, wrap_angle};
 use crate::btl_obj::mask_to_node;
+
+/// `BtlAct_IsAttackId`: the attack actions of the record table (0x70..0xAD).
+fn is_attack_id(id: i32) -> bool {
+    (0x70..0xAE).contains(&id)
+}
 
 const ENTER: u32 = 0;
 const RUN: u32 = 1;
@@ -50,7 +55,7 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x2A | 0x37 | 0x38 | 0x3A | 0x44 | 0x47..=0x5D | 0xAE..=0xB1
+        1..=3 | 0xB..=0x32 | 0x37 | 0x38 | 0x3A | 0x44 | 0x47..=0x5D | 0x70..=0x94 | 0x96..=0xB1
         | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9)
 }
 
@@ -549,8 +554,14 @@ impl Ctx<'_, '_> {
                 return 1;
             }
         }
-        // BtlDecide_QueueAttack(0x9B) goes first (the attack records are not ported); past the vanish limit the
-        // powered combo finisher (BtlAct_QueueComboFinish) would be offered instead, which is not ported either.
+        // Past the vanish limit the powered combo finisher (BtlAct_QueueComboFinish) would be offered instead,
+        // which is not ported.
+        if mask & 0x10_0000 != 0 {
+            let n = self.queue_attack(0x9B);
+            if n > 0 {
+                return n as u32;
+            }
+        }
         if mask & 0x10_0000 != 0
             && self.me.vanish_count < self.me.vanish_limit
             && self.flags2() & 0x2000 != 0
@@ -599,6 +610,14 @@ impl Ctx<'_, '_> {
             0x20..=0x23 => self.vanish_step(phase),
             0x24 => self.vanish_behind(phase),
             0x25..=0x2A => self.recover_air(phase),
+            0x2B | 0x2C => self.vanish_attack(phase),
+            0x2D | 0x2E => self.warp_attack(phase),
+            0x2F | 0x30 => self.slide_attack(phase),
+            0x31 => self.rush_attack(phase),
+            0x32 => self.hop_back_attack(phase),
+            0x92 | 0x9B | 0xAB => self.attack_dash(phase),
+            0x99 => self.attack_volley_dash(phase),
+            0x70..=0x94 | 0x96..=0xAD => self.attack(phase),
             0x47..=0x4C => self.smash_charge(phase),
             0x4D..=0x52 => self.smash_full(phase),
             0x53..=0x57 => self.dash_smash(phase),
@@ -2270,7 +2289,9 @@ impl Ctx<'_, '_> {
                 }
                 _ => {
                     self.decide_attack(0x200_0030);
-                    // BtlDecide_QueueAttack(0x8F / 0x8D / 0x8E): the attack records are not ported.
+                    for id in [0x8F, 0x8D, 0x8E] {
+                        self.queue_attack(id);
+                    }
                     if self.me.anim_progress() > 0.3 {
                         let q = self.queued();
                         self.request(q);
@@ -3033,7 +3054,12 @@ impl Ctx<'_, '_> {
                 }
                 0x6D => {
                     if self.flag(0x5B) {
-                        // BtlDecide_QueueAttack(0x87 / 0x77): the attack records are not ported.
+                        for id in [0x87, 0x77] {
+                            if self.queue_attack(id) != 0 {
+                                self.set_work_f(0, 0.4);
+                                break;
+                            }
+                        }
                         if self.decide_attack(1) != 0 {
                             self.set_work_f(0, 0.6);
                         }
@@ -3273,6 +3299,675 @@ impl Ctx<'_, '_> {
                     self.request(q);
                 }
             }
+        }
+    }
+
+    // ---- the attack records (btl_char_action.c, btl_act_change.c, btl_act_1.c) -----------------------------------
+
+    /// `BtlOpp_GetSeenActionFrame`: the opponent's action frame as this frame sees it.
+    fn opp_seen_action_frame(&self) -> i32 {
+        if self.me.flags.stage() < 6 || self.opp.flags.stage() < 6 {
+            self.opp.prev_action_frame
+        } else {
+            self.opp.action_frame
+        }
+    }
+
+    /// `BtlAct_TestAttackSkill`: the skill bit record `index` needs (flags2 bits 0..31, flags3 from 32), or none.
+    /// The original reads the word before the table for index -1; in the game's data the follow-up chosen is -1
+    /// either way.
+    fn test_attack_skill(&self, index: i32) -> bool {
+        let Some(rec) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.env.common.attack_rec(i))
+        else {
+            return false;
+        };
+        let bit = i32::from(rec.need_skill);
+        if bit < 0 {
+            return true;
+        }
+        let p = &self.data.tables.params;
+        if bit >= 0x20 {
+            p.flags3() & 1u32.wrapping_shl((bit - 0x20) as u32) != 0
+        } else {
+            p.flags2() & 1u32.wrapping_shl(bit as u32) != 0
+        }
+    }
+
+    /// `BtlAct_PrepareAttack`: the pending attack parameters from attack action `id`'s record.
+    fn prepare_attack(&mut self, id: i32) {
+        if !is_attack_id(id) {
+            return;
+        }
+        let Some(rec) = self.env.common.attack_rec((id - 0x70) as usize) else {
+            return;
+        };
+        let parts = i32::from(rec.parts);
+        let motion = i32::from(rec.motion as i16);
+        let cut = if rec.cut_alt < 0 {
+            rec.cut
+        } else if rec.flags & 0x20 != 0 {
+            // The camera's side against the lead time just zeroed.
+            if self.me.cam.side < 0.0 {
+                rec.cut
+            } else {
+                rec.cut_alt
+            }
+        } else if self.frame_mod(2) != 0 {
+            rec.cut
+        } else {
+            rec.cut_alt
+        };
+        let powered = self.flag(6) && !self.me.gauge.body_changed;
+        let mut follow = [0; 2];
+        for (i, f) in follow.iter_mut().enumerate() {
+            let alt = i32::from(rec.follow_alt[i]);
+            *f = if powered && self.test_attack_skill(alt) {
+                alt
+            } else {
+                i32::from(rec.follow[i])
+            };
+        }
+        self.me.next_attack = Attack {
+            flags: i32::from(rec.flags),
+            motion: if parts >= 2 {
+                [motion, motion + 2]
+            } else {
+                [motion, -1]
+            },
+            parts: parts.max(1),
+            lead_in: i32::from(rec.lead_in),
+            cut: i32::from(cut),
+            follow,
+            rate: if rec.rate > 0 {
+                f32::from(rec.rate) * 0.1
+            } else {
+                1.0
+            },
+            cancel_at: rec.cancel_at,
+            lead_time: 0.0,
+            speed: f32::from(rec.speed) * 10.0 * 0.009_259_259,
+            chained: false,
+        };
+        self.me.attack_id = id;
+    }
+
+    /// `BtlDecide_QueueAttack`: attack action `id` when its skill bit is there, the opponent is seen in the state its
+    /// kind needs (not on the frame the hit landed) and its input is made: its lead-in actions, then the attack,
+    /// prepared. Returns how many actions were queued.
+    fn queue_attack(&mut self, id: i32) -> i32 {
+        if !is_attack_id(id) {
+            return 0;
+        }
+        let idx = id - 0x70;
+        let Some(rec) = self.env.common.attack_rec(idx as usize) else {
+            return 0;
+        };
+        if !self.test_attack_skill(idx) {
+            return 0;
+        }
+        let needs: &[i32] = match rec.kind {
+            0 => &[],
+            1 => &[0xD4],
+            2 => &[0xD5],
+            3 => &[0xD0],
+            4 => &[0xCD],
+            5 => &[0xCB],
+            6 => &[0xC6],
+            7 => &[0xC7, 0xC8],
+            8 => &[0xCE],
+            _ => &[-2],
+        };
+        if !needs.is_empty() && self.me.flags.raised(0x5B) {
+            return 0;
+        }
+        let ok = rec.kind == 0 || needs.contains(&self.opp_seen_action());
+        if !ok {
+            return 0;
+        }
+        self.add_action_bit(id);
+        if (1..=9).contains(&rec.input_kind) && !self.test(0x4E + rec.input_kind as u32) {
+            return 0;
+        }
+        let lead: &[i32] = match rec.lead_in {
+            1 => &[0x2B],
+            2 => &[0x2B, 0x2D],
+            3 => &[0x2B, 0x2E],
+            4 => {
+                if self.frame_mod(2) != 0 {
+                    &[0x21]
+                } else {
+                    &[0x22]
+                }
+            }
+            5 => &[0x2B, 0x2F],
+            6 => &[0x31],
+            7 => &[0x32],
+            8 => &[0x2B, 0x30],
+            9 => &[0x2C, 0x2D],
+            _ => &[],
+        };
+        let mut queued = 0;
+        for &a in lead {
+            self.set_queue(queued, a);
+            queued += 1;
+        }
+        self.set_queue(queued, id);
+        self.prepare_attack(id);
+        queued as i32 + 1
+    }
+
+    /// `BtlAct_DecideAttackFollow`: once the attack connects (flag 0x5B), its follow-up records and the inputs its
+    /// flags allow, started past `cancelAt` unless it clashed (0x5D). The combo finishers of flags 0x100 / 0x200
+    /// (`BtlAct_QueueComboFinish`) are not ported.
+    fn decide_attack_follow(&mut self) {
+        if !self.flag(0x5B) {
+            return;
+        }
+        let atk = self.me.attack;
+        for f in atk.follow {
+            if f >= 0 && self.queue_attack(f + 0x70) != 0 {
+                self.me.attack.chained = true;
+            }
+        }
+        for (bit, mask) in [(1, 0x8_0000), (2, 0x10_0000), (4, 1)] {
+            if atk.flags & bit != 0 && self.decide_attack(mask) != 0 {
+                self.me.attack.chained = false;
+            }
+        }
+        if atk.flags & 8 != 0 && self.test(0x34) {
+            self.set_queue(0, 0x46);
+            self.me.attack.chained = false;
+        }
+        if !self.flag(0x5D) && atk.cancel_at < self.me.anim_progress() {
+            let q = self.queued();
+            self.request(q);
+            if self.me.attack.chained && atk.flags & 0x10 != 0 {
+                self.held(0xDD);
+            }
+        }
+    }
+
+    /// `BtlAct_RequestAttackEnd`: 0xB, or 0xC when guarded (flag 0x5C) with attack flag 0x400.
+    fn request_attack_end(&mut self) {
+        let id = if self.flag(0x5C) && self.me.attack.flags & 0x400 != 0 {
+            0xC
+        } else {
+            0xB
+        };
+        self.request(id);
+    }
+
+    /// The start of an attack action: latched, the flag and effect of the record (the camera cut,
+    /// `ChrCam_RequestCut`, and the voice are not ported).
+    fn begin_attack(&mut self) {
+        self.me.attack = self.me.next_attack;
+        if self.me.attack.flags & 0x80 != 0 {
+            self.set(0xCD);
+        }
+        if (1..=3).contains(&self.me.attack.lead_in) {
+            self.me.set_fx(0xD);
+        }
+    }
+
+    /// Actions 0x70..0xAD (`BtlAct_AttackHandler`): the attack of the record `BtlAct_PrepareAttack` set up. Its
+    /// parts play one after another (the earlier ones at twice the record's rate); with a record speed it homes on
+    /// the opponent until it connects or is stopped. Of two attackers only the earlier gets its camera cut (flag
+    /// 0x27; the cut itself is not ported).
+    fn attack(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.begin_attack();
+            let m = self.me.attack.motion[0];
+            self.play(m, 0.15);
+            begin_rise_to_opponent(self.me, self.opp, self.data, self.opp_data);
+            self.me.pose.speed = crate::btl_hit::launch_speed(self.me, self.data, self.env);
+            if self.me.attack.cut >= 0
+                && (!is_attack_id(self.opp_seen_action())
+                    || self.me.action_frame < self.opp_seen_action_frame())
+            {
+                self.set(0x27);
+            }
+        }
+        if phase == RUN {
+            let atk = self.me.attack;
+            self.me.charge = 1.0;
+            let part = self.me.work[2];
+            if part < atk.parts - 1 {
+                self.me.anim_set_step(atk.rate * 2.0);
+                let next = atk.motion.get((part + 1) as usize).copied().unwrap_or(-1);
+                if self.me.anim_advance_then(next, 0.0, 0) {
+                    self.me.work[2] += 1;
+                }
+            } else if self.me.anim_advance(0) {
+                self.request_attack_end();
+            }
+            let (mut speed, mut accel, mut homing) = if atk.speed < 0.0001 {
+                (0.0, kmh(100.0), false)
+            } else {
+                (atk.speed, 10000.0, true)
+            };
+            if self.flag(0x5B) {
+                speed = 0.0;
+                self.me.pose.speed = speed;
+            }
+            if self.flag(0x5C) || self.flag(0x5D) {
+                speed = 0.0;
+                accel = kmh(100.0);
+                homing = false;
+                if self.blocked() {
+                    self.me.pose.speed = speed;
+                }
+            }
+            if homing {
+                self.step(2, 1, 3, speed, accel);
+            } else {
+                self.step(6, 6, 3, speed, accel);
+            }
+            self.me.apply_gravity();
+            self.me.obj.rate = 2.0;
+            self.set(0xD5);
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            self.decide_attack_follow();
+        }
+    }
+
+    /// Actions 0x92, 0x9B, 0xAB (`BtlAct_AttackDashHandler`): a dash at the record's speed (motion 0x197, held
+    /// flag 0x4F) for up to 21 frames or until contact, then the strike 0x198 in 0.3 s; the lean follows the pitch
+    /// to the opponent within 45 degrees. The camera cut, the voice and the sound are not ported.
+    fn attack_dash(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.begin_attack();
+            self.play(0x197, 0.0);
+            self.held(0xE);
+            self.held(0x4F);
+        }
+        if phase == RUN {
+            let atk = self.me.attack;
+            let (mut lean, mut accel, mut speed) = (0.0, kmh(100.0), 0.0);
+            match self.anim_id() {
+                0x197 => {
+                    self.me.anim_advance_loop(0);
+                    speed = atk.speed;
+                    lean = 1.0;
+                    accel = 10000.0;
+                    self.me.set_fx(9);
+                }
+                0x198 => {
+                    self.me.anim_set_duration(0.3);
+                    if self.me.anim_advance(0) {
+                        self.request_attack_end();
+                    }
+                    self.set(0x3F);
+                    lean = 1.0 - self.me.anim_progress();
+                }
+                _ => {}
+            }
+            self.step(6, 6, 3, speed, accel);
+            self.me.apply_gravity();
+            self.set(0x1A);
+            self.set(0xD5);
+            let pitch = self.me.pose.pitch;
+            let aim = opp_pitch_adjusted(self.me, self.opp, self.data, self.opp_data)
+                .clamp(pitch - deg(45.0), pitch + deg(45.0));
+            self.me.set_lean_x(aim * lean);
+            self.set(0x28);
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            match self.anim_id() {
+                0x197 => {
+                    let mut end = false;
+                    self.me.work[2] += 1;
+                    if self.me.work[2] > 20 {
+                        end = true;
+                        self.me.pose.speed *= 0.5;
+                    }
+                    if self.flag(0x5B) || self.flag(0x5D) {
+                        end = true;
+                        self.me.pose.speed = 0.0;
+                    }
+                    if end {
+                        self.request_anim(0x198, 0.0);
+                        self.clear(0x4F);
+                    }
+                }
+                0x198 => self.decide_attack_follow(),
+                _ => {}
+            }
+        }
+        if phase == LEAVE {
+            self.clear(0x4F);
+        }
+    }
+
+    /// Action 0x99 (`BtlAct_AttackVolleyDashHandler`): motion 0x2D into the dash loop 0x19 at the record's speed
+    /// (held flag 0x4F from the loop's start, raised again two frames after it is found down, three times), then
+    /// the strike 0x1A in 0.3 s after the fourth time, 24 frames or a guard. The camera cut, the voice, the sound
+    /// and the vibration are not ported.
+    fn attack_volley_dash(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.begin_attack();
+            self.play(0x2D, 0.15);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let atk = self.me.attack;
+            let (mut speed, mut accel, mut lean) = (0.0, kmh(100.0), 0.0);
+            match self.anim_id() {
+                0x2D => {
+                    self.me.anim_advance_then(0x19, 0.1, 0);
+                }
+                0x19 => {
+                    self.me.anim_advance_loop(0);
+                    speed = atk.speed;
+                    accel = 10000.0;
+                    lean = 1.0;
+                    if self.me.anim_is_new() {
+                        self.held(0x4F);
+                    }
+                    self.me.set_fx(9);
+                    self.me.set_fx(4);
+                }
+                0x1A => {
+                    self.me.anim_set_duration(0.3);
+                    if self.me.anim_advance(0) {
+                        self.request_attack_end();
+                    }
+                    lean = 1.0 - self.me.anim_progress();
+                    self.clear(0x4F);
+                    if self.blocked() {
+                        self.me.pose.speed = speed;
+                    }
+                }
+                _ => {}
+            }
+            self.step(2, 1, 3, speed, accel);
+            self.me.apply_gravity();
+            self.set(0x1A);
+            self.set(0xD5);
+            let pitch = self.me.pose.pitch;
+            self.me.set_lean_x(pitch * lean);
+        }
+        if phase == DECIDE {
+            match self.anim_id() {
+                0x19 => {
+                    let mut end = false;
+                    if !self.flag(0x4F) {
+                        if self.me.work[3] > 0 {
+                            self.me.work[3] -= 1;
+                            if self.me.work[3] <= 0 {
+                                self.held(0x4F);
+                            }
+                        } else {
+                            self.me.work[3] = 2;
+                            self.me.work[4] += 1;
+                            end = self.me.work[4] >= 4;
+                        }
+                    }
+                    self.me.work[2] += 1;
+                    if self.me.work[2] > 23 || self.flag(0x5C) {
+                        end = true;
+                    }
+                    if end {
+                        self.request_anim(0x1A, 0.15);
+                    }
+                }
+                0x1A => self.decide_attack_follow(),
+                _ => {}
+            }
+        }
+        if phase == LEAVE {
+            self.clear(0x4F);
+        }
+    }
+
+    // ---- the lead-ins of the attack records (btl_act_2.c) ------------------------------------------------------
+
+    /// `BtlAct_PlayAttackPart`: plays part `frame` of the pending attack on the sub layer and adds to the lead
+    /// time: an earlier part its length (in 60ths) over the rate, the last half of its two first event frames,
+    /// rounded.
+    fn play_attack_part(&mut self, frame: i32, time: f32) -> f32 {
+        let atk = self.me.next_attack;
+        let motion = |i: i32| atk.motion.get(i as usize).copied().unwrap_or(-1);
+        let mut time = time;
+        if frame < atk.parts - 1 {
+            self.me.anim_play_sub(self.data, motion(frame));
+            time += self.me.obj.layers[1].length * 30.0 / 60.0 / atk.rate;
+        } else if frame == atk.parts - 1 {
+            self.me.anim_play_sub(self.data, motion(frame));
+            let n = self.query_event(1, 1, 0) + self.query_event(2, 1, 0);
+            time += n as f32 * 0.5 * 30.0 / 60.0;
+            time = (time + 0.5).floor();
+        }
+        time
+    }
+
+    /// The queued action, or 0xB.
+    fn request_queued_or_idle(&mut self) {
+        if self.has_queued() {
+            let q = self.queued();
+            self.request(q);
+        } else {
+            self.request(0xB);
+        }
+    }
+
+    /// Actions 0x2B, 0x2C (`BtlAct_VanishAttackHandler` / `...QuickHandler`): vanish (motion 0x26) for six frames
+    /// (one for 0x2C) while the attack's lead time is measured, then onto the opponent's body and into the queued
+    /// attack. The sound and the vibration are not ported.
+    fn vanish_attack(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.me.set_fx(0xC);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            self.me.anim_advance_then(0x26, 0.15, 0);
+            let t = self.play_attack_part(self.me.action_frame, self.me.next_attack.lead_time);
+            self.me.next_attack.lead_time = t;
+            match self.me.work[2] {
+                0 => {
+                    if self.current() == 0x2B {
+                        self.me.work[3] += 1;
+                        if self.me.work[3] >= 4 {
+                            self.set(0xB);
+                        }
+                        if self.me.work[3] >= 6 {
+                            self.me.work[3] = 0;
+                            self.me.work[2] += 1;
+                        }
+                    } else {
+                        self.set(0xB);
+                        self.me.work[2] += 1;
+                    }
+                }
+                1 => {
+                    snap_to_opponent(self.me, self.opp);
+                    self.set(0xB);
+                    self.set(0xCC);
+                    self.request_queued_or_idle();
+                }
+                _ => {}
+            }
+        }
+        if phase == LEAVE {
+            self.held(0xDD);
+        }
+    }
+
+    /// Actions 0x2D, 0x2E (`BtlAct_WarpBehindAttackHandler` / `WarpAheadAttackHandler`): on the first frame behind
+    /// the opponent, or ahead of it on its path by the attack's lead time, facing it; then the queued attack.
+    fn warp_attack(&mut self, phase: u32) {
+        if phase == RUN {
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            if !self.flag(0xBA) {
+                if self.current() == 0x2D {
+                    warp_behind_opponent(self.me, self.data, self.opp, self.opp_data, 0.0);
+                } else {
+                    let lead = self.me.next_attack.lead_time;
+                    warp_ahead_of_opponent(
+                        self.me,
+                        self.data,
+                        self.opp,
+                        self.opp_data,
+                        self.env,
+                        lead,
+                    );
+                }
+                self.me.turn_yaw(self.opp, 2, PI);
+                self.me
+                    .turn_pitch(self.data, self.opp, self.opp_data, 1, PI);
+                self.me.turn_model_yaw(PI, 1.0);
+                self.me.set_direction(3);
+                for f in [0x3F, 0xB, 0xCC, 0x24] {
+                    self.set(f);
+                }
+            }
+            self.request_queued_or_idle();
+        }
+        if phase == LEAVE {
+            self.held(0xDD);
+        }
+    }
+
+    /// Actions 0x2F, 0x30 (`BtlAct_SlideToAttackHandler`): four frames sliding to a point beside where the opponent
+    /// will be (35 degrees below at 11, or 70 at 8 times the attack's speed), then facing that point.
+    fn slide_attack(&mut self, phase: u32) {
+        if phase == ENTER {
+            let (angle, dist, extra, frames) = if self.current() == 0x2F {
+                (-35.0 * PI / 180.0, 11.0, 1.0, 4.0)
+            } else {
+                (-70.0 * PI / 180.0, 8.0, 0.0, 4.0)
+            };
+            let speed = self.me.next_attack.speed;
+            let (point, target) = calc_approach_point(
+                self.me,
+                self.opp,
+                self.data,
+                self.opp_data,
+                self.env,
+                speed,
+                angle,
+                dist,
+                dist + frames + extra,
+            );
+            let step = scale3(sub(point, self.me.pose.pos), 0.25);
+            for k in 0..3 {
+                self.set_work_f(6 + k, step[k]);
+                self.set_work_f(10 + k, target[k]);
+            }
+        }
+        if phase == RUN {
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            let step = [self.work_f(6), self.work_f(7), self.work_f(8)];
+            self.me.pose.pos = add(self.me.pose.pos, step);
+            self.me.work[2] += 1;
+            if self.me.work[2] == 4 {
+                self.request_queued_or_idle();
+            }
+            for f in [0x3F, 0xB, 0xCC, 0x24] {
+                self.set(f);
+            }
+        }
+        if phase == LEAVE {
+            let face = [self.work_f(10), self.work_f(11), self.work_f(12)];
+            self.me.turn_to_point(face, PI, PI);
+            self.held(0xDD);
+        }
+    }
+
+    /// Action 0x31 (`BtlAct_RushToAttackHandler`): dashing at the opponent (motion 0xD) at the attack's speed until
+    /// the closing time is below the attack's lead time, it is blocked or the lock-on is lost: then the queued
+    /// attack; stuck for eight frames, the stop motion 0xE. The sound and the vibration are not ported.
+    fn rush_attack(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xD, 0.15);
+            self.held(0xE);
+            self.set(0xD1);
+        }
+        if phase == RUN {
+            let mut speed = 0.0;
+            let lead = self.play_attack_part(self.me.action_frame, self.work_f(0));
+            self.set_work_f(0, lead);
+            let mut accel = kmh(100.0);
+            match self.anim_id() {
+                0xD => {
+                    self.me.anim_advance_loop(0);
+                    speed = self.me.next_attack.speed;
+                    accel = 10000.0;
+                    self.me.set_fx(4);
+                    if self.flag(0xF) {
+                        self.me.set_fx(0x30);
+                    }
+                    self.set(9);
+                    self.set(0x50);
+                    self.set(0x51);
+                    self.me.set_fx(9);
+                }
+                0xE => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                }
+                _ => {}
+            }
+            self.step(2, 1, 3, speed, accel);
+            self.me.apply_gravity();
+        }
+        if phase == DECIDE && self.anim_id() == 0xD {
+            let mut reach = opp_closing_time(self.me, self.opp) < self.work_f(0);
+            if self.blocked() {
+                reach = true;
+            }
+            let mut stuck = false;
+            if length(self.me.pose.moved) < kmh(100.0) {
+                self.me.work[2] += 1;
+                if self.me.work[2] >= 8 {
+                    stuck = true;
+                }
+            } else {
+                self.me.work[2] = 0;
+            }
+            if !self.flag(5) {
+                reach = true;
+            }
+            if reach || stuck {
+                self.me.pose.speed = 0.0;
+                if self.has_queued() && !stuck {
+                    let q = self.queued();
+                    self.request(q);
+                } else {
+                    self.request_anim(0xE, 0.0);
+                }
+            }
+        }
+        if phase == LEAVE {
+            self.held(0xDD);
+        }
+    }
+
+    /// Action 0x32 (`BtlAct_HopBackAttackHandler`): a hop back (motion 0x28), the queued attack half way through.
+    /// The sound is not ported.
+    fn hop_back_attack(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x28, 0.15);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let speed = self.me.move_speed(self.data, self.env, 0xB);
+            self.me.anim_advance(0);
+            if self.me.anim_progress() > 0.5 {
+                self.request_queued_or_idle();
+            }
+            self.step(2, 5, 4, speed, kmh(100.0));
+            self.me.apply_gravity();
+        }
+        if phase == LEAVE {
+            self.held(0xDD);
         }
     }
 
@@ -4628,7 +5323,26 @@ impl Ctx<'_, '_> {
                     }
                 }
                 0x3B => {
-                    // The follow-ups of the fifth hit (attack records 0x7B / 0x7C, input 0x2A) are not ported.
+                    if self.flag(0x5B) {
+                        if 0.4 < self.me.anim_progress() {
+                            let id = if self.me.height_ratio(self.data, self.env) < 0.5 {
+                                0x7B
+                            } else {
+                                0x7C
+                            };
+                            if self.queue_attack(id) != 0 {
+                                self.set_work_f(0, 0.6);
+                            }
+                        }
+                        if self.flags2() & 2 != 0 && self.test(0x2A) {
+                            self.set_queue(0, 0x1F);
+                            self.set_work_f(0, 0.5);
+                        }
+                        if self.work_f(0) < self.me.anim_progress() {
+                            let q = self.queued();
+                            self.request(q);
+                        }
+                    }
                 }
                 0 | 0x26 => {
                     self.decide_main(0x2_2000);

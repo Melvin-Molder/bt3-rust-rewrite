@@ -2529,6 +2529,66 @@ mod tests {
     }
 
     #[test]
+    fn real_rush_chains_into_the_attack_records() {
+        use crate::btl_input::pad::{SQUARE, START, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..300 {
+            if battle.roster.chars[0].flags.test(0x13) {
+                break;
+            }
+            frame(&mut battle, UP);
+        }
+        for _ in 0..20 {
+            frame(&mut battle, 0);
+        }
+        // Tap the rush button: five rush hits, then record 0x7B (motions 0x50, 0x52) knocks the opponent back
+        // (0xD4); its follow-up 0x7D comes through the vanishing lead-in 0x2B and blows it away (0xD5).
+        let (mut mine, mut anims, mut theirs) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..130 {
+            frame(&mut battle, if i % 4 < 2 { SQUARE } else { 0 });
+            let a = &battle.roster.chars[0];
+            mine.push(a.act.current);
+            anims.push(a.anim.cur);
+            theirs.push(battle.roster.chars[1].act.current);
+        }
+        mine.dedup();
+        anims.dedup();
+        theirs.dedup();
+        assert_eq!(&mine[..6], &[0xB, 0x44, 0x7B, 0x2B, 0x7D, 0xB], "{mine:x?}");
+        assert!(anims.windows(2).any(|w| w == [0x50, 0x52]), "{anims:x?}");
+        assert!(anims.windows(2).any(|w| w == [0x4D, 0x4F]), "{anims:x?}");
+        assert_eq!(&theirs[..5], &[0xB, 0xC0, 0xC6, 0xD4, 0xD9], "{theirs:x?}");
+        assert!(theirs.contains(&0xD5), "{theirs:x?}");
+    }
+
+    #[test]
     fn real_charged_smash_knocks_the_opponent_away() {
         use crate::btl_input::pad::{SQUARE, START, UP};
         let mut setup = BattleSetup::default();

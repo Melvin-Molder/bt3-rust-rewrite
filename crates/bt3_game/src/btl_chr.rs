@@ -137,6 +137,31 @@ pub(crate) struct HitStatus {
     pub contact: i32,
 }
 
+/// `BtlActAttack`: an attack record's parameters, pending (`nextAttack`, from `BtlAct_PrepareAttack`) and latched
+/// by the attack actions (`attack`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Attack {
+    /// The record's flags: 1 / 2 / 4 / 8 / 0x100 / 0x200 follow-up inputs, 0x10 held flag 0xDD on a chained
+    /// follow-up, 0x20 the cut by camera side, 0x40 the cut ends on contact, 0x80 flag 0xCD, 0x400 end in 0xC.
+    pub flags: i32,
+    /// One motion per part (the second is the first + 2; -1 for none).
+    pub motion: [i32; 2],
+    pub parts: i32,
+    /// The record's lead-in (`level`: 1..3 request effect bit 0xD).
+    pub lead_in: i32,
+    /// The camera cut, < 0 for none.
+    pub cut: i32,
+    /// Follow-up attack records (index from 0x70), < 0 for none.
+    pub follow: [i32; 2],
+    pub rate: f32,
+    pub cancel_at: f32,
+    /// The frames until the strike connects, measured by the lead-ins (`leadTime`).
+    pub lead_time: f32,
+    /// The advance speed per frame (0: stand still).
+    pub speed: f32,
+    pub chained: bool,
+}
+
 /// `ChrCam`: the fighter camera, as far as it is ported.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ChrCam {
@@ -299,6 +324,9 @@ pub(crate) struct Chr {
     pub vanish_limit: i32,
     /// `attackId`: the attack last prepared (read by `BtlAct_QueueComboFinish`, which is not ported).
     pub attack_id: i32,
+    /// `nextAttack` / `attack`: the pending and the latched attack parameters.
+    pub next_attack: Attack,
+    pub attack: Attack,
     /// `bodyWarpPos`: where flag 0x55 puts the body sphere this frame (`BtlChar_RequestBodyWarp`).
     pub body_warp_pos: [f32; 3],
     pub evasion_count: i32,
@@ -411,6 +439,8 @@ impl Chr {
             vanish_count: 0,
             vanish_limit: 0,
             attack_id: 0,
+            next_attack: Attack::default(),
+            attack: Attack::default(),
             body_warp_pos: [0.0; 3],
             evasion_count: 0,
             blast_shots: 0,
@@ -1205,6 +1235,26 @@ impl Chr {
         }
     }
 
+    /// `BtlMove_TurnToPoint`: heading yaw and pitch toward `target` by at most the steps.
+    pub(crate) fn turn_to_point(&mut self, target: [f32; 3], yaw_step: f32, pitch_step: f32) {
+        let p = &mut self.pose;
+        let mut d = sub(target, p.pos);
+        let eps = 0.001;
+        if eps < length(d) {
+            d = normalize(d);
+        }
+        let ang = if eps < d[0].abs() || eps < d[2].abs() {
+            d[0].atan2(d[2])
+        } else {
+            0.0
+        };
+        p.yaw = wrap_angle(p.yaw + wrap_angle(ang - p.yaw).clamp(-yaw_step, yaw_step));
+        let pitch = -d[1].clamp(-1.0, 1.0).asin();
+        p.pitch = wrap_angle(p.pitch + wrap_angle(pitch - p.pitch).clamp(-pitch_step, pitch_step));
+        p.steer_yaw = 0.0;
+        p.steer_pitch = 0.0;
+    }
+
     /// `BtlMove_SetHeading`.
     pub(crate) fn set_heading(&mut self, yaw: f32, pitch: f32) {
         self.pose.yaw = yaw;
@@ -1600,6 +1650,118 @@ pub(crate) fn warp_ahead_of_opponent(
     if rad < lim {
         me.pose.pos = scale3(me.pose.pos, rad / lim);
     }
+}
+
+/// `BtlOpp_GetClosingTime`: frames until the two meet at their velocities, 10000000 when they are not closing.
+pub(crate) fn opp_closing_time(me: &Chr, opp: &Chr) -> f32 {
+    let eps = 0.001;
+    let d = opp_delta(me, opp);
+    let dist = length(d);
+    if dist < eps {
+        return 0.0;
+    }
+    let dir = scale3(d, 1.0 / dist);
+    let speed = dot(me.pose.vel, dir);
+    if speed < 0.0 {
+        return 10_000_000.0;
+    }
+    let rel = speed - dot(opp.pose.vel, dir);
+    if rel < eps {
+        return 10_000_000.0;
+    }
+    dist / rel
+}
+
+/// `BtlOpp_GetPitchAdjusted`: the pitch toward the opponent, centre to centre.
+pub(crate) fn opp_pitch_adjusted(me: &Chr, opp: &Chr, data: &SideData, opp_data: &SideData) -> f32 {
+    let mut d = opp_delta(me, opp);
+    d[1] += data.height() * 0.5 - opp_data.height() * 0.5;
+    let len = length(d);
+    if 0.001 < len {
+        -(d[1] / len).clamp(-1.0, 1.0).asin()
+    } else {
+        0.0
+    }
+}
+
+/// `BtlMove_CalcApproachPoint`: the opponent's position `lead` frames ahead (stopped by the stage on the way,
+/// kept between the stage's top and bottom), and the point `dist * dist_scale` plus both radii short of it, `angle`
+/// below the horizontal line to it (kept below the top). Returns (point, target).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn calc_approach_point(
+    me: &Chr,
+    opp: &Chr,
+    data: &SideData,
+    opp_data: &SideData,
+    env: &Env,
+    dist: f32,
+    angle: f32,
+    dist_scale: f32,
+    lead: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let at = opp.snap_pos(6);
+    let mut tgt = add(at, scale3(opp.pose.vel, lead));
+    let scale = data.height();
+    let opp_scale = opp_data.height();
+    tgt[1] += data.height() * 0.5 - opp_data.height() * 0.5;
+    if let Some(hit) = env.col.trace_segment(at, tgt) {
+        let e = sub(tgt, hit.pos);
+        let len3 = length(e);
+        let len_xz = e[0].hypot(e[2]);
+        if 0.001 < len_xz {
+            let k = len3 / len_xz;
+            tgt[0] = hit.pos[0] + e[0] * k;
+            tgt[2] = hit.pos[2] + e[2] * k;
+        }
+        tgt[1] = hit.pos[1];
+    }
+    let top = env.stage.bounds.top + opp_scale * 0.5;
+    if tgt[1] < top {
+        tgt[1] = top;
+    }
+    let bottom = env.stage.bounds.bottom + opp_scale * 0.5;
+    if bottom < tgt[1] {
+        let mut h = sub(tgt, at);
+        let len3 = length(h);
+        let len_xz = h[0].hypot(h[2]);
+        if 0.001 < len_xz && 0.001 < h[1].abs() {
+            let k = (tgt[1] - bottom) / h[1];
+            if 0.0 < k {
+                let m = (len_xz * (1.0 - k) + len3 * k) / len_xz;
+                h[0] *= m;
+                h[2] *= m;
+                tgt[0] = at[0] + h[0];
+                tgt[2] = at[2] + h[2];
+            }
+        }
+        tgt[1] = bottom;
+    }
+    let mut d = sub(tgt, me.pose.pos);
+    d[1] = 0.0;
+    let len = length(d);
+    let mut d = if 0.01 < len {
+        let k = angle.cos() / len;
+        [d[0] * k, -angle.sin(), d[2] * k]
+    } else {
+        [0.0, -angle.sin(), angle.cos()]
+    };
+    let len = dist_scale * dist + data.radius() + opp_data.radius();
+    d = scale3(d, len);
+    let mut out = sub(tgt, d);
+    let top = env.stage.bounds.top + scale * 0.5;
+    if out[1] < top {
+        let flat = d[0].hypot(d[2]);
+        let rise = top - tgt[1];
+        // The EE's sqrt.s takes the root of the magnitude.
+        let r = (length(d) * length(d) - rise * rise).abs().sqrt();
+        if 0.01 < flat {
+            let k = r / flat;
+            out = [tgt[0] - d[0] * k, top, tgt[2] - d[2] * k];
+        } else {
+            out = [tgt[0], top, tgt[2] - r];
+        }
+    }
+    (out, tgt)
 }
 
 /// `BtlMove_SnapToOpponent`: moves the fighter so that its body sphere's centre is on the opponent's, stopped, with
