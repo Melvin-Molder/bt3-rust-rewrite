@@ -252,7 +252,9 @@ pub(crate) struct Input {
     pub(crate) inject_on: bool,
     pub(crate) inject_buttons: u32,
     pub(crate) inject_stick: [f32; 2],
-    /// `chr->techClass` (>= 2 enables BTLC_SWITCH; techniques are not ported, so it stays -1).
+    /// What `BtlInput_TestSwitch` tests this frame (from the fighter's flags and technique, set before sampling).
+    pub(crate) switch: SwitchTest,
+    /// `chr->techClass` (>= 2 enables BTLC_SWITCH).
     pub(crate) tech_class: i32,
 }
 
@@ -291,8 +293,19 @@ impl Default for Input {
             inject_buttons: 0,
             inject_stick: [0.0; 2],
             tech_class: -1,
+            switch: SwitchTest::None,
         }
     }
+}
+
+/// `BtlInput_TestSwitch` for `chr->techClass >= 2`: flag 0xA2 (a charge) fires on letting go of the blast
+/// button, 0xA3 (repeated shots) on pressing it, else the prompt row's direction with the rush button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SwitchTest {
+    None,
+    Release,
+    Press,
+    Dir(i32),
 }
 
 /// `SaveData.key[player]`: the action of each physical button (Circle, Cross, Square, Triangle, L1, L2, R1, R2).
@@ -513,7 +526,25 @@ impl Input {
         if pressed & DIR_MASK != 0 {
             cmd |= C_DIR_P;
         }
-        // BtlInput_TestSwitch needs chr->techClass >= 2: the techniques are not ported.
+        // BtlInput_TestSwitch: the technique's button command.
+        let switch = match self.switch {
+            SwitchTest::None => false,
+            SwitchTest::Release => held & BLAST == 0,
+            SwitchTest::Press => pressed & BLAST != 0,
+            SwitchTest::Dir(dir) => {
+                let want = match dir {
+                    1 => DOWN,
+                    0 => UP,
+                    2 => LEFT,
+                    3 => RIGHT,
+                    _ => 0,
+                };
+                want != 0 && held & want != 0 && pressed & RUSH != 0
+            }
+        };
+        if switch {
+            cmd |= C_SWITCH;
+        }
         cmd
     }
 

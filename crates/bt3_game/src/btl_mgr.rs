@@ -77,12 +77,27 @@ impl Roster {
     }
 
     /// `BtlChars_SampleInput` (`BtlInput_Sample`): stage 2, the pad (or the CPU's virtual pad) into the record.
-    pub(crate) fn sample_input(&mut self, pads: &[PadState; 2], env: &Env) {
-        for (chr, pad) in self.chars.iter_mut().zip(pads) {
+    pub(crate) fn sample_input(&mut self, pads: &[PadState; 2], data: [&SideData; 2], env: &Env) {
+        for ((chr, pad), data) in self.chars.iter_mut().zip(pads).zip(data) {
             if chr.is_frozen() {
                 continue;
             }
             chr.flags.set_stage(2);
+            let class = chr.input.tech_class;
+            chr.input.switch = if class < 2 {
+                crate::btl_input::SwitchTest::None
+            } else if chr.flags.test(0xA2) {
+                crate::btl_input::SwitchTest::Release
+            } else if chr.flags.test(0xA3) {
+                crate::btl_input::SwitchTest::Press
+            } else {
+                let row = data.tables.tech().prompt_row(class);
+                let dir = usize::try_from(row)
+                    .ok()
+                    .and_then(|r| env.common.prompt_rows.get(r))
+                    .map_or(-1, |r| i32::from(r[2] as i8));
+                crate::btl_input::SwitchTest::Dir(dir)
+            };
             let active = (chr.flags.test(2) || chr.flags.test(3))
                 && !chr.flags.test(0x136)
                 && !env.gate.time_stopped;

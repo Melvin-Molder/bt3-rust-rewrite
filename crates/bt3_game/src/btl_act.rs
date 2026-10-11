@@ -15,6 +15,7 @@
 use std::f32::consts::PI;
 
 use crate::btl_blast::{HitRec, blast_limit_a, can_fire, hits_of, ki_cost, ki_cost_of};
+use crate::btl_chr::warp_in_front_of_opponent;
 use crate::btl_chr::{
     Attack, Chr, Env, SideData, add, anim_flag, begin_rise_to_opponent, calc_approach_point,
     circle_opponent, deg, dot, is_blocked_by_opponent, kmh, length, normalize, opp_closing_time,
@@ -25,6 +26,33 @@ use crate::btl_chr::{
 use crate::btl_clash::{ClashC, count_and_mark};
 use crate::btl_input::{DIR_MASK, wrap_angle};
 use crate::btl_obj::{mask_to_node, node_side};
+
+/// `BTL_SUPER_TIMEOUT`: frames after which a technique stops waiting for its effect's flag.
+const SUPER_TIMEOUT: i32 = 150;
+
+/// The motion `n` of a class 2..4 technique: 0x22 per class from 0x105 (0 start, 1 charge loop, 2 fire, 3 firing
+/// loop, 4 second stage, 5 its loop, 6 end; + 7 / + 14 aimed up / down).
+fn super_anim(cls: i32, n: i32) -> i32 {
+    cls * 0x22 + 0xC1 + n
+}
+
+/// `BtlAct_IsTechniqueId`: 0x105..0x132.
+fn is_technique_id(id: i32) -> bool {
+    (0x106..0x106 + 0x2D).contains(&id) || id == 0x105
+}
+
+/// `BtlAct_GetIdClass`.
+fn id_class(id: i32) -> i32 {
+    if id == 0x105 {
+        4
+    } else if (0xFD..0xFD + 6).contains(&id) {
+        (id - 0xFD) % 2
+    } else if (0x106..0x106 + 0x36).contains(&id) {
+        (id - 0x106) % 3 + 2
+    } else {
+        -1
+    }
+}
 
 /// `BtlAct_IsAttackId`: the attack actions of the record table (0x70..0xAD).
 fn is_attack_id(id: i32) -> bool {
@@ -62,7 +90,7 @@ pub(crate) struct Ctx<'a, 'd> {
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xFA..=0xFC)
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xFA..=0xFC | 0x105..=0x11A)
 }
 
 impl Ctx<'_, '_> {
@@ -357,7 +385,13 @@ impl Ctx<'_, '_> {
             self.set_queue(0, 0x35);
             return 1;
         }
-        // Mask 0x100000 (techniques) and 0x800000 (skills): not ported.
+        if mask & 0x10_0000 != 0 {
+            let n = self.check_technique_input();
+            if n != 0 {
+                return n;
+            }
+        }
+        // Mask 0x800000 (skills): not ported.
         if mask & 0x80 != 0 && !self.flag(6) && !self.flag(0x98) {
             if self.data.tables.params.chara_flags() & 0x80 != 0 {
                 if self.me.gauge.ki >= self.me.gauge.ki_max
@@ -799,6 +833,12 @@ impl Ctx<'_, '_> {
             0xE6 => self.recover(phase),
             0xE7 => self.wall_slam(phase),
             0xE8 | 0xE9 => self.wall_recover(phase),
+            0x105 => self.ultimate_start(phase),
+            0x106..=0x108 | 0x10C..=0x10E => self.super_beam(phase),
+            0x109..=0x10B => self.super_warp_beam(phase),
+            0x10F..=0x111 => self.super_charge(phase),
+            0x112..=0x114 => self.super_repeat(phase),
+            0x115..=0x11A => self.super_quick_beam(phase),
             0xFA => self.clash_blows(phase),
             0xFB => self.clash_vanish(phase),
             0xFC => self.clash_exchange(phase),
@@ -6139,6 +6179,759 @@ impl Ctx<'_, '_> {
         }
     }
 
+    // ---- the techniques: Blast 2 and Ultimate Blast (btl_act_super.c, btl_act_decide.c) -------------------------
+
+    /// The technique table.
+    fn tech(&self) -> bt3_data::chara_data::TechTable<'_> {
+        self.data.tables.tech()
+    }
+
+    /// `BtlAct_GetCurrentClass` (`BtlAct_GetIdClass`): 0 / 1 for the skills 0xFD..0x102, 2..4 for the technique
+    /// actions 0x106..0x13B (their place in the triple), 4 for 0x105, else -1.
+    fn current_class(&self) -> i32 {
+        id_class(self.current())
+    }
+
+    /// `BtlAct_CanUseTechnique`: lock-on, the powered-up mode for slot 4, the ki; a technique with flag 0x2000 is
+    /// refused while its lock counter runs (except in modes 5 and 6).
+    fn can_use_technique(&self, slot: i32) -> bool {
+        if !(2..5).contains(&slot) || self.me.gauge.body_changed || !self.flag(5) {
+            return false;
+        }
+        if slot == 4 && !self.flag(6) {
+            return false;
+        }
+        // BtlSuper_GetKiCost: ability 0x2B is not ported.
+        if !self.me.has_ki(self.tech().ki(slot)) {
+            return false;
+        }
+        if self.tech().flags(slot) & 0x2000 != 0 {
+            if matches!(self.env.mode, 5 | 6) {
+                return true;
+            }
+            let check = self.env.mode != 1 || !self.flag(0x11F);
+            if check && self.me.gauge.fired[slot as usize] > 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `BtlAct_GetTechniqueAction`: the technique's kind picks a block of three actions.
+    fn technique_action(&self, slot: i32) -> i32 {
+        let n = slot - 2;
+        match self.tech().kind(slot) {
+            0 | 7 => n + 0x106,
+            1 => n + 0x10C,
+            2 => n + 0x10F,
+            3 => n + 0x112,
+            6 => n + 0x11E,
+            4 | 5 => n + 0x11B,
+            9 => n + 0x109,
+            8 => n + 0x124,
+            10 => n + 0x121,
+            _ => slot + 0x104,
+        }
+    }
+
+    /// `BtlAct_CheckTechniqueInput`: the charge button with blast (inputs 0x6C / 0x6D / 0x6E: neutral, up, down)
+    /// picks slot 2 / 3 / 4; when it can be used by a free fighter: a step back 0x1B first when close (unless the
+    /// technique has flag 0x200 or is of kind 10), 0x105 before slot 4, then the technique's action.
+    fn check_technique_input(&mut self) -> u32 {
+        if self.me.tech_delay > 0 {
+            return 0;
+        }
+        let mut slot = -1;
+        for (input, s) in [(0x6C, 2), (0x6D, 3), (0x6E, 4)] {
+            if self.test(input) {
+                slot = s;
+            }
+        }
+        if slot < 0 || !self.can_use_technique(slot) || !self.me.is_free() {
+            return 0;
+        }
+        let mut n = 0;
+        if self.flag(0x13) && self.tech().flags(slot) & 0x200 == 0 && self.tech().kind(slot) != 10 {
+            self.set_queue(0, 0x1B);
+            n = 1;
+        }
+        if slot == 4 {
+            self.set_queue(n, 0x105);
+            n += 1;
+        }
+        let a = self.technique_action(slot);
+        self.set_queue(n, a);
+        n as u32 + 1
+    }
+
+    /// `BtlSuper_Begin`: speed and fall stopped, the technique flags cleared, the use counted, in flight; class 4
+    /// only when forced. The colour mode of flag 0x8000 is not ported.
+    fn super_begin(&mut self, cls: i32, force: bool) {
+        if !force && cls == 4 {
+            return;
+        }
+        self.me.pose.speed = 0.0;
+        self.me.pose.fall_speed = 0.0;
+        self.me.flags.clear_range(0x9B, 0xA0);
+        self.me.flags.clear_range(0xA7, 0xAA);
+        self.set(0x29);
+        self.me.charge = 0.0;
+        self.me.charge_full_frames = 0;
+        if let Some(u) = self.me.gauge.used.get_mut(cls as usize) {
+            *u += 1;
+        }
+        if !self.flag(0xF) {
+            self.held(0xE);
+        }
+    }
+
+    /// `BtlSuper_SetStartFx`: effect bit 0x3E / 0x3F / 0x40 by class.
+    fn super_start_fx(&mut self, cls: i32) {
+        let bit = match cls {
+            3 => 0x3F,
+            4 => 0x40,
+            _ => 0x3E,
+        };
+        self.me.set_fx(bit);
+    }
+
+    /// `BtlSuper_SetClassFlag`: flag 0xE0 / 0xE1 / 0xE2 by class; class 4 only when forced.
+    fn super_class_flag(&mut self, cls: i32, force: bool) {
+        if !force && cls == 4 {
+            return;
+        }
+        let flag = match cls {
+            3 => 0xE1,
+            4 => 0xE2,
+            _ => 0xE0,
+        };
+        self.set(flag);
+    }
+
+    /// `BtlSuper_RequestHitStop`: level 2 (0x125) with the full flag set, or level 1 (0x126).
+    fn super_hit_stop(&mut self, light: bool) {
+        let flags: &[u32] = if light {
+            &[0x44, 0x45, 0x126]
+        } else {
+            &[0x42, 0x43, 0x44, 0x45, 0x46, 0x125, 0x12A]
+        };
+        for &f in flags {
+            self.set(f);
+        }
+        self.set(0x128);
+    }
+
+    /// `BtlSuper_SetFiringFlags`.
+    fn super_firing_flags(&mut self) {
+        self.set(0xD5);
+        self.set(0xBB);
+        self.set(0x127);
+        if !self.flag(0xE) && !self.flag(0xF) {
+            self.held(0xE);
+        }
+    }
+
+    /// `BtlSuper_SetClass`: the technique's button command is read next frame.
+    fn super_set_class(&mut self, cls: i32) {
+        self.me.input.tech_class = cls;
+    }
+
+    /// `BtlSuper_FitAnimToEvent`: the motion stretched so that its 0x400 event comes `seconds` from now (0.1 s
+    /// for a motion without one).
+    fn super_fit_to_event(&mut self, seconds: f32) {
+        let event = self.query_event(0x400, 0, 0) as f32;
+        if event < 0.0 {
+            self.me.anim_set_duration(0.1);
+            return;
+        }
+        let frame = self.me.obj.frame;
+        if event - 2.0 < frame {
+            return;
+        }
+        let step = if seconds < 0.033_333_335 {
+            event - frame
+        } else {
+            (event / (seconds * 30.0)).min(event - frame)
+        };
+        self.me.anim_set_step(step);
+    }
+
+    /// `BtlSuper_Leave`: unless another technique action follows, the cooldown starts and the effect requests and
+    /// the input lock are dropped.
+    fn super_leave(&mut self, cls: i32) {
+        if is_technique_id(self.requested()) {
+            return;
+        }
+        self.me.tech_delay = self.tech().cooldown_frames(cls);
+        self.me.flags.clear_range(0xA7, 0xAA);
+        self.clear(0x11F);
+        match self.tech().id(cls) {
+            0x268 => self.me.skill_count3 = 0,
+            0x2CD => self.me.boost_stock = 0,
+            _ => {}
+        }
+    }
+
+    /// `BtlSuper_Finish`: back to 0xB, or falling (0xD9) for a technique with flag 0x4000.
+    fn super_finish(&mut self, cls: i32) {
+        if self.tech().flags(cls) & 0x4000 != 0 {
+            self.held(0x1D);
+            self.held(0x1E);
+            self.set(0x35);
+            self.request(0xD9);
+        } else {
+            self.request(0xB);
+        }
+    }
+
+    /// The common start of the beam techniques: the start motion, the begin, facing the opponent, the start flags
+    /// and the ki. The camera cut, the sound and the head look are not ported.
+    fn super_start(&mut self, cls: i32, blend: f32) {
+        self.play(super_anim(cls, 0), blend);
+        self.super_begin(cls, false);
+        self.me.turn_yaw(self.opp, 2, PI);
+        self.me
+            .turn_pitch(self.data, self.opp, self.opp_data, 5, PI);
+        self.me.turn_model_yaw(PI, 1.0);
+        self.super_start_fx(cls);
+        self.super_class_flag(cls, false);
+        let ki = self.tech().ki(cls);
+        self.me.spend_ki(ki, true);
+    }
+
+    /// The button command during a technique (input 0x6F): the held flags 0x9C..0x9E (more damage). The sounds
+    /// are not ported.
+    fn super_boost_input(&mut self) {
+        if self.test(0x6F) {
+            self.held(0x9E);
+            self.held(0x9D);
+            self.held(0x9C);
+        }
+    }
+
+    /// The common end of a run phase: the pitch motions, the step (facing the opponent while aiming), the effect
+    /// bit 0x10.
+    fn super_move(&mut self, cls: i32, aim: bool) {
+        if self.tech().flags(cls) & 0x1000 == 0 {
+            let a = self.anim_id();
+            self.set_pitch_motion_with(a + 7, a + 0xE, aim);
+        }
+        self.step(if aim { 2 } else { 6 }, 5, 2, 0.0, kmh(100.0));
+        self.me.apply_gravity();
+        self.me.set_fx(0x10);
+    }
+
+    /// A wait on an effect's flag, or `BTL_SUPER_TIMEOUT` frames: then motion `next`.
+    fn super_wait_flag(&mut self, flag: u32, cls: i32, next: i32) {
+        self.me.work[2] += 1;
+        if self.me.work[2] > SUPER_TIMEOUT {
+            self.held(flag);
+        }
+        if self.flag(flag) {
+            self.request_anim(super_anim(cls, next), 0.0);
+            self.me.work[2] = 0;
+        }
+    }
+
+    /// Actions 0x106..0x108 (`BtlAct_SuperBeamHandler`) and the long beam 0x10C..0x10E
+    /// (`BtlAct_SuperLongBeamHandler`): the start motion (level 2 hit-stop), the charge loop until the effect
+    /// raises flag 0xA7, the fire, the firing loop until 0xA8 (the long beam: a second stage until 0xA9), the end.
+    /// The effects that raise the flags are not ported yet: each wait ends after 150 frames, as the original's own
+    /// timeout. Not ported either: the self-destruct change of flag 0x2000 (a character change), the shakes,
+    /// vibration, sounds and cuts, and the beam struggles 0x12A.. (flags 0x72 / 0x73).
+    fn super_beam(&mut self, phase: u32) {
+        let cls = self.current_class();
+        let long = (0x10C..=0x10E).contains(&self.current());
+        if phase == ENTER {
+            self.super_start(cls, 0.0);
+        }
+        if phase == RUN {
+            let mut aim = self.tech().flags_a(cls) & 0x800 != 0;
+            match self.anim_id() - super_anim(cls, 0) {
+                0 => {
+                    aim = true;
+                    self.me.anim_advance_then(super_anim(cls, 1), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                }
+                1 => {
+                    aim = true;
+                    self.me.anim_advance_loop(0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                    self.super_wait_flag(0xA7, cls, 2);
+                }
+                2 => {
+                    self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    if long {
+                        self.super_hit_stop(true);
+                        self.super_set_class(cls);
+                    } else {
+                        self.super_set_class(cls);
+                        if self.me.obj.frame < self.query_event(0x400, 0, 0) as f32 {
+                            aim = true;
+                            self.super_hit_stop(true);
+                        }
+                        if self.me.anim_is_new() && self.tech().flags(cls) & 0x2000 != 0 {
+                            let h = self.me.gauge.health - 1;
+                            self.me.damage(self.env, self.data, h, 0x5B);
+                            if let Some(f) = self.me.gauge.fired.get_mut(cls as usize) {
+                                *f += 1;
+                            }
+                        }
+                    }
+                }
+                3 => {
+                    self.me.anim_advance_loop(0);
+                    if long {
+                        self.super_hit_stop(true);
+                        self.super_wait_flag(0xA8, cls, 4);
+                    } else {
+                        self.super_wait_flag(0xA8, cls, 6);
+                    }
+                }
+                4 if long => {
+                    self.me.anim_advance_then(super_anim(cls, 5), 0.0, 0);
+                }
+                5 if long => {
+                    self.me.anim_advance_loop(0);
+                    self.super_wait_flag(0xA9, cls, 6);
+                }
+                6 => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            self.super_move(cls, aim);
+            self.super_firing_flags();
+            self.super_boost_input();
+        }
+        if phase == DECIDE {
+            if !long {
+                if self.flag(0x73) {
+                    self.request(cls + 0x128);
+                }
+                if self.flag(0x72) {
+                    self.request(cls + 0x12B);
+                }
+            }
+            if self.me.work[1] != 0 {
+                self.super_finish(cls);
+            }
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// Actions 0x109..0x10B (`BtlAct_SuperWarpBeamHandler`): the beam fired after a teleport. Once the charge is
+    /// done (flag 0xA7, or 150 frames) five stages: vanish, onto the opponent, 40 in front of it and 20 up facing
+    /// it, reappear, fire.
+    fn super_warp_beam(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.super_start(cls, 0.0);
+        }
+        if phase == RUN {
+            let mut aim = self.tech().flags_a(cls) & 0x800 != 0;
+            let mut warped = false;
+            match self.anim_id() - super_anim(cls, 0) {
+                0 => {
+                    aim = true;
+                    self.me.anim_advance_then(super_anim(cls, 1), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                }
+                1 => {
+                    self.me.anim_advance_loop(0);
+                    aim = true;
+                    match self.me.work[4] {
+                        0 => {
+                            self.super_hit_stop(false);
+                            self.super_set_class(cls);
+                            self.me.work[2] += 1;
+                            if self.me.work[2] > SUPER_TIMEOUT {
+                                self.held(0xA7);
+                            }
+                            if self.flag(0xA7) {
+                                self.me.work[4] += 1;
+                                self.me.work[3] = 0;
+                                self.me.work[2] = 0;
+                                self.me.set_fx(0xC);
+                            }
+                        }
+                        1 => {
+                            self.super_hit_stop(false);
+                            self.me.work[3] += 1;
+                            if self.me.work[3] > 3 {
+                                self.set(0xB);
+                            }
+                            if self.me.work[3] >= 7 {
+                                self.me.work[4] += 1;
+                                self.me.work[3] = 0;
+                            }
+                        }
+                        2 => {
+                            self.super_hit_stop(false);
+                            snap_to_opponent(self.me, self.opp);
+                            self.set(0xB);
+                            warped = true;
+                            self.set(0xCC);
+                            self.me.work[4] += 1;
+                            self.me.work[3] = 0;
+                        }
+                        3 => {
+                            self.super_hit_stop(false);
+                            warp_in_front_of_opponent(
+                                self.me,
+                                self.data,
+                                self.opp,
+                                self.opp_data,
+                                40.0,
+                            );
+                            warped = true;
+                            self.me.pose.pos[1] += 20.0;
+                            self.me.turn_yaw(self.opp, 2, PI);
+                            self.me
+                                .turn_pitch(self.data, self.opp, self.opp_data, 1, PI);
+                            self.me.turn_model_yaw(PI, 1.0);
+                            self.me.set_direction(3);
+                            for f in [0x3F, 0xB] {
+                                self.set(f);
+                            }
+                            self.me.set_fx(0xD);
+                            for f in [0xCC, 0xCE, 0x24] {
+                                self.set(f);
+                            }
+                            self.me.work[4] += 1;
+                            self.me.work[3] = 0;
+                        }
+                        4 => {
+                            self.super_hit_stop(true);
+                            self.me.work[3] += 1;
+                            if self.me.work[3] < 3 {
+                                self.set(0xB);
+                            }
+                            if self.me.work[3] >= 7 {
+                                self.request_anim(super_anim(cls, 2), 0.0);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                2 => {
+                    self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    let event = self.query_event(0x400, 0, 0) as f32;
+                    let frame = self.me.obj.frame;
+                    if frame < event - 4.0 {
+                        self.super_hit_stop(true);
+                    }
+                    if frame < event {
+                        aim = true;
+                    }
+                }
+                3 => {
+                    self.me.anim_advance_loop(0);
+                    self.super_wait_flag(0xA8, cls, 6);
+                }
+                6 => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            if self.tech().flags(cls) & 0x1000 == 0 {
+                let a = self.anim_id();
+                self.set_pitch_motion_with(a + 7, a + 0xE, aim);
+            }
+            if !warped {
+                self.step(if aim { 2 } else { 6 }, 5, 2, 0.0, kmh(100.0));
+                self.me.apply_gravity();
+            }
+            self.me.set_fx(0x10);
+            self.super_firing_flags();
+            self.super_boost_input();
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.super_finish(cls);
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// Actions 0x10F..0x111 (`BtlAct_SuperChargeHandler`): the chargeable technique. The charge loop lasts until
+    /// the button command (letting go of the blast button, flag 0xA2) or the charge time; the charge is full after
+    /// half of it (ability 0x4A is not ported).
+    fn super_charge(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.play(super_anim(cls, 0), 0.15);
+            self.super_begin(cls, false);
+            self.super_start_fx(cls);
+            self.super_class_flag(cls, false);
+            let ki = self.tech().ki(cls);
+            self.me.spend_ki(ki, true);
+        }
+        if phase == RUN {
+            let limit = self.tech().charge_limit_frames(cls);
+            let mut aim = self.tech().flags_a(cls) & 0x800 != 0;
+            match self.anim_id() - super_anim(cls, 0) {
+                0 => {
+                    aim = true;
+                    self.me.anim_advance_then(super_anim(cls, 1), 0.0, 0);
+                    self.super_set_class(cls);
+                    self.set(0x53);
+                }
+                1 => {
+                    self.me.anim_advance_loop(0);
+                    aim = true;
+                    self.super_set_class(cls);
+                    self.set(0x53);
+                    self.me.work[2] += 1;
+                    if self.me.work[2] >= limit {
+                        self.me.work[0] |= 1;
+                    }
+                    self.me.charge = self.me.work[2] as f32 * 2.0 / limit as f32;
+                    if self.me.charge >= 1.0 {
+                        self.me.charge = 1.0;
+                        self.me.set_fx(0x1E);
+                        self.me.charge_full_frames += 1;
+                    }
+                    if self.me.work[0] & 1 != 0 {
+                        self.request_anim(super_anim(cls, 2), 0.0);
+                        self.me.work[2] = 0;
+                    }
+                }
+                2 => {
+                    self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    self.set(0x53);
+                    if self.me.obj.frame < self.query_event(0x400, 0, 0) as f32 {
+                        aim = true;
+                    }
+                }
+                3 => {
+                    self.me.anim_advance_loop(0);
+                    self.super_wait_flag(0xA8, cls, 6);
+                }
+                6 => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            self.super_move(cls, aim);
+            self.super_firing_flags();
+            self.set(0xA2);
+        }
+        if phase == DECIDE {
+            if self.anim_id() == super_anim(cls, 1) && self.test(0x6F) {
+                self.held(0x9E);
+                self.held(0x9D);
+                self.me.work[0] |= 1;
+                if self.me.charge >= 1.0 {
+                    self.held(0x9C);
+                }
+            }
+            if self.me.work[1] != 0 {
+                self.super_finish(cls);
+            }
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// Actions 0x112..0x114 (`BtlAct_SuperRepeatHandler`): shots fired again and again, each paid with health;
+    /// in the fire loop the button command (pressing the blast button, flag 0xA3) fires the next until the shot
+    /// limit, the time limit or 1 health. Own technique records are not ported, so none is ever waited for.
+    fn super_repeat(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.super_start(cls, 0.0);
+        }
+        if phase == RUN {
+            let mut aim = self.tech().flags_a(cls) & 0x800 != 0;
+            match self.anim_id() - super_anim(cls, 0) {
+                0 => {
+                    self.me.anim_advance_then(super_anim(cls, 1), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                    self.super_boost_input();
+                    aim = true;
+                }
+                1 => {
+                    self.me.anim_advance_loop(0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                    self.super_boost_input();
+                    aim = true;
+                    self.super_wait_flag(0xA7, cls, 2);
+                }
+                2 => {
+                    self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    if self.me.obj.frame < self.query_event(0x400, 0, 0) as f32 {
+                        aim = true;
+                        self.super_hit_stop(true);
+                    }
+                    if self.me.anim_is_new() {
+                        let recoil = self.tech().recoil(cls);
+                        self.me.damage(self.env, self.data, recoil, 0x42B);
+                        self.me.work[3] += 1;
+                        self.me.work[2] = 0;
+                        if self.me.work[3] == 1 {
+                            self.clear(0x9E);
+                            self.clear(0x9D);
+                        }
+                    }
+                }
+                3 => {
+                    self.me.anim_advance_loop(0);
+                }
+                6 => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            self.super_move(cls, aim);
+            self.super_firing_flags();
+            self.set(0xA3);
+        }
+        if phase == DECIDE {
+            let shots = self.me.work[3];
+            let last = self.me.gauge.health == 1 || shots >= self.tech().shots(cls);
+            match self.anim_id() - super_anim(cls, 0) {
+                2 => {
+                    if !last {
+                        self.super_set_class(cls);
+                    }
+                }
+                3 => {
+                    self.me.work[2] += 1;
+                    let stop =
+                        self.me.work[2] >= (self.tech().shot_time(cls) * 30.0) as i32 - 1 || last;
+                    if stop {
+                        // BtlMove_CountOwnBeams: no technique records yet.
+                        self.request_anim(super_anim(cls, 6), 0.0);
+                        self.me.work[2] = 0;
+                    } else {
+                        self.super_set_class(cls);
+                        if self.me.work[2] >= 16 && self.test(0x6F) {
+                            self.request_anim(super_anim(cls, 2), 0.0);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if self.me.work[1] != 0 {
+                self.super_finish(cls);
+            }
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// Actions 0x115..0x117 (`BtlAct_SuperQuickBeamHandler`) and 0x118..0x11A (`...QuickLongBeamHandler`): the
+    /// quick forms (flag 0xA4: 30% damage) without the ki, the hit-stop or the charge: the start cut to 0.1 s, the
+    /// fire (the long form's second stage until flag 0xA9), the end. `BtlAct_GetPrev` is never 0x2E.
+    fn super_quick_beam(&mut self, phase: u32) {
+        let cls = self.current_class();
+        let long = (0x118..=0x11A).contains(&self.current());
+        if phase == ENTER {
+            self.play(super_anim(cls, 0), 0.0);
+            self.super_begin(cls, !long);
+            self.super_start_fx(cls);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let mut aim = self.tech().flags_a(cls) & 0x800 != 0;
+            match self.anim_id() - super_anim(cls, 0) {
+                0 => {
+                    self.me.anim_set_duration(0.1);
+                    aim = true;
+                    self.me.anim_advance_then(super_anim(cls, 2), 0.0, 0);
+                    self.me.charge = 0.0;
+                }
+                2 => {
+                    self.super_fit_to_event(0.1);
+                    let next = if long { 4 } else { 3 };
+                    self.me.anim_advance_then(super_anim(cls, next), 0.0, 0);
+                    if !long && self.me.obj.frame < self.query_event(0x400, 0, 0) as f32 {
+                        aim = true;
+                    }
+                }
+                3 if !long => {
+                    self.me.anim_advance_loop(0);
+                    self.super_wait_flag(0xA8, cls, 6);
+                }
+                4 if long => {
+                    self.super_fit_to_event(0.1);
+                    self.me.anim_advance_then(super_anim(cls, 5), 0.0, 0);
+                }
+                5 if long => {
+                    self.me.anim_advance_loop(0);
+                    self.super_wait_flag(0xA9, cls, 6);
+                }
+                6 => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            self.super_move(cls, aim);
+            self.set(0xD5);
+            self.set(0xA4);
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.super_finish(cls);
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// Action 0x105 (`BtlAct_UltimateStartHandler`): before an Ultimate Blast, motion 0x16B under level 2 hit-stop
+    /// (the battle frozen round the pose); its end starts the queued technique. The camera cut, the sound and the
+    /// head look are not ported.
+    fn ultimate_start(&mut self, phase: u32) {
+        let slot = self.current_class();
+        if phase == ENTER {
+            self.play(0x16B, 0.0);
+            self.super_begin(slot, true);
+            self.me.turn_yaw(self.opp, 2, PI);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 5, PI);
+            self.me.turn_model_yaw(PI, 1.0);
+            self.super_class_flag(slot, true);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+        }
+        if phase == RUN {
+            self.me.anim_advance(0);
+            self.super_set_class(slot);
+            self.step(6, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.me.set_fx(0x10);
+            self.super_hit_stop(false);
+            if self.queued() == 0x114 {
+                self.set(0xA3);
+            }
+            self.super_boost_input();
+        }
+        if phase == DECIDE && self.flag(anim_flag::END) {
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
     // ---- the reactions a smash gives (btl_act_1.c) ---------------------------------------------------------------
 
     /// `BtlActB_UpdateMashRate`: each press of an action button (`ANY_FACE`) adds to the motion's step, kept in
@@ -6785,17 +7578,24 @@ impl Ctx<'_, '_> {
     /// `BtlAct_SetPitchMotion` (measuring again): blends in an up or down motion by the pitch toward the opponent,
     /// under lock-on only.
     fn set_pitch_motion(&mut self, up: i32, down: i32) {
+        self.set_pitch_motion_with(up, down, true);
+    }
+
+    /// `BtlAct_SetPitchMotion` with `recalc`: without it the last measured pitch is kept.
+    fn set_pitch_motion_with(&mut self, up: i32, down: i32, recalc: bool) {
         if !self.flag(5) {
             self.me.aim_pitch = 0.0;
             return;
         }
-        let own = self.me.obj.node_pos(0x11);
-        let mut dir = sub(self.opp.obj.node_pos(0x11), own);
-        let len = length(dir);
-        if 0.0001 < len {
-            dir = dir.map(|v| v * (1.0 / len));
+        if recalc {
+            let own = self.me.obj.node_pos(0x11);
+            let mut dir = sub(self.opp.obj.node_pos(0x11), own);
+            let len = length(dir);
+            if 0.0001 < len {
+                dir = dir.map(|v| v * (1.0 / len));
+            }
+            self.me.aim_pitch = -dir[1].clamp(-1.0, 1.0).asin();
         }
-        self.me.aim_pitch = -dir[1].clamp(-1.0, 1.0).asin();
         let t = (self.me.aim_pitch / 0.785_398_16).clamp(-1.0, 1.0);
         if t < 0.0 {
             self.me.anim_set_sub_mix(-t);

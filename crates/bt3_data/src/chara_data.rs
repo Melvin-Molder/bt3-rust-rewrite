@@ -324,6 +324,151 @@ impl CharaTables {
     }
 }
 
+/// The technique table (`BtlSuperData`, `mdl->super`): every field an array of three for the slots 2..4.
+/// Out-of-range reads give 0.
+#[derive(Clone, Copy, Debug)]
+pub struct TechTable<'a>(pub &'a [u8]);
+
+impl TechTable<'_> {
+    fn at<const N: usize>(&self, base: usize, slot: i32, size: usize) -> Option<[u8; N]> {
+        let i = usize::try_from(slot - 2).ok().filter(|&i| i < 3)?;
+        let o = base + i * size;
+        self.0.get(o..o + N)?.try_into().ok()
+    }
+    fn u32_of(&self, base: usize, slot: i32) -> u32 {
+        self.at::<4>(base, slot, 4).map_or(0, u32::from_le_bytes)
+    }
+    fn f32_of(&self, base: usize, slot: i32) -> f32 {
+        self.at::<4>(base, slot, 4).map_or(0.0, f32::from_le_bytes)
+    }
+    fn i16_of(&self, base: usize, slot: i32) -> i32 {
+        self.at::<2>(base, slot, 2)
+            .map_or(0, |b| i32::from(i16::from_le_bytes(b)))
+    }
+    fn s8_of(&self, base: usize, slot: i32) -> i32 {
+        self.at::<1>(base, slot, 1)
+            .map_or(0, |b| i32::from(b[0] as i8))
+    }
+    /// `BtlSuper_GetFlagsA` / `GetFlags`: the two flag words.
+    pub fn flags_a(&self, slot: i32) -> u32 {
+        self.u32_of(0, slot)
+    }
+    pub fn flags(&self, slot: i32) -> u32 {
+        self.u32_of(0xC, slot)
+    }
+    /// `BtlSuper_GetId`.
+    pub fn id(&self, slot: i32) -> i32 {
+        self.i16_of(0x18, slot)
+    }
+    /// `BtlSuper_GetClashPower`.
+    pub fn clash_power(&self, slot: i32) -> i32 {
+        self.i16_of(0x1E, slot)
+    }
+    /// `BtlSuper_GetShotTime` (seconds).
+    pub fn shot_time(&self, slot: i32) -> f32 {
+        self.f32_of(0x24, slot)
+    }
+    /// `BtlSuper_GetShots` / `GetHitsB` (at least 1) / `GetHitsC` (byte + 1).
+    pub fn shots(&self, slot: i32) -> i32 {
+        self.s8_of(0x93, slot).max(1)
+    }
+    pub fn hits_b(&self, slot: i32) -> i32 {
+        self.s8_of(0x96, slot).max(1)
+    }
+    pub fn hits_c(&self, slot: i32) -> i32 {
+        self.s8_of(0x9C, slot) + 1
+    }
+    /// `BtlSuper_GetHitCount`: the product of the three factors, at least 1.
+    pub fn hit_count(&self, slot: i32) -> i32 {
+        let n = self.shots(slot) * self.hits_b(slot) * self.hits_c(slot);
+        if n > 0 { n } else { 1 }
+    }
+    /// `BtlSuper_GetHitDirKind`.
+    pub fn hit_dir_kind(&self, slot: i32) -> i32 {
+        self.s8_of(0x13B, slot)
+    }
+    /// `BtlSuper_GetType`: picks the action block.
+    pub fn kind(&self, slot: i32) -> i32 {
+        self.s8_of(0x13E, slot)
+    }
+    /// `BtlSuper_GetReact` / `GetReactAlt` / `GetReactS800` / `GetReactAltS800`.
+    pub fn react(&self, slot: i32) -> i32 {
+        self.s8_of(0x141, slot)
+    }
+    pub fn react_alt(&self, slot: i32) -> i32 {
+        let v = self.s8_of(0x144, slot);
+        if v > 0 { v } else { self.react(slot) }
+    }
+    pub fn react_s800(&self, slot: i32) -> i32 {
+        self.s8_of(0x147, slot)
+    }
+    pub fn react_alt_s800(&self, slot: i32) -> i32 {
+        let v = self.s8_of(0x14A, slot);
+        if v > 0 { v } else { self.react_s800(slot) }
+    }
+    /// `BtlSuper_IsThrow`: one of the four reactions is 0x22.
+    pub fn is_throw(&self, slot: i32) -> bool {
+        [
+            self.react(slot),
+            self.react_alt(slot),
+            self.react_s800(slot),
+            self.react_alt_s800(slot),
+        ]
+        .contains(&0x22)
+    }
+    /// `BtlSuper_GetStepCount` (at least 1).
+    pub fn steps(&self, slot: i32) -> i32 {
+        self.s8_of(0x159, slot).max(1)
+    }
+    /// `BtlSuper_GetPush` / `GetGuardPush` (10 km/h, raw).
+    pub fn push(&self, slot: i32) -> f32 {
+        self.f32_of(0x16C, slot)
+    }
+    pub fn guard_push(&self, slot: i32) -> f32 {
+        self.f32_of(0x178, slot)
+    }
+    /// The damage over all hits, plain and guarded (raw).
+    pub fn damage(&self, slot: i32) -> i32 {
+        self.u32_of(0x184, slot) as i32
+    }
+    pub fn guard_damage(&self, slot: i32) -> i32 {
+        self.u32_of(0x190, slot) as i32
+    }
+    /// The ki cost (raw, before ability 0x2B).
+    pub fn ki(&self, slot: i32) -> i32 {
+        self.u32_of(0x19C, slot) as i32
+    }
+    /// `BtlSuper_GetRecoilDamage` / `GetDrain`.
+    pub fn recoil(&self, slot: i32) -> i32 {
+        self.u32_of(0x1A8, slot) as i32
+    }
+    pub fn drain(&self, slot: i32) -> i32 {
+        self.u32_of(0x1B4, slot) as i32
+    }
+    /// `BtlSuper_GetCooldownFrames` / `GetChargeLimitFrames`: seconds * 30.
+    pub fn cooldown_frames(&self, slot: i32) -> i32 {
+        (self.f32_of(0x1C0, slot) * 30.0) as i32
+    }
+    pub fn charge_limit_frames(&self, slot: i32) -> i32 {
+        (self.f32_of(0x1CC, slot) * 30.0) as i32
+    }
+    /// `BtlSuper_GetChargeScale`.
+    pub fn charge_scale(&self, slot: i32) -> f32 {
+        self.f32_of(0x1D8, slot)
+    }
+    /// `BtlSuper_GetPromptRowIndex`.
+    pub fn prompt_row(&self, slot: i32) -> i32 {
+        self.s8_of(0x229, slot)
+    }
+}
+
+impl CharaTables {
+    /// The technique table.
+    pub fn tech(&self) -> TechTable<'_> {
+        TechTable(&self.super_table)
+    }
+}
+
 /// `gBtlChars->paramTbl[chara]` (common file 2, table at header word 8, 0x10 bytes each).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CharaEntry {
@@ -397,6 +542,9 @@ pub struct CommonTables {
     pub attack_actions: Vec<[u8; 0x18]>,
     /// `tbl[4]` (word 8).
     pub charas: Vec<CharaEntry>,
+    /// `tbl[5]` (word 9, roster + 0x34): the technique prompt rows, 0x14 bytes each (`BtlTechPromptRow`; byte 2 is
+    /// the direction the technique's button command wants).
+    pub prompt_rows: Vec<[u8; 0x14]>,
 }
 
 impl CommonTables {
@@ -429,10 +577,15 @@ impl CommonTables {
                 blast_stocks: u32_at(c, 0xC) as i32,
             })
             .collect();
+        let prompt_rows = table(9)?
+            .chunks_exact(0x14)
+            .map(|c| c.try_into().unwrap())
+            .collect();
         Ok(Self {
             motion_flags,
             attack_actions,
             charas,
+            prompt_rows,
         })
     }
 }

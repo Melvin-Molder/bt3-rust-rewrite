@@ -97,6 +97,10 @@ pub(crate) struct Gauge {
     pub low_health: bool,
     pub low_health_idle: bool,
     pub body_changed: bool,
+    /// By technique class: how many were started (`used`), and the self-destructs fired / the lock counters of
+    /// the flag-0x2000 techniques (`fired` / `techLock`, the same words).
+    pub used: [i32; 5],
+    pub fired: [i32; 5],
 }
 
 /// `BtlMemberCombo`: the hits taken in a row.
@@ -366,6 +370,8 @@ pub(crate) struct Chr {
     pub clash_count_b: i32,
     /// `clashAnswerFrame`: the clash C answer, -1 none yet, -2 a wrong button, else the frame it came.
     pub clash_answer_frame: i32,
+    /// `skillCount3` (fighter + 0xE5C): a skill counter technique 0x268 scales with (the skills are not ported).
+    pub skill_count3: i32,
     /// `boostStock` (0..10): raised by the throws of character 0x6E.
     pub boost_stock: i32,
     /// `burstNode`: the node the finisher 0x66's burst effect follows.
@@ -491,6 +497,7 @@ impl Chr {
             queue: DamageQueue::default(),
             clash_count_b: 0,
             clash_answer_frame: 0,
+            skill_count3: 0,
             boost_stock: 0,
             burst_node: 0,
             next_attack: Attack::default(),
@@ -1893,6 +1900,24 @@ pub(crate) fn snap_to_opponent(me: &mut Chr, opp: &Chr) {
     me.flags.set(0x55);
     me.flags.set(0x3F);
     me.flags.set(0x24);
+}
+
+/// `BtlMove_WarpInFrontOfOpponent`, under lock-on only: in front of the opponent's next position, both radii
+/// plus `gap` away.
+pub(crate) fn warp_in_front_of_opponent(
+    me: &mut Chr,
+    data: &SideData,
+    opp: &Chr,
+    opp_data: &SideData,
+    gap: f32,
+) {
+    if !me.flags.test(5) {
+        return;
+    }
+    let at = add(opp.snap_pos(6), opp.pose.vel);
+    let yaw = opp.snap_rot(6)[1];
+    let d = data.radius() + opp_data.radius() + gap;
+    me.pose.pos = add(at, [yaw.sin() * d, 0.0, yaw.cos() * d]);
 }
 
 /// `BtlOpp_GetYawFromItsFacing`: the yaw to the opponent relative to the opponent's own facing.

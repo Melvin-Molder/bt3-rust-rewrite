@@ -911,7 +911,7 @@ impl Battle {
             // BtlChars_SampleInput, UpdateInput, UpdateMain and PostScene do nothing while paused; the effect
             // scene runs with its time stopped.
             if !paused {
-                roster.sample_input(&pads, env);
+                roster.sample_input(&pads, data, env);
                 roster.update_input(data, env);
                 roster.update_main(data, env);
             }
@@ -2894,6 +2894,83 @@ mod tests {
             assert!(battle.roster.chars[l].gauge.health < health[l]);
             assert_eq!(battle.roster.chars[w].gauge.health, health[w]);
         }
+    }
+
+    #[test]
+    fn real_blast_2_charges_and_fires_on_release() {
+        use crate::btl_input::pad::{L2, START, TRIANGLE};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        // Charge ki (L2) to afford Goku's first Blast 2 (slot 2: 60000 ki, kind 2, the chargeable 0x10F).
+        for _ in 0..120 {
+            frame(&mut battle, L2);
+        }
+        for _ in 0..5 {
+            frame(&mut battle, 0);
+        }
+        assert_eq!(battle.roster.chars[0].gauge.ki, 100_000);
+        // L2 + Triangle starts it (L2 alone for two frames is the ki charge 0x37); holding Triangle charges (motion 0x106), letting go (flag 0xA2's button
+        // command) fires (0x107), then the firing loop and the end. The beam's effect is not ported: the firing
+        // loop ends on the original's 150-frame timeout.
+        let (mut acts, mut fire_at) = (Vec::new(), None);
+        for i in 0..260 {
+            let held = match i {
+                2..4 => L2,
+                4..6 => L2 | TRIANGLE,
+                6..40 => TRIANGLE,
+                _ => 0,
+            };
+            frame(&mut battle, held);
+            let a = &battle.roster.chars[0];
+            acts.push((a.act.current, a.anim.cur));
+            if fire_at.is_none() && a.anim.cur == 0x107 {
+                fire_at = Some(i);
+            }
+        }
+        acts.dedup();
+        assert_eq!(
+            acts,
+            [
+                (0xB, 0),
+                (0x37, 0x34),
+                (0x10F, 0x105),
+                (0x10F, 0x106),
+                (0x10F, 0x107),
+                (0x10F, 0x108),
+                (0x10F, 0x10B),
+                (0xB, 0)
+            ],
+            "{acts:x?}"
+        );
+        let fire_at = fire_at.unwrap();
+        assert!((40..44).contains(&fire_at), "fired at {fire_at}");
+        assert_eq!(battle.roster.chars[0].gauge.ki, 40_000);
     }
 
     #[test]
