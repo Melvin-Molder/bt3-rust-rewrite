@@ -326,6 +326,8 @@ pub(crate) struct Chr {
     pub vanish_limit: i32,
     /// `attackId`: the attack last prepared (read by `BtlAct_QueueComboFinish`, which is not ported).
     pub attack_id: i32,
+    /// The member's idle talk count (+0xA0): the neutral state talks (0x43) only while it is 0.
+    pub idle_talk_count: i32,
     /// `searchAngle` / `searchRange`: the window the search 0x36 finds the opponent in (zero until a search ends,
     /// then 0.5 rad / 500).
     pub search_angle: f32,
@@ -447,6 +449,7 @@ impl Chr {
             vanish_count: 0,
             vanish_limit: 0,
             attack_id: 0,
+            idle_talk_count: 0,
             search_angle: 0.0,
             search_range: 0.0,
             burst_node: 0,

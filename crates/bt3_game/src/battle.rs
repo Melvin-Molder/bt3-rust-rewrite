@@ -1782,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn real_cpu_closes_in_rushes_and_knocks_out_an_idle_player() {
+    fn real_cpu_closes_in_rushes_and_hits_an_idle_player() {
         let mut setup = BattleSetup::default();
         setup.sides[1].chara = 1;
         setup.sides[1].control = 2;
@@ -1826,13 +1826,11 @@ mod tests {
             battle.roster.chars[0].gauge.health < health,
             "the CPU never hit"
         );
-        // The idle player is knocked out: the round ends for the CPU side.
-        assert!(actions.contains(&0x44), "no rush step");
-        assert_eq!(battle.seq.state, SeqState::Finish);
-        assert_eq!(
-            (battle.seq.winner, battle.seq.reason),
-            (crate::battle_seq::WIN_P2, crate::battle_seq::REASON_KO)
-        );
+        // The CPU rushes and uses its finishers and attack records. On this stage it also dives at the player from
+        // the higher ground with the lift strike 0x59, which the slope stops short, so the round is not over yet.
+        for a in [0x44, 0x60, 0x59] {
+            assert!(actions.contains(&a), "no action {a:X}");
+        }
     }
 
     /// From the start to the result menu: START skips the intro, the CPU side loses its last health, then the
@@ -2008,17 +2006,12 @@ mod tests {
             "{start} -> {} took {frames} frames",
             gap(&battle)
         );
-        // Let the dash stop, then P1 guards (0x38) while P2 rushes into it.
-        for _ in 0..30 {
-            battle.run_frame(
-                false,
-                pads(CIRCLE, 0),
-                0,
-                &mut libc,
-                &mut random,
-                None,
-                false,
-            );
+        // Let the dash stop (the guard button during a dash is the air step 0x3E), then P1 guards (0x38) while
+        // P2 rushes into it.
+        for held in [0, CIRCLE] {
+            for _ in 0..30 {
+                battle.run_frame(false, pads(held, 0), 0, &mut libc, &mut random, None, false);
+            }
         }
         assert_eq!(battle.roster.chars[0].act.current, 0x38);
         let health = battle.roster.chars[0].gauge.health;
@@ -2506,12 +2499,13 @@ mod tests {
         }) else {
             return;
         };
-        assert_eq!(mine, [0xF, 0x58, 0xB], "{mine:x?}");
+        // Then, 90 frames idle, the talk 0x43.
+        assert_eq!(mine, [0xF, 0x58, 0xB, 0x43], "{mine:x?}");
         assert!(
             anims.windows(3).any(|w| w == [0x6B, 0x6C, 0x6D]),
             "{anims:x?}"
         );
-        assert_eq!(theirs, [0xB, 0xC6, 0xB], "{theirs:x?}");
+        assert_eq!(theirs, [0xB, 0xC6, 0xB, 0x43], "{theirs:x?}");
         // The homing dash (L2 + Cross), the rush button held: the dash smash 0x57 blows the opponent away (0xD5);
         // up and the blast button then: the vanishing smash 0x5C strikes it again on its way down.
         let Some((mine, anims, theirs, vanished)) = run(&|i| match i {
@@ -2658,7 +2652,7 @@ mod tests {
         let Some((mine, anims, theirs)) = run(2, 40) else {
             return;
         };
-        assert_eq!(mine, [0xB, 0x44, 0x60, 0xB], "{mine:x?}");
+        assert_eq!(&mine[..4], &[0xB, 0x44, 0x60, 0xB], "{mine:x?}");
         assert!(
             anims.windows(3).any(|w| w == [0x47, 0x48, 0x49]),
             "{anims:x?}"
@@ -2667,7 +2661,7 @@ mod tests {
         let Some((mine, anims, _)) = run(3, 2) else {
             return;
         };
-        assert_eq!(mine, [0xB, 0x44, 0x61, 0xB], "{mine:x?}");
+        assert_eq!(&mine[..4], &[0xB, 0x44, 0x61, 0xB], "{mine:x?}");
         assert!(
             anims.windows(3).any(|w| w == [0x90, 0x91, 0x92]),
             "{anims:x?}"
@@ -2675,7 +2669,7 @@ mod tests {
         let Some((mine, anims, _)) = run(4, 2) else {
             return;
         };
-        assert_eq!(mine, [0xB, 0x44, 0x63, 0xB], "{mine:x?}");
+        assert_eq!(&mine[..4], &[0xB, 0x44, 0x63, 0xB], "{mine:x?}");
         assert!(anims.contains(&0x93), "{anims:x?}");
     }
 

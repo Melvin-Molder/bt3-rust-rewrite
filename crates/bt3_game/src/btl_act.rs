@@ -14,10 +14,10 @@
 
 use std::f32::consts::PI;
 
-use crate::btl_blast::{blast_limit_a, can_fire, hits_of, ki_cost, ki_cost_of};
+use crate::btl_blast::{HitRec, blast_limit_a, can_fire, hits_of, ki_cost, ki_cost_of};
 use crate::btl_chr::{
     Attack, Chr, Env, SideData, add, anim_flag, begin_rise_to_opponent, calc_approach_point,
-    circle_opponent, deg, is_blocked_by_opponent, kmh, length, normalize, opp_closing_time,
+    circle_opponent, deg, dot, is_blocked_by_opponent, kmh, length, normalize, opp_closing_time,
     opp_delta, opp_distance_xz, opp_gap_xz, opp_pitch_adjusted, opp_yaw, opp_yaw_from_facing,
     opp_yaw_from_its_facing, scale_speed_by_approach, scale3, snap_to_opponent, steer_at_opponent,
     sub, warp_ahead_of_opponent, warp_behind_opponent,
@@ -51,12 +51,14 @@ pub(crate) struct Ctx<'a, 'd> {
     pub frame: u32,
     /// `BtlChars_IsTimeStopped`.
     pub time_stopped: bool,
+    /// The effect scene's ki blast records of the last frame (`EftHit_GetList`).
+    pub blasts: &'a [HitRec],
 }
 
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x36 | 0x37 | 0x38 | 0x3A | 0x40 | 0x44 | 0x47..=0x6F | 0x70..=0x94 | 0x96..=0xB1
+        1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0x94 | 0x96..=0xB1
         | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9)
 }
 
@@ -366,7 +368,25 @@ impl Ctx<'_, '_> {
                 return 1;
             }
         }
-        // Masks 0x1000000 / 0x2000000 need an incoming blast: there are none.
+        if mask & 0x100_0000 != 0 && self.flags2() & 0x20 != 0 {
+            if self.data.tables.params.flags() & 2 != 0 {
+                if self.blast_incoming(true, true, true, 90.0) && self.test(0x2B) {
+                    self.set_queue(0, 0x3D);
+                    return 1;
+                }
+            } else if self.blast_incoming(true, true, false, 90.0) && self.test(0x2B) {
+                self.set_queue(0, 0x3B);
+                return 1;
+            }
+        }
+        if mask & 0x200_0000 != 0
+            && self.flags2() & 0x20 != 0
+            && self.blast_incoming(false, true, false, 5.0)
+            && self.test(0x27)
+        {
+            self.set_queue(0, 0x3C);
+            return 1;
+        }
         if mask & 0x80000 != 0 && self.test(0x22) {
             if self.flag(5) && opp_yaw_from_facing(self.me, self.opp).abs() > 1.7 {
                 self.set_queue(0, 0x3A);
@@ -726,6 +746,17 @@ impl Ctx<'_, '_> {
             0x5E..=0x62 | 0x64..=0x66 => self.rush_finish(phase),
             0x63 => self.rush_finish_plain(phase),
             0x40 => self.feint(phase),
+            0x39 => self.evade(phase),
+            0x3B => self.swat(phase),
+            0x3C => self.duck_blast(phase),
+            0x3D => self.block_blasts(phase),
+            0x3E => self.air_step(phase),
+            0x3F => self.ground_step(phase),
+            0x41 => self.rush_guard(phase),
+            0x42 => self.health_burst(phase),
+            0x43 => self.idle_talk(phase),
+            0x45 => self.rush_auto(phase),
+            0x46 => self.rush_rapid(phase),
             0x67..=0x69 => self.ki_pose(phase),
             0x6A => self.lunge(phase),
             0x6B..=0x6F => self.homing_strike(phase),
@@ -811,6 +842,17 @@ impl Ctx<'_, '_> {
                     self.request(action);
                 }
             }
+            if self.flag(0x77) {
+                self.queue_attack(if self.env.stage_4_or_27 { 0x7A } else { 0x79 });
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+        if self.flag(0x7C) {
+            let id = self.evasion_attack();
+            self.queue_attack(id);
+            let q = self.queued();
+            self.request(q);
         }
         for (flag, action) in [(0x6D, 0xC9), (0x6F, 0xCA)] {
             if self.flag(flag) {
@@ -823,6 +865,14 @@ impl Ctx<'_, '_> {
         if self.flag(0x7B) {
             self.request(0x39);
         }
+        if self.flag(0x6B) {
+            let a = if self.data.tables.params.flags() & 2 != 0 {
+                0x3D
+            } else {
+                0x3B
+            };
+            self.request(a);
+        }
         if self.flag(0x79) {
             self.request(0xBD);
         }
@@ -831,6 +881,12 @@ impl Ctx<'_, '_> {
             self.request(q);
         }
         for (flag, action) in [(0x7F, 0xBE), (0x61, 0xFA), (0x62, 0xFB)] {
+            if self.flag(flag) {
+                self.request(action);
+            }
+        }
+        // Flags 0xAA / 0xAB (the techniques) are not ported.
+        for (flag, action) in [(0x7D, 0x41), (0x7E, 0x45)] {
             if self.flag(flag) {
                 self.request(action);
             }
@@ -1381,7 +1437,16 @@ impl Ctx<'_, '_> {
             }
         }
         if phase == DECIDE {
-            // The idle talk (0x43) of modes other than 1 is not ported.
+            if self.env.mode != 1
+                && self.flag(3)
+                && self.me.idle_talk_count <= 0
+                && !self.flag(0xB1)
+            {
+                self.me.work[2] += 1;
+                if self.me.work[2] > 90 {
+                    self.request(0x43);
+                }
+            }
             self.decide_main(0x22FC_BFEB);
             self.decide_attack(0x0800_054F);
             self.decide_common(0xF);
@@ -4907,6 +4972,464 @@ impl Ctx<'_, '_> {
         if phase == LEAVE {
             self.me.search_angle = 0.5;
             self.me.search_range = 500.0;
+        }
+    }
+
+    // ---- the dodges, the poses and the rapid rush (btl_act_1.c, btl_act_2.c) -----------------------------------
+
+    /// `BtlMove_IsBlastIncoming`: a live ki blast record (of the uncharged kinds 0 / 4 / 8, or the others) heading
+    /// for the fighter that reaches it within `limit` frames. Technique records are not ported, so `techniques`
+    /// finds nothing.
+    fn blast_incoming(&self, uncharged: bool, others: bool, _techniques: bool, limit: f32) -> bool {
+        self.blasts.iter().any(|rec| {
+            let plain = matches!(rec.atk.kind, 0 | 4 | 8);
+            if (plain && !uncharged) || (!plain && !others) {
+                return false;
+            }
+            let step = sub(rec.pos, rec.prev);
+            let d = sub(self.me.pose.pos, rec.pos);
+            if dot(d, step) < 0.0 {
+                return false;
+            }
+            let speed = length(step);
+            speed >= 0.001 && length(d) / speed <= limit
+        })
+    }
+
+    /// `BtlAct_GetEvasionAttack`: by both fighters' evasion counts, record 0x89, 0x8A, or 0x8B / 0x8C by height.
+    fn evasion_attack(&self) -> i32 {
+        match (self.me.evasion_count + self.opp.evasion_count).rem_euclid(3) {
+            1 => 0x89,
+            2 => 0x8A,
+            _ => {
+                if self.me.height_ratio(self.data, self.env) > 0.5 {
+                    0x8C
+                } else {
+                    0x8B
+                }
+            }
+        }
+    }
+
+    /// Action 0x39 (`BtlAct_Action39`, forced by flag 0x7B): motion 0xEC, then the evasion attack.
+    fn evade(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xEC, 0.0);
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                let id = self.evasion_attack();
+                self.queue_attack(id);
+                let q = self.queued();
+                self.request(q);
+            }
+            self.step(6, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xC9);
+            self.set(0xD5);
+            if self.flag(0xF) && kmh(200.0) < length(self.me.pose.moved) {
+                self.me.set_fx(0x32);
+            }
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+    }
+
+    /// Action 0x3B (`BtlAct_Action3B`, forced by flag 0x6B or before a blast): the swatting pose 0xF9 / 0xFA; four
+    /// swats (refilled by input 0x2B, emptied when the guard is let go), one off at each motion's end.
+    fn swat(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xF9, 0.15);
+            self.me.work[2] = 4;
+        }
+        if phase == RUN {
+            self.me.anim_advance(0);
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0x1C);
+            self.set(0x50);
+            self.set(0x51);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            if self.flag(0xF) {
+                self.clear(0xE);
+            }
+        }
+        if phase == DECIDE {
+            if self.test(0x2B) {
+                self.me.work[2] = 4;
+            }
+            if self.me.test(0x22, false) {
+                self.me.work[2] = 0;
+            }
+            if self.flag(anim_flag::END) {
+                self.me.work[2] -= 1;
+                if self.me.work[2] <= 0 {
+                    self.request(0xB);
+                } else {
+                    let next = if self.anim_id() == 0xF9 { 0xFA } else { 0xF9 };
+                    self.request_anim(next, 0.0);
+                }
+            }
+            self.decide_common(6);
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Action 0x3C (`BtlAct_Action3C`): motion 0xFD with flag 0x52 (a blast about to hit is let pass), then 0xB.
+    /// The voice is not ported.
+    fn duck_blast(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xFD, 0.15);
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.request(0xB);
+            }
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0x1C);
+            self.set(0x52);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            if self.flag(0xF) {
+                self.clear(0xE);
+            }
+        }
+        if phase == DECIDE {
+            self.decide_main(0x1C6A);
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Action 0x3D (`BtlAct_Action3D`, for characters with parameter flag 2): 0xF9 into the loop 0xFA with flag
+    /// 0x54 until the guard is let go. The sound is not ported.
+    fn block_blasts(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xF9, 0.15);
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0xF9 => {
+                    self.me.anim_advance_then(0xFA, 0.0, 0);
+                }
+                0xFA => self.me.anim_advance_loop(0),
+                _ => {}
+            }
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0x1C);
+            self.set(0x54);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            if self.flag(0xF) {
+                self.clear(0xE);
+            }
+        }
+        if phase == DECIDE {
+            if self.me.test(0x22, false) {
+                self.request(0xB);
+            }
+            self.decide_common(6);
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Action 0x3E (`BtlAct_Action3E`): a step in the air (motion 0xFB) at dash speed round the opponent, then the
+    /// dash 0xF; input 0x2C past 40% queues another, taken at 70%; input 0x40 the flying kick. The voice is not
+    /// ported.
+    fn air_step(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xFB, 0.15);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.request(0xF);
+            }
+            let n = if self.flag(0x11) { 5 } else { 4 };
+            let speed = self.me.move_speed(self.data, self.env, n);
+            let rate = self.me.turn_rate(self.data, 0);
+            self.me.turn_yaw(self.opp, 0, rate);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 2, deg(9.0));
+            self.me.turn_model_yaw(deg(36.0), 0.3);
+            self.me.set_direction(3);
+            self.me.advance(speed, 10000.0);
+            self.me.apply_gravity();
+            if self.flag(5) && !self.me.input.is_held(DIR_MASK) {
+                self.set(0x1A);
+            }
+            let c = opp_yaw_from_facing(self.me, self.opp).cos();
+            if 0.0 < c {
+                let pitch = self.me.pose.pitch;
+                self.me.set_lean_x(pitch * c);
+            }
+            self.set(0xCA);
+            self.me.request_orbit(50.0, 100.0);
+            self.set(0x50);
+            self.set(0x51);
+            self.me.set_fx(0xB);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+        if phase == DECIDE {
+            if 0.4 < self.me.anim_progress() && self.test(0x2C) {
+                self.set_queue(0, 0x3E);
+            }
+            if self.me.anim_passed_ratio(0.7) {
+                let q = self.queued();
+                self.request(q);
+            }
+            if self.test(0x40) {
+                self.request(0x58);
+            }
+            if self.decide_attack(0xC000) != 0 {
+                let q = self.queued();
+                self.request(q);
+            }
+            if self.decide_common(6) {
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
+    /// Action 0x3F (`BtlAct_Action3F`): the ground version, motion 0xFC, then the jump 0x11; input 0x40 the lift
+    /// strike; landing ends it. The voice is not ported.
+    fn ground_step(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xFC, 0.15);
+            self.clear(0xE);
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.request(0x11);
+            }
+            self.step(2, 5, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xD5);
+            self.set(0x50);
+            self.set(0x51);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+        if phase == DECIDE {
+            if 0.4 < self.me.anim_progress() && self.test(0x2C) {
+                self.set_queue(0, 0x3F);
+            }
+            if self.me.anim_passed_ratio(0.7) {
+                let q = self.queued();
+                self.request(q);
+            }
+            if self.test(0x40) {
+                self.request(0x59);
+            }
+            if self.decide_attack(0x6_0000) != 0 {
+                let q = self.queued();
+                self.request(q);
+            }
+            if self.flag(0xF) {
+                self.request(0xB);
+            }
+        }
+    }
+
+    /// Action 0x41 (`BtlAct_Action41`, forced by flag 0x7D): motion 0x193 (the counter of 0x193..0x195 is reset on
+    /// every entry, `BtlAct_GetPrev` never being 0x41), then the idle until flag 0xB5 or the opponent leaves the
+    /// auto rush 0x45: the lunge 0x6A. The sound and the camera cut are not ported.
+    fn rush_guard(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x193, 0.15);
+        }
+        if phase == RUN {
+            let idle = if self.flag(0xE) { 0x26 } else { 0 };
+            match self.anim_id() {
+                0x193..=0x195 => {
+                    self.me.anim_advance_then(idle, 0.15, 0);
+                }
+                0 | 0x26 => self.me.anim_advance_loop(0),
+                _ => {}
+            }
+            self.step(2, 5, 3, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xD5);
+            self.set(0x4E);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+        if phase == DECIDE
+            && matches!(self.anim_id(), 0 | 0x26)
+            && (self.flag(0xB5) || self.opp_seen_action() != 0x45)
+        {
+            self.request(0x6A);
+        }
+    }
+
+    /// Action 0x42 (`BtlAct_Action42`): the burst out of a combo, motion 0x192 over 25 frames for 5000 health,
+    /// untouchable (held flag 0x4B) for its first half. The sound, the voice and the vibration are not ported.
+    fn health_burst(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x192, 0.15);
+            self.held(0xE);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.me.damage(self.env, self.data, 5000, 0x42B);
+            self.held(0x4B);
+            self.me.set_fx(0x2B);
+        }
+        if phase == RUN {
+            self.me.anim_set_duration(25.0 / 30.0);
+            if self.me.anim_advance(0) {
+                self.request(0xB);
+            }
+            if self.me.anim_passed_ratio(0.5) {
+                self.clear(0x4B);
+            }
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xC9);
+            self.set(0xD5);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+        if phase == LEAVE {
+            self.clear(0x4B);
+        }
+    }
+
+    /// Action 0x43 (`BtlAct_Action43`): the idle talk, motion 0x185, counted on the member. The voice is not
+    /// ported.
+    fn idle_talk(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x185, 0.15);
+            self.me.idle_talk_count += 1;
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.request(0xB);
+            }
+            self.step(6, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+    }
+
+    /// Action 0x45 (`BtlAct_RushAutoHandler`, forced by flag 0x7E): the whole rush chain at triple speed from
+    /// 0x37 (`BtlAct_GetPrev` is never 0x45); after the last hit window of 0x40, flag 0x90. The camera cut is not
+    /// ported.
+    fn rush_auto(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x37, 0.1);
+        }
+        if phase == RUN {
+            let id = self.anim_id();
+            match id {
+                0x37..=0x39 | 0x3C..=0x3F => {
+                    self.me.anim_set_step(3.0);
+                    self.me.anim_advance_then(id + 1, 0.0, 0);
+                }
+                0x3A => {
+                    self.me.anim_set_step(3.0);
+                    self.me.anim_advance_then(0x3C, 0.0, 0);
+                }
+                0x40 => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                    let h = self.me.obj.hit;
+                    if !self.me.anim_is_new() && h.index == !h.count {
+                        self.set(0x90);
+                    }
+                }
+                _ => {}
+            }
+            self.step(2, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xD5);
+            self.set(0x88);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+    }
+
+    /// Action 0x46 (`BtlAct_RushRapidHandler`): the rapid rush, motion 0x3C at triple speed (its step counter is
+    /// reset on every entry, `BtlAct_GetPrev` never being 0x46), repeated by input 0x34; on a hit attack record
+    /// 0x9D (0xAC powered up). The sound, the voice and the camera cut are not ported.
+    fn rush_rapid(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x3C, 0.1);
+            begin_rise_to_opponent(self.me, self.opp, self.data, self.opp_data);
+            self.held(0xE);
+            self.me.pose.speed = crate::btl_hit::launch_speed(self.me, self.data, self.env);
+        }
+        if phase == RUN {
+            let next = if self.flag(0xE) { 0x26 } else { 0 };
+            match self.anim_id() {
+                0x3C..=0x3F => {
+                    self.me.anim_set_step(3.0);
+                    self.me.obj.rate = 2.0;
+                    self.me.anim_advance_then(next, 0.3, 0);
+                    self.me.set_fx(9);
+                }
+                0x40 => {
+                    if self.me.obj.frame < self.query_event(1, 0, 0) as f32 {
+                        self.me.anim_set_step(3.0);
+                        self.me.set_fx(9);
+                    }
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                    if self.flag(0x5B) {
+                        self.me.pose.speed = 0.0;
+                    }
+                }
+                0 | 0x26 => {
+                    self.me.anim_advance(1);
+                    if !self.flag(0x34) {
+                        self.request(0xB);
+                    }
+                }
+                _ => {}
+            }
+            self.step(2, 5, 2, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xD5);
+        }
+        if phase == DECIDE {
+            let (can, go) = match self.anim_id() {
+                0x3C..=0x3F => (true, self.flag(anim_flag::END)),
+                0 | 0x26 => (true, true),
+                _ => (false, false),
+            };
+            if can {
+                if self.flag(6) && self.test_attack_skill(0x3C) && !self.me.gauge.body_changed {
+                    self.queue_attack(0xAC);
+                } else {
+                    self.queue_attack(0x9D);
+                }
+                if self.test(0x34) {
+                    self.set_queue(0, 0x46);
+                }
+                if go && self.flag(0x5B) {
+                    let q = self.queued();
+                    self.request(q);
+                }
+            }
         }
     }
 

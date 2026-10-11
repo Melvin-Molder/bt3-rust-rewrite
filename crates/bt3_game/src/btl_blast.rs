@@ -397,16 +397,7 @@ fn list_head<'a>(data: &SideData<'a>, list: usize) -> Option<&'a EmitSet> {
 
 /// `BtlObj_GetNodeSide`.
 fn node_side(node: u32) -> i32 {
-    match node {
-        0..=7 => 2,
-        8..=0xB => 1,
-        0xC..=0xF => 0,
-        0x10..=0x11 => 2,
-        0x12..=0x1F => 1,
-        0x20..=0x2D => 0,
-        0x2E..=0x34 => 2,
-        _ => 3,
-    }
+    crate::btl_obj::node_side(node as i32)
 }
 
 impl Scene {

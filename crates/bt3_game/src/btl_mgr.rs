@@ -159,6 +159,7 @@ impl Roster {
     /// `BtlChars_UpdateMain`: the simulation proper, seven passes over the roster.
     pub(crate) fn update_main(&mut self, data: [&SideData; 2], env: &Env) {
         let frame = self.frame;
+        let blasts = &self.scene.records;
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
             if me.is_frozen() {
@@ -175,6 +176,7 @@ impl Roster {
                 env,
                 frame,
                 time_stopped: env.gate.time_stopped,
+                blasts,
             }
             .update();
             me.anim_apply_blend();
