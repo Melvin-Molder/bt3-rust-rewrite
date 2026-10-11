@@ -41,7 +41,7 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB | 0xC | 0xD | 0xE | 0x11 | 0x13 | 0x37 | 0x3A | 0x44
+        1..=3 | 0xB..=0x18 | 0x37 | 0x38 | 0x3A | 0x44
         | 0xBD | 0xC0..=0xCA | 0xCF..=0xD3 | 0xD8 | 0xD9 | 0xDA..=0xDE | 0xE0..=0xE6)
 }
 
@@ -506,7 +506,14 @@ impl Ctx<'_, '_> {
             0xE => self.close_walk(phase),
             0x11 | 0x13 => self.jump_air(phase),
             0x3A => self.turn(phase),
+            0xF => self.dash(phase),
+            0x10 | 0x12 => self.jump_start(phase),
+            0x14 => self.ascend(phase),
+            0x15 => self.descend(phase),
+            0x16 => self.hop(phase),
+            0x17 | 0x18 => self.fast_vertical(phase),
             0x37 => self.charge(phase),
+            0x38 => self.guard(phase),
             0x44 => self.rush(phase),
             0xBD | 0xC0..=0xCA => self.stagger(phase),
             0xCF..=0xD1 => self.pushed_back(phase),
@@ -1241,6 +1248,590 @@ impl Ctx<'_, '_> {
             self.decide_common(6);
             let q = self.queued();
             self.request(q);
+        }
+    }
+
+    /// Action 0xF (`BtlAct_DashMoveHandler`): the dash, motions 0xC (start) -> 0xD (loop) -> 0xE (stop), or 0x15
+    /// (turn-around), with the side layers 0xF..0x14, 0x16, 0x17. work[0] bit 0: a turn was asked for during the
+    /// start; work[1]: finished. Entered from 0x3E, 0xB0 or 0xB1 it resumes in the loop. The sounds are not ported.
+    fn dash(&mut self, phase: u32) {
+        if phase == ENTER {
+            if matches!(self.me.act.prev, 0x3E | 0xB0 | 0xB1) {
+                self.play(0xD, 0.25);
+            } else {
+                self.play(0xC, 0.15);
+                self.set(0xD0);
+                self.me.turn_yaw(self.opp, 0, PI);
+            }
+        }
+        if phase == RUN {
+            let (sub_neg, sub_pos, ratio, moving) = match self.anim_id() {
+                0xC => {
+                    self.me.anim_advance_then(0xD, 0.15, 0);
+                    (0xF, 0x12, self.me.anim_progress(), true)
+                }
+                0xD => {
+                    self.me.anim_advance_loop(0);
+                    (0x10, 0x13, 1.0, true)
+                }
+                0xE => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                    (0x11, 0x14, 1.0 - self.me.anim_progress(), false)
+                }
+                0x15 => {
+                    if self.me.anim_is_new() && self.flag(0xF) {
+                        self.me.set_fx(0x31);
+                    }
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                    self.me.work[0] &= !1;
+                    (0x16, 0x17, 1.0 - self.me.anim_progress(), false)
+                }
+                _ => (0, 0, 0.0, true),
+            };
+            if self.data.tables.params.flags() & 0x2_0000 == 0 {
+                let side = self.me.rot_y_rel_cam().sin();
+                if 0.0 < side {
+                    self.me.anim_set_sub_mix(side);
+                    self.me.anim_play_sub(self.data, sub_pos);
+                } else {
+                    self.me.anim_set_sub_mix(-side);
+                    self.me.anim_play_sub(self.data, sub_neg);
+                }
+            }
+            if self.flag(5) && moving && (!self.flag(0xE) || !self.me.input.is_held(DIR_MASK)) {
+                self.set(0x1A);
+            }
+            let pitch_mode = if self.flag(0xE) && self.flag(5) { 2 } else { 5 };
+            if moving {
+                let speed =
+                    self.me
+                        .move_speed(self.data, self.env, 4 + usize::from(self.flag(0x11)));
+                let turn = self.me.turn_rate(self.data, 0);
+                self.me.turn_yaw(self.opp, 0, turn);
+                self.me
+                    .turn_pitch(self.data, self.opp, self.opp_data, pitch_mode, deg(9.0));
+                self.me.turn_model_yaw(deg(36.0), 0.3);
+                self.me.set_direction(3);
+                self.me.advance(speed, 10000.0);
+                self.me.apply_gravity();
+                self.me.set_fx(0xB);
+                if self.flag(0xF) {
+                    self.me.set_fx(0x30);
+                }
+            } else {
+                self.step(6, 5, 3, 0.0, kmh(100.0));
+                self.me.apply_gravity();
+            }
+            let toward = opp_yaw_from_facing(self.me, self.opp).cos();
+            if 0.0 < toward {
+                let pitch = self.me.pose.pitch;
+                self.me.set_lean_x(pitch * toward * ratio);
+            }
+            self.set(0xCA);
+            self.set(0x25);
+            self.me.request_orbit(50.0, 100.0);
+            self.me.set_fx(0x3A);
+            if self.me.gauge.low_health_idle {
+                self.set(0x96);
+            }
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            if self.env.stage_4_or_27 && self.flag(0x17) {
+                self.held(0xE);
+            }
+        }
+        if phase == DECIDE {
+            if self.me.work[1] != 0 {
+                self.request(0xB);
+                if !self.has_queued() {
+                    self.decide_main(1);
+                    self.decide_common(1);
+                }
+                let q = self.queued();
+                self.request(q);
+            }
+            match self.anim_id() {
+                0xC => {
+                    if self.me.test(4, true) {
+                        self.me.work[0] |= 1;
+                    }
+                }
+                0xD => {
+                    if self.me.test(6, true) {
+                        self.request_anim(0xE, 0.15);
+                    }
+                    if self.blocked() {
+                        self.request_anim(0xE, 0.15);
+                        self.me.pose.speed = 0.0;
+                    }
+                    if self.me.test(4, true) || self.me.work[0] & 1 != 0 {
+                        self.request_anim(0x15, 0.15);
+                    }
+                }
+                0xE => {
+                    if self.blocked() {
+                        self.me.pose.speed = 0.0;
+                    }
+                    self.decide_main(0x300);
+                }
+                0x15 => {
+                    if self.me.anim_passed_ratio(0.5) && self.me.test(5, true) {
+                        self.request(0xF);
+                        self.me.pose.dash_boost = (self.me.pose.dash_boost + 0.1).min(1.5);
+                    }
+                }
+                _ => {}
+            }
+            let mut queued = self.decide_main(0x2000_1C64) != 0;
+            if self.anim_id() != 0xE {
+                if self.me.test(0x40, true) {
+                    self.request(0x58);
+                }
+                queued |= self.decide_attack(0xC000) != 0;
+                if self.me.test(0x2C, true) {
+                    self.request(0x3E);
+                }
+            }
+            queued |= self.decide_common(0xE);
+            if queued {
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
+    /// `BtlInput_GetStickLength`.
+    fn stick_length(&self) -> f32 {
+        let s = self.me.input.stick();
+        (s[0] * s[0] + s[1] * s[1]).sqrt()
+    }
+
+    /// `BtlMoveParam_GetAccel`: table +0x50 in 10 km/h per second, per frame per frame.
+    fn move_accel(&self, n: usize) -> f32 {
+        self.data.tables.moves.accel[n] * 10.0 * (1000.0 / 3600.0) * (1.0 / 30.0 / 30.0)
+    }
+
+    /// `BtlMoveParam_GetKiCost` without abilities: table +0x64 per second, per frame.
+    fn move_ki_cost(&self, n: usize) -> i32 {
+        self.data.tables.moves.ki_cost[n] / 30
+    }
+
+    /// `BtlAct_GetAction14or16`.
+    fn ascend_action(&self) -> i32 {
+        if self.data.can_fly() { 0x14 } else { 0x16 }
+    }
+
+    /// `BtlAct_GetAction11or15`.
+    fn descend_action(&self) -> i32 {
+        if !self.data.can_fly() && !self.flag(0x11) {
+            0x11
+        } else {
+            0x15
+        }
+    }
+
+    /// Actions 0x10 and 0x12 (`BtlAct_JumpStartHandler`): the take-off, motion 0x1F, then 0x11 or 0x13. The
+    /// sound is not ported.
+    fn jump_start(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x1F, 0.1);
+            self.clear(0xE);
+            self.me.unk_ff0 = 0;
+            if self.current() == 0x12 {
+                self.me.work[0] |= 1;
+            }
+        }
+        if phase == RUN {
+            let high = (self.me.work[0] & 1) as usize;
+            if self.me.anim_advance(1) {
+                self.request(if high != 0 { 0x13 } else { 0x11 });
+            }
+            if self.me.anim_passed_ratio(0.3) {
+                // BtlMoveParam_GetHeight and BtlMove_CalcJumpSpeed.
+                self.me.pose.fall_speed = jump_speed(self.data.tables.moves.height[high] * 10.0);
+            }
+            let speed = self
+                .me
+                .move_speed(self.data, self.env, if high != 0 { 4 } else { 0xD });
+            let stick = self.stick_length();
+            self.step(0, 5, 3, speed * stick, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xC9);
+            self.me.request_orbit(20.0, 50.0);
+            self.set(0x1A);
+            self.me.set_fx(0x3A);
+            if self.me.gauge.low_health_idle {
+                self.set(0x96);
+            }
+        }
+        if phase == DECIDE {
+            if self.me.test(9, true) {
+                let id = self.ascend_action();
+                self.request(id);
+            }
+            if self.data.can_fly() && self.me.test(0xC, true) {
+                let id = self.descend_action();
+                self.request(id);
+            }
+            if self.me.test(7, true) {
+                self.request(0xF);
+                self.held(0xE);
+            }
+            self.decide_main(0x1C00);
+            let q = self.queued();
+            self.request(q);
+            if self.me.test(0x2C, true) {
+                self.request(0x3F);
+            }
+            if self.decide_attack(0x7_0000) != 0 {
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
+    /// Action 0x14 (`BtlAct_AscendHandler`): rising, motion 0x2B (through 0x2E after a jump). The sounds are not
+    /// ported.
+    fn ascend(&mut self, phase: u32) {
+        if phase == ENTER {
+            let motion = if self.me.unk_ff0 > 0 { 0x2E } else { 0x2B };
+            self.play(motion, 0.15);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0x2E => {
+                    self.me.anim_set_duration(0.35);
+                    self.me.anim_advance_then(0x2B, 0.15, 0);
+                    self.step(6, 5, 3, 0.0, kmh(50.0));
+                    self.me.apply_gravity();
+                }
+                0x2B => {
+                    self.me.anim_advance_loop(0);
+                    let speed =
+                        self.me
+                            .move_speed(self.data, self.env, usize::from(self.flag(0x11)))
+                            * self.stick_length();
+                    let vspeed = -self.me.move_speed(self.data, self.env, 0x10);
+                    let vaccel = self.move_accel(0);
+                    self.step(0, 5, 3, speed, kmh(50.0));
+                    self.me.move_vertical(vspeed, vaccel);
+                }
+                _ => {}
+            }
+            self.set(0xC9);
+            self.me.request_orbit(20.0, 50.0);
+            if self.me.gauge.low_health_idle {
+                self.set(0x96);
+            }
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            if self.me.test(0xB, true) {
+                self.request(0xB);
+                self.decide_main(0x41);
+            }
+            self.decide_main(0x1800);
+            self.decide_attack(0x7_0000);
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Action 0x15 (`BtlAct_DescendHandler`): sinking, motion 0x2C (through 0x1F after a jump), landing with
+    /// 0x2D. The sounds and the landing effect are not ported.
+    fn descend(&mut self, phase: u32) {
+        if phase == ENTER {
+            let motion = if self.me.unk_ff0 > 0 { 0x1F } else { 0x2C };
+            self.play(motion, 0.15);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let speed = self
+                .me
+                .move_speed(self.data, self.env, usize::from(self.flag(0x11)))
+                * self.stick_length();
+            let vspeed = self.me.move_speed(self.data, self.env, 0x11);
+            let vaccel = self.move_accel(1);
+            match self.anim_id() {
+                0x1F => {
+                    self.me.anim_set_duration(0.35);
+                    self.me.anim_advance_then(0x2C, 0.15, 0);
+                }
+                0x2C => {
+                    self.me.anim_advance_loop(0);
+                    if self.me.frames_to_ground() < 1.0
+                        && (!self.env.stage_4_or_27
+                            || self.flag(7)
+                            || self.me.pose.ground_pos[1] < -10.0)
+                        && self.me.pose.ground_flags & 0x40 == 0
+                    {
+                        self.request_anim(0x2D, 0.0);
+                    }
+                    self.step(0, 5, 3, speed, kmh(50.0));
+                    self.me.move_vertical(vspeed, vaccel);
+                    self.set(0xC9);
+                }
+                0x2D => {
+                    self.clear(0xE);
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                    self.step(0, 5, 3, 0.0, kmh(100.0));
+                    self.me.apply_gravity();
+                }
+                _ => {}
+            }
+            self.me.request_orbit(20.0, 50.0);
+            if self.me.gauge.low_health_idle {
+                self.set(0x96);
+            }
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            match self.anim_id() {
+                0x1F | 0x2C => {
+                    if self.me.test(0xD, true) {
+                        self.request(0xB);
+                        self.decide_main(0x21);
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                }
+                0x2D => {
+                    if self.me.work[1] != 0 {
+                        let id = if self.me.test(1, true) { 0xD } else { 0xB };
+                        self.request(id);
+                    }
+                }
+                _ => {}
+            }
+            self.decide_main(0x1800);
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Action 0x16 (`BtlAct_HopHandler`): a short rise for a fighter that cannot fly, fading out over motion
+    /// 0x18C, then 0xB.
+    fn hop(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x18C, 0.15);
+            self.held(0xE);
+            self.me.pose.fall_speed = 0.0;
+        }
+        if phase == RUN {
+            let fade = 1.0 - self.me.anim_progress();
+            let speed = self
+                .me
+                .move_speed(self.data, self.env, usize::from(self.flag(0x11)))
+                * self.stick_length()
+                * fade;
+            let vspeed = self.me.move_speed(self.data, self.env, 0x10) * fade;
+            let vaccel = self.move_accel(0) * 0.5;
+            if self.me.anim_advance(0) {
+                self.request(0xB);
+            }
+            self.step(0, 5, 2, speed, kmh(50.0));
+            self.me.move_vertical(-vspeed, vaccel);
+            self.set(0xC9);
+            self.me.request_orbit(20.0, 50.0);
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            self.decide_main(0x1800);
+            self.decide_attack(0x7_0000);
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Actions 0x17 / 0x18 (`BtlAct_FastAscendHandler` / `BtlAct_FastDescendHandler`): the fast rise (motions
+    /// 0x2E, 0x2F, 0x30) or fall (0x31, 0x32, 0x33), draining ki while it lasts. The sounds and the vibration are
+    /// not ported.
+    fn fast_vertical(&mut self, phase: u32) {
+        let up = self.current() == 0x17;
+        let first = if up { 0x2E } else { 0x31 };
+        if phase == ENTER {
+            self.play(first, 0.15);
+            self.held(0xE);
+            if self.me.unk_ff0 > 0 {
+                self.me.work[0] |= 1;
+            }
+        }
+        if phase == RUN {
+            let speed = self.me.move_speed(self.data, self.env, 9);
+            let vspeed = if up { -speed } else { speed };
+            match self.anim_id() - first {
+                0 => {
+                    if self.me.work[0] & 1 != 0 {
+                        self.me.anim_set_duration(0.5);
+                    }
+                    self.me.anim_advance_then(first + 1, 0.15, 0);
+                    self.me.move_vertical(0.0, kmh(100.0));
+                }
+                1 => {
+                    self.me.anim_advance_loop(0);
+                    self.me.move_vertical(vspeed, 10000.0);
+                    self.me.set_fx(4);
+                    self.set(9);
+                }
+                2 => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                    self.me.move_vertical(0.0, kmh(100.0));
+                }
+                _ => {}
+            }
+            self.step(6, 5, 3, 0.0, kmh(100.0));
+            self.me.set_fx(0x3A);
+        }
+        if phase == DECIDE {
+            match self.anim_id() - first {
+                1 => {
+                    let mut stop = false;
+                    if up {
+                        stop |= self.me.test(0x10, true);
+                        let cost = self.move_ki_cost(2);
+                        stop |= self.me.spend_ki(cost, false);
+                        stop |= self.flag(0x15);
+                    } else {
+                        stop |= self.me.test(0x12, true);
+                        let flags = self.me.pose.ground_flags;
+                        if (flags & 0x4000_0000 == 0 || flags & 0x0100_0000 != 0)
+                            && self.me.frames_to_ground() < 0.3 * 30.0
+                        {
+                            stop = true;
+                        }
+                        stop |= self.flag(0x16);
+                        let cost = self.move_ki_cost(2);
+                        stop |= self.me.spend_ki(cost, false);
+                    }
+                    if stop {
+                        self.request_anim(first + 2, 0.15);
+                    }
+                }
+                2 => {
+                    if self.me.work[1] != 0 {
+                        self.request(0xB);
+                        self.decide_main(1);
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                }
+                _ => {}
+            }
+            self.decide_main(if up { 0x1400 } else { 0xC00 });
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// Action 0x38 (`BtlAct_GuardHandler`): guard poses 0xEF (middle), 0xF1 (action input 36) and 0xF3 (input 37),
+    /// each with its recoil at +1, and 0xF5 after flag 0x67. Forced by flags 0x68 / 0x69 / 0x6A when a hit is
+    /// guarded (it opens on the recoil 0xF2 / 0xF4 / 0xF0). A pose change needs three frames of the new input
+    /// (work[2]); releasing the guard (input 34) ends the action. The head look and the voice are not ported.
+    fn guard(&mut self, phase: u32) {
+        if phase == ENTER {
+            let (anim, blend) = if self.flag(0x68) {
+                (0xF2, 0.0)
+            } else if self.flag(0x69) {
+                (0xF4, 0.0)
+            } else if self.flag(0x6A) {
+                (0xF0, 0.0)
+            } else if self.me.test(0x24, true) {
+                (0xF1, 0.15)
+            } else if self.me.test(0x25, true) {
+                (0xF3, 0.15)
+            } else {
+                (0xEF, 0.15)
+            };
+            self.play(anim, blend);
+            self.me.turn_yaw(self.opp, 2, PI);
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0xEF | 0xF1 | 0xF3 => {
+                    self.me.anim_advance_loop(0);
+                }
+                0xF0 | 0xF2 | 0xF4 => {
+                    let back = self.anim_id() - 1;
+                    self.me.anim_advance_then(back, 0.0, 0);
+                    self.set(0x95);
+                    self.set(0x41);
+                }
+                0xF5 => {
+                    self.me.anim_advance_then(0xEF, 0.0, 0);
+                    self.set(0x95);
+                    self.set(0x41);
+                }
+                _ => {}
+            }
+            let accel = kmh(100.0);
+            self.step(6, 5, 2, 0.0, accel);
+            if !self.data.can_fly() && self.flag(0xE) && !self.flag(0x11) {
+                self.me.move_vertical(accel, accel);
+            } else {
+                self.me.apply_gravity();
+            }
+            self.set(0xC9);
+            self.set(0xD5);
+            self.set(0x1C);
+            if self.flag(0xF) && kmh(200.0) < crate::btl_chr::length(self.me.pose.moved) {
+                self.me.set_fx(0x32);
+            }
+            if self.flag(0x11) && !self.flag(0xF) {
+                self.held(0xE);
+            }
+            if self.flag(0xF) {
+                self.clear(0xE);
+            }
+        }
+        if phase == DECIDE {
+            let anim = self.anim_id();
+            if self.flag(0x66) {
+                match anim {
+                    0xEF | 0xF1 | 0xF3 => self.request_anim(anim + 1, 0.0),
+                    0xF0 | 0xF2 | 0xF4 => self.request_anim(anim, 0.0),
+                    0xF5 => self.request_anim(0xF0, 0.0),
+                    _ => {}
+                }
+            } else if self.flag(0x67) {
+                self.request_anim(0xF5, 0.0);
+            } else {
+                if matches!(anim, 0xEF | 0xF1 | 0xF3) {
+                    if self.me.test(0x22, false) {
+                        self.request(0xB);
+                    }
+                    let mut want = 0xEF;
+                    if self.me.test(0x24, true) {
+                        want = 0xF1;
+                    }
+                    if self.me.test(0x25, true) {
+                        want = 0xF3;
+                    }
+                    if anim == want {
+                        self.me.work[2] = 0;
+                    } else {
+                        self.me.work[2] += 1;
+                    }
+                    if self.me.work[2] >= 3 {
+                        self.request_anim(want, 0.15);
+                        self.me.work[2] = 0;
+                    }
+                }
+                self.decide_main(0x100_0000);
+                self.decide_attack(0x400);
+                self.decide_common(6);
+                let q = self.queued();
+                self.request(q);
+            }
         }
     }
 
@@ -2219,16 +2810,33 @@ impl Ctx<'_, '_> {
     }
 }
 
+/// `BtlMove_CalcJumpSpeed`: the upward (negative) launch speed that rises `height` against 50 km/h per frame of
+/// gravity.
+fn jump_speed(mut height: f32) -> f32 {
+    let mut v = 0.0f32;
+    loop {
+        height -= v;
+        v += kmh(50.0);
+        if height < 0.0 {
+            v += (1.0 - -height / v) * kmh(50.0) - kmh(50.0);
+            break;
+        }
+    }
+    -v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn the_slice_s_actions_are_ported_and_others_are_not() {
-        for id in [0xB, 0xD, 0x44, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB, 0xE1] {
+        for id in [
+            0xB, 0xD, 0xF, 0x38, 0x44, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB, 0xE1,
+        ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [0xF, 0x38, 0xAE, 0x60, 0xB8, 0xF6] {
+        for id in [0xAE, 0x60, 0xB8, 0xF6] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

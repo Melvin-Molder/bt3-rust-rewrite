@@ -1473,7 +1473,8 @@ mod tests {
     fn real_fighters_walk_and_rush_in_the_fight() {
         let mut setup = BattleSetup::default();
         setup.sides[1].chara = 1;
-        setup.sides[1].control = 2;
+        // An idle second player: these check the player side, the CPU has its own test.
+        setup.sides[1].pad = 1;
         setup.mode = 5;
         let Some(mut battle) = real_battle(&setup) else {
             return;
@@ -1559,7 +1560,8 @@ mod tests {
         use crate::battle_seq::{REASON_KO, REASON_TIME_UP, WIN_P1};
         let mut setup = BattleSetup::default();
         setup.sides[1].chara = 1;
-        setup.sides[1].control = 2;
+        // An idle second player: these check the player side, the CPU has its own test.
+        setup.sides[1].pad = 1;
         let Some(mut battle) = real_battle(&setup) else {
             return;
         };
@@ -1803,5 +1805,171 @@ mod tests {
             }
         }
         assert_eq!(exit, Some(0x10));
+    }
+
+    #[test]
+    fn real_dash_closes_in_and_guard_blocks_a_rush() {
+        use crate::btl_input::pad::{CIRCLE, CROSS, SQUARE, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32, b: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState {
+                    held: b,
+                    ..PadState::default()
+                },
+            ]
+        };
+        // START skips the stage intro and the talk.
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, pads(0, 0), 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        let gap = |b: &Battle| crate::btl_chr::opp_distance(&b.roster.chars[0], &b.roster.chars[1]);
+        // Cross held: the dash (0xF) runs at the dash speed, much faster than walking.
+        let start = gap(&battle);
+        let mut dashed = false;
+        let mut frames = 0;
+        while gap(&battle) > 30.0 && frames < 60 {
+            battle.run_frame(
+                false,
+                pads(CROSS, 0),
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            dashed |= battle.roster.chars[0].act.current == 0xF;
+            frames += 1;
+        }
+        assert!(dashed, "no dash");
+        assert!(
+            gap(&battle) <= 30.0,
+            "{start} -> {} in {frames} frames",
+            gap(&battle)
+        );
+        assert!(
+            frames < 20,
+            "{start} -> {} took {frames} frames",
+            gap(&battle)
+        );
+        // Let the dash stop, then P1 guards (0x38) while P2 rushes into it.
+        for _ in 0..30 {
+            battle.run_frame(
+                false,
+                pads(CIRCLE, 0),
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+        }
+        assert_eq!(battle.roster.chars[0].act.current, 0x38);
+        let health = battle.roster.chars[0].gauge.health;
+        let mut recoil = false;
+        let mut rushed = false;
+        for i in 0..120 {
+            let near = gap(&battle) < 25.0;
+            let p2 = if !near {
+                UP
+            } else if i % 6 < 2 {
+                SQUARE
+            } else {
+                0
+            };
+            battle.run_frame(
+                false,
+                pads(CIRCLE, p2),
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            rushed |= battle.roster.chars[1].act.current == 0x44;
+            recoil |= matches!(battle.roster.chars[0].anim.cur, 0xF0 | 0xF2 | 0xF4 | 0xF5);
+            assert_eq!(
+                battle.roster.chars[0].act.current, 0x38,
+                "guard broken at frame {i}"
+            );
+        }
+        assert!(rushed, "P2 never rushed");
+        assert!(recoil, "no guard recoil");
+        eprintln!(
+            "guarded: health {health} -> {}",
+            battle.roster.chars[0].gauge.health
+        );
+        assert!(
+            health - battle.roster.chars[0].gauge.health < 300,
+            "guarded hits took full damage"
+        );
+    }
+
+    #[test]
+    fn real_ascend_takes_off_into_flight_and_descend_lands() {
+        use crate::btl_input::pad::{R1, R2};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        setup.mode = 5;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pad = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..90 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        let ground = battle.roster.chars[0].pose.pos[1];
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..60 {
+            battle.run_frame(false, pad(R1), 0, &mut libc, &mut random, None, false);
+            seen.insert(battle.roster.chars[0].act.current);
+        }
+        let high = battle.roster.chars[0].pose.pos[1];
+        eprintln!("ascend actions {seen:X?}, y {ground} -> {high}");
+        assert!(seen.contains(&0x10) && seen.contains(&0x14), "{seen:X?}");
+        // +Y is down: flying 60 frames takes the fighter well above the ground, in flight (flag 0xE).
+        assert!(high < ground - 30.0, "{ground} -> {high}");
+        assert!(battle.roster.chars[0].flags.test(0xE));
+        let mut seen = std::collections::BTreeSet::new();
+        let mut landed = false;
+        for _ in 0..240 {
+            battle.run_frame(false, pad(R2), 0, &mut libc, &mut random, None, false);
+            seen.insert(battle.roster.chars[0].act.current);
+            if battle.roster.chars[0].flags.test(0xF) {
+                landed = true;
+                break;
+            }
+        }
+        eprintln!("descend actions {seen:X?}");
+        assert!(seen.contains(&0x15), "{seen:X?}");
+        assert!(landed, "never landed");
     }
 }

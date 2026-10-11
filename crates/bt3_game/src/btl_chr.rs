@@ -853,10 +853,18 @@ impl Chr {
     }
 
     /// `BtlMember_SpendKi`: not in the powered-up mode (flag 6) unless forced.
-    pub(crate) fn spend_ki(&mut self, amount: i32, force: bool) {
-        if !self.flags.test(6) || force {
-            self.gauge.ki = (self.gauge.ki - amount).max(0);
+    /// Any spending empties the max power gauge; returns true when the ki ran out.
+    pub(crate) fn spend_ki(&mut self, amount: i32, force: bool) -> bool {
+        if self.flags.test(6) && !force {
+            return false;
         }
+        self.gauge.ki -= amount;
+        let ran_out = self.gauge.ki < 0;
+        if ran_out {
+            self.gauge.ki = 0;
+        }
+        self.gauge.max_power = 0;
+        ran_out
     }
 
     /// `BtlMember_IsKiEmpty`.
