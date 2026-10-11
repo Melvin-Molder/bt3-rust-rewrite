@@ -368,6 +368,40 @@ impl TechTable<'_> {
     pub fn shot_time(&self, slot: i32) -> f32 {
         self.f32_of(0x24, slot)
     }
+    /// `BtlSuper_GetShotSpeed` / `GetShotTurnRate` / `GetShotUnk6C` (raw: 10 km/h, degrees per second, the
+    /// effect's scale).
+    pub fn shot_speed(&self, slot: i32) -> f32 {
+        self.f32_of(0x54, slot)
+    }
+    pub fn shot_turn(&self, slot: i32) -> f32 {
+        self.f32_of(0x60, slot)
+    }
+    pub fn shot_scale(&self, slot: i32) -> f32 {
+        self.f32_of(0x6C, slot)
+    }
+    /// The effect's hit shape (+0x99: 0 two spheres, 1 two capsules from the muzzle), raw hit limit (+0x9C, what
+    /// `hits_c` adds 1 to) and frames between two hits (+0x9F) (`EftShot_BuildParam`).
+    pub fn hit_shape(&self, slot: i32) -> i32 {
+        self.s8_of(0x99, slot)
+    }
+    pub fn max_hits(&self, slot: i32) -> i32 {
+        self.s8_of(0x9C, slot)
+    }
+    pub fn hit_interval(&self, slot: i32) -> i32 {
+        self.s8_of(0x9F, slot)
+    }
+    /// The effect's node per event slot (+0xA8, stride 3).
+    pub fn effect_nodes(&self, slot: i32) -> [i32; 6] {
+        std::array::from_fn(|i| self.s8_of(0xA8 + i * 3, slot))
+    }
+    /// The effect type (+0x138: 0 the plain blast / beam, -1 none; `EftShot_BuildParam`).
+    pub fn effect_type(&self, slot: i32) -> i32 {
+        self.s8_of(0x138, slot)
+    }
+    /// `BtlSuper_GetGuardKind`.
+    pub fn guard_kind(&self, slot: i32) -> i32 {
+        self.s8_of(0x150, slot)
+    }
     /// `BtlSuper_GetShots` / `GetHitsB` (at least 1) / `GetHitsC` (byte + 1).
     pub fn shots(&self, slot: i32) -> i32 {
         self.s8_of(0x93, slot).max(1)

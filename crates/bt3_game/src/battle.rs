@@ -14,7 +14,7 @@ use crate::eft::{DrawCtx, EffectTri, FxWorld, OrderTable, SetAssets};
 use bt3_data::ai_data::{AiData, AiTables};
 use bt3_data::cam_anim::CamAnim;
 use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables};
-use bt3_data::eft_pack::EffectPack;
+use bt3_data::eft_pack::{EffectPack, tech_blast_set, tech_pack};
 use bt3_data::elf::Elf;
 use bt3_data::gs::{
     RgbaTexture, decode_clut256_upload, decode_sprite_texture, decode_sprite_texture_raw,
@@ -35,6 +35,7 @@ use crate::btl_input::{InputGate, PadState};
 use crate::btl_menu::{MenuDraw, MenuInput, MenuTexts, PauseMenu, Tree};
 use crate::btl_mgr::Roster;
 use crate::btl_obj::ObjData;
+use crate::btl_tech_fx::TechPack;
 use crate::char_select::BattleSetup;
 use crate::fade::Fade;
 use crate::font::Font;
@@ -170,6 +171,8 @@ pub(crate) struct FighterModel {
     pub(crate) effect: Option<EffectPack>,
     /// The textures and sprite packs of its two ki blast emitter sets.
     pub(crate) blast_assets: [Option<SetAssets>; 2],
+    /// The technique slots' effect packs (`effectPacks`, the second animation file's entries 1..5).
+    pub(crate) tech_packs: [Option<TechPack>; 5],
     /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
     pub(crate) skill_text: Option<Vec<u16>>,
 }
@@ -313,7 +316,13 @@ pub fn load(
             .copied()
             .unwrap_or_default();
         // BtlRes_Request: the second animation file is chara * 10 + 0x599.
-        fighter.effect = EffectPack::parse(&read(MOTION_FILE + 1 + side.chara.max(0) as u32 * 10)?);
+        let anim_file = read(MOTION_FILE + 1 + side.chara.max(0) as u32 * 10)?;
+        fighter.effect = EffectPack::parse(&anim_file);
+        fighter.tech_packs = std::array::from_fn(|slot| {
+            tech_pack(&anim_file, slot).map(|pack| TechPack {
+                blast: tech_blast_set(pack),
+            })
+        });
         if let Some(pack) = &fighter.effect {
             for (list, set) in pack.blast_sets.iter().enumerate() {
                 if let Some(set) = set {
@@ -592,6 +601,7 @@ fn load_fighter(
         gauge: SideGauge::default(),
         effect: None,
         blast_assets: [None, None],
+        tech_packs: Default::default(),
         skill_text: None,
     })
 }
@@ -677,6 +687,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         entry: f.entry,
         effect: f.effect.as_ref(),
         blast_assets: std::array::from_fn(|i| f.blast_assets[i].as_ref()),
+        tech_packs: std::array::from_fn(|i| f.tech_packs[i].as_ref()),
         costume: f.costume,
         chara: f.chara,
     }
@@ -2897,7 +2908,7 @@ mod tests {
     }
 
     #[test]
-    fn real_blast_2_charges_and_fires_on_release() {
+    fn real_blast_2_beam_fires_on_release_and_hits_six_times() {
         use crate::btl_input::pad::{L2, START, TRIANGLE};
         let mut setup = BattleSetup::default();
         setup.sides[1].chara = 1;
@@ -2935,11 +2946,15 @@ mod tests {
             frame(&mut battle, 0);
         }
         assert_eq!(battle.roster.chars[0].gauge.ki, 100_000);
-        // L2 + Triangle starts it (L2 alone for two frames is the ki charge 0x37); holding Triangle charges (motion 0x106), letting go (flag 0xA2's button
-        // command) fires (0x107), then the firing loop and the end. The beam's effect is not ported: the firing
-        // loop ends on the original's 150-frame timeout.
-        let (mut acts, mut fire_at) = (Vec::new(), None);
-        for i in 0..260 {
+        // L2 + Triangle starts it (L2 alone for two frames is the ki charge 0x37); holding Triangle charges (motion
+        // 0x106), letting go (flag 0xA2's button command) fires (0x107), then the firing loop and the end. The
+        // Kamehameha (effect type 0, capsule records, hit limit 5 at 3-frame intervals) leaves the muzzle on the
+        // motion's FIRE event, holds on the opponent for its six hits, the last blowing it away (0xCF), and its end
+        // raises flag 0xA8, which ends the firing loop.
+        let (mut acts, mut fire_at, mut beam_at, mut end_at) = (Vec::new(), None, None, None);
+        let mut hits = Vec::new();
+        let mut health = battle.roster.chars[1].gauge.health;
+        for i in 0..110 {
             let held = match i {
                 2..4 => L2,
                 4..6 => L2 | TRIANGLE,
@@ -2948,9 +2963,20 @@ mod tests {
             };
             frame(&mut battle, held);
             let a = &battle.roster.chars[0];
+            let o = &battle.roster.chars[1];
             acts.push((a.act.current, a.anim.cur));
             if fire_at.is_none() && a.anim.cur == 0x107 {
                 fire_at = Some(i);
+            }
+            if beam_at.is_none() && !battle.roster.scene.tech.beams_of(0).is_empty() {
+                beam_at = Some(i);
+            }
+            if end_at.is_none() && a.anim.cur == 0x10B {
+                end_at = Some(i);
+            }
+            if o.gauge.health < health {
+                hits.push((i, health - o.gauge.health, o.react.reaction));
+                health = o.gauge.health;
             }
         }
         acts.dedup();
@@ -2970,7 +2996,86 @@ mod tests {
         );
         let fire_at = fire_at.unwrap();
         assert!((40..44).contains(&fire_at), "fired at {fire_at}");
+        assert_eq!(beam_at, Some(48));
+        assert_eq!(hits.len(), 6, "{hits:?}");
+        assert!(hits.iter().all(|h| h.1 == hits[0].1), "{hits:?}");
+        assert_eq!(hits[0].0, 53);
+        // Three frames apart; the knock-away of the last hit is reaction 0xF, the others 3.
+        assert!(hits.windows(2).all(|w| w[1].0 - w[0].0 == 3), "{hits:?}");
+        assert!(hits[..5].iter().all(|h| h.2 == 3), "{hits:?}");
+        assert_eq!(hits[5].2, 0xF);
+        assert!(end_at.is_some_and(|e| e < hits[5].0 + 5), "{end_at:?}");
+        assert!(battle.roster.scene.tech.beams_of(0).is_empty());
         assert_eq!(battle.roster.chars[0].gauge.ki, 40_000);
+    }
+
+    #[test]
+    fn real_blast_2_beam_is_guarded() {
+        use crate::btl_input::pad::{CIRCLE, L2, START, TRIANGLE};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32, b: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState {
+                    held: b,
+                    ..PadState::default()
+                },
+            ]
+        };
+        let mut frame = |battle: &mut Battle, p1: u32, p2: u32| {
+            let start = p1 & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(p1, p2), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 }, 0);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..120 {
+            frame(&mut battle, L2, CIRCLE);
+        }
+        for _ in 0..5 {
+            frame(&mut battle, 0, CIRCLE);
+        }
+        // P2 guards (0x38) throughout; P1 fires Goku's Kamehameha uncharged. Every one of its six hits is guarded
+        // (flag 0x66 or 0x67 by the technique's guard kind) for the guarded damage, less than a plain hit's 1170.
+        let mut health = battle.roster.chars[1].gauge.health;
+        let (mut drops, mut guarded) = (Vec::new(), 0);
+        for i in 0..110 {
+            let p1 = match i {
+                2..4 => L2,
+                4..6 => L2 | TRIANGLE,
+                _ => 0,
+            };
+            frame(&mut battle, p1, CIRCLE);
+            let o = &battle.roster.chars[1];
+            if o.gauge.health < health {
+                drops.push(health - o.gauge.health);
+                health = o.gauge.health;
+                if o.flags.test(0x66) || o.flags.test(0x67) {
+                    guarded += 1;
+                }
+            }
+        }
+        assert_eq!(drops.len(), 6, "{drops:?}");
+        assert_eq!(guarded, drops.len(), "{drops:?}");
+        assert!(
+            drops.iter().all(|&d| d == drops[0] && d < 1170),
+            "{drops:?}"
+        );
+        assert_eq!(battle.roster.chars[1].act.current, 0x38);
     }
 
     #[test]

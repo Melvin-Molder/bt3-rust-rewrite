@@ -12,6 +12,7 @@ mod btl_input;
 mod btl_menu;
 mod btl_mgr;
 mod btl_obj;
+mod btl_tech_fx;
 mod btl_text;
 mod char_select;
 mod dialog;

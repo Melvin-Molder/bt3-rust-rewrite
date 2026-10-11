@@ -17,11 +17,11 @@ use std::f32::consts::PI;
 use crate::btl_blast::{HitRec, blast_limit_a, can_fire, hits_of, ki_cost, ki_cost_of};
 use crate::btl_chr::warp_in_front_of_opponent;
 use crate::btl_chr::{
-    Attack, Chr, Env, SideData, add, anim_flag, begin_rise_to_opponent, calc_approach_point,
-    circle_opponent, deg, dot, is_blocked_by_opponent, kmh, length, normalize, opp_closing_time,
-    opp_delta, opp_distance_xz, opp_gap_xz, opp_pitch_adjusted, opp_yaw, opp_yaw_from_facing,
-    opp_yaw_from_its_facing, scale_speed_by_approach, scale3, snap_to_opponent, steer_at_opponent,
-    sub, warp_ahead_of_opponent, warp_behind_opponent,
+    Attack, Chr, Env, SideData, add, anim_flag, begin_rise_to_opponent, calc_aim_dir,
+    calc_approach_point, circle_opponent, deg, dot, is_blocked_by_opponent, kmh, length, normalize,
+    opp_closing_time, opp_delta, opp_distance_xz, opp_gap_xz, opp_pitch_adjusted, opp_yaw,
+    opp_yaw_from_facing, opp_yaw_from_its_facing, scale_speed_by_approach, scale3,
+    snap_to_opponent, steer_at_opponent, sub, warp_ahead_of_opponent, warp_behind_opponent,
 };
 use crate::btl_clash::{ClashC, count_and_mark};
 use crate::btl_input::{DIR_MASK, wrap_angle};
@@ -37,12 +37,12 @@ fn super_anim(cls: i32, n: i32) -> i32 {
 }
 
 /// `BtlAct_IsTechniqueId`: 0x105..0x132.
-fn is_technique_id(id: i32) -> bool {
+pub(crate) fn is_technique_id(id: i32) -> bool {
     (0x106..0x106 + 0x2D).contains(&id) || id == 0x105
 }
 
 /// `BtlAct_GetIdClass`.
-fn id_class(id: i32) -> i32 {
+pub(crate) fn id_class(id: i32) -> i32 {
     if id == 0x105 {
         4
     } else if (0xFD..0xFD + 6).contains(&id) {
@@ -5035,14 +5035,34 @@ impl Ctx<'_, '_> {
 
     // ---- the dodges, the poses and the rapid rush (btl_act_1.c, btl_act_2.c) -----------------------------------
 
-    /// `BtlMove_IsBlastIncoming`: a live ki blast record (of the uncharged kinds 0 / 4 / 8, or the others) heading
-    /// for the fighter that reaches it within `limit` frames. Technique records are not ported, so `techniques`
-    /// finds nothing.
-    fn blast_incoming(&self, uncharged: bool, others: bool, _techniques: bool, limit: f32) -> bool {
+    /// `BtlMove_CountOwnBeams`: the technique records of the fighter's own techniques.
+    fn count_own_beams(&self) -> i32 {
+        self.blasts
+            .iter()
+            .filter(|r| r.tech.is_some_and(|t| t.side == self.me.player))
+            .count() as i32
+    }
+
+    /// `BtlMove_IsBlastIncoming`: a live record (a ki blast of the uncharged kinds 0 / 4 / 8 or of the others, or a
+    /// technique's) heading for the fighter that reaches it within `limit` frames; records with definition flag 2
+    /// are ignored.
+    fn blast_incoming(&self, uncharged: bool, others: bool, techniques: bool, limit: f32) -> bool {
         self.blasts.iter().any(|rec| {
-            let plain = matches!(rec.atk.kind, 0 | 4 | 8);
-            if (plain && !uncharged) || (!plain && !others) {
+            if rec.unk54 {
                 return false;
+            }
+            match rec.tech {
+                None => {
+                    let plain = matches!(rec.atk.kind, 0 | 4 | 8);
+                    if (plain && !uncharged) || (!plain && !others) {
+                        return false;
+                    }
+                }
+                Some(src) => {
+                    if matches!(src.slot, 0 | 1) || !techniques {
+                        return false;
+                    }
+                }
             }
             let step = sub(rec.pos, rec.prev);
             let d = sub(self.me.pose.pos, rec.pos);
@@ -6435,10 +6455,11 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x106..0x108 (`BtlAct_SuperBeamHandler`) and the long beam 0x10C..0x10E
     /// (`BtlAct_SuperLongBeamHandler`): the start motion (level 2 hit-stop), the charge loop until the effect
-    /// raises flag 0xA7, the fire, the firing loop until 0xA8 (the long beam: a second stage until 0xA9), the end.
-    /// The effects that raise the flags are not ported yet: each wait ends after 150 frames, as the original's own
-    /// timeout. Not ported either: the self-destruct change of flag 0x2000 (a character change), the shakes,
-    /// vibration, sounds and cuts, and the beam struggles 0x12A.. (flags 0x72 / 0x73).
+    /// raises flag 0xA7, the fire, the firing loop until 0xA8 (the long beam: a second stage until 0xA9), the end;
+    /// each wait also ends after 150 frames, the original's own timeout (the end of an effect type other than 0,
+    /// and flag 0xA9, come from effects not ported). Not ported either: the self-destruct change of flag 0x2000 (a
+    /// character change), the shakes, vibration, sounds and cuts, and the beam struggles 0x12A.. (flags 0x72 /
+    /// 0x73).
     fn super_beam(&mut self, phase: u32) {
         let cls = self.current_class();
         let long = (0x10C..=0x10E).contains(&self.current());
@@ -6748,7 +6769,7 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x112..0x114 (`BtlAct_SuperRepeatHandler`): shots fired again and again, each paid with health;
     /// in the fire loop the button command (pressing the blast button, flag 0xA3) fires the next until the shot
-    /// limit, the time limit or 1 health. Own technique records are not ported, so none is ever waited for.
+    /// limit, the time limit or 1 health; the end waits until none of the fighter's technique records is left.
     fn super_repeat(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -6817,9 +6838,10 @@ impl Ctx<'_, '_> {
                     let stop =
                         self.me.work[2] >= (self.tech().shot_time(cls) * 30.0) as i32 - 1 || last;
                     if stop {
-                        // BtlMove_CountOwnBeams: no technique records yet.
-                        self.request_anim(super_anim(cls, 6), 0.0);
-                        self.me.work[2] = 0;
+                        if self.count_own_beams() <= 0 {
+                            self.request_anim(super_anim(cls, 6), 0.0);
+                            self.me.work[2] = 0;
+                        }
                     } else {
                         self.super_set_class(cls);
                         if self.me.work[2] >= 16 && self.test(0x6F) {
@@ -7606,40 +7628,9 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// `BtlCharApi_CalcAimDir`: the unit direction from `from` to the opponent's node `node`, its pitch kept in
-    /// min..max (no technique is ported); a direction away from the opponent is mirrored.
+    /// `BtlCharApi_CalcAimDir`.
     fn calc_aim_dir(&self, node: u32, from: [f32; 3], min: f32, max: f32) -> [f32; 3] {
-        let yaw = self.me.pose.rot[1];
-        let mut out = sub(self.opp.obj.node_pos(node), from);
-        let len = length(out);
-        if len < 0.0001 {
-            return [yaw.sin(), 0.0, yaw.cos()];
-        }
-        out = out.map(|v| v * (1.0 / len));
-        let delta = opp_delta(self.me, self.opp);
-        if out[0] * delta[0] + out[2] * delta[2] < 0.0 {
-            out[0] = -out[0];
-            out[2] = -out[2];
-        }
-        let (lo, hi) = (min.sin(), max.sin());
-        for limit in [lo, hi] {
-            let past = if limit == lo {
-                out[1] < lo
-            } else {
-                hi < out[1]
-            };
-            if !past {
-                continue;
-            }
-            let xz = (1.0 - limit * limit).sqrt();
-            if out[1].abs() < 0.999 {
-                let k = xz / (1.0 - out[1] * out[1]).sqrt();
-                out = [out[0] * k, limit, out[2] * k];
-            } else {
-                out = [xz * yaw.sin(), limit, xz * yaw.cos()];
-            }
-        }
-        out
+        calc_aim_dir(self.me, self.opp, self.data, node, from, min, max)
     }
 
     /// The aim of the standing ki blasts: at the opponent's node `node` from the own node 0x11 within 36 degrees

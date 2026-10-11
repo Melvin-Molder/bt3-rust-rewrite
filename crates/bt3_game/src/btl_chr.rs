@@ -208,6 +208,8 @@ pub(crate) struct SideData<'a> {
     pub effect: Option<&'a EffectPack>,
     /// The decoded textures and sprite packs of the two blast lists' emitter sets.
     pub blast_assets: [Option<&'a crate::eft::SetAssets>; 2],
+    /// The technique slots' effect packs (`BtlCharApi_GetPlayerEffectPack`).
+    pub tech_packs: [Option<&'a crate::btl_tech_fx::TechPack>; 5],
     /// The costume of the side's character (`BtlMember_GetActive()->costume`).
     pub costume: i32,
     /// The side's character (`BtlMember_GetActive()->chara`).
@@ -607,6 +609,13 @@ impl Chr {
     /// `BtlChar_IsDead`.
     pub(crate) fn is_dead(&self) -> bool {
         self.gauge.health < 1
+    }
+
+    /// `BtlChar_TestFxBit`.
+    pub(crate) fn test_fx(&self, bit: u32) -> bool {
+        self.fx_bits
+            .get((bit >> 3) as usize)
+            .is_some_and(|b| b & (1 << (bit & 7)) != 0)
     }
 
     /// `BtlChar_SetFxBit`.
@@ -1918,6 +1927,59 @@ pub(crate) fn warp_in_front_of_opponent(
     let yaw = opp.snap_rot(6)[1];
     let d = data.radius() + opp_data.radius() + gap;
     me.pose.pos = add(at, [yaw.sin() * d, 0.0, yaw.cos() * d]);
+}
+
+/// `BtlCharApi_CalcAimDir`: the unit direction from `from` to the opponent's node `node`, its pitch kept in
+/// min..max (flattened, or rebuilt from the model yaw when nearly vertical). A technique with flag 0x40000 aims
+/// along the heading; a direction away from the opponent is mirrored; a zero direction is the model's facing.
+pub(crate) fn calc_aim_dir(
+    me: &Chr,
+    opp: &Chr,
+    data: &SideData,
+    node: u32,
+    from: [f32; 3],
+    min: f32,
+    max: f32,
+) -> [f32; 3] {
+    let yaw = me.pose.rot[1];
+    let mut out = sub(opp.obj.node_pos(node), from);
+    let cur = me.act.current;
+    if crate::btl_act::is_technique_id(cur)
+        && data.tables.tech().flags(crate::btl_act::id_class(cur)) & 0x4_0000 != 0
+    {
+        let xz = out[0].hypot(out[2]);
+        out[0] = me.pose.yaw.sin() * xz;
+        out[2] = me.pose.yaw.cos() * xz;
+    }
+    let len = length(out);
+    if len < 0.0001 {
+        return [yaw.sin(), 0.0, yaw.cos()];
+    }
+    out = out.map(|v| v * (1.0 / len));
+    let delta = opp_delta(me, opp);
+    if out[0] * delta[0] + out[2] * delta[2] < 0.0 {
+        out[0] = -out[0];
+        out[2] = -out[2];
+    }
+    let (lo, hi) = (min.sin(), max.sin());
+    for limit in [lo, hi] {
+        let past = if limit == lo {
+            out[1] < lo
+        } else {
+            hi < out[1]
+        };
+        if !past {
+            continue;
+        }
+        let xz = (1.0 - limit * limit).sqrt();
+        if out[1].abs() < 0.999 {
+            let k = xz / (1.0 - out[1] * out[1]).sqrt();
+            out = [out[0] * k, limit, out[2] * k];
+        } else {
+            out = [xz * yaw.sin(), limit, xz * yaw.cos()];
+        }
+    }
+    out
 }
 
 /// `BtlOpp_GetYawFromItsFacing`: the yaw to the opponent relative to the opponent's own facing.

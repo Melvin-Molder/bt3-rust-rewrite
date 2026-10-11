@@ -8,10 +8,13 @@
 //! blast task updated in creation order, `EftHit_ClampToStage`), `EftDet_Update` (clash, stage, fighter passes) and
 //! `BtlScene_PostUpdate` (every task reads what the passes reported).
 //!
+//! The technique effects (layer 1, `btl_tech_fx`) add their records before the ki blasts; the passes and the
+//! fighters' answers take both kinds (`EftHit_CanHit`, `EftHit_Clash`, `EftHit_CalcResult`).
+//!
 //! Not ported: blast types 2 (ki object), 3 (ki bomb), 4 / 5 (discs) fire nothing, nor does a character whose kind
-//! 1 / 2 list belongs to those managers; technique records and beam struggles; breaking stage objects (a blast
-//! stops at every object); the particles, impact effects, sounds, voices, camera shake, pad vibration and battle
-//! events; abilities.
+//! 1 / 2 list belongs to those managers; the beam struggle (`EftStruggle`: a head-on pair of beams only gets its
+//! flags); breaking stage objects (a blast stops at every object, a rush technique's record meets none); the
+//! particles, impact effects, sounds, voices, camera shake, pad vibration and battle events; abilities.
 
 use std::f32::consts::PI;
 
@@ -23,6 +26,9 @@ use crate::btl_chr::{Chr, Env, SideData, add, dot, kmh, length, opp_delta, scale
 use crate::btl_hit::{guard_kind, raise_first_clash};
 use crate::btl_input::wrap_angle;
 use crate::btl_obj::mask_to_node;
+use crate::btl_tech_fx::{
+    TechFx, TechSrc, absorb_amount, guard_rush, hit_by_rush, tech_outclasses, try_dodge_tech,
+};
 use crate::eft::{EmitState, FxWorld, Modules, Nodes, SetRef, SpawnCtx, spawn};
 use crate::rng::LibcRandom;
 
@@ -42,8 +48,19 @@ const T_OUT: u32 = 0x10;
 const T_ABSORBED: u32 = 0x20;
 const T_DEFLECTED: u32 = 0x40;
 const T_REFLECTED: u32 = 0x80;
+const T_STRUGGLE: u32 = 0x100;
+const T_IMPACT_DONE: u32 = 0x200;
+const T_MULTI: u32 = 0x4000;
+const T_MULTI_CONTACT: u32 = 0x8000;
 const T_KEEP: u32 = 0x1_0000;
+const T_NO_MODE1: u32 = 0x2_0000;
+const T_NO_MODE2: u32 = 0x4_0000;
 const T_END: u32 = 0x3F;
+
+// EFT_HIT_FLAG_*.
+const H_KIND9: u32 = 0x8;
+const H_LAST: u32 = 0x10;
+const H_NO_LAST: u32 = 0x800;
 const T_TURN: u32 = 0xC0;
 
 // EFT_KIBLAST_*.
@@ -67,8 +84,8 @@ const D_CLASH: u32 = 4;
 /// `BTL_REACT_NOFLINCH`.
 const REACT_NOFLINCH: i32 = 2;
 
-/// `EftRArg` / `FxHitArg2`: what a shot is fired with.
-#[derive(Clone, Copy, Debug)]
+/// `EftRArg` / `FxHitArg2`: what a shot is fired with (a technique record carries a blank one).
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Arg {
     /// Launch direction (`pos` of the request: the aim, turned by the volley spread).
     pub dir: [f32; 3],
@@ -101,13 +118,17 @@ struct Sphere {
     radius: f32,
 }
 
-/// The swept shape of a record and what the passes found (`EftDetShape`, type 0: two spheres).
+/// The swept shape of a record and what the passes found (`EftDetShape`): type 0 two spheres, this frame's (`a`)
+/// and last frame's (`b`); type 1 two capsules from the muzzle `a_start`, to `a.pos` (the head) and to `b.pos`
+/// (the tail), of `a`'s radius.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
-    /// This frame's sphere (`a`) and last frame's (`b`).
+    kind: u8,
     a: Sphere,
     b: Sphere,
-    /// `EftHit_GetScale`: 0.1 for a blast (the stage test's radius factor).
+    a_start: [f32; 3],
+    /// `EftHit_GetScale`: 0.1 for a blast, the definition's scale for a technique (the stage test's radius
+    /// factor).
     scale: f32,
     bounds: ColBox,
     delta: [f32; 3],
@@ -137,18 +158,97 @@ pub(crate) struct HitRec {
     pub atk: Arg,
     /// `seenByAi`.
     pub seen_by_ai: bool,
+    /// The technique of a technique record (`src`; `None` for a ki blast).
+    pub tech: Option<TechSrc>,
+    /// `EFT_HIT_FLAG_*` (0x10: the technique's last hit).
+    pub flags: u32,
+    /// `unk54`: the technique's definition flag 2; the deflects, absorbs and the AI ignore the record.
+    pub unk54: bool,
     task: u32,
     shape: Shape,
+}
+
+/// The task header fields the passes report through (`BtlTask`: the tag word, the position, the result and the
+/// multi-hit counters).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Tag {
+    /// `EFT_TASK_*`.
+    pub flags: u32,
+    pub pos: [f32; 3],
+    /// `EftHit_CalcResult`: 0 none, 1 in contact (hold), 3 struggle, 4 hit, 5 finished.
+    pub result: i32,
+    pub count_a: i32,
+    pub hit_count: i32,
+}
+
+impl HitRec {
+    /// `EftHit_GetNew` / `EftHit_Add` of a technique record: two spheres at `pos` and `prev` (shape 0) or two
+    /// capsules from `start` (shape 1) of `radius`; `None` for another shape.
+    pub(crate) fn technique(
+        src: TechSrc,
+        task: u32,
+        pos: [f32; 3],
+        prev: [f32; 3],
+        vel: [f32; 3],
+        start: [f32; 3],
+        radius: f32,
+    ) -> Option<Self> {
+        let kind = match src.def.shape {
+            0 => 0,
+            1 => 1,
+            _ => return None,
+        };
+        let a = Sphere { pos, radius };
+        let b = Sphere { pos: prev, radius };
+        Some(Self {
+            owner: src.side,
+            level: src.def.level,
+            pos,
+            prev,
+            vel,
+            turned: false,
+            atk: Arg::default(),
+            seen_by_ai: false,
+            tech: Some(src),
+            flags: if src.def.sub == 9 { H_KIND9 } else { 0 },
+            unk54: src.def.flags & 2 != 0,
+            task,
+            shape: Shape {
+                kind,
+                a,
+                b,
+                a_start: start,
+                scale: src.def.scale,
+                bounds: capsule_bounds(start, pos, radius),
+                delta: [0.0; 3],
+                dir: [0.0; 3],
+                zone: 0,
+                hit_flags: 0,
+                stage_dist: f32::MAX,
+                dist: f32::MAX,
+                hit_pos: [0.0; 3],
+                contact: [0.0; 3],
+            },
+        })
+    }
+
+    /// `EftHit_GetMaxHits`.
+    fn max_hits(&self) -> i32 {
+        self.tech.map_or(0, |t| t.def.max_hits)
+    }
+
+    /// `EftHit_HasDefFlag20`.
+    fn def_flag20(&self) -> bool {
+        self.tech.is_some_and(|t| t.def.flags & 0x20 != 0)
+    }
 }
 
 /// An `EftKiBlast` task: its tag word and position (the task header) and its work.
 #[derive(Clone, Debug)]
 struct Task {
     id: u32,
-    /// `task->flags`: what the passes reported (`T_*`).
-    hit: u32,
-    /// `task->pos`: where it was reported.
-    hit_pos: [f32; 3],
+    /// What the passes reported (`T_*`) and where.
+    tag: Tag,
     flags: u32,
     pos: [f32; 3],
     prev: [f32; 3],
@@ -177,6 +277,8 @@ pub(crate) struct Scene {
     pub records: Vec<HitRec>,
     /// The particle modules the blasts' emitters start.
     pub fx: Modules,
+    /// The technique effects (layer 1).
+    pub tech: TechFx,
 }
 
 /// What a scene pass needs of the battle.
@@ -194,12 +296,14 @@ pub(crate) struct World<'a, 'd> {
     pub vu0: &'a mut crate::rng::Vu0Random,
     /// `BATTLE_FLAG_PAUSE`: `BtlScene_IsTimeStopped` and every effect's "stopped" test hold.
     pub paused: bool,
+    /// The roster's frame counter (`BtlChar_FrameMod`).
+    pub frame: u32,
 }
 
 // ---- vectors ------------------------------------------------------------------------------------------------------
 
 /// `Vec3_Normalize`: a zero vector gives zero.
-fn norm(v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn norm(v: [f32; 3]) -> [f32; 3] {
     let len = length(v);
     if len == 0.0 {
         [0.0; 3]
@@ -520,8 +624,7 @@ impl Scene {
         self.next_id += 1;
         tasks.push(Task {
             id: self.next_id,
-            hit: 0,
-            hit_pos: [0.0; 3],
+            tag: Tag::default(),
             flags,
             pos,
             prev: me.obj.node_pos(0x11),
@@ -539,13 +642,21 @@ impl Scene {
         });
     }
 
-    /// `BtlScene_Update`, `EftDet_Update` and `BtlScene_PostUpdate` for the ki blasts; then every fighter's live
-    /// blast counts for `BtlMove_CanFireBlast`.
+    /// `BtlChar_SpawnFxBits3C`: the technique shot the fighter's effect bits ask for.
+    pub(crate) fn request_technique(&mut self, me: &Chr, data: &SideData) {
+        self.tech.request(me, data, &mut self.next_id);
+    }
+
+    /// `BtlScene_Update`, `EftDet_Update` and `BtlScene_PostUpdate` for the technique effects and the ki blasts;
+    /// then every fighter's live blast counts for `BtlMove_CanFireBlast`, and the technique timelines' timers
+    /// (`BtlScene_Draw`).
     pub(crate) fn update(&mut self, w: &mut World) {
         // EftHit_BeginFrame: the records are kept while time is stopped.
         if !w.paused {
             self.records.clear();
         }
+        // Layer 1: the technique effects.
+        self.tech.update(w, &mut self.records, HIT_MAX);
         // BtlScene_IsAnyCharStopped.
         let stopped = w.paused || w.chars.iter().any(Chr::is_frozen);
         for side in 0..2 {
@@ -577,11 +688,14 @@ impl Scene {
         // EftDet_Update: nothing while paused.
         if !w.paused {
             self.prepare(w.env);
-            self.clash_pass();
+            self.clash_pass(w);
             self.stage_pass(w.env);
             self.fighter_pass(w);
         }
-        // BtlScene_PostUpdate: EftHit_UpdateResults has nothing a ki blast reads; the impacts are not ported.
+        // BtlScene_PostUpdate: EftHit_UpdateResults, then layer 1's and layer 2's post-updates; the impacts are not
+        // ported.
+        self.update_results();
+        self.tech.post_update(w);
         for side in 0..2 {
             for list in 0..2 {
                 for task in &mut self.lists[side][list] {
@@ -591,43 +705,89 @@ impl Scene {
         }
         for (i, chr) in w.chars.iter_mut().enumerate() {
             chr.live_blasts = [0; 2];
-            for rec in self.records.iter().filter(|r| r.atk.src == i) {
+            for rec in self
+                .records
+                .iter()
+                .filter(|r| r.tech.is_none() && !r.unk54 && r.atk.src == i)
+            {
                 chr.live_blasts[kind_class(rec.atk.kind)] += 1;
             }
         }
+        self.tech.draw(w);
     }
 
-    fn task_mut(&mut self, id: u32) -> Option<&mut Task> {
-        self.lists
+    /// The tag of a record's task: a ki blast or a technique item.
+    fn tag_mut(&mut self, id: u32) -> Option<&mut Tag> {
+        if let Some(t) = self
+            .lists
             .iter_mut()
             .flatten()
             .flatten()
             .find(|t| t.id == id)
+        {
+            return Some(&mut t.tag);
+        }
+        self.tech.tag_mut(id)
+    }
+
+    fn rec_tag(&mut self, i: usize) -> Option<&mut Tag> {
+        let id = self.records[i].task;
+        self.tag_mut(id)
     }
 
     /// `EftHit_SetTaskFlag`.
     fn set_task_flag(&mut self, i: usize, bits: u32, pos: [f32; 3]) {
-        let id = self.records[i].task;
-        if let Some(t) = self.task_mut(id) {
-            t.hit |= bits;
-            t.hit_pos = pos;
+        if let Some(t) = self.rec_tag(i) {
+            t.flags |= bits;
+            t.pos = pos;
         }
     }
 
     fn task_flags(&mut self, i: usize) -> u32 {
-        let id = self.records[i].task;
-        self.task_mut(id).map_or(0, |t| t.hit)
+        self.rec_tag(i).map_or(0, |t| t.flags)
     }
 
-    /// `EftHit_CanHit` for a ki blast record: mode 0 the stage, 1 a fighter, 2 a clash.
+    /// `EftHit_CanHit`: whether a record may still meet the stage (mode 0), a fighter (1) or another record (2).
     fn can_hit(&mut self, i: usize, mode: u32) -> bool {
         let flags = self.task_flags(i);
-        let ok = if mode == 0 {
-            flags & (T_KEEP | T_HIT_STAGE) == 0
-        } else {
-            flags & (T_HIT_CHAR | T_LOST_CLASH) == 0
+        let Some(src) = self.records[i].tech else {
+            let ok = if mode == 0 {
+                flags & (T_KEEP | T_HIT_STAGE) == 0
+            } else {
+                flags & (T_HIT_CHAR | T_LOST_CLASH) == 0
+            };
+            return ok && flags & T_DEFLECTED == 0;
         };
-        ok && flags & T_DEFLECTED == 0
+        let def = src.def;
+        match mode {
+            0 => {
+                if flags & T_KEEP != 0 {
+                    false
+                } else if def.kind != 0 {
+                    flags & (T_STRUGGLE | T_HIT_STAGE) == 0
+                } else {
+                    def.sub == 4
+                }
+            }
+            1 => {
+                if flags & T_NO_MODE1 != 0 {
+                    false
+                } else if flags & T_MULTI != 0 {
+                    true
+                } else {
+                    flags & (T_STRUGGLE | T_LOST_CLASH | T_HIT_CHAR) == 0
+                }
+            }
+            _ => {
+                flags & T_NO_MODE2 == 0
+                    && flags & (T_STRUGGLE | T_LOST_CLASH | T_HIT_STAGE | T_HIT_CHAR) == 0
+            }
+        }
+    }
+
+    /// `EftHit_IsMultiHit`.
+    fn is_multi(&mut self, i: usize) -> bool {
+        self.task_flags(i) & T_MULTI != 0
     }
 
     /// `EftHit_ClampToStage`: a record beyond the stage's inner radius reports "out" once, pulled back onto it.
@@ -639,32 +799,70 @@ impl Scene {
                 let len = p[0].hypot(p[2]);
                 let k = env.inner_radius() / len;
                 let pos = [p[0] * k, p[1], p[2] * k];
-                let id = self.records[i].task;
-                if let Some(t) = self.task_mut(id) {
-                    t.hit_pos = pos;
-                    t.hit |= T_OUT;
+                if let Some(t) = self.rec_tag(i) {
+                    t.pos = pos;
+                    t.flags |= T_OUT;
                 }
-                self.records[i].shape.a.pos = pos;
+                let s = &mut self.records[i].shape;
+                if s.kind == 0 {
+                    s.a.pos = pos;
+                } else {
+                    s.a_start = pos;
+                }
             }
         }
     }
 
-    /// `EftDet_PrepareAll` with `EftDet_PrepareSpheres`.
+    /// `EftDet_PrepareAll` with `EftDet_PrepareSpheres` / `EftDet_PrepareCapsule`.
     fn prepare(&mut self, env: &Env) {
         for rec in &mut self.records {
             let s = &mut rec.shape;
             s.hit_flags = 0;
             s.stage_dist = f32::MAX;
             s.dist = f32::MAX;
-            s.bounds = capsule_bounds(s.b.pos, s.a.pos, s.a.radius);
-            s.delta = sub(s.a.pos, s.b.pos);
+            let start = if s.kind == 0 { s.b.pos } else { s.a_start };
+            s.bounds = capsule_bounds(start, s.a.pos, s.a.radius);
+            s.delta = sub(s.a.pos, start);
             s.dir = norm(s.delta);
             s.zone = env.col.find_zone_near(s.zone as i32, s.a.pos);
         }
     }
 
-    /// `EftDet_ClashPass` for two ki blasts: the lower level loses (both on a tie); `EftDet_SpheresVsSpheres`.
-    fn clash_pass(&mut self) {
+    /// `EftHit_Clash`: 1 record `j` wins, 2 record `i` wins, 3 both lose, 4 a beam struggle. A ki blast loses to a
+    /// technique; two blasts compare levels; two techniques first try `EftHit_ClashTech`, which also stops both
+    /// fighters' technique timers on a head-on pair.
+    fn clash(&mut self, i: usize, j: usize) -> i32 {
+        let (a, b) = (self.records[i], self.records[j]);
+        let level = || {
+            if a.level > b.level {
+                2
+            } else if a.level < b.level {
+                1
+            } else {
+                3
+            }
+        };
+        match (a.tech, b.tech) {
+            (None, None) => level(),
+            (None, Some(_)) => 1,
+            (Some(_), None) => 2,
+            (Some(sa), Some(sb)) => {
+                let r = clash_tech(&a, &b, &sa, &sb);
+                if r == 4 {
+                    self.tech.request_stop(0);
+                    self.tech.request_stop(1);
+                }
+                if r == 3 { level() } else { r }
+            }
+        }
+    }
+
+    /// `EftDet_ClashPass`: every pair of records of different owners; the shapes are swept against each other
+    /// (spheres, capsules from their muzzles, or one of each); the clash is decided for every pair and used when
+    /// they touch: the loser stops (task flag 8). A beam struggle with no sight (flag 0xBA) or late in the battle
+    /// sequence (state 4 on) stops both; else both fighters get held flag 0xAA and both records flag 0x100 (the
+    /// struggle effect itself is not ported).
+    fn clash_pass(&mut self, w: &mut World) {
         let n = self.records.len();
         for i in 0..n.saturating_sub(1) {
             if !self.can_hit(i, 2) {
@@ -675,47 +873,74 @@ impl Scene {
                     continue;
                 }
                 let (a, b) = (self.records[i].shape, self.records[j].shape);
-                let Some((ha, hb)) = spheres_vs_spheres(&a, &b) else {
+                // EftDet_SpheresVsSpheres / CapsuleVsCapsule / CapsuleVsSpheres (the capsule first).
+                let touch = match (a.kind, b.kind) {
+                    (0, 0) | (1, 1) | (1, 0) => spheres_vs_spheres(&a, &b),
+                    (0, 1) => spheres_vs_spheres(&b, &a).map(|(hb, ha)| (ha, hb)),
+                    _ => None,
+                };
+                let result = self.clash(i, j);
+                let Some((ha, hb)) = touch else {
                     continue;
                 };
                 self.records[i].shape.hit_pos = ha.0;
                 self.records[i].shape.contact = ha.1;
                 self.records[j].shape.hit_pos = hb.0;
                 self.records[j].shape.contact = hb.1;
-                // EftHit_Clash / EftHit_CompareLevel.
-                let (la, lb) = (self.records[i].level, self.records[j].level);
-                let result = if la > lb {
-                    2
-                } else if la < lb {
-                    1
-                } else {
-                    3
-                };
                 self.records[i].shape.hit_flags |= D_CLASH;
+                let (pi, pj) = (ha.0, hb.0);
                 if result & 1 != 0 {
-                    let p = self.records[i].shape.hit_pos;
-                    self.set_task_flag(i, T_LOST_CLASH, p);
+                    self.set_task_flag(i, T_LOST_CLASH, pi);
                 }
                 if result & 2 != 0 {
-                    let p = self.records[j].shape.hit_pos;
-                    self.set_task_flag(j, T_LOST_CLASH, p);
+                    self.set_task_flag(j, T_LOST_CLASH, pj);
+                }
+                if result & 4 != 0 {
+                    let owner = self.records[i].owner;
+                    if w.chars[owner].flags.test(0xBA) || w.env.seq_state >= 4 {
+                        self.set_task_flag(i, T_LOST_CLASH, pi);
+                        self.set_task_flag(j, T_LOST_CLASH, pj);
+                    } else {
+                        w.chars[0].flags.set_held(0xAA);
+                        w.chars[1].flags.set_held(0xAA);
+                        // EftStruggle_IsActive: the struggle is not ported, so never active.
+                        self.set_task_flag(i, T_STRUGGLE, pi);
+                        self.set_task_flag(j, T_STRUGGLE, pj);
+                    }
                 }
             }
         }
     }
 
-    /// `EftDet_StagePass` with `EftDet_TestStage`: the swept sphere (a tenth of the radius, at least 0.08) against
-    /// the zone's triangles; the nearest contact stops the blast (task flag 4).
+    /// `EftDet_StagePass` with `EftDet_TestStage`: the swept volume (a sphere of the radius times the record's
+    /// scale, at least 0.08, from last frame's centre or the tail to the head) against the zone's triangles; the
+    /// nearest contact stops the record (task flag 4) unless it is a technique that goes through
+    /// (`EftHit_IsStoppedByHit`). A rush technique's record meets only stage objects, which are not ported.
     fn stage_pass(&mut self, env: &Env) {
         for i in 0..self.records.len() {
             if !self.can_hit(i, 0) {
+                continue;
+            }
+            let tech = self.records[i].tech;
+            let objects_only = tech.is_some_and(|t| {
+                if t.def.kind == 0 {
+                    t.def.sub == 4
+                } else {
+                    t.def.sub == 9
+                }
+            });
+            if objects_only {
                 continue;
             }
             let s = &mut self.records[i].shape;
             let r = (s.a.radius * s.scale).max(0.08);
             let sweep = Sweep::new(s.b.pos, s.a.pos, r);
             let bounds = capsule_bounds(s.b.pos, s.a.pos, r);
-            let mut best = sweep.length.max(r) + 0.001;
+            let mut best = if s.kind == 0 {
+                sweep.length.max(r) + 0.001
+            } else {
+                sweep.length + 0.001
+            };
             let mut found = None;
             env.col
                 .query_zone(s.zone, &bounds, &mut |poly: &ColPoly, v: [[f32; 3]; 3]| {
@@ -744,23 +969,60 @@ impl Scene {
             s.hit_pos = hit;
             s.contact = contact;
             s.hit_flags |= D_STAGE;
-            s.stage_dist = length(sub(s.b.pos, hit));
-            // EftHit_IsStoppedByHit is 1 for a blast; the contact sound and EftKiBomb_SetContact are not ported.
-            self.set_task_flag(i, T_HIT_STAGE, contact);
+            let from = if s.kind == 0 { s.b.pos } else { s.a_start };
+            s.stage_dist = length(sub(from, hit));
+            // EftHit_IsStoppedByHit; the contact sound, EftKiBomb_SetContact and a technique's camera shake and
+            // vibration are not ported.
+            let stops = tech.is_none_or(|t| {
+                if t.def.kind == 0 {
+                    t.def.sub != 4
+                } else {
+                    !matches!(t.def.sub, 7 | 9)
+                }
+            });
+            if stops {
+                self.set_task_flag(i, T_HIT_STAGE, contact);
+            }
+        }
+    }
+
+    /// `EftHit_MarkLastHit`: a technique's record is its last hit: a single hit (not of a rush kind 4), or a
+    /// multi-hit that has landed its last (or any hit with flag 0x20).
+    fn mark_last_hit(&mut self, i: usize) {
+        let rec = self.records[i];
+        let Some(src) = rec.tech else {
+            return;
+        };
+        if rec.flags & H_NO_LAST != 0 {
+            return;
+        }
+        let last = if self.is_multi(i) {
+            let hits = self.rec_tag(i).map_or(0, |t| t.hit_count);
+            hits > 0 && (rec.def_flag20() || hits >= rec.max_hits())
+        } else {
+            src.def.sub != 4
+        };
+        if last {
+            self.records[i].flags |= H_LAST;
         }
     }
 
     /// `EftDet_FighterPass`: each record against the fighter it may hit (owner ^ 1). A contact behind the stage
-    /// contact is dropped; then the fighter dodges, deflects, reflects, absorbs, guards or is hit.
+    /// contact is dropped; then the fighter dodges, deflects, reflects or absorbs, or a multi-hit counts its frames
+    /// in contact, else it guards or is hit.
     fn fighter_pass(&mut self, w: &mut World) {
         for i in 0..self.records.len() {
             if !self.can_hit(i, 1) {
                 continue;
             }
             let target = self.records[i].owner ^ 1;
-            let Some((hit_pos, contact, dist)) =
-                spheres_vs_fighter(&w.chars[target], &self.records[i].shape)
-            else {
+            let shape = self.records[i].shape;
+            // EftDet_SpheresVsFighter / CapsuleVsFighter.
+            let found = match shape.kind {
+                0 | 1 => spheres_vs_fighter(&w.chars[target], &shape),
+                _ => None,
+            };
+            let Some((hit_pos, contact, dist)) = found else {
                 continue;
             };
             let s = &mut self.records[i].shape;
@@ -771,9 +1033,11 @@ impl Scene {
                 continue;
             }
             s.hit_flags |= D_FIGHTER;
+            self.mark_last_hit(i);
             let rec = self.records[i];
             let contact = rec.shape.contact;
-            if try_dodge(w, target, &rec) {
+            let hit_count = self.rec_tag(i).map_or(0, |t| t.hit_count);
+            if try_dodge(w, target, &rec, hit_count) {
                 continue;
             }
             if try_deflect(w, target, &rec) {
@@ -782,12 +1046,142 @@ impl Scene {
                 self.set_task_flag(i, T_REFLECTED, contact);
             } else if try_absorb(w, target, &rec) {
                 self.set_task_flag(i, T_ABSORBED, contact);
-            } else if guard_blast(w, target, &rec) {
+            } else if self.is_multi(i) {
+                self.hit_fighter_multi(w, i, target);
+            } else if try_guard(w, target, &rec) {
+                self.rearm_impact(i);
                 self.set_task_flag(i, T_GUARDED, contact);
             } else if hit(w, target, &rec) {
+                self.rearm_impact(i);
                 self.set_task_flag(i, T_HIT_CHAR, contact);
             }
         }
+    }
+
+    /// `EftHit_RearmImpact`: a multi-hit technique may spawn its impact again.
+    fn rearm_impact(&mut self, i: usize) {
+        if self.records[i].tech.is_some()
+            && let Some(t) = self.rec_tag(i)
+            && t.flags & T_MULTI != 0
+        {
+            t.flags &= !T_IMPACT_DONE;
+        }
+    }
+
+    /// `EftDet_HitFighterMulti`: the task counts its frames in contact; past its hit limit it reports a hit; between
+    /// two hits (fewer frames than the interval since the last) it reports the contact (0x8000, not with flag
+    /// 0x20); else the fighter guards or is hit, and the hit is counted.
+    fn hit_fighter_multi(&mut self, w: &mut World, i: usize, target: usize) {
+        let rec = self.records[i];
+        let contact = rec.shape.contact;
+        let interval = rec.tech.map_or(0, |t| t.def.hit_interval);
+        let Some((frames, hits)) = self.rec_tag(i).map(|t| {
+            t.count_a += 1;
+            (t.count_a, t.hit_count)
+        }) else {
+            return;
+        };
+        if rec.max_hits() < hits {
+            self.set_task_flag(i, T_HIT_CHAR, contact);
+            return;
+        }
+        let bits = if hits > 0 && frames < interval {
+            0
+        } else if try_guard(w, target, &rec) {
+            T_GUARDED
+        } else if hit(w, target, &rec) {
+            T_HIT_CHAR
+        } else {
+            return;
+        };
+        if bits != 0
+            && let Some(t) = self.rec_tag(i)
+        {
+            t.hit_count += 1;
+            t.count_a = 0;
+        }
+        if !rec.def_flag20() {
+            self.set_task_flag(i, T_MULTI_CONTACT, contact);
+        }
+        if bits != 0 {
+            self.rearm_impact(i);
+            self.set_task_flag(i, bits, contact);
+        }
+    }
+
+    /// `EftHit_UpdateResults` / `EftHit_CalcResult`: the result each record's task reads in its post-update.
+    fn update_results(&mut self) {
+        for i in 0..self.records.len() {
+            let rec = self.records[i];
+            let Some(t) = self.rec_tag(i) else {
+                continue;
+            };
+            let mut r = 0;
+            if t.flags & T_HIT_STAGE != 0 {
+                r = 5;
+            }
+            if t.flags & T_MULTI_CONTACT != 0 {
+                r = 1;
+                t.flags &= !T_MULTI_CONTACT;
+            }
+            if t.flags & T_HIT_CHAR != 0 {
+                if t.flags & T_MULTI != 0 {
+                    if rec.max_hits() < t.hit_count && !rec.def_flag20() {
+                        r = 5;
+                    }
+                } else if rec.def_flag20() {
+                    t.flags |= T_KEEP;
+                } else {
+                    r = 4;
+                }
+            }
+            let f = t.flags;
+            if f & T_LOST_CLASH != 0 {
+                r = 4;
+            }
+            if f & T_GUARDED != 0 && f & T_MULTI == 0 {
+                r = 5;
+            }
+            if f & (T_ABSORBED | T_OUT) != 0 {
+                r = 5;
+            }
+            if f & T_STRUGGLE != 0 {
+                r = 3;
+            }
+            if rec.tech.is_some_and(|s| s.def.kind == 0) && f & T_LOST_CLASH == 0 {
+                r &= !5;
+            }
+            t.result = r;
+        }
+    }
+}
+
+/// `EftHit_ClashTech`: two technique records (no skill, the first of hit direction kind 0..2 or 8, neither with
+/// flag 0x100 or more than one shot): head-on (a moving toward b's last position against b's movement) is a beam
+/// struggle (4), else the one moving more toward the other passes (2: `a` wins, 1: `b`); 3 when the rule does
+/// not apply.
+fn clash_tech(a: &HitRec, b: &HitRec, sa: &TechSrc, sb: &TechSrc) -> i32 {
+    let (da, db) = (&sa.def, &sb.def);
+    if da.kind == 0 || db.kind == 0 {
+        return 3;
+    }
+    if !((0..=2).contains(&da.sub) || da.sub == 8) {
+        return 3;
+    }
+    if da.flags & 0x100 != 0 || db.flags & 0x100 != 0 || da.shots >= 2 || db.shots >= 2 {
+        return 3;
+    }
+    let move_a = sub(a.pos, a.prev);
+    let move_b = sub(b.pos, b.prev);
+    let d = sub(b.prev, a.prev);
+    if dot(move_a, d) > 0.0 && dot(move_a, move_b) < 0.0 {
+        return 4;
+    }
+    let t = dot(norm(sub(a.pos, b.pos)), norm(move_a));
+    if !(t < dot(norm(sub(b.pos, a.pos)), norm(move_b))) {
+        1
+    } else {
+        2
     }
 }
 
@@ -857,10 +1251,15 @@ fn add_hit_record(t: &Task) -> HitRec {
         turned: t.flags & W_TURNED != 0,
         atk: t.arg,
         seen_by_ai: false,
+        tech: None,
+        flags: 0,
+        unk54: false,
         task: t.id,
         shape: Shape {
+            kind: 0,
             a,
             b,
+            a_start: [0.0; 3],
             scale: 0.1,
             bounds: capsule_bounds(b.pos, a.pos, radius),
             delta: [0.0; 3],
@@ -882,35 +1281,35 @@ fn task_post_update(t: &mut Task, w: &mut World, fx: &mut Modules) {
         t.state.update_alive(set, fx);
     }
     t.mask = 0;
-    if t.hit & T_END != 0 {
+    if t.tag.flags & T_END != 0 {
         t.life = 0;
         t.flags |= W_ENDING;
         if t.flags & W_STOPPED == 0 {
-            t.pos = t.hit_pos;
+            t.pos = t.tag.pos;
         }
         spawn_parts(t, w, fx, true);
         if t.flags & W_STOPPED == 0 {
             end_trail(t, w);
         }
         t.flags |= W_STOPPED;
-    } else if t.hit & T_TURN != 0 && t.flags & W_DEFLECTED == 0 {
+    } else if t.tag.flags & T_TURN != 0 && t.flags & W_DEFLECTED == 0 {
         // EftKiBlast_Turn: the lerp it starts with is overwritten below.
         let by = t.arg.owner ^ 1;
         let dir = deflect_dir(w, by);
-        if t.hit & T_DEFLECTED != 0 {
+        if t.tag.flags & T_DEFLECTED != 0 {
             t.dir = dir;
             t.arg.owner ^= 1;
             t.flags = (t.flags & !W_HOMING) | W_DEFLECTED;
-        } else if t.hit & T_REFLECTED != 0 {
+        } else if t.tag.flags & T_REFLECTED != 0 {
             t.dir = dir;
             t.arg.owner ^= 1;
             t.life = t.arg.life;
         }
-        t.pos = t.hit_pos;
+        t.pos = t.tag.pos;
         spawn_parts(t, w, fx, true);
         end_trail(t, w);
         t.flags |= W_TURNED;
-        t.hit &= !T_TURN;
+        t.tag.flags &= !T_TURN;
     }
 }
 
@@ -979,7 +1378,7 @@ fn end_trail(t: &mut Task, w: &World) {
 /// `EftAim_Home`: the direction turned toward the opponent's node 0x11, led by half its frame movement times the
 /// frames to impact (at most 15), by at most `max_turn` (spread over half the frames left); unchanged when the owner
 /// is not locked on or the target is behind. `dir` is normalised in place.
-fn home(
+pub(crate) fn home(
     chars: &[Chr; 2],
     pos: [f32; 3],
     dir: &mut [f32; 3],
@@ -1104,8 +1503,20 @@ fn separate_sphere(a: Sphere, b: Sphere) -> Option<([f32; 3], [f32; 3], [f32; 3]
     ))
 }
 
-/// `EftDet_SpheresVsSpheres`: last frame's spheres of both records swept over the frame. Each record's centre
-/// and contact point.
+/// The sphere a shape sweeps along its `delta`: last frame's of two spheres, the one at the muzzle of a capsule.
+fn swept(s: &Shape) -> Sphere {
+    if s.kind == 0 {
+        s.b
+    } else {
+        Sphere {
+            pos: s.a_start,
+            radius: s.a.radius,
+        }
+    }
+}
+
+/// `EftDet_SpheresVsSpheres` (and `CapsuleVsCapsule` / `CapsuleVsSpheres`): the swept spheres of both records
+/// over the frame. Each record's centre and contact point.
 #[allow(clippy::type_complexity)]
 fn spheres_vs_spheres(
     a: &Shape,
@@ -1114,7 +1525,7 @@ fn spheres_vs_spheres(
     if !a.bounds.overlaps(&b.bounds) {
         return None;
     }
-    let (sa, sb) = (a.b, b.b);
+    let (sa, sb) = (swept(a), swept(b));
     let t = sweep_sphere(sa, sb, a.delta, b.delta)?;
     if t <= 0.000_001 || 1.0 <= t {
         let (pa, pb, nrm) = separate_sphere(sa, sb)?;
@@ -1129,9 +1540,9 @@ fn spheres_vs_spheres(
     ))
 }
 
-/// `EftDet_SpheresVsFighter`: last frame's sphere swept along the movement against every body part sphere; the
-/// earliest contact wins, a part it already overlaps ends the search. The centre, the contact point and the
-/// distance from the start.
+/// `EftDet_SpheresVsFighter` (and `CapsuleVsFighter`): the swept sphere along the movement against every body part
+/// sphere; the earliest contact wins, a part it already overlaps ends the search. The centre, the contact point and
+/// the distance from the start.
 fn spheres_vs_fighter(chr: &Chr, s: &Shape) -> Option<([f32; 3], [f32; 3], f32)> {
     let body = &chr.obj.body;
     let hit_box = ColBox {
@@ -1141,7 +1552,7 @@ fn spheres_vs_fighter(chr: &Chr, s: &Shape) -> Option<([f32; 3], [f32; 3], f32)>
     if !s.bounds.overlaps(&hit_box) {
         return None;
     }
-    let b = s.b;
+    let b = swept(s);
     let mut best = 1.0;
     let mut found = None;
     for part in &body.boxes {
@@ -1369,15 +1780,31 @@ pub(crate) fn hit_flags_of(rec: &HitRec, chars: &[Chr; 2], data: [&SideData; 2])
 }
 
 /// `BtlColl_IsFacing`.
-fn is_facing(chr: &Chr, yaw: f32) -> bool {
+pub(crate) fn is_facing(chr: &Chr, yaw: f32) -> bool {
     wrap_angle(chr.pose.rot[1] - yaw).abs() < 1.570_796_3
 }
 
-/// `BtlColl_GetHitDir` for a blast: its travel direction (from its position to the fighter's node 3 when it does
-/// not move); the yaw and the unit direction.
-fn hit_dir(chr: &Chr, rec: &HitRec) -> (f32, [f32; 3]) {
-    let mut dir = if length(rec.vel) < 0.01 {
+/// `BtlColl_GetHitDir`: the record's travel direction; from its position to the fighter's node 3 when it does not
+/// move (or has definition flag 2); from the attacker to the fighter (raised by half their height difference) for a
+/// technique of hit direction kind 3. The yaw and the unit direction.
+pub(crate) fn hit_dir(w: &World, target: usize, rec: &HitRec) -> (f32, [f32; 3]) {
+    let chr = &w.chars[target];
+    let mut from_pos = rec.unk54 || length(rec.vel) < 0.01;
+    let mut from_atk = None;
+    // The skills' records (slots 0, 1) are not ported.
+    if let Some(src) = rec.tech
+        && (2..5).contains(&src.slot)
+        && w.data[src.side].tables.tech().hit_dir_kind(src.slot) == 3
+    {
+        from_pos = false;
+        from_atk = Some(src.side);
+    }
+    let mut dir = if from_pos {
         sub(chr.obj.node_pos(3), rec.pos)
+    } else if let Some(side) = from_atk {
+        let mut d = opp_delta(chr, &w.chars[side]);
+        d[1] += w.data[target].height() * 0.5 - w.data[side].height() * 0.5;
+        sub([0.0; 3], d)
     } else {
         rec.vel
     };
@@ -1393,9 +1820,10 @@ fn hit_dir(chr: &Chr, rec: &HitRec) -> (f32, [f32; 3]) {
     (yaw, dir)
 }
 
-/// `BtlColl_TryDodge` for a blast: a fighter in hit-stop or with flag 0xAA lets it pass; flag 0x5A never; else flag
-/// 0x44.
-fn try_dodge(w: &World, target: usize, _rec: &HitRec) -> bool {
+/// `BtlColl_TryDodge`: a fighter in hit-stop or with flag 0xAA lets a record pass, flag 0x5A never; a fighter in a
+/// technique of kind 8 at least as strong as the record does; a ki blast with flag 0x44; a technique's record
+/// by `try_dodge_tech`.
+fn try_dodge(w: &mut World, target: usize, rec: &HitRec, hit_count: i32) -> bool {
     let chr = &w.chars[target];
     if chr.is_frozen() || chr.flags.test(0xAA) {
         return true;
@@ -1403,17 +1831,27 @@ fn try_dodge(w: &World, target: usize, _rec: &HitRec) -> bool {
     if chr.flags.test(0x5A) {
         return false;
     }
-    // No technique with a clash power is ported.
-    chr.flags.test(0x44)
+    if tech_outclasses(chr, w.data[target], rec.level) {
+        return true;
+    }
+    match rec.tech {
+        None => chr.flags.test(0x44),
+        Some(src) if (2..5).contains(&src.slot) => try_dodge_tech(w, target, hit_count),
+        Some(_) => false,
+    }
 }
 
-/// `BtlColl_TryDeflect`: a free fighter facing the blast knocks it away with flag 0x50 (kinds 0, 4, 8) or 0x51,
+/// `BtlColl_TryDeflect`: a free fighter facing a ki blast knocks it away with flag 0x50 (kinds 0, 4, 8) or 0x51,
 /// or perfectly inside its deflect window; the powered-up skill 0x80 always does.
 fn try_deflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
+    if rec.tech.is_some() || rec.unk54 {
+        return false;
+    }
     if hit_flags(w, rec) & 2 != 0 || !w.chars[target].is_free() {
         return false;
     }
     let pflags = w.data[target].tables.params.flags();
+    let (yaw, _) = hit_dir(w, target, rec);
     let chr = &mut w.chars[target];
     if !chr.flags.test(0x52)
         && !chr.flags.test(0x54)
@@ -1422,7 +1860,7 @@ fn try_deflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     {
         return true;
     }
-    if is_facing(chr, hit_dir(chr, rec).0) {
+    if is_facing(chr, yaw) {
         return false;
     }
     let perfect = chr.flags.test(0x41) && chr.unk1074 > 0 && pflags & 2 == 0;
@@ -1455,13 +1893,14 @@ fn deflect_dir_of(chr: &Chr, rec: &HitRec) -> [f32; 3] {
     }
 }
 
-/// `BtlColl_TryReflect`: a free fighter with flag 0x52 facing the blast sends it back.
+/// `BtlColl_TryReflect`: a free fighter with flag 0x52 facing a ki blast sends it back.
 fn try_reflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
-    if hit_flags(w, rec) & 2 != 0 {
+    if rec.tech.is_some() || rec.unk54 || hit_flags(w, rec) & 2 != 0 {
         return false;
     }
+    let (yaw, _) = hit_dir(w, target, rec);
     let chr = &mut w.chars[target];
-    if !chr.flags.test(0x52) || !chr.is_free() || is_facing(chr, hit_dir(chr, rec).0) {
+    if !chr.flags.test(0x52) || !chr.is_free() || is_facing(chr, yaw) {
         return false;
     }
     chr.deflect_dir = deflect_dir_of(chr, rec);
@@ -1469,27 +1908,38 @@ fn try_reflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     true
 }
 
-/// `BtlColl_TryAbsorb`: a free fighter with flag 0x54 (or a perfect guard with parameter flag 2) facing a type 0 /
-/// 1 blast takes three times its ki cost.
+/// `BtlColl_TryAbsorb`: a free fighter with flag 0x54 (or, for a ki blast, a perfect guard with parameter flag 2)
+/// facing the record takes ki: three times a type 0 / 1 blast's cost, or a technique's cost over its shots
+/// (technique flag 4 only).
 fn try_absorb(w: &mut World, target: usize, rec: &HitRec) -> bool {
+    if rec.unk54 {
+        return false;
+    }
     let pflags = w.data[target].tables.params.flags();
-    let flags = hit_flags(w, rec);
-    let blast = *hit_record(w, rec);
-    let chr = &mut w.chars[target];
+    let chr = &w.chars[target];
     let mut alt = false;
     if !chr.flags.test(0x54) {
-        alt = chr.flags.test(0x41) && chr.unk1074 > 0 && pflags & 2 != 0;
+        alt = chr.flags.test(0x41) && chr.unk1074 > 0 && pflags & 2 != 0 && rec.tech.is_none();
         if !alt {
             return false;
         }
     }
-    if !chr.is_free() || is_facing(chr, hit_dir(chr, rec).0) {
+    if !chr.is_free() || is_facing(chr, hit_dir(w, target, rec).0) {
         return false;
     }
-    if flags & 2 != 0 || matches!(blast.kind_type(), 2 | 3) {
-        return false;
-    }
-    let amount = blast.ki() * 3;
+    let amount = if rec.tech.is_some() {
+        match absorb_amount(w, rec) {
+            Some(a) => a,
+            None => return false,
+        }
+    } else {
+        let blast = *hit_record(w, rec);
+        if hit_flags(w, rec) & 2 != 0 || matches!(blast.kind_type(), 2 | 3) {
+            return false;
+        }
+        blast.ki() * 3
+    };
+    let chr = &mut w.chars[target];
     // BtlMember_AddKi: the overflow feeds the max power gauge outside the powered-up mode.
     if amount > 0 {
         let g = &mut chr.gauge;
@@ -1507,22 +1957,32 @@ fn try_absorb(w: &mut World, target: usize, rec: &HitRec) -> bool {
     true
 }
 
-/// `BtlColl_TryGuard` with `BtlColl_GuardBlast`: a fighter in a guard motion takes the guarded damage and a push
-/// from a blast it faces (any unblockable blast goes through).
-fn guard_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
+/// `BtlColl_TryGuard`: flag 0x59 takes any record as guarded; else a ki blast by `guard_blast`, a technique's
+/// record (slots 2..4) by `guard_rush`.
+fn try_guard(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if w.chars[target].flags.test(0x59) {
         return true;
     }
+    match rec.tech {
+        None => guard_blast(w, target, rec),
+        Some(src) if (2..5).contains(&src.slot) => guard_rush(w, target, rec),
+        Some(_) => false,
+    }
+}
+
+/// `BtlColl_GuardBlast`: a fighter in a guard motion takes the guarded damage and a push from a blast it faces
+/// (any unblockable blast goes through).
+fn guard_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let flags = hit_flags(w, rec);
     let blast = *hit_record(w, rec);
     let env = w.env;
     let data = w.data[target];
+    let (yaw, dir) = hit_dir(w, target, rec);
     let chr = &mut w.chars[target];
     if chr.flags.test(0x44) {
         return false;
     }
     let kind = guard_kind(chr);
-    let (yaw, dir) = hit_dir(chr, rec);
     if kind != 6 && (flags & 1 != 0 || is_facing(chr, yaw)) {
         return false;
     }
@@ -1539,8 +1999,8 @@ fn guard_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     true
 }
 
-/// `BtlColl_Hit` with `BtlColl_HitByBlast`: a pending reaction that cannot be replaced takes the hit without
-/// effect; else the reaction by the victim's state, the damage and the push, and the victim locks on.
+/// `BtlColl_Hit`: a pending reaction that cannot be replaced takes the record without effect; else a ki blast's
+/// hit or a technique's (slots 2..4); a hit that lands raises the first clash of the record's owner.
 fn hit(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if matches!(
         w.chars[target].react.reaction,
@@ -1548,18 +2008,41 @@ fn hit(w: &mut World, target: usize, rec: &HitRec) -> bool {
     ) {
         return true;
     }
+    let ret = match rec.tech {
+        None => hit_by_blast(w, target, rec),
+        Some(src) if (2..5).contains(&src.slot) => hit_by_rush(w, target, rec),
+        Some(_) => false,
+    };
+    if ret {
+        let (atk, def) = if rec.owner == 0 {
+            let [a, b] = &mut *w.chars;
+            (a, b)
+        } else {
+            let [b, a] = &mut *w.chars;
+            (a, b)
+        };
+        raise_first_clash(atk, def);
+    }
+    ret
+}
+
+/// `BtlColl_HitByBlast`: the reaction by the victim's state, the damage and the push, and the victim locks on.
+fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let flags = hit_flags(w, rec);
     let blast = *hit_record(w, rec);
     let env = w.env;
     let (data, atk_data) = (w.data[target], w.data[rec.atk.src]);
     let atk_powered = w.chars[rec.atk.src].flags.test(6);
+    let (yaw, dir) = hit_dir(w, target, rec);
     let chr = &mut w.chars[target];
     let st = env.anim_flags(chr.anim.cur);
     if chr.flags.test(0x44) {
         return false;
     }
-    // A fighter using a technique (none is ported) would take it without effect.
-    let (yaw, dir) = hit_dir(chr, rec);
+    // A fighter using a technique takes it without effect.
+    if crate::btl_act::is_technique_id(chr.act.current) {
+        return true;
+    }
     let front = is_facing(chr, yaw);
     let or_plain = |v: i8| i32::from(if v != 0 { v } else { blast.react() });
     let react = if chr.no_flinch > 0 {
@@ -1628,14 +2111,6 @@ fn hit(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if !chr.flags.test(0x93) {
         chr.flags.set_held(5);
     }
-    let (atk, def) = if rec.owner == 0 {
-        let [a, b] = &mut *w.chars;
-        (a, b)
-    } else {
-        let [b, a] = &mut *w.chars;
-        (a, b)
-    };
-    raise_first_clash(atk, def);
     true
 }
 

@@ -41,6 +41,10 @@ pub struct SetHead {
     pub flags: u8,
     /// Bit per phase the set has emitters for.
     pub phase_mask: u8,
+    /// The second width animation (flag 4): b0 -> b1 -> b2 over `width_b_time` seconds (`EftEmit_UpdateWidth2`).
+    pub width_b: [f32; 3],
+    pub width_b_time: f32,
+    pub width_b_split: f32,
 }
 
 /// `EftEmitDef` (0x40 bytes): one emitter.
@@ -193,6 +197,9 @@ impl EmitSet {
             end_frames: h[0x20],
             flags: h[0x21],
             phase_mask: h[0x27],
+            width_b: [f32_at(h, 0x2C), f32_at(h, 0x30), f32_at(h, 0x34)],
+            width_b_time: f32_at(h, 0x38),
+            width_b_split: f32_at(h, 0x3C),
         };
         let (n_groups, n_parts) = (usize::from(h[4]), usize::from(h[5]));
         if n_groups > SET_KINDS || n_parts > 40 {
@@ -412,6 +419,21 @@ impl EffectPack {
             blast_sets: [set(3), set(4)],
         })
     }
+}
+
+/// `BtlCharApi_GetPlayerEffectPack`: the effect pack of technique slot `slot` (0..4) is entry `slot + 1` of the
+/// character's second animation file (`BtlObj_RequestCharaModel`); `None` when it is empty.
+pub fn tech_pack(anim_file: &[u8], slot: usize) -> Option<&[u8]> {
+    if slot >= 5 {
+        return None;
+    }
+    pack_entry(anim_file, slot + 1)
+}
+
+/// `EftBlastMgr_Init`: the emitter set of a type 0 technique effect (the plain blast / beam), header entry 4 of
+/// the slot's pack.
+pub fn tech_blast_set(pack: &[u8]) -> Option<EmitSet> {
+    EmitSet::parse(pack, 4).ok()
 }
 
 /// `EftRbnPrm`: a ribbon's parameter block (the emitter's first definition block). "[3]" is the value at the three

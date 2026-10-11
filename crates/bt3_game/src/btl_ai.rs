@@ -594,18 +594,21 @@ impl Ai<'_, '_, '_, '_> {
         -1
     }
 
-    /// `BtlCharApi_FindIncomingBlast`: the first ki blast record (modes 0 / 1; mode 2 / 3 look at technique
-    /// records, none of which is ported) not the fighter's own nor seen, flying toward it and within five frames
-    /// of its travel (less the body radius and 10). Mode 1 gives its class instead: 0 for kinds 0, 4, 8, else 2
-    /// when it cannot be guarded, else 1.
+    /// `BtlCharApi_FindIncomingBlast`: the first record not the fighter's own nor seen (`BtlCharApi_SkipBlastRec`:
+    /// ki blasts in modes 0 / 1, technique records in modes 2 / 3; none with definition flag 2), flying toward it
+    /// and within five frames of its travel (1.9 for a technique) less the body radius and 10. Mode 1 gives its
+    /// class instead: 0 for kinds 0, 4, 8, else 2 when it cannot be guarded, else 1.
     fn incoming_blast(&self, mode: i32) -> i32 {
-        if mode >= 2 {
-            return -1;
-        }
+        let reach = if mode < 2 { 5.0 } else { 1.9 };
         let me = self.me();
         let pos = self.pos(me);
         for (i, rec) in self.c.blasts.iter().enumerate() {
-            if rec.owner == me || rec.seen_by_ai {
+            let skip = match (mode < 2, rec.tech) {
+                (true, None) => rec.owner == me,
+                (false, Some(src)) => src.side == me,
+                _ => true,
+            };
+            if skip || rec.unk54 || rec.seen_by_ai {
                 continue;
             }
             let to_blast = normalize(sub(rec.pos, pos));
@@ -614,7 +617,7 @@ impl Ai<'_, '_, '_, '_> {
                 continue;
             }
             let dist = length(sub(rec.pos, pos)) - self.radius(me) - 10.0;
-            if length(step) * 5.0 < dist {
+            if length(step) * reach < dist {
                 continue;
             }
             if mode != 1 {
@@ -639,12 +642,14 @@ impl Ai<'_, '_, '_, '_> {
         }
     }
 
-    /// `BtlCharApi_IsBlastPassing`: some blast not fired by the fighter is level with it or moving away.
+    /// `BtlCharApi_IsBlastPassing`: some record not fired by the fighter (nor with definition flag 2) is level with
+    /// it or moving away.
     fn blast_passing(&self) -> bool {
         let me = self.me();
         let pos = self.pos(me);
         self.c.blasts.iter().any(|rec| {
-            rec.atk.src != me
+            rec.tech.map_or(rec.atk.src, |t| t.side) != me
+                && !rec.unk54
                 && !(0.0
                     < dot(
                         normalize(sub(rec.pos, pos)),
