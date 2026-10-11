@@ -17,8 +17,8 @@ use std::f32::consts::PI;
 use crate::btl_blast::{blast_limit_a, can_fire, hits_of, ki_cost, ki_cost_of};
 use crate::btl_chr::{
     Chr, Env, SideData, anim_flag, begin_rise_to_opponent, deg, is_blocked_by_opponent, kmh,
-    length, opp_delta, opp_gap_xz, opp_yaw, opp_yaw_from_facing, scale_speed_by_approach,
-    steer_at_opponent, sub,
+    length, normalize, opp_delta, opp_gap_xz, opp_yaw, opp_yaw_from_facing,
+    scale_speed_by_approach, steer_at_opponent, sub, warp_behind_opponent,
 };
 use crate::btl_input::{DIR_MASK, wrap_angle};
 use crate::btl_obj::mask_to_node;
@@ -27,6 +27,11 @@ const ENTER: u32 = 0;
 const RUN: u32 = 1;
 const DECIDE: u32 = 2;
 const LEAVE: u32 = 3;
+
+/// `BtlParam_GetAmountA` / `BtlParam_GetAmountB`: the ki of a vanishing step and of vanishing behind the
+/// opponent (abilities 0x23 / 0x24 lower them; abilities are not ported).
+const VANISH_KI: i32 = 10000;
+const VANISH_BEHIND_KI: i32 = 20000;
 
 /// What a handler sees: the fighter, its opponent, both sides' data and the battle.
 pub(crate) struct Ctx<'a, 'd> {
@@ -44,7 +49,7 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x1D | 0x37 | 0x38 | 0x3A | 0x44 | 0xAE..=0xB1
+        1..=3 | 0xB..=0x2A | 0x37 | 0x38 | 0x3A | 0x44 | 0xAE..=0xB1
         | 0xBD | 0xC0..=0xCA | 0xCF..=0xD3 | 0xD8 | 0xD9 | 0xDA..=0xDE | 0xE0..=0xE6)
 }
 
@@ -310,8 +315,11 @@ impl Ctx<'_, '_> {
             self.set_queue(0, 0x1E);
             return 1;
         }
-        // BtlParam_GetAmountA: 10000 without abilities.
-        if mask & 0x20000 != 0 && self.flags2() & 8 != 0 && self.flag(5) && self.me.has_ki(10000) {
+        if mask & 0x20000 != 0
+            && self.flags2() & 8 != 0
+            && self.flag(5)
+            && self.me.has_ki(VANISH_KI)
+        {
             for (input, action) in [(0x20, 0x23), (0x1D, 0x20), (0x1E, 0x21), (0x1F, 0x22)] {
                 if self.test(input) {
                     self.set_queue(0, action);
@@ -319,11 +327,10 @@ impl Ctx<'_, '_> {
                 }
             }
         }
-        // BtlParam_GetAmountB: 20000.
         if mask & 0x40000 != 0
             && self.flag(5)
             && self.flag(0x13)
-            && self.me.has_ki(20000)
+            && self.me.has_ki(VANISH_BEHIND_KI)
             && self.flag(0xB3)
             && self.me.unk1080 > 0
         {
@@ -573,6 +580,10 @@ impl Ctx<'_, '_> {
             0x19 => self.homing_dash(phase),
             0x1A => self.dragon_dash(phase),
             0x1B..=0x1D => self.side_step(phase),
+            0x1E | 0x1F => self.step_in(phase),
+            0x20..=0x23 => self.vanish_step(phase),
+            0x24 => self.vanish_behind(phase),
+            0x25..=0x2A => self.recover_air(phase),
             0x37 => self.charge(phase),
             0x38 => self.guard(phase),
             0xAE => self.ki_blast(phase),
@@ -2182,6 +2193,263 @@ impl Ctx<'_, '_> {
                 let q = self.queued();
                 self.request(q);
             }
+        }
+    }
+
+    /// Actions 0x1E, 0x1F (`BtlAct_StepInHandler`): the short forward dash, motion 0x1B, fast until 70% of it.
+    /// 0x1E reads attack inputs; 0x1F queues the attack records 0x8F, 0x8D, 0x8E (the records are not ported).
+    fn step_in(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x1B, 0.15);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.request(0xB);
+            }
+            if self.me.anim_progress() < 0.3 {
+                self.set(0x42);
+            }
+            let (speed, accel) = if self.me.anim_progress() < 0.7 {
+                (self.me.move_speed(self.data, self.env, 0xA), 10000.0)
+            } else {
+                (0.0, kmh(100.0))
+            };
+            self.step(2, 1, 3, speed, accel);
+            self.me.apply_gravity();
+            self.set(0x88);
+            self.set(0xD5);
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+            if self.me.gauge.low_health_idle {
+                self.set(0x96);
+            }
+        }
+        if phase == DECIDE {
+            match self.current() {
+                0x1E => {
+                    self.decide_attack(0x1C0_0803);
+                    if self.me.anim_progress() > 0.5 {
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                    if self.decide_attack(0x40) != 0 {
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                }
+                _ => {
+                    self.decide_attack(0x200_0030);
+                    // BtlDecide_QueueAttack(0x8F / 0x8D / 0x8E): the attack records are not ported.
+                    if self.me.anim_progress() > 0.3 {
+                        let q = self.queued();
+                        self.request(q);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Actions 0x20..0x23 (`BtlAct_VanishStepHandler`): the vanishing step, motion 0xF6, then seven frames of fast
+    /// movement back (0x20), left (0x21), right (0x22) or along the line to the opponent (0x23), untouchable
+    /// (flags 0x42..0x46). Raised by flags 0x74..0x76 (a counter), it starts at once. The sound, the voice, battle
+    /// event 0x41, frame bit 0x8000 and the stage timer of stages 4 / 27 are not ported.
+    fn vanish_step(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xF6, 0.15);
+            if self.me.act.prev == 0x44 {
+                self.held(0x83);
+                self.me.spend_ki(VANISH_KI, false);
+            }
+            if self.flag(0x74) || self.flag(0x75) || self.flag(0x76) {
+                self.me.work[0] |= 1;
+                self.set(0x12C);
+            }
+            self.me.work[2] = 7;
+            self.me.set_fx(0xC);
+            self.held(0xE);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            if self.flag(0x78) {
+                self.me.work[0] |= 2;
+            }
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.me.work[0] |= 1;
+            }
+            if self.me.work[0] & 1 == 0 {
+                self.step(2, 5, 7, 0.0, kmh(100.0));
+                self.me.apply_gravity();
+            } else {
+                if self.me.work[2] == 7 {
+                    let delta = normalize(opp_delta(self.me, self.opp));
+                    let yaw = -opp_yaw(self.me, self.opp);
+                    let mut dir = [0.0f32; 3];
+                    match self.current() {
+                        0x21 => dir[0] = -1.0,
+                        0x22 => dir[0] = 1.0,
+                        0x23 => {
+                            dir[1] = delta[1];
+                            dir[2] = (1.0f32 - delta[1] * delta[1]).sqrt();
+                        }
+                        _ => dir[2] = -1.0,
+                    }
+                    let dir = normalize(dir);
+                    let (s, c) = yaw.sin_cos();
+                    self.me.pose.dir = [dir[0] * c - dir[2] * s, dir[1], dir[0] * s + dir[2] * c];
+                }
+                self.me.work[2] -= 1;
+                let counter = self.me.work[2];
+                let speed = if counter >= 2 {
+                    let speed = self.me.move_speed(self.data, self.env, 0x12);
+                    scale_speed_by_dist(self.me, self.opp, speed, PI, 6.0)
+                } else {
+                    if counter == 1 {
+                        self.me.set_fx(0xD);
+                    }
+                    0.0
+                };
+                self.step(2, 5, 7, speed, 10000.0);
+                self.me.apply_gravity();
+                // Unless flag 0x78 was up at the start, the step keeps up with the opponent.
+                if self.me.work[0] & 2 == 0 && self.flag(5) {
+                    let moved = self.opp.pose.moved;
+                    for (p, m) in self.me.pose.pos.iter_mut().zip(moved) {
+                        *p += m;
+                    }
+                }
+                self.set(0xB);
+            }
+            self.me.request_orbit(5.0, 10.0);
+            self.set(0x88);
+            self.me.set_fx(0x3A);
+            for f in 0x42..=0x46 {
+                self.set(f);
+            }
+            if self.flag(0x83) {
+                self.set(0x85);
+            }
+        }
+        if phase == DECIDE {
+            if !self.has_queued() {
+                self.decide_attack(3);
+            }
+            if self.me.work[2] <= 0 {
+                self.request(0xB);
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
+    /// Action 0x24 (`BtlAct_VanishBehindHandler`): vanish (motion 0xF6), then reappear behind the opponent facing
+    /// it, for 20000 ki. The sound, the voice and the vibration are not ported.
+    fn vanish_behind(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xF6, 0.15);
+            self.me.spend_ki(VANISH_BEHIND_KI, false);
+            self.me.set_fx(0xC);
+            self.held(0xE);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.me.work[2] = 7;
+        }
+        if phase == RUN {
+            if !self.me.anim_advance(0) {
+                self.step(2, 5, 7, 0.0, kmh(100.0));
+                self.me.apply_gravity();
+            } else {
+                self.me.work[2] -= 1;
+                let counter = self.me.work[2];
+                if counter >= 2 {
+                    self.me.pose.speed = 0.0;
+                    self.me.pose.fall_speed = 0.0;
+                } else if counter == 1 {
+                    self.me.set_fx(0xD);
+                    if !self.flag(0xBA) {
+                        warp_behind_opponent(self.me, self.data, self.opp, self.opp_data, 0.0);
+                        self.me.turn_yaw(self.opp, 2, PI);
+                        self.me
+                            .turn_pitch(self.data, self.opp, self.opp_data, 1, PI);
+                        self.me.turn_model_yaw(PI, 1.0);
+                        self.me.set_direction(3);
+                        for f in [0x3F, 0xB, 0xCC, 0x24] {
+                            self.set(f);
+                        }
+                    }
+                }
+                self.set(0xB);
+            }
+            for f in 0x42..=0x46 {
+                self.set(f);
+            }
+        }
+        if phase == DECIDE {
+            if !self.has_queued() {
+                self.decide_attack(3);
+            }
+            if self.me.work[2] <= 0 {
+                self.request(0xB);
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
+    /// Actions 0x25..0x2A (`BtlAct_RecoverHandler`): recovering in the air (motions 0xFE..0x102) for the ki of the
+    /// parameter's +0x48. 0x29 and 0x2A turn around; 0x26 goes on to the dash 0xF, 0x28 and 0x2A to the homing
+    /// dash 0x19, the others to 0xB. The sound is not ported.
+    fn recover_air(&mut self, phase: u32) {
+        if phase == ENTER {
+            if self.me.is_air_motion(self.env, false) {
+                self.me.pose.yaw = wrap_angle(self.me.pose.yaw + PI);
+            }
+            let anim = match self.current() {
+                0x27 => 0xFF,
+                0x29 => 0x100,
+                0x28 => 0x101,
+                0x2A => 0x102,
+                _ => 0xFE,
+            };
+            if matches!(self.current(), 0x29 | 0x2A) {
+                self.me.pose.speed = 0.0;
+                self.me.pose.yaw = wrap_angle(self.me.pose.yaw + PI);
+                self.me.pose.rot[1] = self.me.pose.yaw;
+            }
+            self.play(anim, 0.0);
+            self.held(0xE);
+            let cost = self.data.tables.params.s32_at(0x48);
+            self.me.spend_ki(cost, false);
+        }
+        if phase == RUN {
+            match self.current() {
+                0x26 => {
+                    self.me.anim_advance(0);
+                    if self.me.anim_progress() > 0.4 {
+                        self.request(0xF);
+                    }
+                }
+                0x28 | 0x2A => {
+                    if self.me.anim_advance(0) {
+                        self.request(0x19);
+                    }
+                }
+                _ => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                    }
+                }
+            }
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            if self.flag(0x11) {
+                self.held(0xE);
+            }
+        }
+        if phase == LEAVE {
+            self.set(0x33);
         }
     }
 

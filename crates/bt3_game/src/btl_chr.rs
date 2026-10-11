@@ -1466,6 +1466,24 @@ pub(crate) fn opp_yaw(me: &Chr, opp: &Chr) -> f32 {
     }
 }
 
+/// `BtlMove_WarpBehindOpponent`, under lock-on only: the opponent's next position (its target position plus its
+/// last movement), both radii and `gap` behind it.
+pub(crate) fn warp_behind_opponent(
+    me: &mut Chr,
+    data: &SideData,
+    opp: &Chr,
+    opp_data: &SideData,
+    gap: f32,
+) {
+    if !me.flags.test(5) {
+        return;
+    }
+    let at = add(opp.snap_pos(6), opp.pose.vel);
+    let yaw = opp.snap_rot(6)[1];
+    let d = data.radius() + opp_data.radius() + gap;
+    me.pose.pos = add(at, [-yaw.sin() * d, 0.0, -yaw.cos() * d]);
+}
+
 /// `BtlOpp_GetYawFromFacing`: relative to the own model yaw plus the root yaw.
 pub(crate) fn opp_yaw_from_facing(me: &Chr, opp: &Chr) -> f32 {
     wrap_angle(opp_yaw(me, opp) - wrap_angle(me.pose.rot[1] + me.pose.root_rot[1]))

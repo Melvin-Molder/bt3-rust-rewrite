@@ -2353,6 +2353,99 @@ mod tests {
     }
 
     #[test]
+    fn real_step_in_and_vanishing_step() {
+        use crate::btl_input::pad::{CIRCLE, CROSS, LEFT, SQUARE, START, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..40 {
+            frame(&mut battle, 0);
+        }
+        let dist = |b: &Battle| {
+            let (a, o) = (b.roster.chars[0].pose.pos, b.roster.chars[1].pose.pos);
+            ((a[0] - o[0]).powi(2) + (a[2] - o[2]).powi(2)).sqrt()
+        };
+        // Walk in until close (flag 0x13: the opponent within both heights and a margin).
+        for _ in 0..300 {
+            if battle.roster.chars[0].flags.test(0x13) {
+                break;
+            }
+            frame(&mut battle, UP);
+        }
+        for _ in 0..20 {
+            frame(&mut battle, 0);
+        }
+        assert!(
+            battle.roster.chars[0].flags.test(0x13),
+            "not close: {}",
+            dist(&battle)
+        );
+        // A dash when close: the short forward dash (action 0x1E), back to neutral when its motion ends.
+        let before = dist(&battle);
+        frame(&mut battle, CROSS);
+        let mut actions = Vec::new();
+        for _ in 0..40 {
+            actions.push(battle.roster.chars[0].act.current);
+            frame(&mut battle, 0);
+        }
+        assert!(actions.contains(&0x1E), "{actions:x?}");
+        assert_eq!(battle.roster.chars[0].act.current, 0xB);
+        assert!(
+            dist(&battle) < before - 5.0,
+            "{before} -> {}",
+            dist(&battle)
+        );
+        // Guard pressed with left during a rush step (the only decide that offers it): the vanishing step to the
+        // left (action 0x21). Its ki is spent only when the previous action was the rush, which nothing records
+        // (BtlAct_GetPrev reads a word nobody writes), so the ki stays.
+        battle.roster.chars[0].gauge.ki = 40000;
+        frame(&mut battle, SQUARE);
+        frame(&mut battle, 0);
+        for _ in 0..3 {
+            frame(&mut battle, 0);
+        }
+        assert_eq!(battle.roster.chars[0].act.current, 0x44);
+        let pos = battle.roster.chars[0].pose.pos;
+        frame(&mut battle, LEFT | CIRCLE);
+        let mut actions = Vec::new();
+        for _ in 0..40 {
+            actions.push(battle.roster.chars[0].act.current);
+            frame(&mut battle, 0);
+        }
+        assert!(actions.contains(&0x21), "{actions:x?}");
+        // (The rush step's hit adds ki of its own.)
+        assert!(battle.roster.chars[0].gauge.ki >= 40000);
+        let moved =
+            crate::btl_chr::length(crate::btl_chr::sub(battle.roster.chars[0].pose.pos, pos));
+        assert!(moved > 5.0, "moved {moved}");
+    }
+
+    #[test]
     fn real_pause_menu_shows_the_fighters_skill_list() {
         use crate::btl_input::pad::{CROSS, DOWN, RIGHT, START, TRIANGLE};
         let setup = BattleSetup::default();
