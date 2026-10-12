@@ -151,14 +151,10 @@ pub(crate) struct Throw {
     pub partner_step: i32,
     /// The step the victim's model is reloaded in.
     pub last_step: i32,
-    /// `BtlChange_RequestObject`'s partner object (character < 0: none). The partner objects are not ported: only
-    /// the character is read.
+    /// `BtlChange_RequestObject`'s partner object (character < 0: none).
     pub partner_chara: i32,
-    #[allow(dead_code)]
     pub partner_costume: i32,
-    #[allow(dead_code)]
     pub partner_variant: i32,
-    #[allow(dead_code)]
     pub partner_slot: i32,
     /// The victim turns by `turn_yaw` / `turn_pitch` at the end.
     pub turn_victim: bool,
@@ -1178,6 +1174,22 @@ impl Chr {
         self.obj.sample_pose(&data.obj);
         self.pose_to_obj(true);
         self.obj.calc_matrices(&data.obj);
+        if matches!(
+            self.act.current,
+            0x104 | 0x106..=0x108 | 0x12D..=0x12F | 0x139..=0x13B
+        ) {
+            // The damaged variant (or technique 0x280's character, flag 0xA6: the body changed, the member's
+            // gauges reloaded at full health).
+            self.gauge.variant = self.form.variant;
+            if self.flags.test(0xA6) {
+                let g = &mut self.gauge;
+                g.body_changed = true;
+                g.health_max = data.entry.health_max.max(10000);
+                g.ki_max = 100_000;
+                g.blast_max = data.entry.blast_stocks * 100_000;
+                g.health = g.health_max;
+            }
+        }
         if matches!(self.act.current, 0xEC..=0xF0) {
             let form_flags = data.tables.params.form_flags();
             let g = &mut self.gauge;
@@ -1203,6 +1215,12 @@ impl Chr {
             }
             g.health = g.health.clamp(1, g.health_max);
             g.blast = g.blast.clamp(0, g.blast_max);
+        }
+        // The damaged look of the variant (object flag 0x40000000); the aura's colour preset is not ported.
+        if self.gauge.variant != 0 {
+            self.obj.flags |= 0x4000_0000;
+        } else {
+            self.obj.flags &= !0x4000_0000;
         }
     }
 

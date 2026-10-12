@@ -786,6 +786,8 @@ pub type Loader = Box<dyn FnMut(u32) -> Result<Vec<u8>, String> + Send + Sync>;
 struct ChangeJob {
     side: usize,
     object: bool,
+    /// The model only (`modelOnly`): the side's animation files, voice and AI stay.
+    model_only: bool,
     load: SideLoad,
     state: u8,
     model: Option<FighterModel>,
@@ -935,6 +937,7 @@ impl Battle {
                 self.change_job = Some(ChangeJob {
                     side,
                     object,
+                    model_only,
                     load,
                     state: 0,
                     model: None,
@@ -989,7 +992,7 @@ impl Battle {
                 }
                 let job = self.change_job.take().unwrap();
                 if let Some(model) = job.model {
-                    self.swap_side(job.side, model);
+                    self.swap_side(job.side, model, job.model_only);
                 }
             }
         }
@@ -998,7 +1001,7 @@ impl Battle {
     /// The swap of `BtlLoad_StepChara`: the side's files replaced (`BtlRes_CommitReload2`), the fighter's object
     /// set up again (`BtlChars_OnModelLoaded`), the side's AI reset (`BtlAiMgr_ResetSide`), its face and skill
     /// list. The voice bank is not ported.
-    fn swap_side(&mut self, side: usize, model: FighterModel) {
+    fn swap_side(&mut self, side: usize, model: FighterModel, model_only: bool) {
         self.hud
             .set_face(side, self.assets.hud_cpu.faces[side].clone());
         if let Some(menu) = &mut self.menu {
@@ -1011,6 +1014,9 @@ impl Battle {
         ];
         let env = self.assets.env(self.seq.state_id(), self.gate());
         self.roster.chars[side].on_model_loaded(&data[side], &data[side ^ 1], &env);
+        if model_only {
+            return;
+        }
         let mut unused = GameRandom::from_key(&[0]);
         let mut no_blasts = Vec::new();
         let mut ctx = AiCtx {
@@ -3779,6 +3785,8 @@ mod tests {
         assert_eq!(health - r.chars[1].gauge.health, 10910);
         assert!(!(0x130..=0x132).contains(&r.chars[0].act.current));
         assert_ne!(r.chars[0].act.current, 0x104);
+        // The loser, still undamaged, changed to its damaged model.
+        assert_eq!(r.chars[1].gauge.variant, 1);
         assert!(r.scene.struggle.is_none());
         assert!(r.scene.records.is_empty());
     }
@@ -3791,7 +3799,7 @@ mod tests {
         slot: i32,
         frames: usize,
         near: bool,
-    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3])> {
+    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3], [i32; 4])> {
         use crate::btl_input::pad::{DOWN, L2, START, TRIANGLE, UP};
         let mut setup = BattleSetup::default();
         setup.sides[0].chara = chara;
@@ -3870,11 +3878,19 @@ mod tests {
             }
         }
         let table = battle.assets.fighters[0].tables.tech().damage(slot);
+        let r = &battle.roster.chars;
+        let state = [
+            r[0].gauge.variant,
+            r[1].gauge.variant,
+            battle.assets.fighters[0].chara,
+            i32::from(r[0].gauge.body_changed),
+        ];
         Some((
             log,
             health - battle.roster.chars[1].gauge.health,
             table,
             parts,
+            state,
         ))
     }
 
@@ -3953,6 +3969,28 @@ mod tests {
     }
 
     #[test]
+    fn real_technique_model_changes() {
+        // Through the change queue: character 37's self-destruct Ultimate Blast (flag 0x2000) changes the user to
+        // its damaged model; the rush sequences of characters 40 (the victim's, flag 0x80000) and 28 (both) reload
+        // the damaged models in their last step; character 86's technique 0x280 turns the user into one of six
+        // fixed characters by the frame counter (here 13, costume 2), its body changed.
+        let expect: [(i32, fn([i32; 4]) -> bool); 4] = [
+            (37, |s| s[0] == 1 && s[1] == 0),
+            (40, |s| s[0] == 0 && s[1] == 1),
+            (28, |s| s[0] == 1 && s[1] == 1),
+            (86, |s| s[2] == 13 && s[3] == 1),
+        ];
+        for (chara, ok) in expect {
+            let Some((log, _, _, parts, state)) = run_technique(chara, 4, 700, false) else {
+                return;
+            };
+            assert!(ok(state), "{chara}: {state:?} {log:x?}");
+            assert_eq!(log.last().map(|l| l.1), Some(0xB), "{chara}: {log:x?}");
+            assert_eq!(parts[1], 0, "{chara}");
+        }
+    }
+
+    #[test]
     fn real_transformations() {
         use crate::btl_input::pad::DOWN;
         // Character 1 taps R3: its default transformation (character 2, one stock, sequence 0: action 0xEC) loads
@@ -4020,7 +4058,7 @@ mod tests {
             (157, 4, true),
             (13, 4, false),
         ] {
-            let Some((log, dmg, table, parts)) = run_technique(chara, slot, 600, false) else {
+            let Some((log, dmg, table, parts, _)) = run_technique(chara, slot, 600, false) else {
                 return;
             };
             let seq = if slot == 4 {
@@ -4049,7 +4087,7 @@ mod tests {
         let has = |log: &[(usize, i32, i32)], a: &[i32], b: &[i32]| {
             log.iter().any(|(_, x, y)| a.contains(x) && b.contains(y))
         };
-        let Some((log, dmg, table, parts)) = run_technique(65, 3, 400, false) else {
+        let Some((log, dmg, table, parts, _)) = run_technique(65, 3, 400, false) else {
             return;
         };
         assert!(has(&log, &[0x12E], &[0x13A]), "{log:x?}");
@@ -4062,7 +4100,7 @@ mod tests {
             (55, 3, true),
             (150, 3, false),
         ] {
-            let (log, dmg, table, parts) = run_technique(chara, slot, 400, near).unwrap();
+            let (log, dmg, table, parts, _) = run_technique(chara, slot, 400, near).unwrap();
             assert!(parts[0] > 0 && parts[1] == 0, "{chara}: {parts:?}");
             let (fin, caught) = if slot == 2 {
                 (0x12A, 0x133)
@@ -4095,7 +4133,7 @@ mod tests {
             (0, 3, false, 0x11F),
             (133, 3, true, 0x122),
         ] {
-            let Some((log, dmg, table, parts)) = run_technique(chara, slot, 700, near) else {
+            let Some((log, dmg, table, parts, _)) = run_technique(chara, slot, 700, near) else {
                 return;
             };
             assert!(has(&log, dash, None), "{chara}: {log:x?}");
@@ -4111,7 +4149,7 @@ mod tests {
                 "{chara}: {log:x?}"
             );
         }
-        let Some((log, dmg, table, _)) = run_technique(61, 2, 300, false) else {
+        let Some((log, dmg, table, _, _)) = run_technique(61, 2, 300, false) else {
             return;
         };
         assert!(has(&log, 0x124, Some(0x136)), "{log:x?}");

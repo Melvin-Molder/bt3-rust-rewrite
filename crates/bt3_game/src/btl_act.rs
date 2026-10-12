@@ -123,8 +123,8 @@ pub(crate) struct Ctx<'a, 'd> {
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xEC..=0xF0 | 0xFA..=0xFC | 0x104
-        | 0x105..=0x13B)
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xEC..=0xF0 | 0xFA..=0xFC | 0x103
+        | 0x104 | 0x105..=0x13B)
 }
 
 impl Ctx<'_, '_> {
@@ -872,6 +872,7 @@ impl Ctx<'_, '_> {
             0xE7 => self.wall_slam(phase),
             0xE8 | 0xE9 => self.wall_recover(phase),
             0xEC | 0xF0 => self.transform_a(phase),
+            0x103 => self.change_random_chara(phase),
             0xED => self.transform_b(phase),
             0xEE => self.transform_c(phase),
             0xEF => self.transform_d(phase),
@@ -6131,16 +6132,48 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0x104 (`BtlAct_ClashLostHandler`, forced by flag 0xAB or the lost struggle): motion 0x172 under
-    /// level 2 hit-stop, held to its end, then falling (0xD9). Not ported: the change to the damaged model of a
-    /// fighter still in its undamaged one (a character change), the camera cut, the chains' push and the stage
-    /// timer.
+    /// level 2 hit-stop, held to its end, then falling (0xD9); a fighter still in its undamaged model changes to the
+    /// damaged one, the motion played again on it to its end, put back where it stood. Not ported: the camera cut,
+    /// the chains' push and the stage timer.
     fn clash_lost(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x172, 0.0);
+            if self.me.gauge.variant == 0 {
+                self.me.work[0] |= 1;
+                self.set_form_current();
+            }
         }
         if phase == RUN {
+            let change = self.me.work[0] & 1 != 0;
+            if change && self.me.action_frame == 1 {
+                self.me.save_placement();
+                self.request_form();
+            }
             if self.me.anim_advance(0) {
-                self.me.work[1] = 1;
+                self.me.work[0] |= 2;
+            }
+            if self.me.work[0] & 2 != 0 {
+                if change {
+                    match self.me.work[2] {
+                        0 => {
+                            if self.change.is_loaded_for(self.me.player) {
+                                self.request_anim(0x172, 0.0);
+                                self.change.set_ready(self.me.player);
+                                self.me.work[2] += 1;
+                            }
+                        }
+                        _ => {
+                            // BtlAnim_EnableHandle (the root's axes zeroed) is not ported.
+                            self.me.anim_jump_to_end();
+                            self.change.set_done(self.me.player);
+                            self.set(0xF5);
+                            self.set(0x55);
+                            self.me.work[1] = 1;
+                        }
+                    }
+                } else {
+                    self.me.work[1] = 1;
+                }
             }
             self.step(6, 5, 2, 0.0, kmh(100.0));
             self.me.apply_gravity();
@@ -6630,18 +6663,28 @@ impl Ctx<'_, '_> {
     /// Actions 0x106..0x108 (`BtlAct_SuperBeamHandler`) and the long beam 0x10C..0x10E
     /// (`BtlAct_SuperLongBeamHandler`): the start motion (level 2 hit-stop), the charge loop until the effect
     /// raises flag 0xA7, the fire, the firing loop until 0xA8 (the long beam: a second stage until 0xA9), the end;
-    /// each wait also ends after 150 frames, the original's own timeout (the end of an effect type other than 0,
-    /// and flag 0xA9, come from effects not ported). A catch (flag 0x73) goes to the closing motion 0x12A.., a
-    /// sequence (0x72) to 0x12D... Not ported either: the self-destruct change of flag 0x2000 (a character change),
-    /// the shakes, vibration, sounds and cuts.
+    /// each wait also ends after the original's own timeout of 150 frames. A catch (flag 0x73) goes to the closing
+    /// motion 0x12A.., a sequence (0x72) to 0x12D..; a catching technique measures the sequence's motions while it
+    /// fires. The self-destruct technique (flag 0x2000) of an undamaged fighter changes it to its damaged model
+    /// before the fire. Not ported: the shakes, vibration, sounds and cuts.
     fn super_beam(&mut self, phase: u32) {
         let cls = self.current_class();
         let long = (0x10C..=0x10E).contains(&self.current());
         if phase == ENTER {
             self.super_start(cls, 0.0);
+            // A self-destruct technique (flag 0x2000) changes a fighter still undamaged to its damaged model.
+            if !long && self.tech().flags(cls) & 0x2000 != 0 && self.me.gauge.variant == 0 {
+                self.me.work[0] |= 1;
+            }
         }
         if phase == RUN {
             let mut aim = self.tech().flags_a(cls) & 0x800 != 0;
+            let change = self.me.work[0] & 1 != 0;
+            if !long && change && self.me.action_frame == 1 {
+                self.me.save_placement();
+                self.set_form_current();
+                self.request_form();
+            }
             match self.anim_id() - super_anim(cls, 0) {
                 0 => {
                     aim = true;
@@ -6654,7 +6697,20 @@ impl Ctx<'_, '_> {
                     self.me.anim_advance_loop(0);
                     self.super_hit_stop(false);
                     self.super_set_class(cls);
-                    self.super_wait_flag(0xA7, cls, 2);
+                    if long || !change {
+                        self.super_wait_flag(0xA7, cls, 2);
+                    } else {
+                        // The fire waits for the damaged model as well.
+                        self.me.work[2] += 1;
+                        if self.me.work[2] > SUPER_TIMEOUT {
+                            self.held(0xA7);
+                        }
+                        if self.flag(0xA7) && self.change.is_loaded_for(self.me.player) {
+                            self.change.set_ready(self.me.player);
+                            self.request_anim(super_anim(cls, 2), 0.0);
+                            self.me.work[2] = 0;
+                        }
+                    }
                 }
                 2 => {
                     self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
@@ -6673,6 +6729,11 @@ impl Ctx<'_, '_> {
                             if let Some(f) = self.me.gauge.fired.get_mut(cls as usize) {
                                 *f += 1;
                             }
+                        }
+                        if self.me.anim_is_new() && change {
+                            self.change.set_done(self.me.player);
+                            self.set(0xF5);
+                            self.set(0x55);
                         }
                     }
                 }
@@ -6698,6 +6759,11 @@ impl Ctx<'_, '_> {
                     }
                 }
                 _ => {}
+            }
+            // A catching technique measures the sequence it may start (BtlSuper_MeasureRushStep).
+            if !long && self.tech().is_throw(cls) {
+                let frame = self.me.action_frame;
+                self.measure_rush_step(cls, frame);
             }
             self.super_move(cls, aim);
             self.super_firing_flags();
@@ -7782,27 +7848,44 @@ impl Ctx<'_, '_> {
         self.request(next);
     }
 
-    /// A step of a sequence that waits for a model reload (`BtlChange_RequestChara` / `IsLoadedFor` / `SetReady` /
-    /// `SetDone`): the reload is not ported, so the load is ready at once; the step's motion restarts, is placed
-    /// again and jumps to its end. `mine`: this fighter's model is the one reloaded. True once done.
-    fn rush_reload_step(&mut self, k: usize, cls: i32, level: i32, mine: bool) -> bool {
+    /// A step of a sequence that reloads a model (`work[k]`: the victim's damaged model in its last step with
+    /// `def_reload`, the attacker's in the last step with `atk_reload`): `mine` requests its damaged variant as the
+    /// step starts; once the step's motion ends and the model of `side` is in memory, the motion starts again on
+    /// it, then it is placed again and jumps to its end (flag 0x55). True once done.
+    fn rush_reload_step(
+        &mut self,
+        k: usize,
+        cls: i32,
+        level: i32,
+        mine: bool,
+        side: usize,
+    ) -> bool {
         let attacker = self.me.work[0] & 1 != 0;
         match self.me.work[k] {
             0 => {
+                if mine && self.me.anim_is_new() {
+                    self.set_form_current();
+                    self.request_form();
+                }
                 if self.flag(anim_flag::END) {
                     self.me.work[k] += 1;
                 }
             }
             1 => {
-                if mine {
-                    self.me.body_warp_pos = self.me.obj.body_sphere().0;
-                    let a = self.anim_id();
-                    self.request_anim(a, 0.0);
+                if self.change.is_loaded_for(side) {
+                    if mine {
+                        // BtlChar_ResetBodyWarp.
+                        self.me.body_warp_pos = self.me.obj.body_sphere().0;
+                        self.change.set_ready(side);
+                        let a = self.anim_id();
+                        self.request_anim(a, 0.0);
+                    }
+                    self.me.work[k] += 1;
                 }
-                self.me.work[k] += 1;
             }
             2 => {
                 if mine {
+                    self.change.set_done(side);
                     let from = if attacker { self.data } else { self.opp_data };
                     self.me.request_place_relative(from, cls, level);
                     self.set(0x55);
@@ -7821,8 +7904,9 @@ impl Ctx<'_, '_> {
     /// the attacker's table (flag 0xF6), standing and out of reach. The attacker's damage queue deals the hits
     /// (`BtlSuper_SetupRushDamage`). At the end the attacker finishes (0x8C, `BtlSuper_Finish`; a self-destruct
     /// technique leaves it 1 health) and the victim lands (`BtlAct_GetLandingAction`), stands (failed: 0xB) or
-    /// stays down (0xEB). Not ported: the model reloads and character changes (BtlChange, treated as loaded at once),
-    /// the partner objects, the stage timer.
+    /// stays down (0xEB). Models are reloaded through the change queue: the damaged variants of `def_reload` /
+    /// `atk_reload`, and technique 0x280's random character (`BtlAct_SetFormRandom`). Not ported: the partner
+    /// objects (their requests are served without an object), the stage timer.
     fn rush_sequence(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -7847,7 +7931,15 @@ impl Ctx<'_, '_> {
                     let ki = self.tech().ki(cls) / 2;
                     self.me.spend_ki(ki, true);
                 }
-                if self.me.thr.partner_chara >= 0 {
+                let t = self.me.thr;
+                if t.partner_chara >= 0 {
+                    self.change.request_object(
+                        self.me.player,
+                        t.partner_chara,
+                        t.partner_costume,
+                        t.partner_variant,
+                        t.partner_slot,
+                    );
                     self.me.work[0] |= 2;
                 }
             }
@@ -7860,8 +7952,12 @@ impl Ctx<'_, '_> {
             if self.me.anim_is_new() && (level != 0 || thr.place_first_step) {
                 self.me.request_place_relative(own, cls, level);
             }
+            let atk_side = thr.atk_side as usize;
             if level == thr.partner_step {
-                if self.me.anim_advance(0) {
+                if self.me.anim_advance(0) && self.change.is_loaded_for(atk_side) {
+                    if self.me.work[0] & 2 != 0 {
+                        self.change.set_ready(self.me.player);
+                    }
                     let a = self.anim_id();
                     self.request_anim(a + 1, 0.0);
                 }
@@ -7872,19 +7968,27 @@ impl Ctx<'_, '_> {
                 } else {
                     match self.me.work[3] {
                         0 => {
+                            if attacker && self.me.anim_is_new() {
+                                self.set_form_random();
+                                self.request_form();
+                            }
                             if self.me.anim_advance(0) {
                                 self.me.work[3] += 1;
                             }
                         }
                         1 => {
-                            if attacker {
-                                let a = self.anim_id();
-                                self.request_anim(a, 0.0);
+                            if self.change.is_loaded_for(atk_side) {
+                                if attacker {
+                                    self.change.set_ready(atk_side);
+                                    let a = self.anim_id();
+                                    self.request_anim(a, 0.0);
+                                }
+                                self.me.work[3] += 1;
                             }
-                            self.me.work[3] += 1;
                         }
                         2 => {
                             if attacker {
+                                self.change.set_done(atk_side);
                                 self.me.request_place_relative(own, cls, level);
                                 self.me.anim_jump_to_end();
                             }
@@ -7894,14 +7998,23 @@ impl Ctx<'_, '_> {
                     }
                 }
             } else {
+                // The partner object is in once its step is over (BtlChange_SetDone; its animations are not
+                // ported).
+                if self.me.work[0] & 2 != 0
+                    && thr.partner_step < level
+                    && self.me.anim_is_new()
+                    && level == thr.partner_step + 1
+                {
+                    self.change.set_done(self.me.player);
+                }
                 self.me.anim_advance(0);
                 let ok_b = if thr.def_reload && thr.last_step == level {
-                    self.rush_reload_step(2, cls, level, !attacker)
+                    self.rush_reload_step(2, cls, level, !attacker, thr.def_side as usize)
                 } else {
                     true
                 };
                 let ok_a = if thr.atk_reload && thr.step_count - 1 == level {
-                    self.rush_reload_step(3, cls, level, attacker)
+                    self.rush_reload_step(3, cls, level, attacker, atk_side)
                 } else {
                     true
                 };
@@ -8155,6 +8268,80 @@ impl Ctx<'_, '_> {
         };
         self.set_queue(0, action);
         true
+    }
+
+    /// `BtlAct_SetFormCurrent`: the member's own character in its damaged variant, the model only.
+    fn set_form_current(&mut self) {
+        self.me.form = crate::btl_chr::Form {
+            index: -1,
+            chara: self.data.chara,
+            costume: self.data.costume,
+            variant: 1,
+            cost: 0,
+            kind: 0,
+            obj_id: -1,
+            partner: -1,
+            obj_costume: 0,
+            anim_chara: -1,
+            anim1_chara: -1,
+            voice_chara: -1,
+            allowed: self.me.form.allowed,
+        };
+    }
+
+    /// `BtlAct_SetFormRandom`: one of six fixed characters by the frame counter, the model only.
+    fn set_form_random(&mut self) {
+        const FORMS: [(i32, i32); 6] =
+            [(1, 0), (0xD, 2), (0x19, 1), (0x1D, 1), (0x18, 0), (0x59, 0)];
+        let (chara, costume) = FORMS[self.frame_mod(6) as usize];
+        self.me.form = crate::btl_chr::Form {
+            index: -1,
+            chara,
+            costume,
+            variant: 0,
+            cost: 0,
+            kind: 0,
+            obj_id: -1,
+            partner: -1,
+            obj_costume: 0,
+            anim_chara: -1,
+            anim1_chara: -1,
+            voice_chara: -1,
+            allowed: self.me.form.allowed,
+        };
+    }
+
+    /// Action 0x103 (`BtlAct_ChangeRandomCharaHandler`): the fighter becomes one of six fixed characters (the
+    /// model only) under level 2 hit-stop, put back where it stood; then 0xB.
+    fn change_random_chara(&mut self, phase: u32) {
+        if phase == RUN {
+            match self.me.work[2] {
+                0 => {
+                    self.me.save_placement();
+                    self.set_form_random();
+                    self.request_form();
+                    self.me.work[2] += 1;
+                }
+                1 => {
+                    if self.change.is_loaded_for(self.me.player) {
+                        self.change.set_ready(self.me.player);
+                        self.request_anim(0, 0.0);
+                        self.me.work[2] += 1;
+                    }
+                }
+                _ => {
+                    self.change.set_done(self.me.player);
+                    self.set(0xF5);
+                    self.set(0x55);
+                    self.request(0xB);
+                }
+            }
+            for f in [
+                0x125, 0x136, 0x42, 0x43, 0x44, 0x45, 0x46, 0xBB, 0x3F, 0x128, 0x1B, 0x1A,
+            ] {
+                self.set(f);
+            }
+        }
     }
 
     /// `BtlChange_RequestChara` of the form.
