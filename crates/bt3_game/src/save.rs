@@ -45,6 +45,8 @@ const OFS_CUSTOM: usize = 0x1808;
 const OFS_REC: usize = 0x2D40;
 const OFS_ITEM: usize = 0x2EC8;
 const OFS_MONEY: usize = 0x3028;
+const OFS_SHOP_FLAGS: usize = 0x1008;
+const OFS_STOCK_LEVEL: usize = 0x100C;
 /// `SAVE_MONEY_MAX`.
 const MONEY_MAX: i32 = 9_999_999;
 /// `SAVE_FLAG_DEFAULT` and `SAVE_VOLUME_DEFAULT`.
@@ -188,6 +190,12 @@ impl SaveData {
         {
             *b |= 3;
         }
+    }
+
+    /// `HistOutro_Init`'s count of a saga's first completion: `stockLevel` up by one, `shopFlags` bit 0.
+    pub fn raise_stock_level(&mut self) {
+        self.set_word(OFS_STOCK_LEVEL, self.word(OFS_STOCK_LEVEL) + 1);
+        self.set_word(OFS_SHOP_FLAGS, self.word(OFS_SHOP_FLAGS) | 1);
     }
 
     /// `money`.

@@ -176,6 +176,8 @@ pub struct ModeMenuAssets {
 #[derive(Clone, Debug)]
 pub struct ModeMenuData {
     pub fod: Vec<u8>,
+    /// Section 5: the saga outro's movie (`HistOutro_Run(2)` shares the section).
+    pub outro_fod: Vec<u8>,
     pub msg_fod: Vec<u8>,
     /// Section 6: the descriptions' lines.
     pub text: Vec<u8>,
@@ -186,12 +188,14 @@ impl ModeMenuAssets {
     pub fn parse(res: &[u8]) -> Result<Self, Box<dyn Error>> {
         let screen: Vec<ImageTexture> = flash_textures(0)
             .into_iter()
+            .chain(crate::hist_outro::flash_textures(0))
             .filter(|t| t.is_some_and(|((s, _), _)| s < SAGA))
             .collect();
         let files = decode_files(res, [&screen[..], &MSG_TEXTURES])?;
         Ok(Self {
             data: ModeMenuData {
                 fod: pack_section(res, 3)?.to_vec(),
+                outro_fod: pack_section(res, 5)?.to_vec(),
                 msg_fod: pack_section(pack_section(res, 8)?, 2)?.to_vec(),
                 text: pack_section(res, 6)?.to_vec(),
                 msg: Vec::new(),
@@ -232,6 +236,8 @@ pub struct SagaLayout {
     /// The episode list's movie (the screen's textures and the saga's) and the background movie's.
     pub flash: Vec<Option<usize>>,
     pub bg: Vec<Option<usize>>,
+    /// The outro's movie.
+    pub outro: Vec<Option<usize>>,
 }
 
 impl SagaLayout {
@@ -241,6 +247,7 @@ impl SagaLayout {
             background,
             flash: image_indices(&flash_textures(saga), &first),
             bg: image_indices(&bg_textures(saga), &first),
+            outro: image_indices(&crate::hist_outro::flash_textures(saga), &first),
         }
     }
 }
@@ -253,6 +260,7 @@ impl SagaAssets {
         let own: Vec<ImageTexture> = flash_textures(saga)
             .into_iter()
             .chain(bg_textures(saga))
+            .chain(crate::hist_outro::flash_textures(saga))
             .filter_map(|t| t.filter(|((s, _), _)| *s >= SAGA))
             .map(|((s, k), e)| Some(((s - SAGA, k), e)))
             .collect();

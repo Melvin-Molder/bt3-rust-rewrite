@@ -142,6 +142,7 @@
 !/crates/bt3_game/src/mode_menu.rs
 !/crates/bt3_game/src/hist_result.rs
 !/crates/bt3_game/src/hist_save.rs
+!/crates/bt3_game/src/hist_outro.rs
 !/crates/bt3_game/src/get_win.rs
 !/crates/bt3_game/src/stg_blur.rs
 !/crates/bt3_game/src/post.rs

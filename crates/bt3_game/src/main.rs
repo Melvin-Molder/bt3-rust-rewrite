@@ -81,6 +81,7 @@ mod flash;
 mod font;
 mod get_win;
 mod gfx_water;
+mod hist_outro;
 mod hist_result;
 mod hist_save;
 mod hist_select;
@@ -207,6 +208,8 @@ enum Scene {
     HistResult(Box<hist_result::HistResultScreen>),
     /// `HistSave_Run(4)`, progress mode 10: the story mode's save.
     HistSave(Box<hist_save::HistSaveScreen>),
+    /// `HistOutro_Run(2)`, progress mode 9: a completed saga's outro.
+    HistOutro(Box<hist_outro::HistOutroScreen>),
     Black,
     Loading(LoadingScreen),
     /// `Battle_Load`: the loading screen while the battle's files are read.
@@ -243,6 +246,7 @@ impl Scene {
             | Scene::ModeMenu(_)
             | Scene::HistResult(_)
             | Scene::HistSave(_)
+            | Scene::HistOutro(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
                 2.0 * VBLANK_SECONDS
@@ -1678,7 +1682,28 @@ fn run_frames(
                         }
                         hist_result::HistResultResult::Won => start_hist_save(game, 8),
                         hist_result::HistResultResult::Cleared => {
-                            info!("progress mode 9 (the saga's outro) is not ported yet");
+                            start_hist_outro(game, &mut commands)
+                        }
+                    }
+                }
+            }
+            Scene::HistOutro(screen) => {
+                let frame = screen.run_frame(
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    stop_all(game, &mut commands);
+                    match result {
+                        hist_outro::HistOutroResult::Save => start_hist_save(game, 9),
+                        hist_outro::HistOutroResult::Ending => {
+                            info!("progress mode 3 (the ending movie) is not ported yet");
                             game.scene = Scene::Black;
                         }
                     }
@@ -2911,6 +2936,32 @@ fn start_hist_result(game: &mut Game, won: bool, ball: i32) {
         Ok(screen) => game.scene = Scene::HistResult(Box::new(screen)),
         Err(error) => {
             error!("cannot start the story result screen: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Hist_Main` mode 9: `HistOutro_Run(2)` for the saga `game.hist.sub_menu` (it starts its own music).
+fn start_hist_outro(game: &mut Game, commands: &mut Commands) {
+    let saga = game.hist.sub_menu.clamp(0, 7) as usize;
+    if !load_saga(game, saga) {
+        return;
+    }
+    let (data, _) = game.mode_menu.as_ref().expect("episode list is loaded");
+    let mut sounds = Vec::new();
+    match hist_outro::HistOutroScreen::new(
+        data,
+        &game.sagas[&saga],
+        &mut game.save,
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            game.scene = Scene::HistOutro(Box::new(screen));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start the saga's outro: {error}");
             game.scene = Scene::Black;
         }
     }
