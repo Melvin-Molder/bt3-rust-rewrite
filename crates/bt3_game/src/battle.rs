@@ -198,6 +198,9 @@ pub struct BattleAssets {
     pub(crate) snd: std::sync::Mutex<crate::btl_snd::CharSound>,
     /// Sample banks to load (`Snd_LoadBank` / `Snd_ReloadBank` by mask; `None` unloads), taken by the game.
     pub bank_requests: Vec<(u32, Option<Vec<u8>>)>,
+    /// The banks reloaded, (mask, file), for the tests.
+    #[cfg(test)]
+    pub bank_files: Vec<(u32, u32)>,
     stage_id: i32,
     /// `Battle_GetStartStage`: the stage a rematch loads back.
     start_stage: i32,
@@ -538,6 +541,8 @@ pub fn load(
         ),
         snd: std::sync::Mutex::new(snd),
         bank_requests,
+        #[cfg(test)]
+        bank_files: Vec::new(),
         stage,
         stage_model,
         stage_id: setup.stage,
@@ -1707,6 +1712,8 @@ struct ChangeJob {
     /// The model only (`modelOnly`): the side's animation files, voice and AI stay.
     model_only: bool,
     load: SideLoad,
+    /// `voiceChara`: the character whose voice bank loads.
+    voice_chara: i32,
     state: u8,
     model: Option<FighterModel>,
 }
@@ -1783,6 +1790,8 @@ impl BattleAssets {
 impl BattleAssets {
     /// `Snd_ReloadBank(mask, ..)` of a file: the battle's loop flags and the game's bank.
     fn reload_bank(&mut self, read: &mut Loader, mask: u32, file: u32) {
+        #[cfg(test)]
+        self.bank_files.push((mask, file));
         let data = read(file).ok();
         if let Some(kind) = crate::btl_snd::CharSound::kind_of_mask(mask) {
             self.snd
@@ -2313,6 +2322,7 @@ impl Battle {
                     object,
                     model_only,
                     load,
+                    voice_chara: req.voice_chara,
                     state: 0,
                     model: None,
                 });
@@ -2366,7 +2376,7 @@ impl Battle {
                 }
                 let job = self.change_job.take().unwrap();
                 if let Some(model) = job.model {
-                    self.swap_side(job.side, model, job.model_only);
+                    self.swap_side(job.side, model, job.model_only, job.voice_chara);
                 }
             }
         }
@@ -2374,14 +2384,17 @@ impl Battle {
 
     /// The swap of `BtlLoad_StepChara`: the side's files replaced (`BtlRes_CommitReload2`), the fighter's object
     /// set up again (`BtlChars_OnModelLoaded`), the side's AI reset (`BtlAiMgr_ResetSide`), its face and skill
-    /// list. The voice bank is not ported.
-    fn swap_side(&mut self, side: usize, model: FighterModel, model_only: bool) {
-        // Snd_ReloadBank(0x10 / 0x20): the side's bank of its new character.
-        if !model_only && let Some(read) = self.loader.as_mut() {
-            let chara = model.chara.max(0) as u32;
+    /// list, and the voice bank of the change's voice character.
+    fn swap_side(&mut self, side: usize, model: FighterModel, model_only: bool, voice_chara: i32) {
+        // Snd_ReloadBank(0x10 / 0x20): the bank of `voiceChara` (every change the game makes gives one with its
+        // animation characters; a negative one, which would name the file before the first bank, keeps the bank).
+        if !model_only
+            && voice_chara >= 0
+            && let Some(read) = self.loader.as_mut()
+        {
             let mask = if side == 0 { 0x10 } else { 0x20 };
             self.assets
-                .reload_bank(read, mask, voice_bank_file(chara as i32));
+                .reload_bank(read, mask, voice_bank_file(voice_chara));
         }
         self.hud
             .set_face(side, self.assets.hud_cpu.faces[side].clone());
@@ -8530,6 +8543,11 @@ mod tests {
         let (log, stopped, still) = run_transform(&mut battle, 0, 120);
         assert!(log.iter().any(|l| l.1 == 0xEC), "{log:x?}");
         assert_eq!(log.last().map(|l| (l.1, l.2)), Some((0xB, 2)), "{log:x?}");
+        // The side's voice bank is the new character's.
+        assert_eq!(
+            battle.assets.bank_files.last(),
+            Some(&(0x10, voice_bank_file(2)))
+        );
         assert!(stopped && still);
         let c = &battle.roster.chars[0];
         assert!(c.gauge.blast < 300_000 - 90_000, "{}", c.gauge.blast);
