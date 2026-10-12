@@ -1078,6 +1078,14 @@ impl Scene {
         for dir in self.tech.tints.drain(..) {
             self.tints.start(0, dir, 0.2);
         }
+        // The techniques' last setting of view 0's blur (EftBlast_UpdateBlur and the others).
+        if let Some((alphas, dir)) = self.tech.blur.take() {
+            for (i, a) in alphas.into_iter().enumerate() {
+                self.blurs.set_color(0, i, [0x80, 0x80, 0x80, a]);
+            }
+            self.blurs.set_color(0, 3, [0x80, 0x80, 0x80, 0x40]);
+            self.blurs.set_center(0, dir, false);
+        }
         // The sweeps' marks that ran out start their blast impacts.
         for (arg, scale) in self.tech.blast_impacts.drain(..) {
             self.impacts.spawn_blast(w.env.impact, &arg, scale, 1.0);

@@ -8563,4 +8563,102 @@ mod tests {
                 .all(|l| *l == ModelLook::default())
         );
     }
+
+    #[test]
+    fn real_technique_blurs_the_stage_between_its_events() {
+        use crate::btl_input::pad::{L2, START, TRIANGLE};
+        // Character 40's Blast 2 (technique 0x153, slot 2, a blast with flag 0x200) turns view 0's blur on at its
+        // event 0x10 (blur index 3) and off at event 2 (index 0), rising by tenths in between.
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 40;
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let def = crate::btl_tech_fx::TechDef::of(&side_data(&battle.assets.fighters[0]), 2);
+        assert_eq!(
+            (def.id, def.flags & 0x200, def.blur_on, def.blur_off),
+            (0x153, 0x200, 3, 0)
+        );
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false)
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        battle.roster.chars[0].gauge.ki = battle.roster.chars[0].gauge.ki_max;
+        let (mut on, mut drawn, mut techs) = (0, 0, Vec::new());
+        for i in 0..150 {
+            let held = match i {
+                0..2 => L2,
+                2..4 => L2 | TRIANGLE,
+                4..40 => TRIANGLE,
+                _ => 0,
+            };
+            let f = frame(&mut battle, held);
+            let cur = battle.roster.chars[0].act.current;
+            if techs.last() != Some(&cur) {
+                techs.push(cur);
+            }
+            if battle.roster.scene.blurs.is_on(0) {
+                on += 1;
+            }
+            if let Some(r) = f.post.last()
+                && r.tris.len() == 16
+            {
+                drawn += 1;
+            }
+        }
+        assert!(
+            techs.iter().any(|&a| crate::btl_act::is_technique_id(a)),
+            "{techs:x?}"
+        );
+        assert!(on > 0 && drawn > 0, "{on} {drawn} {techs:x?}");
+        assert!(!battle.roster.scene.blurs.is_on(0));
+    }
+
+    #[test]
+    fn real_connected_rush_shot_blurs_the_stage() {
+        // Character 3's Ultimate Blast (0x2E8, a rush shot with flag 0x200) once connected: the victim's event 0x10
+        // starts view 0's blur, its event 0x20 drops it (Goku's 0x2D2 has the flag, but its victim raises
+        // neither).
+        let (mut on, mut last, mut connected) = (0, false, false);
+        let Some((log, ..)) = run_technique_watched(3, 4, 600, false, &mut |b| {
+            connected |= b.roster.chars[0].flags.test(0xA1);
+            last = b.roster.scene.blurs.is_on(0);
+            on += usize::from(last);
+        }) else {
+            return;
+        };
+        assert!(connected, "{log:x?}");
+        assert!(on > 30, "{on} {log:x?}");
+        assert!(!last);
+        // Character 1's slot 3 (0x1E2, a shot technique with flag 0x200) does the same through
+        // EftShotTech_UpdateBlur, once connected.
+        let (mut on, mut connected) = (0, false);
+        let Some((log, ..)) = run_technique_watched(1, 3, 600, false, &mut |b| {
+            connected |= b.roster.chars[0].flags.test(0xA1);
+            on += usize::from(b.roster.scene.blurs.is_on(0));
+        }) else {
+            return;
+        };
+        assert!(connected && on > 0, "{on} {log:x?}");
+    }
 }

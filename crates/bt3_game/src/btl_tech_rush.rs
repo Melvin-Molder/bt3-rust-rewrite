@@ -14,8 +14,11 @@
 //! keep the parts that run by themselves going). The swarm of models of a definition with flag 0x20000 is not
 //! drawn, but its libc `rand()` draws are kept (`EftRushShot_UpdateModels`).
 //!
-//! Not ported: the swarm's models, the camera cut, the stage tint, blur, streaks and flash, and the sparks' sounds
-//! the victim's events start.
+//! Once connected it darkens the stage (the stage tint's slot 0) and, with definition flag 0x200, blurs it between
+//! the victim's events 0x10 and 0x20.
+//!
+//! Not ported: the swarm's models, the camera cut, the streaks and flash, and the sparks' sounds the victim's events
+//! start.
 
 use bt3_data::eft_pack::{EmitSet, SetHead};
 
@@ -95,6 +98,12 @@ pub(crate) struct RushShot {
     /// The swarm, when the definition has flag 0x20000 (`mgr->sub[0]`).
     swarm: Option<[Mote; SWARM]>,
     dead: bool,
+    /// `EFT_RUSHSHOT_FADE`, `fade`, `fadePos`: the stage blur's rise, strength and direction once connected; this
+    /// update's setting of view 0's blur.
+    fading: bool,
+    fade: f32,
+    fade_pos: [f32; 3],
+    pub(crate) blur_out: Option<([u8; 3], [f32; 3])>,
 }
 
 impl RushShot {
@@ -136,6 +145,10 @@ impl RushShot {
             time2: 0.0,
             swarm: (def.flags & 0x2_0000 != 0).then_some([Mote::default(); SWARM]),
             dead: false,
+            fading: false,
+            fade: 0.0,
+            fade_pos: [0.0; 3],
+            blur_out: None,
         };
         if head_set.flags & 4 != 0 {
             s.speed = s.width2 * def.scale;
@@ -220,9 +233,11 @@ impl RushShot {
         w: &mut World,
         fx: &mut Modules,
         events: u32,
+        opp_events: u32,
         cur_slot: i32,
     ) -> (Option<HitRec>, bool) {
         let side = self.src.side;
+        self.blur_out = None;
         if stopped(w, side) {
             return (None, false);
         }
@@ -300,8 +315,8 @@ impl RushShot {
                 _ => {}
             }
         }
-        // EftRushShot_UpdateAttached: the swarm, then the node it sits on (the victim's events' blur, streaks,
-        // flash and sparks are not ported).
+        // EftRushShot_UpdateAttached: the swarm, then the node it sits on (the victim's events' streaks, flash and
+        // sparks are not ported).
         if self.kind == 1 {
             if self.flags & SUB != 0 {
                 self.update_swarm(w.libc);
@@ -313,6 +328,23 @@ impl RushShot {
         } else if self.flags & ATTACHED != 0 {
             self.pos = w.chars[side].obj.node_pos(0x36);
             self.dir = aim_dir(&*w, side, self.nodes.pos(1));
+        }
+        // EftRushShot_UpdateFade (connected, definition flag 0x200): the victim's event 0x10 aims the stage blur
+        // from node 0x11 and starts its rise by tenths, its event 0x20 drops it.
+        if self.flags & CONNECTED != 0 && def.flags & 0x200 != 0 {
+            if opp_events & 0x10 != 0 {
+                self.fading = true;
+                self.fade_pos = aim_dir(&*w, side, w.chars[side].obj.node_pos(0x11));
+            }
+            if opp_events & 0x20 != 0 {
+                self.fade = 0.0;
+                self.fading = false;
+            }
+            if self.fading {
+                self.fade = (self.fade + 0.1).min(1.0);
+            }
+            let alphas = crate::btl_tech_fx::blur_alphas(self.fade, [32.0, 64.0, 128.0]);
+            self.blur_out = Some((alphas, self.fade_pos));
         }
         if test(EV_ABORT) {
             if self.flags & ENDED == 0 {

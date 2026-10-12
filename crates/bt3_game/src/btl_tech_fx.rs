@@ -155,6 +155,9 @@ pub(crate) struct TechDef {
     pub ground_fx: i32,
     pub impact_scale: f32,
     pub ground_scale: f32,
+    /// `blurOn` / `blurOff`: which event (an index into 2, 4, .. 0x40; on 2 none) turns the stage blur on and off.
+    pub blur_on: i32,
+    pub blur_off: i32,
 }
 
 impl TechDef {
@@ -190,6 +193,8 @@ impl TechDef {
                 ground_fx: s.ground_fx(slot),
                 impact_scale: 1.0,
                 ground_scale: 1.0,
+                blur_on: s.blur_on(slot),
+                blur_off: s.blur_off(slot),
             };
         }
         let t = data.tables.tech();
@@ -219,6 +224,8 @@ impl TechDef {
             ground_fx: t.ground_fx(slot),
             impact_scale: t.impact_scale(slot),
             ground_scale: t.ground_scale(slot),
+            blur_on: t.blur_on(slot),
+            blur_off: t.blur_off(slot),
         }
     }
 
@@ -316,6 +323,11 @@ struct Beam {
     trail_time: f32,
     width2: f32,
     time2: f32,
+    /// `blur` / `blurDir` (flag 0x400 while it rises): the stage blur's strength and direction; this update's
+    /// setting of view 0's blur.
+    blur: f32,
+    blur_dir: [f32; 3],
+    blur_out: Option<([u8; 3], [f32; 3])>,
 }
 
 /// The technique layer (`gEftShot`, `gEftTechEvt`).
@@ -327,6 +339,9 @@ pub(crate) struct TechFx {
     pub(crate) cam_stop: bool,
     /// The stage tint's slot 0 starts of this update (`StgTint_Start(0, dir, 0.2)`, by the rush shots), in order.
     pub(crate) tints: Vec<usize>,
+    /// The last setting of view 0's stage blur this update (`EftBlast_UpdateBlur` and the others): the alphas of
+    /// its centre, middle and corners, and its direction.
+    pub(crate) blur: Option<([u8; 3], [f32; 3])>,
     events: [u32; 2],
     requests: [u32; 2],
     timelines: Vec<Timeline>,
@@ -359,6 +374,7 @@ impl Default for TechFx {
             cam_requests: Vec::new(),
             cam_stop: false,
             tints: Vec::new(),
+            blur: None,
             events: [0; 2],
             requests: [0; 2],
             timelines: Vec::new(),
@@ -398,6 +414,11 @@ fn in_skill(chr: &Chr) -> bool {
 /// `BtlCharApi_IsInRushSequence`.
 pub(crate) fn in_rush_sequence(chr: &Chr) -> bool {
     matches!(chr.act.current, 0x12D..=0x12F | 0x139..=0x13B)
+}
+
+/// A stage blur's three ring alphas at strength `t`: `t` times each factor, through `s32` to a byte.
+pub(crate) fn blur_alphas(t: f32, k: [f32; 3]) -> [u8; 3] {
+    k.map(|k| (t * k) as i32 as u8)
 }
 
 /// `BtlCharApi_GetRushFinishPhase`: -1 outside a rush sequence; 0 when the side's model is not reloaded
@@ -869,6 +890,9 @@ impl Beam {
             trail_time: 0.0,
             width2: head_set.width_b[0],
             time2: 0.0,
+            blur: 0.0,
+            blur_dir: [0.0; 3],
+            blur_out: None,
         };
         if prop {
             b.draw_scale = b.scale;
@@ -1064,7 +1088,37 @@ impl Beam {
             self.speed = self.width2 * def.scale;
             self.vel = scale3(self.dir, self.speed);
         }
-        // EftBlast_UpdateBlur (definition flag 0x200): the stage blur is not ported.
+        // EftBlast_UpdateBlur / EftPropShot_UpdateBlur (definition flag 0x200; on index 2 none): the on event aims
+        // it from node 0x11 (a prop shot's own direction), the off event drops it; it rises by tenths.
+        self.blur_out = None;
+        if def.flags & 0x200 != 0 && def.blur_on != 2 {
+            const BITS: [u32; 6] = [2, 4, 8, 0x10, 0x20, 0x40];
+            let bit = |i: i32| {
+                usize::try_from(i)
+                    .ok()
+                    .and_then(|i| BITS.get(i))
+                    .copied()
+                    .unwrap_or(0)
+            };
+            if test(bit(def.blur_on)) {
+                self.flags |= 0x400;
+                let d = aim_dir(&*w, side, w.chars[side].obj.node_pos(0x11));
+                if self.prop {
+                    self.dir = d;
+                } else {
+                    self.blur_dir = d;
+                }
+            }
+            if test(bit(def.blur_off)) {
+                self.blur = 0.0;
+                self.flags &= !0x400;
+            }
+            if self.flags & 0x400 != 0 {
+                self.blur = (self.blur + 0.1).min(1.0);
+            }
+            let dir = if self.prop { self.dir } else { self.blur_dir };
+            self.blur_out = Some((blur_alphas(self.blur, [32.0, 64.0, 128.0]), dir));
+        }
         if advance {
             self.state += 1;
         }
@@ -1405,6 +1459,7 @@ impl TechFx {
         next_id: &mut u32,
     ) {
         self.events = [0; 2];
+        self.blur = None;
         let mut i = 0;
         while i < self.timelines.len() {
             let mut t = self.timelines[i];
@@ -1435,6 +1490,9 @@ impl TechFx {
                 while k < self.beams[side][slot].len() {
                     let beam = &mut self.beams[side][slot][k];
                     let rec = beam.update(w, fx, self.events[side], self.cur_slot[side]);
+                    if beam.blur_out.is_some() {
+                        self.blur = beam.blur_out;
+                    }
                     // EftBlast_Term / EftPropShot_Term (not technique 0x19A's prop, which raised it).
                     let a8 = beam.src.def.kind != 0 && !(beam.prop && beam.flags & 0x800 != 0);
                     if let Some(rec) = rec
@@ -1490,7 +1548,16 @@ impl TechFx {
                 while k < self.rush_shots[side][slot].len() {
                     let r = &mut self.rush_shots[side][slot][k];
                     let attached = r.attached();
-                    let (rec, stop) = r.update(w, fx, self.events[side], self.cur_slot[side]);
+                    let (rec, stop) = r.update(
+                        w,
+                        fx,
+                        self.events[side],
+                        self.events[side ^ 1],
+                        self.cur_slot[side],
+                    );
+                    if r.blur_out.is_some() {
+                        self.blur = r.blur_out;
+                    }
                     // The rush connected: the stage darkens.
                     if !attached && r.attached() {
                         self.tints.push(0);
@@ -1603,6 +1670,9 @@ impl TechFx {
                         self.events[side ^ 1],
                         self.cur_slot[side],
                     );
+                    if s.blur_out.is_some() {
+                        self.blur = s.blur_out;
+                    }
                     // EftShotTech_StartCam / EftCam_Stop.
                     if !s.cam_sent && s.connected() {
                         s.cam_sent = true;

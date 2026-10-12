@@ -496,6 +496,14 @@ impl TechTable<'_> {
     pub fn impact_scale(&self, slot: i32) -> f32 {
         self.f32_of(0x84, slot)
     }
+    /// The event bits (as indices into 2, 4, .. 0x40; 2 none) that turn the stage blur on and off (+0x15C, +0x15F;
+    /// `EftShotParam.blurOn` / `blurOff`).
+    pub fn blur_on(&self, slot: i32) -> i32 {
+        self.s8_of(0x15C, slot)
+    }
+    pub fn blur_off(&self, slot: i32) -> i32 {
+        self.s8_of(0x15F, slot)
+    }
     pub fn ground_scale(&self, slot: i32) -> f32 {
         self.f32_of(0x78, slot)
     }
@@ -717,6 +725,13 @@ impl SkillTable<'_> {
     /// `BtlSkill_GetHitSound` (+0x6C).
     pub fn hit_sound(&self, slot: i32) -> i32 {
         self.s8_of(0x6C, slot)
+    }
+    /// The stage blur's on / off event indices (+0x6E, +0x70).
+    pub fn blur_on(&self, slot: i32) -> i32 {
+        self.s8_of(0x6E, slot)
+    }
+    pub fn blur_off(&self, slot: i32) -> i32 {
+        self.s8_of(0x70, slot)
     }
     /// `BtlSkill_GetFlagsA` (+0x00): the effect definition's flags (`EftShot_BuildParam`).
     pub fn flags_a(&self, slot: i32) -> u32 {

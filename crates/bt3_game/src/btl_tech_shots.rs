@@ -7,8 +7,11 @@
 //! the owner's node 0x36 and aim again, and option 1 takes the muzzle (node 0x36) on event 0x20 for the phase 4
 //! emitters and shots. The END event, or ABORT, ends it once its shots are gone; its end raises flag 0xA8.
 //!
+//! Once connected it sets view 0's stage blur every frame, rising between the opponent's events 0x10 and 0x20 with
+//! definition flag 0x200.
+//!
 //! Not ported: its model, the camera cut, and what the connected rush starts on the opponent's events (screen
-//! flash, node sounds, stage blur, streaks, the aura orb and glow, the ground dust).
+//! flash, node sounds, streaks, the aura orb and glow, the ground dust).
 
 use bt3_data::eft_pack::SetHead;
 
@@ -69,6 +72,10 @@ pub(crate) struct ShotTech {
     emit: Option<EmitState>,
     head_set: SetHead,
     dead: bool,
+    /// `blur` / `blurDir` (flag 0x400 while it rises); this update's setting of view 0's blur.
+    blur: f32,
+    blur_dir: [f32; 3],
+    pub(crate) blur_out: Option<([u8; 3], [f32; 3])>,
 }
 
 impl ShotTech {
@@ -101,6 +108,9 @@ impl ShotTech {
             emit: emit_state(data, src.slot),
             head_set,
             dead: false,
+            blur: 0.0,
+            blur_dir: [0.0; 3],
+            blur_out: None,
         };
         if head_set.flags & 1 != 0 && head_set.move_kind == 2 {
             s.node = 0x15;
@@ -387,6 +397,7 @@ impl ShotTech {
         let side = self.src.side;
         self.opp_events = opp_events;
         self.cur_slot = cur_slot;
+        self.blur_out = None;
         if stopped(w, side) {
             return;
         }
@@ -440,7 +451,25 @@ impl ShotTech {
             if options & 0x40 != 0 {
                 self.dir = self.calc_dir(w);
             }
-            // EftShotTech_UpdateConnected: of its helpers only the muzzle is ported (the others draw).
+            // EftShotTech_UpdateConnected: of its helpers the blur and the muzzle are ported (the others draw).
+            // EftShotTech_UpdateBlur: with definition flag 0x200 the victim's event 0x10 aims the blur from node
+            // 0x11 and starts its rise by tenths, its event 0x20 drops it; view 0's blur is set every frame.
+            let def = self.src.def;
+            if def.flags & 0x200 != 0 {
+                if opp_events & 0x10 != 0 {
+                    self.flags |= 0x400;
+                    self.blur_dir = aim_dir(&*w, side, w.chars[side].obj.node_pos(0x11));
+                }
+                if opp_events & 0x20 != 0 {
+                    self.blur = 0.0;
+                    self.flags &= !0x400;
+                }
+                if self.flags & 0x400 != 0 {
+                    self.blur = (self.blur + 0.1).min(1.0);
+                }
+            }
+            let alphas = crate::btl_tech_fx::blur_alphas(self.blur, [8.0, 32.0, 128.0]);
+            self.blur_out = Some((alphas, self.blur_dir));
             if options & 1 != 0 && test(0x20) {
                 (self.muzzle_pos, self.muzzle_dir) = muzzle(w, side);
             }
