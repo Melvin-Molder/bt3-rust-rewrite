@@ -82,6 +82,7 @@ mod font;
 mod get_win;
 mod gfx_water;
 mod hist_result;
+mod hist_save;
 mod hist_select;
 mod hud;
 mod hud_combo;
@@ -204,6 +205,8 @@ enum Scene {
     ModeMenu(Box<mode_menu::ModeMenuScreen>),
     /// `HistResult_Run(3)`, progress mode 8: the story battle's result.
     HistResult(Box<hist_result::HistResultScreen>),
+    /// `HistSave_Run(4)`, progress mode 10: the story mode's save.
+    HistSave(Box<hist_save::HistSaveScreen>),
     Black,
     Loading(LoadingScreen),
     /// `Battle_Load`: the loading screen while the battle's files are read.
@@ -239,6 +242,7 @@ impl Scene {
             | Scene::HistSelect(_)
             | Scene::ModeMenu(_)
             | Scene::HistResult(_)
+            | Scene::HistSave(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
                 2.0 * VBLANK_SECONDS
@@ -1672,15 +1676,31 @@ fn run_frames(
                         hist_result::HistResultResult::Lost => {
                             start_mode_menu(game, &mut commands, 8)
                         }
-                        hist_result::HistResultResult::Won => {
-                            info!(
-                                "progress mode 10 (the story mode's save screen) is not ported yet"
-                            );
-                            game.scene = Scene::Black;
-                        }
+                        hist_result::HistResultResult::Won => start_hist_save(game, 8),
                         hist_result::HistResultResult::Cleared => {
                             info!("progress mode 9 (the saga's outro) is not ported yet");
                             game.scene = Scene::Black;
+                        }
+                    }
+                }
+            }
+            Scene::HistSave(screen) => {
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
+                let frame = screen.run_frame(held, pressed, &mut game.font, &mut mc);
+                let result = screen.result();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    stop_all(game, &mut commands);
+                    match result {
+                        hist_save::HistSaveResult::Sagas => start_hist_select(game, &mut commands),
+                        hist_save::HistSaveResult::Episodes => {
+                            start_mode_menu(game, &mut commands, 10)
                         }
                     }
                 }
@@ -2891,6 +2911,41 @@ fn start_hist_result(game: &mut Game, won: bool, ball: i32) {
         Ok(screen) => game.scene = Scene::HistResult(Box::new(screen)),
         Err(error) => {
             error!("cannot start the story result screen: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Hist_Main` mode 10: `HistSave_Run(4)`, the save flow over a black screen; `prev_mode` is the mode it comes
+/// from.
+fn start_hist_save(game: &mut Game, prev_mode: i32) {
+    let loaded = Iso9660::open(&game.iso_path)
+        .map_err(Into::into)
+        .and_then(|mut image| read_file(&mut image, hist_select::ARCHIVE_FILE_ID))
+        .and_then(|file| {
+            Ok(bpe::decode(pack_section(
+                &file,
+                hist_save::ARCHIVE_SECTION,
+            )?)?)
+        })
+        .and_then(|res| {
+            dialog::DialogAssets::parse(pack_section(&res, hist_save::DIALOG_SECTION)?)
+        });
+    let dialog = match loaded {
+        Ok(assets) => {
+            let indices = register_pairs(game, assets.textures);
+            dialog::Dialog::new(&assets.fod, assets.titles, indices, None, 0)
+        }
+        Err(error) => Err(error),
+    };
+    match dialog {
+        Ok(dialog) => {
+            let screen =
+                hist_save::HistSaveScreen::new(dialog, game.card_res.as_deref(), prev_mode);
+            game.scene = Scene::HistSave(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot load the story save screen: {error}");
             game.scene = Scene::Black;
         }
     }
