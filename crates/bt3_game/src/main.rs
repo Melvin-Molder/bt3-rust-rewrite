@@ -67,6 +67,7 @@ mod eft_rushburst;
 mod eft_shock;
 mod eft_shotfx;
 mod eft_smoke;
+mod eft_spark;
 mod eft_spdline;
 mod eft_storm;
 mod eft_streak;

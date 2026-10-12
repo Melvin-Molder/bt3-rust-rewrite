@@ -16,7 +16,7 @@
 //!
 //! The fighters' answers play their sounds and voices (`BtlColl_*`), the shots their fire and stage-contact sounds.
 //!
-//! Not ported: the struggle's spark; the particles, impact effects and battle events.
+//! Not ported: the particles, impact effects and battle events.
 
 use std::f32::consts::PI;
 
@@ -314,6 +314,8 @@ pub(crate) struct Scene {
     pub tech: TechFx,
     /// The beam struggle (`EftStruggle`, layer 3).
     pub struggle: Option<Struggle>,
+    /// The struggle's sparks (`EftClashSpark`, layer 3).
+    pub sparks: crate::eft_spark::Sparks,
     /// The thrown objects (kind 1) and bombs (kind 2) of the ki blasts of types 2 / 3, by fighter, in the place of
     /// those lists.
     pub ki_objs: [[Vec<KiObj>; 2]; 2],
@@ -406,6 +408,8 @@ pub(crate) struct Struggle {
     pub pos: [f32; 3],
     frames: i32,
     end: bool,
+    /// Its spark.
+    spark: Option<u32>,
 }
 
 /// `Vec3_Lerp(out, a, b, t)`: a t + b (1 - t).
@@ -420,7 +424,7 @@ impl Struggle {
     }
 
     /// `EftStruggle_Start` / `EftStruggle_Init`: both sides' powers (the definition's +0x88), the point from the
-    /// clash bias. The spark is drawing only.
+    /// clash bias (the spark is started there by the caller).
     fn start(a: &HitRec, b: &HitRec, bias: f32) -> Option<Self> {
         let (r0, r1) = if a.owner == 0 { (a, b) } else { (b, a) };
         let side = |r: &HitRec| {
@@ -439,6 +443,7 @@ impl Struggle {
             bias,
             frames: 0,
             end: false,
+            spark: None,
         })
     }
 }
@@ -983,9 +988,12 @@ impl Scene {
             s.end = true;
         }
         if s.end {
+            // EftStruggle_Term.
+            self.sparks.stop(s.spark);
             self.struggle = None;
             return;
         }
+        self.sparks.place(s.spark, s.pos, 1.0);
         s.bias = ((w.clash_bias + 1.0) * 0.5).clamp(0.0, 1.0);
         s.pos = lerp3(s.side[1].start, s.side[0].start, s.bias);
         for side in s.side {
@@ -1553,9 +1561,32 @@ impl Scene {
         );
         self.tech
             .update_shots(w, &mut self.fx, &mut self.records, HIT_MAX, &self.eft_objs);
+        // EftClashSpark_Update.
+        if let Some(s) = w.env.spark {
+            let ctx = crate::eft::SpawnCtx {
+                chr: 0,
+                set: &s.set,
+                assets: &s.assets,
+                set_ref: SetRef {
+                    side: 0,
+                    list: crate::eft::SPARK_LIST,
+                },
+                char_scale: [scale[0], scale[1]],
+                opp_chara_flags: flags[1],
+                opp_node3: node3[1],
+            };
+            self.sparks
+                .update(&mut self.fx, &ctx, w.paused, w.libc, w.vu0);
+        }
         let fxw = FxWorld {
             sets: std::array::from_fn(|s| {
-                world_sets(w.data[s].fx_sets(), impact_sets, transform_sets, w.env.orb)
+                world_sets(
+                    w.data[s].fx_sets(),
+                    impact_sets,
+                    transform_sets,
+                    w.env.orb,
+                    w.env.spark,
+                )
             }),
             any_frozen: stopped,
             stopped: [0, 1].map(|s| crate::btl_tech_fx::stopped(w, s)),
@@ -1623,6 +1654,9 @@ impl Scene {
         self.impacts
             .post_update(&mut self.fx, impact_sets, w.paused);
         self.tech.post_update_shots(w, &mut self.fx);
+        if let Some(s) = w.env.spark {
+            self.sparks.post_update(&s.set, &mut self.fx, w.paused);
+        }
         self.serve_tech_requests(w);
         // BtlObj_UpdateAll's effect objects.
         self.eft_objs.update(w.paused, |r| {
@@ -1998,6 +2032,11 @@ impl Scene {
                             self.set_task_flag(j, T_STRUGGLE, pj);
                             let (a, b) = (self.records[i], self.records[j]);
                             self.struggle = Struggle::start(&a, &b, w.clash_bias);
+                            // EftClashSpark_Create at the point, along fighter 0's beam.
+                            if let (Some(s), Some(set)) = (&mut self.struggle, w.env.spark) {
+                                let r0 = if a.owner == 0 { &a } else { &b };
+                                s.spark = self.sparks.create(&set.set, s.pos, r0.vel);
+                            }
                         }
                     }
                 }
@@ -2575,8 +2614,10 @@ pub(crate) fn world_sets<'a>(
     impact: &'a [crate::eft_impact::ImpactSet],
     transform: &'a [crate::eft_impact::ImpactSet],
     orb: Option<&'a crate::eft_orb_tail::OrbCfg>,
+    spark: Option<&'a crate::eft_impact::ImpactSet>,
 ) -> [Option<&'a SetAssets>; crate::eft::SET_LISTS] {
     own[crate::eft::ORB_LIST] = orb.map(|o| &o.burst_set);
+    own[crate::eft::SPARK_LIST] = spark.map(|s| &s.assets);
     for (k, s) in impact.iter().enumerate() {
         own[crate::eft_impact::FIRST_LIST + k] = Some(&s.assets);
     }

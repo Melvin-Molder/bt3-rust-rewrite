@@ -145,6 +145,8 @@ pub struct BattleAssets {
     pub(crate) impact_sets: Vec<crate::eft_impact::ImpactSet>,
     /// `EftTransformMgr_Init`: the transformation effect's eight sets (empty when one does not load).
     pub(crate) transform_sets: Vec<crate::eft_impact::ImpactSet>,
+    /// `EftClashSparkMgr_Init`: the struggle spark's set.
+    pub(crate) spark_set: Option<crate::eft_impact::ImpactSet>,
     /// `EftAuraMgr_Init`: the aura's settings and flame textures.
     pub(crate) aura_cfg: Option<crate::eft_aura::AuraCfg>,
     pub(crate) aura_textures: crate::eft_aura::AuraTextures,
@@ -508,6 +510,7 @@ pub fn load(
         shadow_pages: [0; 2],
         impact_sets: Vec::new(),
         transform_sets: Vec::new(),
+        spark_set: None,
         aura_cfg: None,
         aura_textures: crate::eft_aura::AuraTextures::default(),
         bolt_cfg: None,
@@ -811,6 +814,14 @@ pub fn load(
     }
     if transform_sets.len() == crate::eft_transform::SET_ENTRIES.len() {
         assets.transform_sets = transform_sets;
+    }
+    if let Ok(set) = bt3_data::eft_pack::EmitSet::parse(&common_fx, crate::eft_spark::SET_ENTRY) {
+        let assets_of =
+            crate::eft::SetAssets::load(&set, &mut assets.effect_textures).map_err(error)?;
+        assets.spark_set = Some(crate::eft_impact::ImpactSet {
+            set,
+            assets: assets_of,
+        });
     }
     assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
     assets.stage_pack14 = pack14.map(|t| assets.push_effect_textures(t));
@@ -1862,6 +1873,7 @@ impl BattleAssets {
             fx: &self.fx_tables,
             impact: &self.impact_sets,
             transform: &self.transform_sets,
+            spark: self.spark_set.as_ref(),
             glow: self.glow_cfg.as_ref(),
             streak: self.streak_cfg.as_ref(),
             orb: self.orb_cfg.as_ref(),
@@ -3504,6 +3516,7 @@ impl Battle {
                         &self.assets.impact_sets,
                         &self.assets.transform_sets,
                         self.assets.orb_cfg.as_ref(),
+                        self.assets.spark_set.as_ref(),
                     )
                 }),
                 any_frozen: self.roster.chars.iter().any(|c| c.is_frozen()),
@@ -6990,6 +7003,12 @@ mod tests {
         let (mut struggle_at, mut lost_at, mut moved) = (None, None, false);
         let (mut clash_frames, mut cut_frames) = (0, 0);
         let mut first_pos = None;
+        // Its spark (common entry 0x268) sits at the point, raising particles of its set, until it ends.
+        let spark_list = Some(crate::eft::SetRef {
+            side: 0,
+            list: crate::eft::SPARK_LIST,
+        });
+        let (mut sparks, mut spark_objects) = (0, 0);
         for i in 0..300 {
             let (p1, p2) = match i {
                 2..4 => (L2, L2),
@@ -7006,6 +7025,8 @@ mod tests {
                 }
                 moved |= first_pos.is_some_and(|p| p != s.pos);
             }
+            sparks = sparks.max(r.scene.sparks.count());
+            spark_objects = spark_objects.max(r.scene.fx.counts(spark_list).iter().sum::<usize>());
             if r.clash.state != 0 {
                 assert_eq!(r.chars[0].act.current, 0x130);
                 assert_eq!(r.chars[1].act.current, 0x130);
@@ -7037,6 +7058,9 @@ mod tests {
         assert_eq!(r.chars[1].gauge.variant, 1);
         assert!(r.scene.struggle.is_none());
         assert!(r.scene.records.is_empty());
+        assert_eq!(sparks, 1);
+        assert!(spark_objects > 0);
+        assert_eq!(r.scene.sparks.count(), 0);
     }
 
     /// Runs character `chara`'s technique of `slot` (charged first; `near`: from beside the opponent) against an

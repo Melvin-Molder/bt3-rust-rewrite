@@ -1020,9 +1020,12 @@ pub(crate) struct SetRef {
     pub list: usize,
 }
 
-/// `FxWorld::sets`' entries per side: the side's own eleven, then the impacts' and the transformation's common
-/// sets.
-pub(crate) const SET_LISTS: usize = ORB_LIST + 1;
+/// `FxWorld::sets`' entries per side: the side's own eleven, then the impacts', the transformation's, the orb
+/// tail's and the struggle spark's common sets.
+pub(crate) const SET_LISTS: usize = SPARK_LIST + 1;
+
+/// The list of the struggle spark's set, after the orb tail's.
+pub(crate) const SPARK_LIST: usize = ORB_LIST + 1;
 
 /// The list of the orb tail's burst emitters (`OrbCfg::burst_set`), after the transformation's.
 pub(crate) const ORB_LIST: usize =
