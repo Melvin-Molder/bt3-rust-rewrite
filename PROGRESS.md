@@ -70,7 +70,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 
 - [x] Loading screen and battle loading, character and stage changes
 - [x] Fighters: the action state machine, movement, combat, techniques, transformations, fusions, switches, clashes A and B
-- [~] Clash C: ported, started only by the story scripts' forced dashes, no test yet
+- [x] Clash C: started by the story scripts' forced dashes (actions 5 / 6)
 - [x] Computer opponent (`BtlAi*`)
 - [x] Effects, stages and their effects, cameras, the demo camera
 - [x] HUD, pause and result menus, replays

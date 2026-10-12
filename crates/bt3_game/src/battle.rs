@@ -5306,6 +5306,67 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn real_scripted_dashes_meet_in_clash_c() {
+        // Story mode's forced dash (action 6, flag 0x111) on both sides: the two meet and start clash C.
+        let mut setup = BattleSetup::default();
+        setup.mode = 1;
+        setup.sides[1].chara = 1;
+        setup.sides[1].control = 2;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut run = |battle: &mut Battle| {
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+        };
+        // The script would end the intro (BtlSeq_CallExtra).
+        run(&mut battle);
+        battle.seq_call_extra();
+        for _ in 0..200 {
+            run(&mut battle);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        for c in &mut battle.roster.chars {
+            c.flags.set_held(0x111);
+        }
+        let mut dashed = false;
+        let mut clash = false;
+        for _ in 0..300 {
+            run(&mut battle);
+            dashed |= battle.roster.chars.iter().all(|c| c.act.current == 6);
+            if battle.roster.chars.iter().all(|c| c.act.current == 0xFB) {
+                clash = true;
+                break;
+            }
+        }
+        assert!(
+            dashed && clash,
+            "{:x?}",
+            battle.roster.chars.each_ref().map(|c| c.act.current)
+        );
+        for _ in 0..30 {
+            run(&mut battle);
+        }
+        assert!(
+            (9..=11).contains(&battle.roster.clash.state),
+            "{}",
+            battle.roster.clash.state
+        );
+    }
+
+    #[test]
     fn real_battle_ends_by_ko_and_by_time_up() {
         use crate::battle_seq::{REASON_KO, REASON_TIME_UP, WIN_P1};
         let mut setup = BattleSetup::default();
