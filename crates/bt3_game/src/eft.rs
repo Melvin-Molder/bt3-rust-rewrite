@@ -3551,3 +3551,73 @@ mod tests {
         );
     }
 }
+
+/// `EftMesh_DrawPlain` of an effect mesh under `mtx` (colour and uv scale 1, no uv offset, no depth offset):
+/// every triangle projected (`Vu0Cur_ProjectPointsStq`), dropped when its first point's depth slot is out of
+/// range or a point is off the GS area, or its three alphas are below 0.1; textured by the owner's texture
+/// `tri.tex` (untextured below 0), queued in its first point's depth slot on `layer`.
+pub(crate) fn draw_mesh_plain(
+    ot: &mut OrderTable,
+    ctx: &DrawCtx,
+    mesh: &bt3_data::eft_mesh::EffectMesh,
+    mtx: &Mtx,
+    textures: &[usize],
+    layer: i32,
+) {
+    for tri in &mesh.tris {
+        let mut scr = [(0i32, 0i32, 0i32, 0.0f32); 3];
+        let mut verts = [EffectVertex::default(); 3];
+        let mut alpha = [0.0f32; 3];
+        for (k, &i) in tri.v.iter().enumerate() {
+            let Some(v) = mesh.verts.get(i) else {
+                return;
+            };
+            let p = apply(&ctx.world2screen, apply(mtx, v.pos));
+            let q = 1.0 / p[3];
+            scr[k] = (
+                (p[0] * q * 16.0) as i32,
+                (p[1] * q * 16.0) as i32,
+                (p[2] * q) as i32,
+                q,
+            );
+            alpha[k] = v.color[3];
+            verts[k] = EffectVertex {
+                position: [
+                    scr[k].0 as f32 / 16.0 - OFFSET_X,
+                    scr[k].1 as f32 / 16.0 - OFFSET_Y,
+                    (scr[k].2 & 0xFF_FFFF) as f32,
+                ],
+                stq: [v.uv[0] * q, v.uv[1] * q, q],
+                rgba: v.color.map(|c| c as i32 as u8),
+            };
+        }
+        let z = scr[0].2 >> 8;
+        let off = |s: &(i32, i32, i32, f32)| {
+            s.2 <= 0 || s.0 > 0xFFEF || s.0 <= 0 || s.1 > 0xFFEF || s.1 <= 0
+        };
+        if !(0..0x1000).contains(&z) || scr.iter().any(off) {
+            continue;
+        }
+        if alpha.iter().all(|&a| a < 0.1) {
+            continue;
+        }
+        let texture = usize::try_from(tri.tex)
+            .ok()
+            .and_then(|t| textures.get(t).copied());
+        // Below 0 the original draws on layer 0 without blending; the meshes drawn here use 1.
+        let l = if layer >= 2 { layer - 2 } else { layer.max(0) } as usize;
+        let blend = EffectBlend::of(l, layer >= 2);
+        ot.add(
+            depth_slot(z),
+            l,
+            EffectTri {
+                texture,
+                blend,
+                clamp: false,
+                zwrite: false,
+                alpha_ref: 0,
+                vertices: verts,
+            },
+        );
+    }
+}

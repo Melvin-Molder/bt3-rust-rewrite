@@ -510,8 +510,10 @@ struct Body {
 /// flight's record of mode 0 is never the last hit (0x800). By technique: 0x282 / 0x1F3 (mode 0) take it in hand
 /// on event 0x10 at node slot 3's node and throw it again on 0x20; 0x2A8 (1) sits on the victim's node 3; 0x162 (2)
 /// follows the hand's node 0x1F from FIRE; 0x167 / 0x168 (3) sit on the victim's node 0x11 with the rings. END
-/// ends it once the set's end frames are over, ABORT at once; its end raises flag 0xA8 for a technique. Its models
-/// and rings are not ported.
+/// ends it once the set's end frames are over, ABORT at once; its end raises flag 0xA8 for a technique. With
+/// definition flag 0x20000 a model object follows it (mode 0 in the hand and flying, turned along the direction;
+/// mode 2 on the hand's node 0x1F along nodes 0x15 to 0x19); with flag 0x40000 mode 3 places rings (0x167 one,
+/// 0x168 three, rolled a quarter turn, 20 apart and growing) around the victim or the flight.
 #[derive(Clone, Debug)]
 pub(crate) struct ObjTech {
     id: u32,
@@ -536,15 +538,49 @@ pub(crate) struct ObjTech {
     width2: f32,
     time2: f32,
     dead: bool,
+    /// The model object (definition flag 0x20000).
+    model: Option<u32>,
+    /// `EftKRings`: each ring's roll, offset along the direction and scale, and their matrices this frame.
+    rings: Vec<Ring>,
+    ring_mtx: Vec<crate::battle::Mtx>,
+}
+
+/// One ring of a thrown object.
+#[derive(Clone, Copy, Debug)]
+struct Ring {
+    roll: f32,
+    offset: f32,
+    scale: f32,
+}
+
+/// `Mtx_ScaleDiagUniform`, `Mtx_RotateZXY` and `Mtx_Translate` from the identity.
+fn pose_mtx(scale: [f32; 3], ang: [f32; 3], pos: [f32; 3]) -> crate::battle::Mtx {
+    use crate::battle::mul;
+    use crate::btl_obj::{rot_x, rot_y, rot_z};
+    let mut m: crate::battle::Mtx = [
+        [scale[0], 0.0, 0.0, 0.0],
+        [0.0, scale[1], 0.0, 0.0],
+        [0.0, 0.0, scale[2], 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    m = mul(
+        &mul(&mul(&m, &rot_z(ang[2])), &rot_x(ang[0])),
+        &rot_y(ang[1]),
+    );
+    for k in 0..3 {
+        m[3][k] += pos[k];
+    }
+    m
 }
 
 impl ObjTech {
-    /// `EftObjTech_Init` (the model and the rings are not made).
+    /// `EftObjTech_Init`: the mode by technique, the model object (hidden) and the rings.
     pub(crate) fn new(
         id: u32,
         src: TechSrc,
         data: &crate::btl_chr::SideData,
         set: &EmitSet,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) -> Self {
         let def = src.def;
         let head_set = set.head;
@@ -577,12 +613,102 @@ impl ObjTech {
             width2: head_set.width_b[0],
             time2: 0.0,
             dead: false,
+            model: None,
+            rings: Vec::new(),
+            ring_mtx: Vec::new(),
         };
         if head_set.flags & 4 != 0 {
             o.speed = o.width2 * def.scale;
             o.flags |= 0x200;
         }
+        if def.flags & 0x2_0000 != 0 {
+            let handle = out.handle();
+            out.reqs.push(crate::btl_tech_fx::TechReq::ObjCreate {
+                handle,
+                model: o.model_ref(),
+            });
+            o.model = Some(handle);
+        }
+        if def.flags & 0x4_0000 != 0 {
+            // EftObjTech_InitRings.
+            let count = match def.id {
+                0x167 => 1,
+                0x168 => 3,
+                _ => 0,
+            };
+            o.rings = vec![
+                Ring {
+                    roll: 0.0,
+                    offset: 0.0,
+                    scale: 1.0,
+                };
+                count
+            ];
+            o.ring_mtx = vec![crate::battle::IDENTITY; count];
+            let (roll, step, grow) = if def.id == 0x168 {
+                (-std::f32::consts::FRAC_PI_2, -20.0, 0.3)
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+            o.set_ring_params(roll, step, grow);
+        }
         o
+    }
+
+    /// The model's place: the owner's technique slot.
+    pub(crate) fn model_ref(&self) -> crate::eft_obj::ModelRef {
+        crate::eft_obj::ModelRef {
+            side: self.src.side,
+            slot: self.src.slot as usize,
+        }
+    }
+
+    /// `EftObjTech_SetRingParams`: each ring's roll, its offset `step` apart and its scale growing by `grow`.
+    fn set_ring_params(&mut self, roll: f32, step: f32, grow: f32) {
+        let (mut offset, mut scale) = (0.0, 1.0);
+        for r in &mut self.rings {
+            r.roll = roll;
+            r.offset = offset;
+            offset += step;
+            r.scale = scale;
+            scale += grow;
+        }
+    }
+
+    /// `EftObjTech_PlaceRings`: each ring scaled (the width across, the length along y), turned by the angles with
+    /// its roll as the pitch, at the position plus the direction times its offset.
+    fn place_rings(&mut self, pos: [f32; 3], ang: [f32; 3], width: f32, length: f32) {
+        let dir = self.dir;
+        for (r, m) in self.rings.iter().zip(&mut self.ring_mtx) {
+            let a = [crate::btl_tech_volley::eft_wrap(r.roll), ang[1], ang[2]];
+            let p = add(scale3(dir, r.offset), pos);
+            *m = pose_mtx([width * r.scale, length, width * r.scale], a, p);
+        }
+    }
+
+    /// The rings' matrices while they are drawn (`EftObjTech_Draw`: flag 0x40000, in use).
+    pub(crate) fn rings(&self) -> Option<&[crate::battle::Mtx]> {
+        (self.src.def.flags & 0x4_0000 != 0 && self.flags & 0x4000 != 0 && !self.rings.is_empty())
+            .then_some(self.ring_mtx.as_slice())
+    }
+
+    /// `EftObjTech_SetModelPose`: the scale, rotations Z X Y, the position.
+    fn pose_model(&self, pos: [f32; 3], ang: [f32; 3], out: &mut crate::btl_tech_fx::TechOut) {
+        if let Some(handle) = self.model {
+            let s = self.scale;
+            out.reqs.push(crate::btl_tech_fx::TechReq::ObjMtx {
+                handle,
+                mtx: pose_mtx([s; 3], ang, pos),
+            });
+        }
+    }
+
+    /// `EftObjTech_Term`'s request: the model goes.
+    pub(crate) fn term(&mut self, out: &mut crate::btl_tech_fx::TechOut) {
+        if let Some(handle) = self.model.take() {
+            out.reqs
+                .push(crate::btl_tech_fx::TechReq::ObjDestroy(handle));
+        }
     }
 
     pub(crate) fn id(&self) -> u32 {
@@ -604,9 +730,10 @@ impl ObjTech {
         }
     }
 
-    /// `EftObjTech_UpdateMotion`: where the object is held or pinned, by mode (the poses of the model and the
-    /// rings are not ported).
-    fn update_motion(&mut self, w: &World, events: u32) {
+    /// `EftObjTech_UpdateMotion`: where the object is held or pinned, by mode, with the model's pose and the
+    /// rings' placement.
+    fn update_motion(&mut self, w: &World, events: u32, out: &mut crate::btl_tech_fx::TechOut) {
+        use crate::btl_tech_volley::eft_wrap;
         let side = self.src.side;
         let test = |b: u32| events & b != 0;
         let me = &w.chars[side].obj;
@@ -635,6 +762,15 @@ impl ObjTech {
                 } else if self.flags & 0x1000 != 0 {
                     self.held.pos = me.node_pos(node);
                 }
+                if self.flags & 0x1000 != 0 {
+                    let d = self.dir.map(|c| c.clamp(-1.0, 1.0));
+                    let ang = [
+                        eft_wrap(d[1].asin()),
+                        eft_wrap(d[0].atan2(d[2]) + std::f32::consts::PI),
+                        0.0,
+                    ];
+                    self.pose_model(self.held.pos, ang, out);
+                }
             }
             1 => {
                 if self.flags & 0x400 != 0 {
@@ -646,17 +782,34 @@ impl ObjTech {
                     self.flags |= 0x4000;
                 }
                 if self.flags & 0x4000 != 0 {
-                    if self.flags & 0x400 == 0 {
+                    let o = if self.flags & 0x400 == 0 {
                         self.body.pos = me.node_pos(0x1F);
+                        me
                     } else {
                         self.held.pos = opp.node_pos(0x1F);
-                    }
+                        opp
+                    };
+                    // Along nodes 0x15 to 0x19 (Mtx_AxisZToEuler of the hand's frame), at node 0x1F.
+                    let z = crate::btl_blast::norm(sub(o.node_pos(0x19), o.node_pos(0x15)));
+                    let flat = (z[0] * z[0] + z[2] * z[2]).sqrt();
+                    let ang = [-z[1].atan2(flat), z[0].atan2(z[2]), 0.0];
+                    self.pose_model(o.node_pos(0x1F), ang, out);
                 }
             }
             3 => {
+                let def = self.src.def;
+                let opp_scale = crate::btl_fx::char_scale(w.data[side ^ 1]);
                 if self.flags & 0x400 != 0 {
                     self.held.pos = opp.node_pos(0x11);
                     self.dir = [0.0, -1.0, 0.0];
+                    if self.flags & 0x800 == 0 && def.flags & 0x4_0000 != 0 {
+                        let step = if def.id == 0x168 {
+                            opp_scale * -4.0
+                        } else {
+                            0.0
+                        };
+                        self.set_ring_params(0.0, step, 0.0);
+                    }
                 }
                 if test(EV_START) && self.flags & 0x8000 != 0 {
                     self.flags |= 0x4000;
@@ -666,6 +819,27 @@ impl ObjTech {
                 }
                 if test(0x10) {
                     self.flags |= 0x2_0000;
+                }
+                if def.flags & 0x4_0000 != 0 && self.flags & 0x4000 != 0 {
+                    let mut length = self.scale + self.scale;
+                    let mut width = self.scale * 1.5;
+                    let (pos, ang) = if self.flags & 0x400 != 0 {
+                        let k = if self.flags & 0x2_0000 == 0 { 0.8 } else { 0.5 };
+                        width *= opp_scale * k;
+                        length *= opp_scale * k;
+                        (self.held.pos, [0.0; 3])
+                    } else {
+                        let d = self.dir.map(|c| c.clamp(-1.0, 1.0));
+                        let ang = [0.0, eft_wrap(d[0].atan2(d[2])), 0.0];
+                        if self.flags & 0x1_0000 == 0 {
+                            (self.nodes.pos(0), ang)
+                        } else {
+                            width += width;
+                            length += length;
+                            (self.body.pos, ang)
+                        }
+                    };
+                    self.place_rings(pos, ang, width, length);
                 }
             }
             _ => {}
@@ -679,6 +853,7 @@ impl ObjTech {
         fx: &mut Modules,
         events: u32,
         cur_slot: i32,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) -> Option<HitRec> {
         let side = self.src.side;
         if stopped(w, side) {
@@ -745,7 +920,7 @@ impl ObjTech {
                 _ => {}
             }
         }
-        self.update_motion(&*w, events);
+        self.update_motion(&*w, events, out);
         if test(EV_ABORT) {
             if self.flags & 0x10 == 0 {
                 self.flags |= 8;
@@ -858,7 +1033,25 @@ impl ObjTech {
     /// `EftObjTech_PostUpdate`: the record moved by the pass moves the head; a fighter hit pins it on the victim
     /// (flag 0x400, the phase 6 emitters started) and stops the owner's timeline, a guard or the stage ends it;
     /// result bit 2 starts its life timer. Returns whether the timeline is to stop.
-    pub(crate) fn post_update(&mut self, w: &World, fx: &mut Modules) -> bool {
+    pub(crate) fn post_update(
+        &mut self,
+        w: &World,
+        fx: &mut Modules,
+        out: &mut crate::btl_tech_fx::TechOut,
+    ) -> bool {
+        // EftObjTech_UpdateModelVisible: mode 0 while held or thrown, mode 2 from FIRE.
+        if let Some(handle) = self.model {
+            let show = match self.mode {
+                0 => self.flags & 0x1000 != 0,
+                2 => self.flags & 0x4000 != 0,
+                _ => false,
+            };
+            if show {
+                let on = !crate::btl_tech_fx::effect_hidden_1(&w.chars[self.src.side]);
+                out.reqs
+                    .push(crate::btl_tech_fx::TechReq::ObjVisible { handle, on });
+            }
+        }
         if stopped(w, self.src.side) {
             return false;
         }

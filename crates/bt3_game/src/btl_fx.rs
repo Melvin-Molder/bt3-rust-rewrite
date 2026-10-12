@@ -377,7 +377,7 @@ pub(crate) fn power_up_look(
 }
 
 /// `BtlScene_GetCharScale`.
-fn char_scale(data: &SideData) -> f32 {
+pub(crate) fn char_scale(data: &SideData) -> f32 {
     data.height() / 19.35
 }
 

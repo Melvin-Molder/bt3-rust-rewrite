@@ -933,11 +933,37 @@ pub(crate) fn load_side(
             }
         });
         let model = entry.and_then(|e| load_effect_model(e, ramp, assets).ok());
+        // EftObjTechMgr_Init with definition flag 0x40000: the rings' mesh (entry 1's entry 1) and texture set (2).
+        let ring = if def.flags & 0x4_0000 != 0 {
+            let e1 = bt3_data::pack_entry(pack, 1);
+            let mesh = e1
+                .and_then(|e| bt3_data::pack_entry(e, 1))
+                .and_then(|m| bt3_data::eft_mesh::EffectMesh::parse(m).ok());
+            let tex = e1
+                .and_then(|e| bt3_data::pack_entry(e, 2))
+                .and_then(|t| TextureResource::parse(t).ok());
+            match (mesh, tex) {
+                (Some(mesh), Some(tex)) => {
+                    let mut textures = Vec::new();
+                    for e in &tex.entries {
+                        textures.push(assets.effect_textures.len());
+                        assets
+                            .effect_textures
+                            .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+                    }
+                    Some(crate::btl_tech_fx::RingAssets { mesh, textures })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         fighter.tech_packs[slot] = Some(TechPack {
             blast,
             assets: set_assets,
             places,
             model,
+            ring,
         });
     }
     if let Some(pack) = &fighter.effect {
@@ -3606,6 +3632,21 @@ impl Battle {
                     .scene
                     .orbs
                     .draw(cfg, &self.assets.orb_textures, &mut ot, &ctx);
+            }
+            // EftObjTech_Draw: the thrown objects' rings (EftMesh_Draw, layer 1), unless their fighter is hidden.
+            for (r, mtxs) in self.roster.scene.tech.rings() {
+                if crate::btl_tech_fx::effect_hidden_1(&self.roster.chars[r.side]) {
+                    continue;
+                }
+                let Some(ring) = self.assets.fighters[r.side].tech_packs[r.slot]
+                    .as_ref()
+                    .and_then(|p| p.ring.as_ref())
+                else {
+                    continue;
+                };
+                for m in mtxs {
+                    crate::eft::draw_mesh_plain(&mut ot, &ctx, &ring.mesh, m, &ring.textures, 1);
+                }
             }
             self.roster
                 .scene
@@ -8932,6 +8973,48 @@ mod tests {
     }
 
     #[test]
+    fn real_thrown_objects_show_their_models_and_rings() {
+        // Definition flag 0x20000: characters 55's (0x162, held in the hand, mode 2) and 150's (0x1F3, mode 0)
+        // thrown objects have a model object, shown while in use; flag 0x40000: characters 49's (0x167) and 115's
+        // (0x168) place one and three rings of their pack's mesh, which draw.
+        for (chara, slot, near, model, rings) in [
+            (55, 3, true, true, 0),
+            (150, 3, false, true, 0),
+            (49, 3, false, false, 1),
+            (115, 2, false, false, 3),
+        ] {
+            let (mut shown, mut placed, mut assets) = (0, 0, false);
+            let Some((log, ..)) = run_technique_watched(chara, slot, 400, near, &mut |b| {
+                shown += b
+                    .roster
+                    .scene
+                    .eft_objs
+                    .iter()
+                    .filter(|o| o.obj.flags & 2 != 0)
+                    .count();
+                for (_, m) in b.roster.scene.tech.rings() {
+                    placed = placed.max(m.len());
+                }
+                assets |= b.assets.fighters[0].tech_packs[slot as usize]
+                    .as_ref()
+                    .and_then(|p| p.ring.as_ref())
+                    .is_some_and(|r| {
+                        // Points (w 1) with textures for every textured triangle.
+                        r.mesh.verts.iter().all(|v| v.pos[3] == 1.0)
+                            && r.mesh.tris.iter().all(|t| {
+                                usize::try_from(t.tex).map_or(true, |i| i < r.textures.len())
+                            })
+                    });
+            }) else {
+                return;
+            };
+            assert_eq!(shown > 0, model, "{chara}: {shown} {log:x?}");
+            assert_eq!(placed, rings, "{chara}: {log:x?}");
+            assert_eq!(assets, rings > 0, "{chara}");
+        }
+    }
+
+    #[test]
     fn real_catching_technique_effects() {
         // The rush shot (type 9) of character 65's slot 3 catches (reaction 0x22) into the sequence; character
         // 94's (technique 0x19D, reaction 0x1D) and the thrown objects (type 8) of characters 49 (0x167), 115
@@ -9933,6 +10016,24 @@ mod tests {
             target = b.roster.scene.target_bursts;
         });
         assert!(target > 0);
+    }
+
+    #[test]
+    fn real_shot_technique_poses_its_model() {
+        // Character 148's ultimate (0x290, a shot technique with definition flag 0x20000) has a model in its pack:
+        // an effect object, hidden until the connected rush's owner raises event 0x10, then posed at node 0x36
+        // along the direction and shown; gone with the item.
+        let (mut objs, mut shown, mut last) = (0, 0, 1);
+        let Some((log, ..)) = run_technique_watched(0x94, 4, 600, false, &mut |b| {
+            let o = &b.roster.scene.eft_objs;
+            objs = objs.max(o.iter().count());
+            shown += o.iter().filter(|o| o.obj.flags & 2 != 0).count();
+            last = o.iter().count();
+        }) else {
+            return;
+        };
+        assert!(objs == 1 && shown > 0, "{objs} {shown} {log:x?}");
+        assert_eq!(last, 0);
     }
 
     #[test]

@@ -80,11 +80,20 @@ pub(crate) struct ShotTech {
     victim: crate::btl_tech_fx::VictimFx,
     /// `auraFx`: the orb tail it holds.
     aura: Option<u32>,
+    /// The model object (definition flag 0x20000: pack entry 1) and flag 0x100000 (posed between the owner's
+    /// events 0x10 and 0x20).
+    model: Option<u32>,
+    model_on: bool,
 }
 
 impl ShotTech {
-    /// `EftShotTech_Init` (the model is not made).
-    pub(crate) fn new(src: TechSrc, data: &crate::btl_chr::SideData, head_set: SetHead) -> Self {
+    /// `EftShotTech_Init`: with definition flag 0x20000 its model object, hidden (`EftShotTech_InitModel`).
+    pub(crate) fn new(
+        src: TechSrc,
+        data: &crate::btl_chr::SideData,
+        head_set: SetHead,
+        out: &mut crate::btl_tech_fx::TechOut,
+    ) -> Self {
         let mut s = Self {
             src,
             cam_sent: false,
@@ -117,7 +126,20 @@ impl ShotTech {
             blur_out: None,
             victim: Default::default(),
             aura: None,
+            model: None,
+            model_on: false,
         };
+        if src.def.flags & 0x2_0000 != 0 {
+            let handle = out.handle();
+            out.reqs.push(crate::btl_tech_fx::TechReq::ObjCreate {
+                handle,
+                model: crate::eft_obj::ModelRef {
+                    side: src.side,
+                    slot: src.slot as usize,
+                },
+            });
+            s.model = Some(handle);
+        }
         if head_set.flags & 1 != 0 && head_set.move_kind == 2 {
             s.node = 0x15;
             s.flags |= 0x2000;
@@ -132,8 +154,12 @@ impl ShotTech {
         self.dead
     }
 
-    /// `EftShotTech_Term`'s requests: its streak fields stop, its orb dies and the glow goes.
+    /// `EftShotTech_Term`'s requests: its model goes, its streak fields stop, its orb dies and the glow goes.
     pub(crate) fn term(&mut self, out: &mut crate::btl_tech_fx::TechOut) {
+        if let Some(handle) = self.model.take() {
+            out.reqs
+                .push(crate::btl_tech_fx::TechReq::ObjDestroy(handle));
+        }
         self.victim.stop_all(out);
         if let Some(handle) = self.aura.take() {
             use crate::btl_tech_fx::TechReq;
@@ -527,6 +553,38 @@ impl ShotTech {
             }
             if options & 1 != 0 && test(0x20) {
                 (self.muzzle_pos, self.muzzle_dir) = muzzle(w, side);
+            }
+            // The model between the owner's events 0x10 and 0x20: at node 0x36, turned along the direction
+            // (EftShotTech_SetModelPose: the scale, rotations Z X Y, the position; shown).
+            if let Some(handle) = self.model {
+                if test(0x10) {
+                    self.model_on = true;
+                }
+                if test(0x20) {
+                    self.model_on = false;
+                }
+                if self.model_on {
+                    use crate::btl_obj::{rot_x, rot_y};
+                    use crate::btl_tech_volley::eft_wrap;
+                    let pos = w.chars[side].obj.node_pos(0x36);
+                    let d = self.dir.map(|c| c.clamp(-1.0, 1.0));
+                    let pitch = eft_wrap(d[1].clamp(-1.0, 1.0).asin());
+                    let yaw = eft_wrap(d[0].atan2(d[2]));
+                    let k = self.scale;
+                    let mut m: crate::battle::Mtx = [
+                        [k, 0.0, 0.0, 0.0],
+                        [0.0, k, 0.0, 0.0],
+                        [0.0, 0.0, k, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ];
+                    m = crate::battle::mul(&crate::battle::mul(&m, &rot_x(pitch)), &rot_y(yaw));
+                    for i in 0..3 {
+                        m[3][i] += pos[i];
+                    }
+                    use crate::btl_tech_fx::TechReq;
+                    out.reqs.push(TechReq::ObjMtx { handle, mtx: m });
+                    out.reqs.push(TechReq::ObjVisible { handle, on: true });
+                }
             }
         }
         let mut busy = false;

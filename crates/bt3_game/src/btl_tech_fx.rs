@@ -58,6 +58,16 @@ pub(crate) struct TechPack {
     pub places: Option<[[f32; 4]; 5]>,
     /// The model of pack entry 1 (`mgr->model` of the prop shots, by costume for technique 0x19A).
     pub model: Option<crate::eft_obj::EffectModel>,
+    /// A thrown object's rings (definition flag 0x40000): the mesh of pack entry 1's entry 1 and the textures of
+    /// its texture set, entry 2 (`EftMesh_Init`, `EftTexSet_Load32`).
+    pub ring: Option<RingAssets>,
+}
+
+/// The rings' mesh and textures.
+#[derive(Clone, Debug)]
+pub(crate) struct RingAssets {
+    pub mesh: bt3_data::eft_mesh::EffectMesh,
+    pub textures: Vec<usize>,
 }
 
 // EFT_TECH_EVT_*: a fighter's technique events of the frame.
@@ -579,6 +589,12 @@ impl Default for TechFx {
             rand: 0,
         }
     }
+}
+
+/// `BtlScene_IsEffectHidden(chr, 1)`: the fighter hidden (object flag 2 off) outside a rush sequence, or changing.
+pub(crate) fn effect_hidden_1(chr: &Chr) -> bool {
+    (chr.obj.flags & 2 == 0 && !in_rush_sequence(chr))
+        || matches!(chr.act.current, 0xEC..=0xF8 | 0x103 | 0x104)
 }
 
 /// `BtlScene_IsCharStopped`.
@@ -1225,10 +1241,7 @@ impl Beam {
         let Some(handle) = self.prop_obj else {
             return;
         };
-        let c = &w.chars[self.src.side];
-        let hidden = (c.obj.flags & 2 == 0 && !in_rush_sequence(c))
-            || matches!(c.act.current, 0xEC..=0xF8 | 0x103 | 0x104);
-        let on = self.prop_flags & 0x40 != 0 && !hidden;
+        let on = self.prop_flags & 0x40 != 0 && !effect_hidden_1(&w.chars[self.src.side]);
         out.reqs.push(TechReq::ObjVisible { handle, on });
     }
 
@@ -1631,14 +1644,14 @@ impl TechFx {
             2 => {
                 let items = &mut self.shot_techs[side][slot as usize];
                 if items.len() < ITEMS {
-                    items.push(ShotTech::new(src, data, set.head));
+                    items.push(ShotTech::new(src, data, set.head, &mut self.out));
                 }
             }
             8 => {
                 let items = &mut self.obj_techs[side][slot as usize];
                 if items.len() < ITEMS {
                     *next_id += 1;
-                    items.push(ObjTech::new(*next_id, src, data, set));
+                    items.push(ObjTech::new(*next_id, src, data, set, &mut self.out));
                 }
             }
             9 => {
@@ -1904,13 +1917,15 @@ impl TechFx {
                 let mut k = 0;
                 while k < self.obj_techs[side][slot].len() {
                     let o = &mut self.obj_techs[side][slot][k];
-                    if let Some(rec) = o.update(w, fx, self.events[side], self.cur_slot[side])
+                    if let Some(rec) =
+                        o.update(w, fx, self.events[side], self.cur_slot[side], &mut self.out)
                         && records.len() < max
                     {
                         records.push(rec);
                     }
                     if o.dead() {
                         // EftObjTech_Term.
+                        o.term(&mut self.out);
                         if o.src().def.kind != 0 {
                             w.chars[side].flags.set_held(0xA8);
                         }
@@ -2071,6 +2086,7 @@ impl TechFx {
             }
             for mut o in self.obj_techs[side][slot].drain(..) {
                 o.kill_parts(fx);
+                o.term(&mut self.out);
                 if o.src().def.kind != 0 {
                     held.set_held(0xA8);
                 }
@@ -2217,6 +2233,17 @@ impl TechFx {
     }
 
     /// Layer 1 of `BtlScene_PostUpdate`: every item reads what the passes reported.
+    /// `EftObjTech_Draw`: the rings of the thrown objects in use, with their fighter's technique slot.
+    pub(crate) fn rings(
+        &self,
+    ) -> impl Iterator<Item = (crate::eft_obj::ModelRef, &[crate::battle::Mtx])> {
+        self.obj_techs
+            .iter()
+            .flatten()
+            .flatten()
+            .filter_map(|o| o.rings().map(|r| (o.model_ref(), r)))
+    }
+
     pub(crate) fn post_update(&mut self, w: &World, fx: &mut Modules) {
         for side in 0..2 {
             for slot in 0..5 {
@@ -2240,7 +2267,7 @@ impl TechFx {
                 }
                 let mut stop = false;
                 for o in &mut self.obj_techs[side][slot] {
-                    stop |= o.post_update(w, fx);
+                    stop |= o.post_update(w, fx, &mut self.out);
                 }
                 if stop {
                     // EftTechEvt_RequestStop.
