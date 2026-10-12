@@ -1258,8 +1258,16 @@ impl Battle {
             self.roster.chars[0].hud_team(),
             self.roster.chars[1].hud_team(),
         ];
-        self.hud
-            .pre_update(self.seq.time_left(), &sides, &teams, self.seq.paused);
+        let fight = self.seq.state_id() == 3;
+        let [c0, c1] = &self.roster.chars;
+        let combos = [c0.hud_combo(c1, fight), c1.hud_combo(c0, fight)];
+        self.hud.pre_update(
+            self.seq.time_left(),
+            &sides,
+            &teams,
+            &combos,
+            self.seq.paused,
+        );
         self.seq_pre_update(&mut input);
         // BATTLE_FLAG_PAUSE as the sequence left it last frame.
         let paused = self.seq.paused;
@@ -1400,6 +1408,10 @@ impl Battle {
         };
         self.hud.set_paused(self.seq.paused);
         let mut hud = self.hud.draw(libc, shown);
+        if let Some(font) = font.as_deref_mut() {
+            let scripts = [0, 1].map(|s| self.assets.fighters[s].skill_text.as_deref());
+            self.hud.draw_combo_text(font, scripts);
+        }
         // BtlGame_Draw: the menu over the HUD.
         if let Some(menu) = &self.menu {
             menu.draw(
@@ -4094,6 +4106,59 @@ mod tests {
             battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
         }
         Some(battle)
+    }
+
+    #[test]
+    fn real_combo_counter() {
+        use crate::btl_input::pad::{SQUARE, UP};
+        // Side 0 rushes the idle opponent: from the second hit the combo part shows the hits and the damage the
+        // opponent took, then slides them out when the combo ends.
+        let Some(mut battle) = transform_battle(1, false) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pad = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..300 {
+            let r = &battle.roster;
+            if crate::btl_chr::opp_distance(&r.chars[0], &r.chars[1]) < 25.0 {
+                break;
+            }
+            battle.run_frame(false, pad(UP), 0, &mut libc, &mut random, None, false);
+        }
+        let mut most = (0, 0);
+        let base = battle.assets.hud_sheets[2].base;
+        let mut drawn = false;
+        for _ in 0..80 {
+            let near =
+                crate::btl_chr::opp_distance(&battle.roster.chars[0], &battle.roster.chars[1])
+                    < 25.0;
+            let held = if near { SQUARE } else { UP };
+            battle.run_frame(false, pad(held), 0, &mut libc, &mut random, None, false);
+            let f = battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+            if let Some(m) = battle.hud.combo().on_show(0) {
+                most = most.max(m);
+            }
+            drawn |= f
+                .hud
+                .prims
+                .iter()
+                .any(|p| p.texture.is_some_and(|t| (base..base + 8).contains(&t)));
+        }
+        assert!(most.0 >= 2 && most.1 > 0, "{most:?}");
+        assert!(drawn);
+        for _ in 0..200 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+        }
+        assert_eq!(battle.hud.combo().on_show(0), None);
     }
 
     #[test]

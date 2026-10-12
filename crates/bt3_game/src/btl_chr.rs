@@ -966,6 +966,38 @@ impl Chr {
         }
     }
 
+    /// The combo part's view of the side (`Hud_PreUpdate`): this fighter's flags and the opponent's combo (the
+    /// one this side is dealing); a frozen fighter reports no hit and no flag. `fight`: the sequence is in the
+    /// fight state.
+    pub(crate) fn hud_combo(&self, opp: &Chr, fight: bool) -> crate::hud_combo::SideCombo {
+        let me_on = !self.is_frozen();
+        let opp_on = !opp.is_frozen();
+        let f = &self.flags;
+        let text = [0xDE, 0xDF, 0xE0, 0xE1, 0xE2]
+            .iter()
+            .position(|&n| f.test(n))
+            .filter(|_| me_on)
+            .map_or(-1, |i| i as i32);
+        crate::hud_combo::SideCombo {
+            hit_new: opp_on && opp.combo.new_hit,
+            clash_count: self.clash_count_b,
+            hits: opp.combo.hits,
+            damage_new: opp_on && opp.combo.changed,
+            damage: if opp.flags.test(0xED) {
+                -1
+            } else {
+                opp.combo.damage
+            },
+            shown: opp.combo.timer > 0,
+            text,
+            powered_up: me_on && f.raised(6),
+            flag71: me_on && f.test(0x71),
+            lock_on: me_on && fight && f.raised(5),
+            flag_e3: me_on && f.test(0xE3),
+            flag_9c: me_on && f.raised(0x9C),
+        }
+    }
+
     /// `BtlCtrl_IsPoseReached`: motions 0x181 / 0x183, or 0x184 played to its end.
     pub(crate) fn pose_reached(&self) -> bool {
         match self.anim.cur {

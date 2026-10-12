@@ -39,6 +39,11 @@ impl Ramp {
         self.running = false;
     }
 
+    /// `target`.
+    pub(crate) fn target(&self) -> f32 {
+        self.target
+    }
+
     /// `value == target`.
     pub(crate) fn at_target(&self) -> bool {
         self.value == self.target
@@ -738,6 +743,7 @@ impl Battle {
         self.seq.timer.start(10.0, 0.0, 1.0);
         self.hud.show_gauges(false);
         self.hud.show_timer(false);
+        self.hud.show_combo(false);
     }
 
     /// `BtlSeqWinTalk_PreUpdate`: the pose, its camera and the line; then a 1.5 s hold.

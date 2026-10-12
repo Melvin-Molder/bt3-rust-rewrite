@@ -40,6 +40,7 @@ mod fade;
 mod flash;
 mod font;
 mod hud;
+mod hud_combo;
 mod hud_gauge;
 mod hud_gs;
 mod hud_team;

@@ -1,6 +1,7 @@
 //! The battle HUD (src/battle/hud.c, hud_sprite.c, hud_notice_1.c, hud_notice_2.c): the manager's visibility
-//! bits, the team panel (hud_team.rs), the gauges and timer (hud_gauge.rs) and the notice part, the READY / FIGHT
-//! announcements with the announcer's lines. The combo counter, prompts and caption are not ported yet.
+//! bits, the team panel (hud_team.rs), the gauges and timer (hud_gauge.rs), the combo part (hud_combo.rs) and the
+//! notice part, the READY / FIGHT announcements with the announcer's lines. The prompts and caption are not ported
+//! yet.
 //!
 //! The notices lean on the GS destination alpha: a band written only into the alpha plane lets the word through
 //! where it covers (TEST_2 0x3C000: DATE with DATM 1), and the FIGHT streak is added in proportion to the alpha
@@ -17,6 +18,7 @@ use crate::title::TitleSound;
 pub(crate) const HUD_FILE: u32 = 6;
 pub(crate) const SHEET_WORDS: [usize; 5] = [1, 4, 5, 2, 3];
 const NOTICE_SHEET: usize = 1;
+const COMBO_SHEET: usize = 2;
 /// `HudNotice_GetVoiceBase` with `SAVE_FLAG_VOICE`, which a fresh save has.
 const ANNOUNCER_BASE: u32 = 0x10B6C;
 const ANNOUNCER_LINES: u32 = 7;
@@ -24,6 +26,7 @@ const SHOW_ALL: u32 = 0x1F;
 const SHOW_GAUGES: u32 = 1;
 const SHOW_TIMER: u32 = 2;
 const SHOW_NOTICE: u32 = 4;
+const SHOW_COMBO: u32 = 8;
 
 const SPR_WORD: usize = 0;
 const SPR_PART: usize = 1;
@@ -175,13 +178,13 @@ impl Sprite {
 
 /// A 2D affine matrix for row vectors: p' = p * m + t.
 #[derive(Clone, Copy, Debug)]
-struct Xf {
+pub(crate) struct Xf {
     m: [[f32; 2]; 2],
     t: [f32; 2],
 }
 
 impl Xf {
-    fn translate(x: f32, y: f32) -> Self {
+    pub(crate) fn translate(x: f32, y: f32) -> Self {
         Self {
             m: [[1.0, 0.0], [0.0, 1.0]],
             t: [x, y],
@@ -220,7 +223,7 @@ impl Xf {
 
 /// `HudSprite_DrawAt`'s corners: top left, top right, bottom right, bottom left, transformed and cut to whole
 /// pixels (`(s32)` of the VU0 result), with their texel centres (UV = texel * 16 + 8).
-fn sprite_polygon(spr: &Sprite, xf: &Xf, sheet: &HudSheet) -> Vec<HudVertex> {
+pub(crate) fn sprite_polygon(spr: &Sprite, xf: &Xf, sheet: &HudSheet) -> Vec<HudVertex> {
     let [x0, x1, y0, y1] = spr.rect.map(f32::from);
     let [u0, u1, v0, v1] = spr.uv.map(f32::from);
     let [w, h] = usize::try_from(spr.tex)
@@ -286,7 +289,7 @@ fn clip_to_quad(mut poly: Vec<HudVertex>, quad: &[[f32; 2]]) -> Vec<HudVertex> {
     poly
 }
 
-fn fan(poly: &[HudVertex]) -> Vec<HudVertex> {
+pub(crate) fn fan(poly: &[HudVertex]) -> Vec<HudVertex> {
     (1..poly.len().saturating_sub(1))
         .flat_map(|i| [poly[0], poly[i], poly[i + 1]])
         .collect()
@@ -640,6 +643,7 @@ pub(crate) struct Hud {
     team: crate::hud_team::TeamPart,
     /// `Battle_GetMode() != 1`: story mode draws no team panel.
     team_shown: bool,
+    combo: crate::hud_combo::ComboPart,
     gauge: GaugePart,
     timer: TimerPart,
     notice: NoticePart,
@@ -685,6 +689,9 @@ impl Hud {
             flags: 0,
             team: crate::hud_team::TeamPart::new(&sheet0),
             team_shown: mode != 1,
+            combo: crate::hud_combo::ComboPart::new(
+                sheets.get(COMBO_SHEET).cloned().unwrap_or_default(),
+            ),
             timer: TimerPart::new(&sheet0),
             gauge: GaugePart::new(sheet0),
             notice: NoticePart::new(sheets.get(NOTICE_SHEET).cloned().unwrap_or_default()),
@@ -701,11 +708,26 @@ impl Hud {
         time_left: i32,
         sides: &[SideGauge; 2],
         teams: &[crate::hud_team::SideTeam; 2],
+        combos: &[crate::hud_combo::SideCombo; 2],
         paused: bool,
     ) {
         self.timer.set_time(time_left);
         for (side, gauge) in sides.iter().enumerate() {
             self.gauge.set_side(side, gauge);
+            let c = &combos[side];
+            self.combo.set_side(side, c, paused);
+            // The combo damage shakes the other side's health; powering up shakes the side's ki.
+            if !paused && c.damage_new {
+                let (count, amp) = match c.damage {
+                    9999.. => (15, 3),
+                    1000.. => (10, 2),
+                    _ => (5, 2),
+                };
+                self.gauge.shake_hp(side ^ 1, count, amp);
+            }
+            if c.powered_up {
+                self.gauge.shake_ki(side, 8, 2);
+            }
         }
         if !paused {
             for (side, team) in teams.iter().enumerate() {
@@ -719,6 +741,7 @@ impl Hud {
     pub(crate) fn set_paused(&mut self, paused: bool) {
         self.gauge.paused = paused;
         self.team.paused = paused;
+        self.combo.paused = paused;
         self.timer.paused = paused;
     }
 
@@ -750,6 +773,31 @@ impl Hud {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn combo(&self) -> &crate::hud_combo::ComboPart {
+        &self.combo
+    }
+
+    /// `Hud_ShowCombo`.
+    pub(crate) fn show_combo(&mut self, on: bool) {
+        if on {
+            self.flags |= SHOW_COMBO;
+        } else {
+            self.flags &= !SHOW_COMBO;
+        }
+    }
+
+    /// `HudCombo_DrawText` with the sides' skill scripts (after `draw`, while the combo part is shown).
+    pub(crate) fn draw_combo_text(
+        &self,
+        font: &mut crate::font::Font,
+        scripts: [Option<&[u16]>; 2],
+    ) {
+        if self.flags & SHOW_COMBO != 0 {
+            self.combo.draw_text(font, scripts);
+        }
+    }
+
     /// `Hud_ShowTimer`.
     pub(crate) fn show_timer(&mut self, on: bool) {
         if on {
@@ -760,7 +808,7 @@ impl Hud {
     }
 
     /// `Hud_Draw`: each part that is switched on updates, then draws: the team panels (outside story mode) and the
-    /// gauges of both sides, the clock, the notice. A frame that is not `shown` runs the
+    /// gauges of both sides, the clock, the combo part, the notice. A frame that is not `shown` runs the
     /// updates and draws nothing.
     pub(crate) fn draw(&mut self, libc: &mut LibcRandom, shown: bool) -> HudFrame {
         let mut layer = None;
@@ -777,6 +825,11 @@ impl Hud {
             layer = (!self.layer.is_empty()).then(|| self.layer.to_rgba());
         }
         let mut prims = Vec::new();
+        if self.flags & SHOW_COMBO != 0 {
+            for side in 0..2 {
+                self.combo.run(side, libc, &mut prims);
+            }
+        }
         if self.flags & SHOW_NOTICE != 0 {
             self.notice.update(libc);
             self.notice.draw(&mut prims);

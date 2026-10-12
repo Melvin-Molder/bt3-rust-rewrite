@@ -409,6 +409,18 @@ impl GaugePart {
         self.dead[side] = g.dead;
     }
 
+    /// `HudGauge_ShakeHp`: the panel and the health node shake `count` frames by up to `amp`.
+    pub(crate) fn shake_hp(&mut self, side: usize, count: u16, amp: u16) {
+        self.shake[side][0] = (count, amp);
+        self.shake[side][1] = (count, amp);
+    }
+
+    /// `HudGauge_ShakeKi`: the panel and the ki node.
+    pub(crate) fn shake_ki(&mut self, side: usize, count: u16, amp: u16) {
+        self.shake[side][0] = (count, amp);
+        self.shake[side][2] = (count, amp);
+    }
+
     /// `HudGauge_SetSwitching`: the side's panel slides away (0.3 s) while it switches members, and back with
     /// its shown health and ki reset.
     pub(crate) fn set_switching(&mut self, side: usize, switching: bool) {

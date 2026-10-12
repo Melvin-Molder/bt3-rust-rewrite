@@ -105,6 +105,33 @@ fn check_unlock(text: &[u16], p: &mut usize, ctx: &TextCtx) -> bool {
     }
 }
 
+/// `BtlText_FindEntry`: the name of the n-th entry of a script (eight characters into its line), up to the line's
+/// end (the font's flag 1), whatever the controller type and the unlocks.
+pub(crate) fn entry_name(text: &[u16], mut n: i32) -> Option<&[u16]> {
+    let ctx = TextCtx {
+        pad_type: 0,
+        chara_bits: [0; 3],
+        body_changed: false,
+    };
+    let mut p = 1;
+    while at(text, p) != 0 {
+        p += 2;
+        check_unlock(text, &mut p, &ctx);
+        match at(text, p) {
+            STAR => {
+                if n <= 0 {
+                    return Some(line(text, p + 4));
+                }
+                n -= 1;
+            }
+            AT => break,
+            _ => {}
+        }
+        p = next_line(text, p);
+    }
+    None
+}
+
 /// `BtlText_CountEntries`: the pages and each page's entries.
 pub(crate) fn count_entries(list: &mut SkillList, script: Option<&[u16]>, ctx: &TextCtx) {
     let Some(text) = script else {
