@@ -12,6 +12,9 @@ use crate::loading::Quad;
 
 pub const PSS_PATH: &str = "DATA/ZS3USOP.PSS";
 pub const ADX_PATH: &str = "DATA/ZS3USOP.ADX";
+/// `Movie_PlayEnding`'s files: the story's ending movie.
+pub const ENDING_PSS_PATH: &str = "DATA/ZS3USED.PSS";
+pub const ENDING_ADX_PATH: &str = "DATA/ZS3USED.ADX";
 pub const WIDTH: u32 = 512;
 pub const HEIGHT: u32 = 448;
 const FRAME_BYTES: usize = WIDTH as usize * HEIGHT as usize * 4;
@@ -32,9 +35,10 @@ pub struct VideoStream {
 }
 
 impl VideoStream {
-    pub fn open(iso_path: &Path) -> io::Result<Self> {
+    /// `Movie_Open`'s video: the .PSS file `pss` streamed from the ISO through `ffmpeg`.
+    pub fn open(iso_path: &Path, pss: &'static str) -> io::Result<Self> {
         let mut iso = Iso9660::open(iso_path)?;
-        let size = iso.file_size(PSS_PATH)?;
+        let size = iso.file_size(pss)?;
         let mut child = Command::new("ffmpeg")
             .args(["-v", "error", "-f", "mpeg", "-i", "pipe:0", "-map", "0:v:0"])
             .args([
@@ -56,7 +60,7 @@ impl VideoStream {
             let mut offset = 0u64;
             while offset < size {
                 let len = READ_CHUNK.min((size - offset) as usize);
-                let Ok(chunk) = iso.read_file_range(PSS_PATH, offset, len) else {
+                let Ok(chunk) = iso.read_file_range(pss, offset, len) else {
                     break;
                 };
                 if stdin.write_all(&chunk).is_err() {
@@ -177,7 +181,7 @@ impl MoviePlayer {
 
 #[cfg(test)]
 mod tests {
-    use super::{MoviePlayer, soundtrack_volume_db};
+    use super::{ENDING_ADX_PATH, ENDING_PSS_PATH, Iso9660, MoviePlayer, soundtrack_volume_db};
 
     #[test]
     fn soundtrack_plays_at_minus_twelve_point_nine_decibels() {
@@ -213,6 +217,20 @@ mod tests {
         }
         // The fade is done on call 15 (14 updates after the start), calls 15-17 count `wait` to 3, call 18 leaves.
         assert_eq!(frames, 18);
+    }
+
+    /// The ending movie's files from the ISO in `rom/`, when it is there: the video, and the soundtrack decoded.
+    #[test]
+    fn real_ending_movie_files_are_on_the_disc() {
+        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = Iso9660::open(&iso) else {
+            return;
+        };
+        assert!(image.file_size(ENDING_PSS_PATH).unwrap() > 1 << 20);
+        let adx = image.read_file(ENDING_ADX_PATH).unwrap();
+        let wav = crate::adx_to_wav(&adx).unwrap();
+        assert!(wav.len() > adx.len());
     }
 
     #[test]

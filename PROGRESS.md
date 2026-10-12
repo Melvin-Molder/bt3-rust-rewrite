@@ -25,7 +25,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 - [x] Result screen and rewards (mode 8)
 - [x] Saga outro (mode 9)
 - [x] Save screen (mode 10)
-- [ ] Ending movie (mode 3)
+- [x] Ending movie (mode 3)
 - [ ] Dragon balls hidden on the stages (`BattleResult.dragonBallFound`)
 - [ ] HUD slide out / in around a scripted scene, and the event cue (`HudPrompt_ShowCue`)
 

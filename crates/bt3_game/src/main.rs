@@ -196,7 +196,8 @@ enum Scene {
     /// `Dc_Main` mode 56: the replay list.
     ReplayMenu(Box<replay_menu::ReplayMenuScreen>),
     Logos(LogoSequence),
-    Movie(MoviePlayer, VideoStream),
+    /// `Movie_Run`: the opening movie (`false`) or the story's ending movie (`true`).
+    Movie(MoviePlayer, VideoStream, bool),
     Title(Box<TitleScreen>),
     MainMenu(Box<MainMenuScreen>),
     DuelMenu(Box<DuelMenuScreen>),
@@ -344,6 +345,8 @@ struct Game {
     story_battle: bool,
     /// The story battle's script, set up and waiting for the battle to load.
     pending_script: Option<btl_script::BtlScript>,
+    /// `gProgress->prevMode` when the ending movie started: 6 the saga select, 9 an outro.
+    ending_from: i32,
     movie_texture: Option<usize>,
     soundtrack: Option<Decoding>,
     soundtrack_source: Option<Handle<AudioSource>>,
@@ -710,6 +713,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             in_demo: false,
             story_battle: false,
             pending_script: None,
+            ending_from: 6,
             movie_texture,
             soundtrack,
             soundtrack_source: None,
@@ -1513,7 +1517,8 @@ fn run_frames(
                     start_opening_movie(game, &mut commands, &mut audio);
                 }
             }
-            Scene::Movie(player, video) => {
+            Scene::Movie(player, video, ending) => {
+                let ending = *ending;
                 let frame = player.run_frame(start, || video.next_picture());
                 game.quads = into_screen(frame.quads);
                 if frame.picture.is_some() {
@@ -1522,7 +1527,11 @@ fn run_frames(
                 if player.is_finished() {
                     // The soundtrack plays on the BGM player.
                     stop_player(&mut game.bgm, &mut commands);
-                    start_title(game, &mut commands, &mut audio);
+                    if ending {
+                        finish_ending_movie(game, &mut commands);
+                    } else {
+                        start_title(game, &mut commands, &mut audio);
+                    }
                 }
             }
             Scene::Title(screen) => {
@@ -1658,8 +1667,7 @@ fn run_frames(
                         }
                         hist_select::HistSelResult::Saga => start_mode_menu(game, &mut commands, 6),
                         hist_select::HistSelResult::Ending => {
-                            info!("progress mode 3 (the ending movie) is not ported yet");
-                            game.scene = Scene::Black;
+                            start_ending_movie(game, &mut commands, &mut audio, 6)
                         }
                     }
                 }
@@ -1728,8 +1736,7 @@ fn run_frames(
                     match result {
                         hist_outro::HistOutroResult::Save => start_hist_save(game, 9),
                         hist_outro::HistOutroResult::Ending => {
-                            info!("progress mode 3 (the ending movie) is not ported yet");
-                            game.scene = Scene::Black;
+                            start_ending_movie(game, &mut commands, &mut audio, 9)
                         }
                     }
                 }
@@ -2237,7 +2244,7 @@ fn start_opening_movie(game: &mut Game, commands: &mut Commands, audio: &mut Ass
         game.scene = Scene::Black;
         return;
     };
-    let video = match VideoStream::open(&game.iso_path) {
+    let video = match VideoStream::open(&game.iso_path, movie::PSS_PATH) {
         Ok(video) => video,
         Err(error) => {
             error!("cannot decode {} with ffmpeg: {error}", movie::PSS_PATH);
@@ -2258,7 +2265,66 @@ fn start_opening_movie(game: &mut Game, commands: &mut Commands, audio: &mut Ass
         let entity = commands.spawn((AudioPlayer(source), settings)).id();
         game.bgm = Some(Player { entity, level });
     }
-    game.scene = Scene::Movie(MoviePlayer::new(texture), video);
+    game.scene = Scene::Movie(MoviePlayer::new(texture), video, false);
+}
+
+/// `Hist_Main` mode 3: `Movie_PlayEnding`, from the saga select (`prev_mode` 6) or a saga's outro (9). Its
+/// soundtrack is decoded before the movie starts.
+fn start_ending_movie(
+    game: &mut Game,
+    commands: &mut Commands,
+    audio: &mut Assets<AudioSource>,
+    prev_mode: i32,
+) {
+    game.ending_from = prev_mode;
+    let Some(texture) = game.movie_texture else {
+        finish_ending_movie(game, commands);
+        return;
+    };
+    let video = match VideoStream::open(&game.iso_path, movie::ENDING_PSS_PATH) {
+        Ok(video) => video,
+        Err(error) => {
+            error!(
+                "cannot decode {} with ffmpeg: {error}",
+                movie::ENDING_PSS_PATH
+            );
+            finish_ending_movie(game, commands);
+            return;
+        }
+    };
+    let path = game.iso_path.clone();
+    let mut decoding = Some(std::thread::spawn(move || {
+        let bytes = Iso9660::open(&path)
+            .and_then(|mut iso| iso.read_file(movie::ENDING_ADX_PATH))
+            .map_err(|error| error.to_string())?;
+        adx_to_wav(&bytes)
+    }));
+    let mut source = None;
+    finish_decoding(&mut decoding, &mut source, audio, movie::ENDING_ADX_PATH);
+    if let Some(source) = source {
+        let level = sound::out_volume(sound::CH_BGM, 0x40);
+        let settings =
+            PlaybackSettings::DESPAWN.with_volume(Volume::Decibels(movie::soundtrack_volume_db()));
+        let entity = commands.spawn((AudioPlayer(source), settings)).id();
+        game.bgm = Some(Player { entity, level });
+    }
+    game.scene = Scene::Movie(MoviePlayer::new(texture), video, true);
+}
+
+/// After `Movie_PlayEnding`: saga 8's slot marked seen (flag 1), music 7 unlocked; back to the saga select, or
+/// after an outro (slot flag 2) on to the save screen.
+fn finish_ending_movie(game: &mut Game, commands: &mut Commands) {
+    stop_all(game, commands);
+    let flags = game.save.slot_flags(8) | 1;
+    game.save.set_slot_flags(8, flags);
+    game.save.bgm_bits |= 0x80;
+    if game.ending_from == 9 {
+        let flags = game.save.slot_flags(8) | 2;
+        game.save.set_slot_flags(8, flags);
+        start_hist_save(game, 3);
+    } else {
+        start_hist_select(game, commands);
+    }
 }
 
 /// Progress_Main mode 1: `Bgm_Play(MENU_BGM_TITLE)`, then `Title_Run(1)`.
