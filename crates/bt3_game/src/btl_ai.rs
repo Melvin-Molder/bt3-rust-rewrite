@@ -6,9 +6,7 @@
 //!
 //! Every random number is a `Rand_Range` of the shared generator, in the original order.
 //!
-//! Not ported here because the fighter side has nothing to report yet: techniques, skills and ki blasts (no
-//! technique, blast or prompt is ever active), transformation, fusion and team switches (never possible), clashes
-//! and move-slot effects (never running), the stage 4 / 27 pose bit and the story-mode override.
+//! Not ported: the story-mode override (`BtlCharApi_GetStoryAiForce`) and the abilities the conditions test.
 
 use bt3_data::ai_data::{AiData, AiRule, AiTables};
 use bt3_data::stage_col::StageNav;
@@ -765,6 +763,16 @@ impl Ai<'_, '_, '_, '_> {
         i32::from(byte(&self.c.data[i].tables.skill_table, 0x94 + n) as i8)
     }
 
+    /// `BtlCharApi_IsMoveSlotActive`: skill slot `n`'s effect runs: the evasions it gave are left, or its stat
+    /// modifiers are on.
+    fn move_slot_active(&self, i: usize, n: usize) -> bool {
+        let c = self.chr(i);
+        if c.skill_slot == n as i32 && (c.dodges > 0 || c.dodges_b > 0) {
+            return true;
+        }
+        c.slot_on.get(n).copied().unwrap_or(false)
+    }
+
     /// `BtlCharApi_IsMoveFlag100`.
     fn move_flag_100(&self, i: usize, n: usize) -> bool {
         word(&self.c.data[i].tables.skill_table, 0x8 + n * 4) >> 8 & 1 != 0
@@ -957,16 +965,37 @@ impl Ai<'_, '_, '_, '_> {
         let limit = self.c.env.stage.bounds.top + self.height(me) + 10.0;
         match mode {
             0 => self.pos(me)[1] < limit,
-            1 => self.c.env.stage_4_or_27 || alt < 10.0,
+            1 => (self.c.env.stage_4_or_27 && !self.pose_bit(me)) || alt < 10.0,
             _ => false,
         }
     }
 
-    /// `BtlAiSeq_CheckStageAbort`. The stage 4 / 27 tests read the pose bit, which is never set here.
+    /// `BtlCharApi_TestPoseBit80(objId, 1)`: bit 0x80 of the fighter's ground flags.
+    fn pose_bit(&self, i: usize) -> bool {
+        self.chr(i).pose.ground_flags & 0x80 != 0
+    }
+
+    /// `BtlAiSeq_CheckStageAbort`: on stage 4 / 27, the actions that need the pose bit (9, 11, 21 also below -80;
+    /// 13 the opponent's; 29 its own, and a one-step action in state class 12 waits for the output timer).
     fn check_stage_abort(&mut self, id: u32) -> bool {
         let special = self.c.env.stage_4_or_27;
+        let (me, op) = (self.me(), self.op());
         match id {
-            9 | 11 | 21 | 13 | 29 => special,
+            9 | 11 | 21 => special && (!self.pose_bit(me) || -80.0 < self.pos(me)[1]),
+            13 => special && !self.pose_bit(op),
+            29 => {
+                if !special {
+                    return false;
+                }
+                if !self.pose_bit(me) {
+                    return true;
+                }
+                if self.w.seq.depth != 1 || self.cls(me) != 12 || self.w.pad.timer > 0 {
+                    return false;
+                }
+                self.w.pad.mark[3] &= !4;
+                false
+            }
             15 => self.check_height(self.w.seq.step),
             16 => self.check_height(0),
             17 => self.check_height(1),
@@ -1238,24 +1267,15 @@ impl Ai<'_, '_, '_, '_> {
                 0
             }
             7 => self.pick_combo_branch(n),
-            // Fusion / transformation slots: BtlCharApi_PickFusionSlot / PickTransformSlot draw Rand_Range(100)
-            // and find no slot the side can use.
-            8 | 9 => {
-                self.rand(100);
-                0
-            }
-            10 => {
-                // One member: no candidate, the parameter is 0 and the alternative a draw.
-                self.rand(100);
-                self.w.seq.timer = 0;
-                self.rand(n as u32)
-            }
+            // BtlAiPick_FusionSlot / TransformSlot: the slot proposed, none = alternative 0.
+            8 => self.pick_fusion_slot().max(0),
+            9 => self.pick_transform_slot().max(0),
+            10 => self.pick_switch_member(n),
             11 => {
                 let level = self.w.level;
                 if !(level < -1) { 0 } else { -level - 2 }
             }
-            // BtlAiPick_PromptButton: no prompt is ever open.
-            12 => -1,
+            12 => self.pick_prompt_button(),
             13 => match arg {
                 1 => {
                     self.w.seq.timer = 0;
@@ -1277,6 +1297,205 @@ impl Ai<'_, '_, '_, '_> {
                 0
             }
             _ => 0,
+        }
+    }
+
+    /// `BtlCharApi_PickFusionSlot`: a fusion the side's blast stocks pay for (cost not 0); one is taken, two by a
+    /// draw, three 35 / 20 / 45 %; -1 none. Draws `Rand_Range(100)` always.
+    fn pick_fusion_slot(&mut self) -> i32 {
+        let me = self.me();
+        let blast = self.chr(me).gauge.blast;
+        let r = self.rand(100);
+        let p = &self.c.data[me].tables.params;
+        let list: Vec<i32> = (0..3)
+            .filter(|&i| {
+                let cost = p.fusion_cost(i);
+                cost != 0 && blast >= cost
+            })
+            .map(|i| i as i32)
+            .collect();
+        match list.len() {
+            1 => list[0],
+            2 => list[self.rand(2) as usize],
+            3 => {
+                if r < 35 {
+                    0
+                } else if r < 55 {
+                    1
+                } else {
+                    2
+                }
+            }
+            _ => -1,
+        }
+    }
+
+    /// `BtlCharApi_PickTransformSlot`: a transformation the side's blast stocks pay for (slot 3 also at cost 0,
+    /// then taken with 2 %); -1 none. Draws `Rand_Range(100)` always, `Rand_Range(2)` for two without slot 3.
+    fn pick_transform_slot(&mut self) -> i32 {
+        let me = self.me();
+        let blast = self.chr(me).gauge.blast;
+        let r = self.rand(100);
+        let p = &self.c.data[me].tables.params;
+        let list: Vec<i32> = (0..4)
+            .filter(|&i| {
+                let cost = p.trans_cost(i);
+                !(cost == 0 && i != 3) && blast >= cost
+            })
+            .map(|i| i as i32)
+            .collect();
+        let has3 = list.contains(&3);
+        match list.len() {
+            1 => list[0],
+            2 => {
+                if has3 {
+                    if r < 2 { 3 } else { list[0] }
+                } else {
+                    list[self.rand(2) as usize]
+                }
+            }
+            3 if has3 => {
+                if r < 2 {
+                    3
+                } else if r < 60 {
+                    list[0]
+                } else {
+                    list[1]
+                }
+            }
+            3 => {
+                if r < 60 {
+                    list[0]
+                } else if r < 90 {
+                    list[1]
+                } else {
+                    list[2]
+                }
+            }
+            // Four always hold slot 3.
+            4 => {
+                if r < 2 {
+                    3
+                } else if r < 60 {
+                    list[0]
+                } else if r < 90 {
+                    list[1]
+                } else {
+                    list[2]
+                }
+            }
+            _ => -1,
+        }
+    }
+
+    /// `BtlAiPick_SwitchMember`: the members other than the active one with health, scored health % * 0.7 + ki %
+    /// * 0.3, best first; the parameter is the best with 60 % of two, 50 / 35 / 15 % of three, 40 / 30 / 30 % of
+    /// four (0 otherwise). One candidate is taken with alternative 0; else the alternative is a draw.
+    fn pick_switch_member(&mut self, n: i32) -> i32 {
+        let me = self.me();
+        let roll = self.rand(100);
+        let c = self.chr(me);
+        let pct = |v: i32, max: i32| {
+            if max > 0 {
+                let p = (v as f32 / max as f32 * 100.0) as i32;
+                if p <= 0 && v > 0 { 1 } else { p }
+            } else {
+                0
+            }
+        };
+        let mut found: Vec<(i32, i32)> = (0..c.members.len())
+            .filter_map(|i| {
+                let g = c.member_gauge(i);
+                let hp = pct(g.health, g.health_max);
+                (i != c.active && hp != 0).then(|| {
+                    let ki = pct(g.ki, g.ki_max);
+                    (
+                        (hp as f32 * 0.7) as i32 + (ki as f32 * 0.3) as i32,
+                        i as i32,
+                    )
+                })
+            })
+            .collect();
+        if found.len() == 1 {
+            self.w.seq.timer = found[0].1;
+            return 0;
+        }
+        // The original's bubble sort: stable, best first.
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        let sel = match found.len() {
+            2 => found[usize::from(roll >= 60)].1,
+            3 => {
+                found[if roll < 50 {
+                    0
+                } else if roll < 85 {
+                    1
+                } else {
+                    2
+                }]
+                .1
+            }
+            4 => {
+                found[if roll < 40 {
+                    0
+                } else if roll < 70 {
+                    1
+                } else {
+                    2
+                }]
+                .1
+            }
+            _ => 0,
+        };
+        self.w.seq.timer = sel;
+        // BtlAiPick_Random.
+        self.rand(n as u32)
+    }
+
+    /// `BtlCharApi_GetPromptButtons`: the buttons the fighter's technique prompt asks for (0x10 / 0x20 / 0x40 /
+    /// 0x80 up / down / left / right with 8, 4 the blast button), 0 without one.
+    fn prompt_buttons(&self) -> i32 {
+        let me = self.me();
+        let c = self.chr(me);
+        let class = c.input.tech_class;
+        if class < 2 {
+            return 0;
+        }
+        if c.flags.test(0xA2) {
+            0
+        } else if c.flags.test(0xA3) {
+            4
+        } else {
+            let row = self.c.data[me].tables.tech().prompt_row(class);
+            match usize::try_from(row)
+                .ok()
+                .and_then(|r| self.c.env.common.prompt_rows.get(r))
+                .map(|r| r[2] as i8)
+            {
+                Some(0) => 0x18,
+                Some(1) => 0x28,
+                Some(2) => 0x48,
+                Some(3) => 0x88,
+                _ => 0,
+            }
+        }
+    }
+
+    /// `BtlAiPick_PromptButton`: the button the prompt asks for, up / down / left / right / blast = alternatives
+    /// 0..4; none ends the action. The CPU always answers right.
+    fn pick_prompt_button(&self) -> i32 {
+        let prompt = self.prompt_buttons();
+        if prompt & 0x10 != 0 {
+            0
+        } else if prompt & 0x20 != 0 {
+            1
+        } else if prompt & 0x40 != 0 {
+            2
+        } else if prompt & 0x80 != 0 {
+            3
+        } else if prompt & 4 != 0 {
+            4
+        } else {
+            -1
         }
     }
 
@@ -1426,8 +1645,8 @@ impl Ai<'_, '_, '_, '_> {
                     _ => !self.flag(self.me(), 0xBE),
                 }
             }
-            // BtlAiStep_WhileOppSkillFlag4: the opponent is never in a technique.
-            20 => true,
+            // BtlAiStep_WhileOppSkillFlag4.
+            20 => !self.opp_skill_flag4(),
             22 => {
                 self.w.seq.timer += 1;
                 if self.w.seq.timer > 60 {
@@ -1586,7 +1805,21 @@ impl Ai<'_, '_, '_, '_> {
         0.0 < dot(face, normalize(d))
     }
 
-    /// Step handler 14: no clash is ported, so the counts are equal and the fighter is in none.
+    /// `BtlCharApi_IsOppSkillFlag4`: bit 2 (value 4) of the flag word of the opponent's technique.
+    fn opp_skill_flag4(&self) -> bool {
+        let op = self.op();
+        let cur = self.chr(op).act.current;
+        crate::btl_act::is_technique_id(cur)
+            && self.c.data[op]
+                .tables
+                .tech()
+                .flags(crate::btl_act::id_class(cur))
+                & 4
+                != 0
+    }
+
+    /// Step handler 14 (`BtlAiStep_ClashMash`): mashing in a clash (timer 1: clash B / C, 2: clash A); a step on
+    /// the level-scaled rate, the better one while ahead on the clash count; done when the clash is over.
     fn step_clash_mash(&mut self) -> bool {
         let cls = self.c.ai.class_of(self.anim(self.me()));
         let roll = self.rand(100);
@@ -1602,7 +1835,12 @@ impl Ai<'_, '_, '_, '_> {
             ),
             _ => return true,
         };
-        let (va, vb) = (0, 0);
+        let (me, op) = (self.me(), self.op());
+        let (va, vb) = if self.w.seq.timer == 1 {
+            (self.chr(me).clash_count_b, self.chr(op).clash_count_b)
+        } else {
+            (self.chr(me).clash_count_a, self.chr(op).clash_count_a)
+        };
         let a = if va > vb { a } else { b };
         if roll < a {
             self.w.seq.step = (self.w.seq.step + 1) % 4;
@@ -1663,8 +1901,7 @@ impl Ai<'_, '_, '_, '_> {
             if cls[0] != 0x16 {
                 return true;
             }
-            // The pose bit is never set: step 2.
-            self.w.seq.step = 2;
+            self.w.seq.step = if self.pose_bit(me) { 3 } else { 2 };
             return false;
         }
         let kind = self.skill_type(me, slot);
@@ -1714,7 +1951,7 @@ impl Ai<'_, '_, '_, '_> {
         if self.skill_kind(me, slot.max(0) as usize) != 5 {
             return true;
         }
-        self.w.seq.step = 1;
+        self.w.seq.step = if self.pose_bit(me) { 0 } else { 1 };
         self.cls(me) == 0
     }
 
@@ -2579,7 +2816,10 @@ impl Ai<'_, '_, '_, '_> {
         if self.sense_bit32() {
             f |= 0x1_0000_0000;
         }
-        // BtlAiSense_CheckSwitch: no prompt is open.
+        // BtlAiSense_CheckSwitch: a technique prompt is open.
+        if self.prompt_buttons() != 0 && self.w.st.react & 0x1_0000 == 0 {
+            f |= 0x800_0000;
+        }
         let r = self.sense_act10();
         if r > 0 {
             if r == 2 {
@@ -2590,9 +2830,22 @@ impl Ai<'_, '_, '_, '_> {
         self.w.st.flags |= f;
     }
 
-    /// Bit 56: transformation is not ported, so the fighter cannot transform; only the timer runs.
+    /// `BtlCharApi_GetTransformCost`: the default transformation's cost (0 without transformations).
+    fn transform_cost(&self, i: usize) -> i32 {
+        let p = &self.c.data[i].tables.params;
+        if p.trans_count() == 0 {
+            return 0;
+        }
+        usize::try_from(p.trans_default()).map_or(0, |s| p.trans_cost(s))
+    }
+
+    /// Bit 56 (`BtlAiSense_CheckBit56`): the default transformation can be paid for and used, not for 600 frames
+    /// after a form change, and only at or below a level-scaled health percentage (the story-mode override is not
+    /// ported).
     fn sense_bit56(&mut self) -> bool {
         let me = self.me();
+        let cost = self.transform_cost(me);
+        let gauge = self.chr(me).gauge.blast;
         let ratio = self.hp(me) as f32 / self.hp_max(me) as f32;
         let limit = self.scale(self.pb(0xF), self.pb(0x107));
         if matches!(self.action(me), 0xEC..=0xF2) {
@@ -2604,21 +2857,64 @@ impl Ai<'_, '_, '_, '_> {
             return false;
         }
         self.w.st.timer18 = -1;
-        let _ = (limit, ratio);
-        false
-    }
-
-    /// Bit 57: fusion is never possible.
-    fn sense_bit57(&mut self) -> bool {
-        if matches!(self.action(self.me()), 0xEC..=0xF2) {
-            self.w.st.timer1c = 600;
+        if (limit as f32) < ratio * 100.0 {
+            return false;
         }
-        false
+        let c = self.chr(me);
+        let slot = self.c.data[me].tables.params.trans_default();
+        // BtlCharApi_CanTransform.
+        if slot < 0
+            || !crate::btl_act::can_transform(c, self.c.data[me], self.c.env, slot, true, true)
+        {
+            return false;
+        }
+        cost != 0 && gauge >= cost
     }
 
-    /// Bit 58: one member, so no switch.
+    /// Bit 57 (`BtlAiSense_CheckBit57`): a fusion can be made (`BtlCharApi_CanFuse`), as bit 56 with the health
+    /// limit 20 points higher.
+    fn sense_bit57(&mut self) -> bool {
+        let me = self.me();
+        let ratio = self.hp(me) as f32 / self.hp_max(me) as f32;
+        let limit = self.scale(self.pb(0xF), self.pb(0x107)) + 20;
+        if matches!(self.action(me), 0xEC..=0xF2) {
+            self.w.st.timer1c = 600;
+            return false;
+        }
+        let c = self.chr(me);
+        if !(0..3).any(|i| {
+            crate::btl_act::can_fuse(c, self.c.data[me], self.c.env, i, true, true).is_some()
+        }) {
+            return false;
+        }
+        self.w.st.timer1c -= 1;
+        if self.w.st.timer1c > 0 {
+            return false;
+        }
+        self.w.st.timer1c = -1;
+        (limit as f32) >= ratio * 100.0
+    }
+
+    /// Bit 58 (`BtlAiSense_CheckBit58`): a switch can be made (`BtlCharApi_CanSwitch`) outside the powered-up mode,
+    /// and lost health (70 points) plus missing ki (30 points) reach the AI type's level-scaled threshold.
     fn sense_bit58(&mut self) -> bool {
-        false
+        let me = self.me();
+        let c = self.chr(me);
+        let (hp, ki) = (c.gauge.health, c.gauge.ki);
+        let limit = self.scale(self.pu(0x2AD), self.pu(0x56D));
+        if c.flags.test(6) || !crate::btl_act::can_switch(c, true, true) {
+            return false;
+        }
+        self.w.st.timer20 -= 1;
+        if self.w.st.timer20 > 0 {
+            return false;
+        }
+        self.w.st.timer20 = -1;
+        let r = hp as f32 / self.hp_max(me) as f32;
+        let mut score = ((1.0 - r) * 70.0) as i32;
+        let r = ki as f32 / 100_000.0;
+        score += ((1.0 - r) * 30.0) as i32;
+        score >= limit
     }
 
     /// Bit 32: with no technique or blast, only the attribute / progress test of the opponent's attack.
@@ -3130,12 +3426,10 @@ impl Ai<'_, '_, '_, '_> {
                         !(opp_stun < 0x1F)
                     }
                 }
-                // BtlCharApi_IsMoveSlotActive is never true.
-                5 => false,
+                5 => !self.move_flag_100(me, i) && self.move_slot_active(me, i),
                 6 => self.powered(me),
                 _ => false,
             };
-            let _ = self.move_flag_100(me, i);
             if blocked {
                 continue;
             }
@@ -3162,20 +3456,35 @@ impl Ai<'_, '_, '_, '_> {
         true
     }
 
-    /// `AiThink_TestSkill`: a usable technique slot. The opponent is never in a technique.
+    /// `BtlCharApi_GetOppSkillClass`: the class (2..4) of the opponent's technique, -1 outside one.
+    fn opp_skill_class(&self) -> i32 {
+        let cur = self.chr(self.op()).act.current;
+        if crate::btl_act::is_technique_id(cur) {
+            crate::btl_act::id_class(cur)
+        } else {
+            -1
+        }
+    }
+
+    /// `AiThink_TestSkill`: a usable technique slot; with function 0x6A one that beats the opponent's technique (its
+    /// class read as an index into the three-slot arrays, as the original does).
     fn test_skill(&mut self) -> bool {
         let me = self.me();
+        let op = self.op();
         let fun = self.c.tab.func(self.w.plan.cond);
         let gauge = self.ki(me);
         let kind = self.w.plan.cond - 0x65;
         let hp = self.hp(me);
-        let opp_slot = -1;
+        let opp_slot = self.opp_skill_class();
         if self.chr(me).tech_delay != 0 {
             return false;
         }
         let any_basic = fun == 0x6B;
         let beat_opp = fun == 0x6A;
-        let strict = true;
+        let mut strict = true;
+        if beat_opp && opp_slot != -1 {
+            strict = self.skill_state(op, opp_slot as usize) & 0x100 == 0;
+        }
         if kind as u32 >= 7 && !any_basic && !beat_opp {
             return false;
         }
@@ -3192,15 +3501,29 @@ impl Ai<'_, '_, '_, '_> {
                     continue;
                 }
             } else if beat_opp {
-                if strict && self.skill_state(me, i) & 0x100 != 0 {
+                let (power, rank) = (self.skill_power(me, i), self.skill_rank(me, i));
+                if strict {
+                    if self.skill_state(me, i) & 0x100 != 0 {
+                        continue;
+                    }
+                    if opp_slot != -1 {
+                        let o = opp_slot as usize;
+                        let (op_power, op_rank) = (self.skill_power(op, o), self.skill_rank(op, o));
+                        if op_power > power || (op_power == power && rank < op_rank) {
+                            continue;
+                        }
+                    }
+                } else if opp_slot != -1 {
+                    if self.skill_power(op, opp_slot as usize) > power {
+                        continue;
+                    }
+                } else if k != 3 {
                     continue;
                 }
-                let _ = (opp_slot, self.skill_power(me, i), self.skill_rank(me, i));
             } else if kind != k {
                 continue;
             }
-            if k == 5 && self.c.env.stage_4_or_27 {
-                // The pose bit is never set.
+            if k == 5 && self.c.env.stage_4_or_27 && (!self.pose_bit(me) || !self.pose_bit(op)) {
                 continue;
             }
             if (self.skill_flags(me, i) & 0x2000 != 0 || self.skill_id(me, i) == 0x280)
@@ -3324,8 +3647,8 @@ impl Ai<'_, '_, '_, '_> {
             8 => !(self.blast(me) / 100000 < arg_i),
             9 => eq(self.powered(me)),
             10 => eq(self.w.st.flags >> 6 & 1 != 0),
-            // Stage 4 / 27 with the pose bit clear (it is never set).
-            11 => eq(self.c.env.stage_4_or_27),
+            // Stage 4 / 27 with the pose bit clear.
+            11 => eq(self.c.env.stage_4_or_27 && !self.pose_bit(me)),
             12 => eq(false),
             13 => eq(self.w.plan.slot == 2),
             14 => self.w.kit & 1 == arg_i,

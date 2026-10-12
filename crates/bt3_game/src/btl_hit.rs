@@ -491,6 +491,7 @@ impl Pair<'_, '_> {
             let (data, opp_data) = (self.data[a], self.data[a ^ 1]);
             let (me, opp) = split(self.chars, a);
             check_near(me, opp, data);
+            check_grab(me, opp, data, opp_data, self.env);
             check_touch(me, opp, data, opp_data);
         }
         for a in 0..2 {
@@ -953,6 +954,57 @@ fn check_near(a: &mut Chr, b: &Chr, data: &SideData) {
             a.flags.clear(0x4B);
         }
     }
+}
+
+/// `BtlHit_CheckGrab`: attacker flag 0x4C / 0x4D (the blinding skill of slot 0 / 1) catches the opponent within 100
+/// of its node 3, unless it is untouchable (0x42), its form is immune (parameter bit 0x1000000 << form), it has flag
+/// 0x137, or the attacker is behind it (lying down: with motion flag 0x8000): reaction 9 (0xE lying down), blinded
+/// for the skill's frames, lock-on lost. The voice is not ported.
+fn check_grab(a: &mut Chr, b: &mut Chr, data: &SideData, opp_data: &SideData, env: &Env) -> bool {
+    if b.flags.test(0x42) {
+        return false;
+    }
+    let slot = if a.flags.test(0x4D) {
+        1
+    } else if a.flags.test(0x4C) {
+        0
+    } else {
+        return false;
+    };
+    a.flags.clear(0x4C);
+    a.flags.clear(0x4D);
+    // BtlHit_FormIndex: the costume twice, plus one for a damaged variant.
+    let costume = b
+        .members
+        .get(b.active)
+        .map_or(opp_data.costume, |m| m.costume);
+    let form = costume * 2 + i32::from(b.gauge.variant != 0);
+    let immune = u32::try_from(form)
+        .ok()
+        .and_then(|f| 0x100_0000u32.checked_shl(f))
+        .is_some_and(|bit| opp_data.tables.params.flags() & bit != 0);
+    if immune || b.flags.test(0x137) {
+        return false;
+    }
+    if 100.0 < crate::btl_chr::length(crate::btl_chr::sub(a.obj.node_pos(3), b.obj.node_pos(3))) {
+        return false;
+    }
+    let flags = env.anim_flags(b.anim.cur);
+    let lying = flags & 0x800 != 0;
+    let behind = if lying {
+        flags & 0x8000 != 0
+    } else {
+        is_from_behind(a, b)
+    };
+    if behind {
+        return false;
+    }
+    b.react.back = false;
+    b.blind_timer = data.tables.skill().frames(slot);
+    b.react.yaw = a.pose.yaw;
+    b.react.reaction = if lying { 0xE } else { 9 };
+    b.flags.clear(5);
+    true
 }
 
 /// `BtlHit_CheckTouch`: attacker flag 0x4F raises contact when the bodies touch.

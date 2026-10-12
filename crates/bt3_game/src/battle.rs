@@ -2342,16 +2342,68 @@ mod tests {
             battle.roster.chars[0].gauge.health < health,
             "the CPU never hit"
         );
-        // The CPU rushes, throws (0xB4 -> 0xB7) and uses its attack records; the idle player is knocked out and the
-        // round ends for the CPU side.
-        for a in [0x44, 0xB4, 0xB7] {
+        // The CPU rushes, uses its attack records and its techniques (a beam, and a rush technique into its
+        // sequence); the idle player is knocked out and the round ends for the CPU side.
+        for a in [0x44, 0x106, 0x11C, 0x12E] {
             assert!(actions.contains(&a), "no action {a:X}");
         }
+        assert!(
+            actions.iter().any(|&a| (0x70..=0xAD).contains(&a)),
+            "{actions:X?}"
+        );
         assert_eq!(battle.seq.state, SeqState::Finish);
         assert_eq!(
             (battle.seq.winner, battle.seq.reason),
             (crate::battle_seq::WIN_P2, crate::battle_seq::REASON_KO)
         );
+    }
+
+    #[test]
+    fn real_cpu_transforms_and_switches() {
+        // A CPU at low health with blast stocks transforms (sense bit 56: character 1's default transformation),
+        // and a CPU with a team member switches (bit 58) once its switch gauge is full (kept full here).
+        for (team, want) in [(false, 0xEC..=0xF0), (true, 0xF3..=0xF5)] {
+            let mut setup = BattleSetup::default();
+            setup.sides[1].chara = 1;
+            setup.sides[1].control = 2;
+            setup.sides[1].cpu_level = 13;
+            setup.sides[1].change_allowed = 1;
+            if team {
+                setup.sides[1].team[0] = (2, 0);
+                setup.sides[1].team_count = 1;
+                setup.sides[1].switch_enabled = 1;
+            }
+            let Some(mut battle) = real_battle(&setup) else {
+                return;
+            };
+            battle.assets.chara_bits = [u64::MAX; 3];
+            let mut libc = LibcRandom::new(1);
+            let mut random = GameRandom::from_key(&[1]);
+            let idle = [PadState::default(); 2];
+            for _ in 0..200 {
+                let start =
+                    battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+                battle.run_frame(start, idle, 0, &mut libc, &mut random, None, false);
+                if battle.seq.state == SeqState::Fight {
+                    break;
+                }
+            }
+            let mut seen = false;
+            let mut acts = std::collections::BTreeSet::new();
+            for _ in 0..1800 {
+                let c = &mut battle.roster.chars[1];
+                c.gauge.health = c.gauge.health.min(c.gauge.health_max / 5);
+                c.gauge.blast = c.gauge.blast_max;
+                c.switch_gauge = 100_000;
+                battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+                acts.insert(battle.roster.chars[1].act.current);
+                seen |= want.contains(&battle.roster.chars[1].act.current);
+                if seen {
+                    break;
+                }
+            }
+            assert!(seen, "team {team}: {acts:X?}");
+        }
     }
 
     /// From the start to the result menu: START skips the intro, the CPU side loses its last health, then the
@@ -4619,6 +4671,49 @@ mod tests {
         assert_eq!(acts[..2], [0xEA, 0xB], "{acts:x?}");
         assert!(!battle.roster.chars[1].flags.test(0xBE));
         assert!(battle.roster.chars[1].gauge.ki > 0);
+    }
+
+    #[test]
+    fn real_skill_grab() {
+        use crate::btl_input::pad::UP;
+        // Character 0's first skill (id 1, the blinding grab: flag 0x4C as its motion ends) catches the opponent
+        // facing it within 100: reaction 9 (action 0xC6), blinded for the skill's frames, lock-on lost.
+        let Some(mut battle) = transform_battle(0, false) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pad = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..300 {
+            let r = &battle.roster;
+            if crate::btl_chr::opp_distance_xz(&r.chars[0], &r.chars[1]) < 40.0 {
+                break;
+            }
+            battle.run_frame(false, pad(UP), 0, &mut libc, &mut random, None, false);
+        }
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let acts = run_skill(&mut battle, false, 10);
+        let (mut opp, mut blind) = (Vec::new(), 0);
+        for _ in 0..120 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+            let o = &battle.roster.chars[1];
+            blind = blind.max(o.blind_timer);
+            if opp.last() != Some(&o.act.current) {
+                opp.push(o.act.current);
+            }
+        }
+        assert!(acts.contains(&0xFD), "{acts:x?}");
+        assert!(opp.contains(&0xC6), "{opp:x?}");
+        let frames = battle.assets.fighters[0].tables.skill().frames(0);
+        assert!(blind > 0 && blind <= frames, "{blind} {frames}");
     }
 
     #[test]

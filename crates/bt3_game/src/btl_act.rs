@@ -67,6 +67,114 @@ pub(crate) fn rush_sequence_frame(chr: &Chr) -> f32 {
     frame
 }
 
+/// `BattleSide_IsCharaUsable`: character `chara` is open to the side.
+fn chara_usable(me: &Chr, env: &Env, chara: i32) -> bool {
+    let bits = env.chara_bits[me.player];
+    usize::try_from(chara)
+        .ok()
+        .and_then(|c| bits.get(c / 64).map(|w| (w >> (c % 64)) & 1 != 0))
+        .unwrap_or(false)
+}
+
+/// `BtlAct_CanTransform`: transformation `index` (0..3) of the parameter, when it names a character the side may
+/// use (kind 3 needs the stage's moon), with the blast stocks it costs (`need_blast`) and the side allowed to change
+/// (`need_allowed`); never while the opponent is in a technique (flag 0xAF) or the body is changed. Ability 0x5E is
+/// not ported.
+pub(crate) fn can_transform(
+    me: &Chr,
+    data: &SideData,
+    env: &Env,
+    index: i32,
+    need_blast: bool,
+    need_allowed: bool,
+) -> bool {
+    let Ok(i) = usize::try_from(index) else {
+        return false;
+    };
+    if i >= 4 {
+        return false;
+    }
+    if need_allowed && me.form.allowed == 0 {
+        return false;
+    }
+    if me.flags.test(0xAF) || me.gauge.body_changed {
+        return false;
+    }
+    let p = &data.tables.params;
+    let chara = p.trans_target(i);
+    if chara == 0xFF || !chara_usable(me, env, chara) {
+        return false;
+    }
+    if p.trans_kind(i) == 3 && env.stage.stage_flags & 0x10 == 0 {
+        return false;
+    }
+    !(need_blast && me.gauge.blast < p.trans_cost(i))
+}
+
+/// `BtlMember_FindPresentIndex`: the present member of character `chara`.
+fn find_member(me: &Chr, chara: i32) -> Option<usize> {
+    me.members
+        .iter()
+        .position(|m| m.present && m.chara == chara)
+}
+
+/// The partner of fusion `index`: the first of its four characters present on the team.
+pub(crate) fn fusion_partner(me: &Chr, data: &SideData, index: usize) -> Option<usize> {
+    let p = &data.tables.params;
+    (0..4).find_map(|n| find_member(me, p.fusion_partner(index, n)))
+}
+
+/// `BtlAct_CanFuse`: fusion `index` (0..2) of the parameter names a character the side may use, with the stocks it
+/// costs and a partner on the team, alive and not body-changed; refused as a transformation is (ability 0x5E is not
+/// ported). The partner's member index.
+pub(crate) fn can_fuse(
+    me: &Chr,
+    data: &SideData,
+    env: &Env,
+    index: usize,
+    need_blast: bool,
+    need_allowed: bool,
+) -> Option<usize> {
+    if index >= 3 {
+        return None;
+    }
+    if need_allowed && me.form.allowed == 0 {
+        return None;
+    }
+    if me.flags.test(0xAF) || me.gauge.body_changed {
+        return None;
+    }
+    let p = &data.tables.params;
+    let chara = p.fusion_result(index);
+    if chara == 0xFF || !chara_usable(me, env, chara) {
+        return None;
+    }
+    if need_blast && me.gauge.blast < p.fusion_cost(index) {
+        return None;
+    }
+    let member = fusion_partner(me, data, index)?;
+    let g = me.member_gauge(member);
+    if g.body_changed || g.health <= 0 {
+        return None;
+    }
+    Some(member)
+}
+
+/// `BtlAct_CanSwitch`: a full switch gauge (`need_gauge`), two members alive, the side allowed to change
+/// (`need_allowed`), the opponent not in a technique (flag 0xAF).
+pub(crate) fn can_switch(me: &Chr, need_gauge: bool, need_allowed: bool) -> bool {
+    if need_allowed && me.form.allowed == 0 {
+        return false;
+    }
+    if me.flags.test(0xAF) {
+        return false;
+    }
+    if need_gauge && me.switch_gauge < 100_000 {
+        return false;
+    }
+    me.count_alive() >= 2
+}
+
 /// `BtlAct_GetLandingAction`: the victim's action after a rush, by the technique's landing kind.
 fn landing_action(kind: i32) -> i32 {
     match kind {
@@ -8389,38 +8497,14 @@ impl Ctx<'_, '_> {
     /// to change (`need_allowed`); never while the opponent is in a technique (flag 0xAF) or the body is changed.
     /// Ability 0x5E is not ported.
     fn can_transform(&self, index: i32, need_blast: bool, need_allowed: bool) -> bool {
-        let Ok(i) = usize::try_from(index) else {
-            return false;
-        };
-        if i >= 4 {
-            return false;
-        }
-        if need_allowed && self.me.form.allowed == 0 {
-            return false;
-        }
-        if self.flag(0xAF) || self.me.gauge.body_changed {
-            return false;
-        }
-        let p = &self.data.tables.params;
-        let chara = p.trans_target(i);
-        if chara == 0xFF {
-            return false;
-        }
-        let bits = self.env.chara_bits[self.me.player];
-        let usable = usize::try_from(chara)
-            .ok()
-            .and_then(|c| bits.get(c / 64).map(|w| (w >> (c % 64)) & 1 != 0))
-            .unwrap_or(false);
-        if !usable {
-            return false;
-        }
-        if p.trans_kind(i) == 3 && self.env.stage.stage_flags & 0x10 == 0 {
-            return false;
-        }
-        if need_blast && self.me.gauge.blast < p.trans_cost(i) {
-            return false;
-        }
-        true
+        can_transform(
+            self.me,
+            self.data,
+            self.env,
+            index,
+            need_blast,
+            need_allowed,
+        )
     }
 
     /// `BtlAct_CheckTransformInput`: R3 tapped alone (input 99) is the character's default transformation, with
@@ -8893,16 +8977,7 @@ impl Ctx<'_, '_> {
     /// `BtlAct_CanSwitch`: a full switch gauge (`need_gauge`), two members alive, the side allowed to change
     /// (`need_allowed`), the opponent not in a technique (flag 0xAF).
     fn can_switch(&self, need_gauge: bool, need_allowed: bool) -> bool {
-        if need_allowed && self.me.form.allowed == 0 {
-            return false;
-        }
-        if self.flag(0xAF) {
-            return false;
-        }
-        if need_gauge && self.me.switch_gauge < 100_000 {
-            return false;
-        }
-        self.me.count_alive() >= 2
+        can_switch(self.me, need_gauge, need_allowed)
     }
 
     /// `BtlAct_CheckSwitchInput`: L3 + R3 (input 107) switches to the next member (`BtlAct_QueueSwitch`: 0xF3).
@@ -9708,55 +9783,18 @@ impl Ctx<'_, '_> {
 
     // ---- the fusions (btl_act_decide.c, btl_act_change.c) ------------------------------------------------------
 
-    /// `BtlMember_FindPresentIndex`: the present member of character `chara`.
-    fn find_member(&self, chara: i32) -> Option<usize> {
-        self.me
-            .members
-            .iter()
-            .position(|m| m.present && m.chara == chara)
-    }
-
-    /// The partner of fusion `index`: the first of its four characters present on the team.
-    fn fusion_partner(&self, index: usize) -> Option<usize> {
-        let p = &self.data.tables.params;
-        (0..4).find_map(|n| self.find_member(p.fusion_partner(index, n)))
-    }
-
     /// `BtlAct_CanFuse`: fusion `index` (0..2) of the parameter names a character the side may use, with the stocks
     /// it costs and a partner on the team, alive and not body-changed; refused as a transformation is (ability 0x5E
     /// is not ported).
     fn can_fuse(&self, index: usize, need_blast: bool, need_allowed: bool) -> Option<usize> {
-        if index >= 3 {
-            return None;
-        }
-        if need_allowed && self.me.form.allowed == 0 {
-            return None;
-        }
-        if self.flag(0xAF) || self.me.gauge.body_changed {
-            return None;
-        }
-        let p = &self.data.tables.params;
-        let chara = p.fusion_result(index);
-        if chara == 0xFF {
-            return None;
-        }
-        let bits = self.env.chara_bits[self.me.player];
-        let usable = usize::try_from(chara)
-            .ok()
-            .and_then(|c| bits.get(c / 64).map(|w| (w >> (c % 64)) & 1 != 0))
-            .unwrap_or(false);
-        if !usable {
-            return None;
-        }
-        if need_blast && self.me.gauge.blast < p.fusion_cost(index) {
-            return None;
-        }
-        let member = self.fusion_partner(index)?;
-        let g = self.me.member_gauge(member);
-        if g.body_changed || g.health <= 0 {
-            return None;
-        }
-        Some(member)
+        can_fuse(
+            self.me,
+            self.data,
+            self.env,
+            index,
+            need_blast,
+            need_allowed,
+        )
     }
 
     /// `BtlAct_CheckFusionInput`: R3 held 12 frames with left / up / right (inputs 104..106) is fusion 0..2.
