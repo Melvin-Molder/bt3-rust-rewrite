@@ -149,32 +149,133 @@ pub(crate) fn update(me: &mut Chr, m: Option<&PartnerModel>, wind: [f32; 4]) {
     obj.flags &= !0x200_0000;
 }
 
-/// `BtlPartner_UpdateEvents` / `BtlPartner_HandleEvents` (manager pass 10): event 0x2000000 hides the object,
-/// 0x4000000 shows it; events 0x20 / 0x40 and bits 43 / 44 set and clear its flags 0x20 / 0x40.
-pub(crate) fn update_events(me: &mut Chr) {
+/// `BtlPartner_LinkToOwner`: the partner's mouth follows the fighter's lip tracks (`BtlObj_CopyLipTables`).
+pub(crate) fn link_to_owner(me: &mut Chr) {
     let Some(p) = me.partner.as_deref_mut() else {
         return;
     };
+    if let (Some(face), Some(owner)) = (p.obj.face.as_mut(), me.obj.face.as_ref()) {
+        face.copy_lips(owner);
+    }
+}
+
+/// `BtlPartner_UpdateEvents` / `BtlPartner_HandleEvents` (manager pass 10): event 0x2000000 hides the object,
+/// 0x4000000 shows it; a light (0x100) or heavy (0x80) impact event starts a hit spark (kind 0xF / 0x10, scale 1:
+/// not a fighter's object) at its node along its facing, a sound at its node 3 and the opponent's voice kind 1;
+/// events 0x20 / 0x40 and bits 43 / 44 set and clear its flags 0x20 / 0x40; its sound events play
+/// (`BtlFxObj_PlayEventSounds`); voice lines (kind 7: the voice base + character * 100 + line) under fighter flag
+/// 0x131 (line 0x62 of the partner's character) and in the technique classes 2 / 3 / 4 (lines 0x57 / 0x59 / 0x5B,
+/// the next with event bit 39, of the fighter's active member), each line, and under flag 0x130 lines 0x5F..0x61
+/// silently, held by its mouth (sub-state 2). Bit 42's vanish lines are not ported for it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_events(
+    me: &mut Chr,
+    opp: &mut Chr,
+    m: Option<&PartnerModel>,
+    env: &crate::btl_chr::Env,
+    frame: u32,
+    impacts: &mut crate::eft_impact::Impacts,
+    libc: &mut crate::rng::LibcRandom,
+) {
+    use crate::btl_snd::KIND_COMMON;
+    let class = crate::btl_act::id_class(me.act.current);
+    let (f130, f131) = (me.flags.test(0x130), me.flags.test(0x131));
+    let active = me.members[me.active].chara;
+    let (Some(p), Some(m)) = (me.partner.as_deref_mut(), m) else {
+        return;
+    };
     let obj = &mut p.obj;
+    let pos = obj.node_pos(3);
+    let mut snd = env.snd();
     if obj.test_event(0x200_0000) {
         obj.flags &= !2;
     }
     if obj.test_event(0x400_0000) {
         obj.flags |= 2;
     }
+    let mut hit = None;
+    if obj.test_event(0x100) {
+        hit = Some((0x100, (frame % 2) as i32 + 2, 0xF));
+    }
+    if obj.test_event(0x80) {
+        hit = Some((0x80, 0x49, 0x10));
+    }
+    if let Some((mask, sound, id)) = hit {
+        let node = crate::btl_obj::mask_to_node(obj.event_arg(mask)) as u32;
+        let a = obj.rot[1];
+        let arg = crate::eft_impact::ImpactArg {
+            pos: obj.node_pos(node),
+            dir: [
+                crate::btl_tech_volley::mathf_sin(a),
+                0.0,
+                crate::btl_tech_volley::mathf_cos(a),
+            ],
+            id,
+            chr: me.player,
+        };
+        impacts.spawn_hit(env.impact, &arg, 1.0);
+        snd.request(pos, -1, KIND_COMMON, 200.0, 1500.0, sound);
+        opp.voice(env, frame, 1, libc);
+    }
     // BtlFxObj_HandleFlagEvents.
-    for (bit, flag, on) in [
+    for (bit, flag, set) in [
         (0x20u64, 0x20u32, true),
         (0x40, 0x20, false),
         (1 << 43, 0x40, true),
         (1 << 44, 0x40, false),
     ] {
         if obj.test_event(bit) {
-            if on {
+            if set {
                 obj.flags |= flag;
             } else {
                 obj.flags &= !flag;
             }
+        }
+    }
+    let params = if m.tables.params.is_empty() {
+        0
+    } else {
+        m.tables.params.flags()
+    };
+    crate::btl_snd::obj_event_sounds(obj, params, frame, &mut snd);
+    let base = crate::battle_seq::voice_chara_base() as i32;
+    let lines = crate::battle_seq::VOICE_CHARA_LINES as i32;
+    let (mut line, mut held) = (-1, -1);
+    if f130 {
+        if obj.test_event(0x8000) {
+            held = 0x5F;
+        }
+        if obj.test_event(0x80_0000_0000) {
+            held = 0x60;
+        }
+        if obj.test_event(0x2_0000) {
+            held = 0x61;
+        }
+    }
+    if f131 && obj.test_event(0x80_0000_8000) {
+        line = 0x62;
+        held = 0x62;
+    }
+    if line >= 0 {
+        snd.request(pos, -1, 7, 200.0, 1500.0, base + m.chara * lines + line);
+    }
+    if held >= 0 {
+        obj.set_sub_state(2, held, libc);
+    }
+    let on = match class {
+        2 => 0x57,
+        3 => 0x59,
+        4 => 0x5B,
+        _ => -1,
+    };
+    if on >= 0 {
+        if obj.test_event(0x8000) {
+            snd.request(pos, -1, 7, 200.0, 1500.0, base + active * lines + on);
+            obj.set_sub_state(2, on, libc);
+        }
+        if obj.test_event(0x80_0000_0000) {
+            snd.request(pos, -1, 7, 200.0, 1500.0, base + active * lines + on + 1);
+            obj.set_sub_state(2, on + 1, libc);
         }
     }
 }

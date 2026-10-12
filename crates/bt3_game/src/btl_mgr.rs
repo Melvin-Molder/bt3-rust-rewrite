@@ -474,7 +474,15 @@ impl Roster {
                 continue;
             }
             me.flags.set_stage(10);
-            crate::btl_partner::update_events(me);
+            crate::btl_partner::update_events(
+                me,
+                opp,
+                data[i].partner,
+                env,
+                frame,
+                &mut self.scene.impacts,
+                libc,
+            );
             crate::btl_snd::after_hit_sounds(me, data[i], env, frame);
             crate::btl_fx::trigger_obj_1d(me);
             let impacts = &mut self.scene.impacts;

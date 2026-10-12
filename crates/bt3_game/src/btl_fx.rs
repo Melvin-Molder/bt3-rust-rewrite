@@ -274,7 +274,7 @@ pub(crate) fn shake_and_vibrate_on_events(me: &mut Chr) {
 }
 
 /// `BtlFx_PushBackOnEvent400`: in a rush sequence of a technique without flag 0x1000000, animation event 0x400
-/// raises flag 0x9F, while which the chains are pushed straight back (the partner object's are not ported).
+/// raises flag 0x9F, while which the chains are pushed straight back (the partner object's too).
 pub(crate) fn push_back_on_event_400(me: &mut Chr, data: &SideData) {
     let cur = me.act.current;
     if crate::btl_act::is_technique_id(cur)
@@ -292,6 +292,10 @@ pub(crate) fn push_back_on_event_400(me: &mut Chr, data: &SideData) {
                 crate::btl_tech_volley::mathf_cos(a),
             ];
             me.obj.chains.add_push(v, 5.0);
+            // BtlPartner_PushAngle.
+            if let Some(p) = me.partner.as_deref_mut() {
+                p.obj.chains.add_push(v, 5.0);
+            }
         }
     }
 }

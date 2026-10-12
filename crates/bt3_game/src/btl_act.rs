@@ -9112,8 +9112,15 @@ impl Ctx<'_, '_> {
                     if self.me.anim_is_new() {
                         if level == thr.partner_step + 1 {
                             self.change.set_done(self.me.player);
-                            if thr.tech == 0x2E8 && self.me.has_ability(0x79) {
-                                crate::btl_partner::set_flag80(self.me, self.data.partner, true);
+                            if thr.tech == 0x2E8 {
+                                crate::btl_partner::link_to_owner(self.me);
+                                if self.me.has_ability(0x79) {
+                                    crate::btl_partner::set_flag80(
+                                        self.me,
+                                        self.data.partner,
+                                        true,
+                                    );
+                                }
                             }
                         }
                         let anim = level - thr.partner_step + 0x19D;

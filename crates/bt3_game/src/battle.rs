@@ -7176,7 +7176,7 @@ mod tests {
         near: bool,
         watch: &mut dyn FnMut(&Battle),
     ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3], [i32; 4])> {
-        run_technique_prepared(chara, slot, frames, near, &mut |_| {}, watch)
+        run_technique_prepared(chara, slot, frames, near, &mut |_| {}, &mut |b, _| watch(b))
     }
 
     /// `run_technique_watched` with `prepare` run on the battle once it is loaded.
@@ -7186,7 +7186,7 @@ mod tests {
         frames: usize,
         near: bool,
         prepare: &mut dyn FnMut(&mut Battle),
-        watch: &mut dyn FnMut(&Battle),
+        watch: &mut dyn FnMut(&Battle, &BattleFrame),
     ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3], [i32; 4])> {
         use crate::btl_input::pad::{DOWN, L2, START, TRIANGLE, UP};
         let mut setup = BattleSetup::default();
@@ -7208,7 +7208,7 @@ mod tests {
         };
         let mut frame = |battle: &mut Battle, held: u32| {
             let start = held & START != 0 && battle.prev_held[0] & START == 0;
-            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false)
         };
         for i in 0..200 {
             let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
@@ -7256,8 +7256,8 @@ mod tests {
                 4..6 => L2 | dir | TRIANGLE,
                 _ => 0,
             };
-            frame(&mut battle, p1);
-            watch(&battle);
+            let f = frame(&mut battle, p1);
+            watch(&battle, &f);
             let r = &battle.roster;
             let (a, b) = (r.chars[0].act.current, r.chars[1].act.current);
             let live: usize = r.scene.fx.counts(None).iter().sum();
@@ -9165,25 +9165,37 @@ mod tests {
         // The rush techniques that bring a partner object: character 3's 0x2E8 (character 4's model, from step 1),
         // character 16's 0x2B0 (object 0x10B, from step 0) and character 65's 0x1C1 (object 0x112, type 3). Each
         // is loaded through the change queue, put on the attacker, shown by its animation's events and stepped
-        // by hand through its model animations, then released with its files.
+        // by hand through its model animations, speaking the technique class's lines, then released with its
+        // files.
         for (chara, slot, partner) in [(3, 4, 4), (16, 4, 0x10B), (65, 3, 0x112)] {
             let (mut attached, mut shown, mut frames, mut files) = (false, 0, Vec::new(), false);
-            let mut last = None;
-            let Some((log, ..)) = run_technique_watched(chara, slot, 900, false, &mut |b| {
-                let c = &b.roster.chars[0];
-                if let Some(p) = &c.partner {
-                    attached = true;
-                    shown += usize::from(p.obj.flags & 2 != 0);
-                    if p.obj.layers[0].motion.is_some() {
-                        frames.push(p.obj.frame);
+            let (mut last, mut lines) = (None, Vec::new());
+            let base = crate::battle_seq::voice_chara_base() + chara as u32 * 100;
+            let Some((log, ..)) =
+                run_technique_prepared(chara, slot, 900, false, &mut |_| {}, &mut |b, f| {
+                    for s in &f.sounds {
+                        if let TitleSound::VoiceEx { id, .. } = s
+                            && (base + 0x57..base + 0x5D).contains(id)
+                        {
+                            lines.push(id - base);
+                        }
                     }
-                    let m = b.assets.fighters[0].partner.as_ref();
-                    files |= m.is_some_and(|m| {
-                        m.chara == (crate::btl_partner::file_id(partner, 0, 0) as i32 - 0x590) / 10
-                    });
-                }
-                last = Some(c.partner.is_some() || b.assets.fighters[0].partner.is_some());
-            }) else {
+                    let c = &b.roster.chars[0];
+                    if let Some(p) = &c.partner {
+                        attached = true;
+                        shown += usize::from(p.obj.flags & 2 != 0);
+                        if p.obj.layers[0].motion.is_some() {
+                            frames.push(p.obj.frame);
+                        }
+                        let m = b.assets.fighters[0].partner.as_ref();
+                        files |= m.is_some_and(|m| {
+                            m.chara
+                                == (crate::btl_partner::file_id(partner, 0, 0) as i32 - 0x590) / 10
+                        });
+                    }
+                    last = Some(c.partner.is_some() || b.assets.fighters[0].partner.is_some());
+                })
+            else {
                 return;
             };
             assert!(attached, "{chara}: {log:x?}");
@@ -9194,6 +9206,10 @@ mod tests {
                 "{chara}: {frames:?}"
             );
             assert_eq!(last, Some(false), "{chara}");
+            // Its voice lines of the active member: class 4's 0x5B / 0x5C, class 3's 0x59 / 0x5A.
+            lines.sort_unstable();
+            let first = if slot == 4 { 0x5B } else { 0x59 };
+            assert_eq!(lines, [first, first + 1], "{chara}");
         }
     }
 
@@ -10278,7 +10294,7 @@ mod tests {
                 t[0x15C] = 1;
                 t[0x15F] = 2;
             },
-            &mut |b| on += usize::from(b.roster.scene.blurs.is_on(0)),
+            &mut |b, _| on += usize::from(b.roster.scene.blurs.is_on(0)),
         ) else {
             return;
         };

@@ -147,6 +147,13 @@ pub(crate) struct Face {
 
 impl Face {
     /// `BtlObj_CreateFace`: `None` when the model has neither eyes nor a mouth.
+    /// `BtlObj_CopyLipTables`: the lip tracks of another face's model.
+    pub(crate) fn copy_lips(&mut self, from: &Face) {
+        let mut model = (*self.model).clone();
+        model.lips = from.model.lips.clone();
+        self.model = Arc::new(model);
+    }
+
     pub(crate) fn new(model: Arc<FaceModel>) -> Option<Self> {
         let mut flags = 0;
         if model.eye_count.is_some() {

@@ -372,12 +372,19 @@ pub(crate) fn fx_event_sounds(
             }
         }
     }
-    let pos = me.obj.node_pos(3);
-    let obj_id = if data.tables.params.flags() & 0x8000 != 0 {
-        0xB
-    } else {
-        0x33
-    };
+    obj_event_sounds(&me.obj, data.tables.params.flags(), frame, &mut env.snd());
+}
+
+/// `BtlFxObj_PlayEventSounds`: an object's sound events at its node 3, heard from 200 to 1500 (`param_flags`: its
+/// parameter block's flags, 0x8000 picking sound 0xB over 0x33).
+pub(crate) fn obj_event_sounds(
+    obj: &crate::btl_obj::Obj,
+    param_flags: u32,
+    frame: u32,
+    snd: &mut CharSound,
+) {
+    let pos = obj.node_pos(3);
+    let obj_id = if param_flags & 0x8000 != 0 { 0xB } else { 0x33 };
     let events: [(u64, i32, i32); 20] = [
         (0x10, KIND_COMMON, (frame % 3) as i32 + 0x28),
         (0x1000_0000, KIND_COMMON, 0x1E),
@@ -400,9 +407,8 @@ pub(crate) fn fx_event_sounds(
         (0x8000_0000, KIND_BANK8, (frame % 2) as i32),
         (0, 0, 0),
     ];
-    let mut snd = env.snd();
     for (mask, kind, id) in events {
-        if mask != 0 && me.obj.test_event(mask) {
+        if mask != 0 && obj.test_event(mask) {
             snd.request(pos, -1, kind, 200.0, 1500.0, id);
         }
     }
