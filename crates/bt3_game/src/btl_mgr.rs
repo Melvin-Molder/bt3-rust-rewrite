@@ -94,7 +94,13 @@ impl Roster {
     }
 
     /// `BtlChars_SampleInput` (`BtlInput_Sample`): stage 2, the pad (or the CPU's virtual pad) into the record.
-    pub(crate) fn sample_input(&mut self, pads: &[PadState; 2], data: [&SideData; 2], env: &Env) {
+    pub(crate) fn sample_input(
+        &mut self,
+        pads: &[PadState; 2],
+        data: [&SideData; 2],
+        env: &Env,
+        replay: &mut crate::btl_replay::Replay,
+    ) {
         for ((chr, pad), data) in self.chars.iter_mut().zip(pads).zip(data) {
             if chr.is_frozen() {
                 continue;
@@ -118,7 +124,13 @@ impl Roster {
             let active = (chr.flags.test(2) || chr.flags.test(3))
                 && !chr.flags.test(0x136)
                 && !env.gate.time_stopped;
-            chr.input.sample(pad, active, env.gate.time_stopped);
+            let player = chr.player;
+            chr.input.sample(
+                pad,
+                active,
+                env.gate.time_stopped,
+                Some((&mut *replay, player)),
+            );
         }
     }
 
@@ -691,6 +703,7 @@ impl Roster {
         data: [&SideData; 2],
         env: &Env,
         libc: &mut crate::rng::LibcRandom,
+        replay: bool,
     ) {
         for i in 0..2 {
             let chr = &mut self.chars[i];
@@ -712,7 +725,7 @@ impl Roster {
                 chr.pose.moved = [0.0; 3];
             }
             // BtlChar_UpdateVibration to the fighter's pad.
-            chr.update_vibration(&mut self.pad_vib[chr.player]);
+            chr.update_vibration(&mut self.pad_vib[chr.player], replay);
             chr.flags.set_stage(12);
         }
         self.snapshot(5);

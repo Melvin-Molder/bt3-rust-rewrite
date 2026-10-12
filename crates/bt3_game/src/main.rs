@@ -18,6 +18,7 @@ mod btl_menu;
 mod btl_mgr;
 mod btl_obj;
 mod btl_obj_chain;
+mod btl_replay;
 mod btl_snd;
 mod btl_tech_disc;
 mod btl_tech_fx;

@@ -83,12 +83,12 @@ impl Chr {
         self.set_small_vibration(seconds);
     }
 
-    /// `BtlChar_UpdateVibration`: this frame's request to the fighter's pad (none while disabled or for the CPU),
-    /// the times counted down.
-    pub(crate) fn update_vibration(&mut self, pad: &mut PadVib) {
+    /// `BtlChar_UpdateVibration`: this frame's request to the fighter's pad (none while disabled, in a replay or
+    /// for the CPU), the times counted down.
+    pub(crate) fn update_vibration(&mut self, pad: &mut PadVib, replay: bool) {
         let cpu = self.input.inject_on;
         let vib = &mut self.vib;
-        if !vib.enabled || cpu {
+        if !vib.enabled || replay || cpu {
             vib.time = 0;
             vib.small_time = 0;
             return;

@@ -19,6 +19,9 @@ use crate::title::TitleSound;
 /// `gPauseMenuVersus` / `gPauseMenuResultVersus`.
 pub(crate) const PAUSE_VERSUS: u32 = 0x2C_5280;
 pub(crate) const RESULT_VERSUS: u32 = 0x2C_5408;
+/// `gPauseMenuReplayRec` / `gPauseMenuResultReplayRec`: the trees while the battle's own replay plays.
+pub(crate) const PAUSE_REPLAY: u32 = 0x2C_5560;
+pub(crate) const RESULT_REPLAY: u32 = 0x2C_56E8;
 /// The yes / no box and the CPU level menu, whose cursors the item callbacks set.
 const CONFIRM_MENU: u32 = 0x2C_4F00;
 /// Item callbacks by address.
@@ -106,6 +109,15 @@ pub(crate) struct Tree {
 }
 
 impl Tree {
+    /// Every item's id, menu by menu.
+    #[cfg(test)]
+    pub(crate) fn item_ids(&self) -> Vec<i32> {
+        self.menus
+            .iter()
+            .flat_map(|m| m.items.iter().map(|i| i.id))
+            .collect()
+    }
+
     /// Reads the tree at `addr` of the executable's data.
     pub(crate) fn read(elf: &Elf, addr: u32) -> io::Result<Self> {
         let mut tree = Tree {
@@ -338,7 +350,7 @@ pub(crate) struct MenuDraw<'a> {
 /// `gBtlMenu` with the pause menu's two trees (`PauseMenu_GetMenu`).
 #[derive(Clone, Debug)]
 pub(crate) struct PauseMenu {
-    trees: [Tree; 2],
+    pub(crate) trees: [Tree; 2],
     /// `gBtlMenu->active`: the menu is shown.
     pub(crate) active: bool,
     pad: i32,

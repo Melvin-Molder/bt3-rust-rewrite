@@ -1069,6 +1069,16 @@ impl NoticePart {
     /// alpha; the spins, the trail and the banner draw it plainly. Then the fragments, after-images or copy, and for
     /// FIGHT, K.O. and the trail the streak added in proportion to the word's alpha.
     fn draw(&self, out: &mut Vec<HudPrim>) {
+        // Node 3 (256, 50): the replay mark, drawn plainly.
+        let mark = &self.spr[SPR_REPLAY];
+        if !mark.hidden {
+            let at = Xf::translate(256.0, 50.0);
+            out.push(self.prim(
+                mark,
+                sprite_polygon(mark, &at, &self.sheet),
+                HudBlend::Alpha,
+            ));
+        }
         let Some(kind) = self.kind else {
             return;
         };
@@ -1199,6 +1209,9 @@ pub(crate) struct Hud {
     caption: CaptionPart,
     /// `Battle_GetMode() == 7` (the attract demo): only the caption is drawn.
     caption_only: bool,
+    /// `gBtlGameReplayActive` (latched at the round's reset) and `gHud->replayMode`.
+    replay: bool,
+    replay_mode: i32,
     textures: HudTextures,
     layer: GsLayer,
     announcer: i32,
@@ -1254,6 +1267,8 @@ impl Hud {
             ),
             caption: CaptionPart::new(sheets.get(CAPTION_SHEET).cloned().unwrap_or_default()),
             caption_only: mode == 7,
+            replay: false,
+            replay_mode: 0,
             textures,
             layer: GsLayer::new(),
             announcer,
@@ -1308,6 +1323,22 @@ impl Hud {
         self.combo.paused = paused;
         self.timer.paused = paused;
         self.prompt.paused = paused;
+    }
+
+    /// `BtlGame_Reset`'s latch of a playing replay.
+    pub(crate) fn set_replay(&mut self, on: bool) {
+        self.replay = on;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_replay(&self) -> bool {
+        self.replay
+    }
+
+    /// `Hud_SetReplayMode`, and `Hud_PreUpdate`'s replay mark (shown in mode 1 while a replay plays).
+    pub(crate) fn set_replay_mode(&mut self, mode: i32) {
+        self.replay_mode = mode;
+        self.notice.spr[SPR_REPLAY].show(self.replay && mode == 1);
     }
 
     /// The prompt part's icon definitions, read from the executable.
@@ -1420,6 +1451,22 @@ impl Hud {
         if self.flags & SHOW_NOTICE != 0 {
             self.notice.update(libc);
             self.notice.draw(&mut prims);
+        }
+        // While a replay plays, mode 0 draws only the caption, 1 everything but it, 2 nothing (all parts update).
+        if self.replay {
+            let mut caption = Vec::new();
+            self.caption.run(&mut caption);
+            return match self.replay_mode {
+                0 => HudFrame {
+                    layer: None,
+                    prims: caption,
+                },
+                1 => HudFrame { layer, prims },
+                _ => HudFrame {
+                    layer: None,
+                    prims: Vec::new(),
+                },
+            };
         }
         HudFrame { layer, prims }
     }

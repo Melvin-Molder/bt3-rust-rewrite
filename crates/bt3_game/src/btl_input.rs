@@ -572,8 +572,15 @@ impl Input {
     }
 
     /// `BtlInput_Sample` + `BtlInput_BuildRecord`. `active`: flag 2 or 3 is up, 0x136 is not and time runs (else
-    /// the record is neutral). The replay hook records nothing here.
-    pub(crate) fn sample(&mut self, pad: &PadState, active: bool, time_stopped: bool) {
+    /// the record is neutral). An active frame goes into the fighter's replay track, or comes from it while a
+    /// replay plays (`BtlReplay_Record` / `BtlReplay_Play`).
+    pub(crate) fn sample(
+        &mut self,
+        pad: &PadState,
+        active: bool,
+        time_stopped: bool,
+        replay: Option<(&mut crate::btl_replay::Replay, usize)>,
+    ) {
         self.pad_status = pad.status;
         if pad.status < 4 {
             self.last_status = pad.status;
@@ -611,7 +618,16 @@ impl Input {
             buttons = self.add_double_taps(buttons, prev_buttons);
             commands = self.build_commands(buttons, prev_buttons);
         }
-        if !active {
+        if active {
+            if let Some((replay, player)) = replay {
+                if replay.active {
+                    (buttons, stick) = replay.play(player);
+                    commands = self.build_commands(buttons, prev_buttons);
+                } else {
+                    replay.record(player, buttons, stick);
+                }
+            }
+        } else {
             buttons = 0;
             stick = [STICK_CENTER; 2];
             commands = 0;
@@ -987,7 +1003,7 @@ mod tests {
             held,
             ..PadState::default()
         };
-        input.sample(&pad, true, false);
+        input.sample(&pad, true, false, None);
         input.update(&InputGate::default(), false);
     }
 
@@ -1051,7 +1067,7 @@ mod tests {
             left: stick_from_raw(0x80, 0x00),
             ..PadState::default()
         };
-        input.sample(&pad, true, false);
+        input.sample(&pad, true, false, None);
         input.update(&InputGate::default(), false);
         assert!(input.is_held(UP) && !input.is_held(LEFT | RIGHT));
     }
@@ -1066,6 +1082,7 @@ mod tests {
             },
             true,
             false,
+            None,
         );
         let gate = InputGate {
             block: true,
@@ -1081,7 +1098,7 @@ mod tests {
         input.inject_on = true;
         input.inject_buttons = GUARD;
         input.inject_stick = [0.0, -1.0];
-        input.sample(&PadState::default(), true, false);
+        input.sample(&PadState::default(), true, false, None);
         input.update(&InputGate::default(), false);
         assert!(input.is_held(GUARD | ANY_FACE | UP));
         assert!(input.is_cmd_held(C_GUARD_H));

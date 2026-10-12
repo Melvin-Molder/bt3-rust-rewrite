@@ -684,6 +684,7 @@ impl Battle {
                 if let Some(reason) = reason {
                     self.seq.winner = ABORT;
                     self.seq.reason = reason as u32;
+                    self.replay.on_result(reason as u32);
                 }
                 if !open {
                     // PauseMenu_Update's close (Adx_ResumeSeVoice), then the flags.
@@ -757,6 +758,12 @@ impl Battle {
         if dead[1] || dead[0] {
             self.seq.winner = if dead[1] { WIN_P1 } else { WIN_P2 };
             self.seq.reason = REASON_KO;
+            return true;
+        }
+        // A replay whose input ran out ends.
+        if self.replay.ran_out() {
+            self.seq.winner = crate::btl_replay::WIN_OTHER;
+            self.seq.reason = crate::btl_replay::REASON_END;
             return true;
         }
         false
@@ -959,9 +966,10 @@ impl Battle {
                         input.sounds,
                     );
                     if let Some(reason) = reason {
-                        // BattleResult_Set(BTL_RESULT_ABORT, reason).
+                        // BattleResult_Set(BTL_RESULT_ABORT, reason): a rematch records, "view replay" plays.
                         self.seq.winner = ABORT;
                         self.seq.reason = reason as u32;
+                        self.replay.on_result(reason as u32);
                     }
                 }
                 if self.seq.winner & ABORT != 0 {

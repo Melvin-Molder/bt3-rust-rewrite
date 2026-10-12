@@ -232,6 +232,9 @@ pub struct BattleAssets {
     /// The versus pause and result menus (mode 0 only), the menu sheet (HUD file entry 7, in `hud_textures`)
     /// and the menu texts.
     pub(crate) menus: Option<(Tree, Tree)>,
+    /// The pause and result menus while the battle's replay plays (`gPauseMenuReplayRec`,
+    /// `gPauseMenuResultReplayRec`).
+    pub(crate) replay_menus: Option<(Tree, Tree)>,
     pub(crate) menu_sheet: HudSheet,
     pub(crate) menu_texts: MenuTexts,
 }
@@ -412,6 +415,14 @@ pub fn load(
     } else {
         None
     };
+    let replay_menus = if setup.mode == 0 {
+        Some((
+            Tree::read(elf, crate::btl_menu::PAUSE_REPLAY).map_err(error)?,
+            Tree::read(elf, crate::btl_menu::RESULT_REPLAY).map_err(error)?,
+        ))
+    } else {
+        None
+    };
     let common_tables = CommonTables::parse(&common).map_err(error)?;
     let ai = AiData::parse(&common).map_err(error)?;
     let ai_tables = AiTables::read(elf).map_err(error)?;
@@ -512,6 +523,7 @@ pub fn load(
         screen_mode: setup.screen_mode,
         bgm: setup.bgm,
         menus,
+        replay_menus,
         menu_sheet,
         menu_texts,
     };
@@ -1461,6 +1473,8 @@ pub struct Battle {
     roots: [Mtx; 2],
     /// `obj->shadow`: the fighters' ground shadows as the last update collected them.
     pub(crate) shadows: [crate::obj_shadow::Shadow; 2],
+    /// `gBattleReplay`: the input tracks, kept across restarts.
+    pub(crate) replay: crate::btl_replay::Replay,
     started: bool,
     /// `gBtlAi`.
     ai: AiMgr,
@@ -1822,6 +1836,7 @@ impl Battle {
             fade: Fade::start_in(1.0),
             roots,
             shadows: Default::default(),
+            replay: Default::default(),
             started: false,
             ai,
             menu,
@@ -2315,9 +2330,20 @@ impl Battle {
         objs.unwrap_or_else(|e| e.into_inner())
             .reset_stage(&mut self.vu0);
         self.amb.start(self.assets.stage_id);
+        // PauseMenu_GetMenu: the replay's trees while it plays.
+        let trees = if self.replay.active {
+            self.assets.replay_menus.clone()
+        } else {
+            self.assets.menus.clone()
+        };
+        if let (Some(menu), Some((pause, result))) = (&mut self.menu, trees) {
+            menu.trees = [pause, result];
+        }
         if let Some(menu) = &mut self.menu {
             menu.reset();
         }
+        // Battle_ResetWork: the replay's end flag cleared.
+        self.replay.end = false;
         // BtlLoad_Reload: a side that changed character loads its starting one back (Load_RunBlocking).
         self.change_job = None;
         for side in 0..2 {
@@ -2356,6 +2382,8 @@ impl Battle {
             self.assets.mode,
         );
         self.hud.set_prompt_defs(self.assets.prompt_defs.clone());
+        // BtlGame_Reset: whether a replay plays, latched.
+        self.hud.set_replay(self.replay.active);
         self.seq = Seq::new(self.assets.mode, self.assets.time_limit);
         self.demo = DemoCam::default();
         self.eft_cam = crate::battle_seq::EftCam::default();
@@ -2378,6 +2406,9 @@ impl Battle {
         self.roster.scene.stage = stage_fx;
         self.roster.scene.tints = crate::stg_tint::Tints::new(self.assets.stage.tint);
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
+        // BtlChar_ResetAll's BtlReplay_Rewind / BtlReplay_ResetViewer.
+        self.replay.rewind();
+        self.replay.reset_viewer();
         self.fade = Fade::start_in(1.0);
         self.started = false;
     }
@@ -2458,6 +2489,15 @@ impl Battle {
                 rep_right: repeat & RIGHT != 0,
             }
         });
+        // Pad 0's `gamePressed` directions for the replay viewer: left 1, right 2, down 4, up 8.
+        let viewer_pressed = {
+            use crate::btl_input::pad::{DOWN, LEFT, RIGHT, UP};
+            let pressed = pads[0].held & !self.prev_held[0];
+            [(LEFT, 1), (RIGHT, 2), (DOWN, 4), (UP, 8)]
+                .iter()
+                .filter(|(b, _)| pressed & b != 0)
+                .fold(0, |m, (_, g)| m | g)
+        };
         self.prev_held = pads.map(|p| p.held);
         let mut input = SeqInput {
             start,
@@ -2474,6 +2514,9 @@ impl Battle {
         self.fade2.update();
         if self.with_roster(|roster, data, env| roster.check_start(data, env)) {
             self.seq.started = true;
+            // BtlChar_ResetAll: the fighters' replay tracks rewound, the viewer reset.
+            self.replay.rewind();
+            self.replay.reset_viewer();
         }
         let sides = [
             self.roster.chars[0].hud_gauge(),
@@ -2523,13 +2566,17 @@ impl Battle {
         }
         let mut vu0 = self.vu0;
         let loading = self.loading;
+        let mut replay = std::mem::take(&mut self.replay);
+        let menu_active = self.menu.as_ref().is_some_and(|m| m.active);
         self.with_roster(|roster, data, env| {
             // BtlChars_SampleInput, UpdateInput, UpdateMain and PostScene do nothing while paused or while a stage
             // loads; the effect scene runs with its time stopped.
             if !paused && !loading {
-                roster.sample_input(&pads, data, env);
+                roster.sample_input(&pads, data, env, &mut replay);
                 roster.update_input(data, env);
                 roster.update_main(data, env, &mut *input.libc, &mut vu0);
+                // BtlReplay_UpdateViewer, in UpdateMain after the cameras.
+                replay.update_viewer(viewer_pressed, paused, menu_active);
             }
             roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
             if !paused && !loading {
@@ -2537,6 +2584,8 @@ impl Battle {
             }
             false
         });
+        self.replay = replay;
+        self.hud.set_replay_mode(self.replay.hud_mode);
         self.check_stage_change();
         if !paused && !self.loading {
             // BtlStage_Update: StgAmb_Update, then the objects' animations and StgRigid_Update (not while paused or
@@ -2570,7 +2619,13 @@ impl Battle {
         // BtlCam_UpdateOverride: the camera with flag 0xD3 (a cut's priority) takes the screen; on a tie the
         // default view, side 0's.
         let pri = [0, 1].map(|s| self.roster.chars[s].flags.test(0xD3));
-        let view_side = if pri[1] && !pri[0] { 1 } else { 0 };
+        let view_side = if pri[1] && !pri[0] {
+            1
+        } else if pri[0] && !pri[1] {
+            0
+        } else {
+            self.replay.default_view()
+        };
         let cam = self.roster.chars[view_side].cam;
         let mut view = View::new(cam.pos, cam.rot);
         if self.demo.is_active() {
@@ -2617,8 +2672,9 @@ impl Battle {
         if !self.loading {
             self.roster.change.update();
             if !paused {
+                let replay_active = self.replay.active;
                 self.with_roster(|roster, data, env| {
-                    roster.end_frame(data, env, &mut *input.libc);
+                    roster.end_frame(data, env, &mut *input.libc, replay_active);
                     true
                 });
                 // BtlCharSnd_PlayRequests, from this frame's camera.
@@ -2884,8 +2940,10 @@ impl Battle {
                 paused: false,
                 in_technique: [false; 2],
             };
-            // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else side 0's view.
+            // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else the default view's
+            // side (the replay viewer's choice while a replay plays).
             let demo = self.demo.is_active();
+            let shown = self.replay.default_view();
             // Layer 0's stage effects, then the others.
             let roster = &mut self.roster;
             let mut direct = Vec::new();
@@ -2926,7 +2984,7 @@ impl Battle {
                             || glows.is_active(chr)
                         {
                             None
-                        } else if (demo || chr == 0) && c.obj.flags & 0x20_0000 != 0 {
+                        } else if (demo || chr == shown) && c.obj.flags & 0x20_0000 != 0 {
                             Some(0.3)
                         } else {
                             Some(1.0)
@@ -2944,7 +3002,7 @@ impl Battle {
                         let o = &chars[chr].obj;
                         if o.flags & 2 == 0 {
                             None
-                        } else if (demo || chr == 0) && o.flags & 0x20_0000 != 0 {
+                        } else if (demo || chr == shown) && o.flags & 0x20_0000 != 0 {
                             Some(0.3)
                         } else {
                             Some(1.0)
@@ -2962,7 +3020,7 @@ impl Battle {
                         let o = &chars[chr].obj;
                         if o.flags & 2 == 0 {
                             None
-                        } else if (demo || chr == 0) && o.flags & 0x20_0000 != 0 {
+                        } else if (demo || chr == shown) && o.flags & 0x20_0000 != 0 {
                             Some(0.3)
                         } else {
                             Some(1.0)
@@ -2975,7 +3033,7 @@ impl Battle {
                 .scene
                 .spdlines
                 .draw(&mut ot, &ctx, self.assets.spdline_texture, |chr| {
-                    demo || chr == 0
+                    demo || chr == shown
                 });
             self.roster
                 .scene
@@ -3001,9 +3059,9 @@ impl Battle {
             self.roster
                 .scene
                 .fx
-                .draw(&fxw, &mut ot, &ctx, |chr| demo || chr == 0);
+                .draw(&fxw, &mut ot, &ctx, |chr| demo || chr == shown);
             // EftBlind_Draw, EftFlash_Draw.
-            self.roster.scene.flashes.draw(&mut ot);
+            self.roster.scene.flashes.draw(&mut ot, self.replay.active);
             // EftBurst_IsBusy: the transition's first 150 frames.
             let busy = self.burst.as_ref().is_some_and(|b| b.frame < 150);
             self.roster
@@ -8967,6 +9025,77 @@ mod tests {
             most = most.max((angle(rot(&battle)) - rest).abs());
         }
         assert!(most > 0.01, "{most}");
+    }
+
+    #[test]
+    fn real_replays_play_the_battle_back() {
+        use crate::btl_input::pad::{RIGHT, START};
+        let Some(mut battle) = fight_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        // The replay trees: the result menu offers viewing the replay (0x18 / 0x19) again.
+        let (_, result) = battle.assets.replay_menus.clone().unwrap();
+        let ids = result.item_ids();
+        assert!(ids.iter().any(|&i| i == 0x18 || i == 0x19), "{ids:x?}");
+        // Player 1 walks right for two seconds: every active frame goes into the tracks.
+        let walk = [
+            PadState {
+                held: RIGHT,
+                ..PadState::default()
+            },
+            PadState::default(),
+        ];
+        for _ in 0..60 {
+            battle.run_frame(false, walk, 0, &mut libc, &mut random, None, false);
+        }
+        let recorded = battle.replay.len(0);
+        assert!(recorded >= 60, "{recorded}");
+        assert_eq!(battle.replay.len(1), recorded);
+        let walked = battle.roster.chars[0].pose.pos;
+        // "View replay": the battle restarts with the replay playing; pad 0 only skips the intro.
+        battle.replay.on_result(0x1_0000);
+        battle.seq.restart = true;
+        let mut frames = 0;
+        while battle.replay.pos(0) < recorded && frames < 1000 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let held = if skip && frames % 2 == 0 { START } else { 0 };
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
+            frames += 1;
+            assert!(battle.replay.active);
+        }
+        assert_eq!(battle.replay.pos(0), recorded);
+        let replayed = battle.roster.chars[0].pose.pos;
+        for k in 0..3 {
+            assert!(
+                (walked[k] - replayed[k]).abs() < 1e-3,
+                "{walked:?} {replayed:?}"
+            );
+        }
+        assert!(battle.hud.is_replay());
+        // Past the end the battle finishes (winner bit 0x10, reason 0x40000).
+        for _ in 0..10 {
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+        }
+        assert!(battle.replay.ran_out());
+        assert_eq!(battle.seq.reason, crate::btl_replay::REASON_END);
     }
 
     #[test]

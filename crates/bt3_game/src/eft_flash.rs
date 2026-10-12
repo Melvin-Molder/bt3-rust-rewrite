@@ -228,8 +228,8 @@ impl Flashes {
 
     /// `EftBlind_Draw` (not in a replay) then `EftFlash_Draw`: grey at the blind level, then the flash's colour
     /// blended towards transparent white by its fade, each over the whole screen.
-    pub(crate) fn draw(&self, ot: &mut OrderTable) {
-        if self.blind_shown {
+    pub(crate) fn draw(&self, ot: &mut OrderTable, replay: bool) {
+        if self.blind_shown && !replay {
             sprite(ot, [128, 128, 128, self.blind as u32 as u8]);
         }
         if let Some(w) = &self.task {
@@ -299,7 +299,7 @@ mod tests {
         }
         assert_eq!(f.phase(), Some(1));
         let mut ot = OrderTable::new();
-        f.draw(&mut ot);
+        f.draw(&mut ot, false);
         let tris = ot.into_list();
         assert_eq!(tris[0].vertices[0].rgba, [255, 255, 255, 128]);
         assert_eq!(tris[0].blend, EffectBlend::Add);
@@ -322,7 +322,7 @@ mod tests {
         }
         assert_eq!(f.phase(), Some(4));
         let mut ot = OrderTable::new();
-        f.draw(&mut ot);
+        f.draw(&mut ot, false);
         let a = ot.into_list()[0].vertices[0].rgba[3];
         assert!((50..80).contains(&a), "{a}");
         for _ in 0..7 {
@@ -375,7 +375,7 @@ mod tests {
         c[1].blind = 1.0;
         f.update(&c, false, false);
         let mut ot = OrderTable::new();
-        f.draw(&mut ot);
+        f.draw(&mut ot, false);
         let tris = ot.into_list();
         assert_eq!(tris.len(), 2);
         assert_eq!(tris[0].vertices[0].rgba, [128, 128, 128, 127]);
@@ -385,7 +385,7 @@ mod tests {
         assert!(f.blind_shown);
         f.update(&c, false, false);
         let mut ot = OrderTable::new();
-        f.draw(&mut ot);
+        f.draw(&mut ot, false);
         assert!(ot.into_list().is_empty());
     }
 }
