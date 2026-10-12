@@ -1466,6 +1466,18 @@ impl Scene {
         }
         let chars = &*w.chars;
         let (n0, n1) = (|n| chars[0].obj.node_pos(n), |n| chars[1].obj.node_pos(n));
+        // The partner objects' (objects 2 + side): `BtlCharApi_GetHeight` / `GetNodePos` of a missing object give
+        // 10 and the origin.
+        let partner_pos = [0, 1].map(|s| {
+            move |n| {
+                chars[s]
+                    .partner
+                    .as_ref()
+                    .map_or([0.0; 3], |p| p.obj.node_pos(n))
+            }
+        });
+        let partner_height =
+            [0, 1].map(|s| w.data[s].partner.map_or(10.0, |m| m.model.header.size[0]));
         let shot = [
             crate::eft_shotfx::ShotChr {
                 height: w.data[0].height(),
@@ -1474,6 +1486,14 @@ impl Scene {
             crate::eft_shotfx::ShotChr {
                 height: w.data[1].height(),
                 node_pos: &n1,
+            },
+            crate::eft_shotfx::ShotChr {
+                height: partner_height[0],
+                node_pos: &partner_pos[0],
+            },
+            crate::eft_shotfx::ShotChr {
+                height: partner_height[1],
+                node_pos: &partner_pos[1],
             },
         ];
         let tables = w.env.fx;

@@ -33,6 +33,11 @@ pub(crate) struct Shadow {
 }
 
 /// `ObjShadow_IsEnabled`: object flag 0x10000000, and no stage loading.
+/// `ObjShadow_IsFlat`.
+pub(crate) fn flat(obj_flags: u32, loading: bool) -> bool {
+    !loading && obj_flags & 0x2000_0000 != 0
+}
+
 pub(crate) fn enabled(obj_flags: u32, loading: bool) -> bool {
     !loading && obj_flags & 0x1000_0000 != 0
 }
@@ -283,6 +288,45 @@ fn fill_tri(cover: &mut [bool], p: [[f32; 2]; 3]) {
 
 /// `ObjShadow_Draw`: the collected triangles, lifted 0.02 along their normals, in `color` (alpha times the
 /// strength), with program 6's texture coordinates, transformed and clipped as the stage is.
+/// `ObjShadow_BeginFlat` (an object with flag 0x20000000): the model flattened on the ground plane y = 0 along
+/// `light` (the light's half vector, 0.01 above), drawn untextured in the light colour blended by a fixed 0x46
+/// (`ObjGs_AddFlatShadowEnv`), depth tested without depth writes.
+pub(crate) fn flat_tris(
+    tris: impl IntoIterator<Item = [[f32; 3]; 3]>,
+    light: [f32; 3],
+    color: [f32; 4],
+    view: &View,
+) -> Vec<EffectTri> {
+    let flat = plane_mtx([0.0, -1.0, 0.0, 0.0], light, -0.01);
+    let rgba = [color[0], color[1], color[2], 0x46 as f32];
+    let tris: Vec<_> = tris
+        .into_iter()
+        .map(|t| {
+            t.map(|v| {
+                let s = apply(&flat, [v[0], v[1], v[2], 1.0]);
+                let q = 1.0 / s[3];
+                ([s[0] * q, s[1] * q, s[2] * q], rgba, [0.0, 0.0, 1.0])
+            })
+        })
+        .collect();
+    let screen = crate::stage_draw::draw_triangles(&tris, view);
+    screen
+        .chunks_exact(3)
+        .map(|t| EffectTri {
+            texture: None,
+            blend: EffectBlend::Alpha,
+            clamp: true,
+            zwrite: false,
+            alpha_ref: 0,
+            vertices: [0, 1, 2].map(|i| EffectVertex {
+                position: t[i].position,
+                stq: t[i].stq,
+                rgba: t[i].rgba.map(|c| c as i32 as u8),
+            }),
+        })
+        .collect()
+}
+
 pub(crate) fn ground_tris(
     shadow: &Shadow,
     cams: &PageCams,

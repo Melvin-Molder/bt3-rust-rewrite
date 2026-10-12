@@ -361,7 +361,7 @@ impl ShotFx {
     pub(crate) fn update(
         &mut self,
         paused: bool,
-        chars: &[ShotChr; 2],
+        chars: &[ShotChr],
         tables: &Tables,
         coef: &[f32; 4],
         libc: &mut LibcRandom,
@@ -374,7 +374,9 @@ impl ShotFx {
             if r.flags == 0 || r.flags & REQ_HOLD != 0 {
                 continue;
             }
-            let c = &chars[r.chr];
+            let Some(c) = chars.get(r.chr) else {
+                continue;
+            };
             if r.flags & (REQ_BODY_A | REQ_BODY_B) != 0 {
                 if r.flags & REQ_BURST != 0 {
                     if r.flags & REQ_BURST_DONE == 0 {

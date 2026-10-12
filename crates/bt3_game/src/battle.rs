@@ -171,7 +171,8 @@ pub struct BattleAssets {
     /// among the effect textures.
     pub(crate) spdline_texture: Option<usize>,
     /// The two fighters' shadow pages among the effect textures (`ObjShadow` page 0x150, drawn every frame).
-    pub(crate) shadow_pages: [usize; 2],
+    /// The ground shadows' pages: the fighters', then their partner objects'.
+    pub(crate) shadow_pages: [usize; 4],
     /// Stage pack entry 0x12's textures among the effect textures, on a stage that has the entry.
     pub(crate) stage_pack12: Option<Vec<usize>>,
     /// Stage pack entry 0xE's textures (the storm's) among the effect textures.
@@ -509,7 +510,7 @@ pub fn load(
         ray_texture: None,
         dust_textures: Vec::new(),
         spdline_texture: None,
-        shadow_pages: [0; 2],
+        shadow_pages: [0; 4],
         impact_sets: Vec::new(),
         transform_sets: Vec::new(),
         spark_set: None,
@@ -1811,8 +1812,8 @@ pub struct Battle {
     pub(crate) fade: Fade,
     /// Node 0's world matrix of each fighter from the last pose (`DemoCam_SetBase` reads it before the new pose).
     roots: [Mtx; 2],
-    /// `obj->shadow`: the fighters' ground shadows as the last update collected them.
-    pub(crate) shadows: [crate::obj_shadow::Shadow; 2],
+    /// `obj->shadow`: the fighters' and their partner objects' ground shadows as the last update collected them.
+    pub(crate) shadows: [crate::obj_shadow::Shadow; 4],
     /// `gBattleReplay`: the input tracks, kept across restarts.
     pub(crate) replay: crate::btl_replay::Replay,
     started: bool,
@@ -3244,6 +3245,21 @@ impl Battle {
                         broken,
                     );
                 }
+                // The partner object's (BtlObj_UpdateAll goes through every object).
+                if let (Some(p), Some(m)) = (&c.partner, &self.assets.fighters[side].partner)
+                    && crate::obj_shadow::enabled(p.obj.flags, self.loading)
+                {
+                    let data = crate::btl_partner::obj_data(m);
+                    self.shadows[2 + side] = crate::obj_shadow::update(
+                        &p.obj.bounds(&data),
+                        m.model.header.size[0],
+                        self.assets.screen_mode == 1,
+                        p.obj.area,
+                        self.light_dir,
+                        &self.assets.collision,
+                        broken,
+                    );
+                }
             }
         }
         self.amb_cam = Some(view.eye());
@@ -3649,18 +3665,45 @@ impl Battle {
             })
             .collect();
         batches.sort_by_key(|batch| (batch.textures, batch.look));
-        // BtlObjDraw_DrawShadows: per fighter shown with flags 2 and 0x10 and its shadow flag, the page of its
-        // silhouette and the ground triangles textured with it.
+        // BtlObjDraw_DrawShadows: per object shown with flags 2 and 0x10 (the fighters, then their partner
+        // objects): a flat shadow (flag 0x20000000), or with the shadow flag the page of its silhouette and the
+        // ground triangles textured with it.
         let mut shadows = Vec::new();
-        for side in 0..2 {
-            let obj = &self.roster.chars[side].obj;
-            let model = &self.assets.fighters[side].model;
-            let shadow = &self.shadows[side];
-            if !crate::obj_shadow::enabled(obj.flags, self.loading)
-                || obj.flags & 0x12 != 0x12
-                || shadow.tris.is_empty()
+        let color = self
+            .assets
+            .stage
+            .shadow_color
+            .map_or(crate::obj_shadow::DEFAULT_COLOR, |c| c.map(f32::from));
+        let objects = (0..4).filter_map(|i| {
+            let (side, c) = (i & 1, &self.roster.chars[i & 1]);
+            if i < 2 {
+                Some((i, &c.obj, &self.assets.fighters[side].model))
+            } else {
+                let p = c.partner.as_ref()?;
+                let m = self.assets.fighters[side].partner.as_ref()?;
+                Some((i, &p.obj, &m.model))
+            }
+        });
+        for (slot, obj, model) in objects {
+            if obj.flags & 0x12 != 0x12
                 || model_look(obj, model.header.flags, self.light_dir, &view).is_none()
             {
+                continue;
+            }
+            if crate::obj_shadow::flat(obj.flags, self.loading) {
+                let mut tris = Vec::new();
+                crate::obj_shadow::model_tris(
+                    model,
+                    &obj.nodes,
+                    |n| node_shown(model.header.flags, obj.flags, n),
+                    |t| tris.push(t),
+                );
+                let light = crate::obj_shadow::light_half(self.light_dir);
+                shadows.extend(crate::obj_shadow::flat_tris(tris, light, color, &view));
+                continue;
+            }
+            let shadow = &self.shadows[slot];
+            if !crate::obj_shadow::enabled(obj.flags, self.loading) || shadow.tris.is_empty() {
                 continue;
             }
             let cams = crate::obj_shadow::page_cams(obj.pos, model.header.size[0]);
@@ -3671,7 +3714,7 @@ impl Battle {
                 |n| node_shown(model.header.flags, obj.flags, n),
                 |t| tris.push(t),
             );
-            let page = self.assets.shadow_pages[side];
+            let page = self.assets.shadow_pages[slot];
             // The page is the object's: rendered with the first view.
             if sv.first {
                 texture_updates.push((
@@ -3683,11 +3726,6 @@ impl Battle {
                     },
                 ));
             }
-            let color = self
-                .assets
-                .stage
-                .shadow_color
-                .map_or(crate::obj_shadow::DEFAULT_COLOR, |c| c.map(f32::from));
             shadows.extend(crate::obj_shadow::ground_tris(
                 shadow, &cams, color, &view, page,
             ));
@@ -9341,9 +9379,10 @@ mod tests {
         // character 16's 0x2B0 (object 0x10B, from step 0) and character 65's 0x1C1 (object 0x112, type 3). Each
         // is loaded through the change queue, put on the attacker, shown by its animation's events and stepped
         // by hand through its model animations, speaking the technique class's lines, then released with its
-        // files.
+        // files. Object 0x112 (type 3) casts a flat shadow while shown; the others (type 1) none.
         for (chara, slot, partner) in [(3, 4, 4), (16, 4, 0x10B), (65, 3, 0x112)] {
             let (mut attached, mut shown, mut frames, mut files) = (false, 0, Vec::new(), false);
+            let mut flat = 0;
             let (mut last, mut lines) = (None, Vec::new());
             let base = crate::battle_seq::voice_chara_base() + chara as u32 * 100;
             let Some((log, ..)) =
@@ -9356,6 +9395,7 @@ mod tests {
                         }
                     }
                     let c = &b.roster.chars[0];
+                    flat += f.shadows.iter().filter(|t| t.texture.is_none()).count();
                     if let Some(p) = &c.partner {
                         attached = true;
                         shown += usize::from(p.obj.flags & 2 != 0);
@@ -9375,6 +9415,7 @@ mod tests {
             };
             assert!(attached, "{chara}: {log:x?}");
             assert!(files, "{chara}");
+            assert_eq!(flat > 0, partner == 0x112, "{chara}: {flat}");
             assert!(shown > 0, "{chara}");
             assert!(
                 frames.windows(2).any(|w| w[1] > w[0]),

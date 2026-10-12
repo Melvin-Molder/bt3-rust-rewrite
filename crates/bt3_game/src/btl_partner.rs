@@ -166,7 +166,7 @@ pub(crate) fn link_to_owner(me: &mut Chr) {
 /// (`BtlFxObj_PlayEventSounds`); voice lines (kind 7: the voice base + character * 100 + line) under fighter flag
 /// 0x131 (line 0x62 of the partner's character) and in the technique classes 2 / 3 / 4 (lines 0x57 / 0x59 / 0x5B,
 /// the next with event bit 39, of the fighter's active member), each line, and under flag 0x130 lines 0x5F..0x61
-/// silently, held by its mouth (sub-state 2). Bit 42's vanish lines are not ported for it.
+/// silently, held by its mouth (sub-state 2). Event bit 42 starts the vanish lines on it (object 2 + side).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_events(
     me: &mut Chr,
@@ -175,6 +175,7 @@ pub(crate) fn update_events(
     env: &crate::btl_chr::Env,
     frame: u32,
     impacts: &mut crate::eft_impact::Impacts,
+    shotfx: &mut crate::eft_shotfx::ShotFx,
     libc: &mut crate::rng::LibcRandom,
 ) {
     use crate::btl_snd::KIND_COMMON;
@@ -218,6 +219,9 @@ pub(crate) fn update_events(
         opp.voice(env, frame, 1, libc);
     }
     // BtlFxObj_HandleFlagEvents.
+    if obj.test_event(0x400_0000_0000) {
+        shotfx.start(2 + me.player, 0);
+    }
     for (bit, flag, set) in [
         (0x20u64, 0x20u32, true),
         (0x40, 0x20, false),

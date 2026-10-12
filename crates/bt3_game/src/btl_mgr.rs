@@ -481,6 +481,7 @@ impl Roster {
                 env,
                 frame,
                 &mut self.scene.impacts,
+                &mut self.scene.shotfx,
                 libc,
             );
             crate::btl_snd::after_hit_sounds(me, data[i], env, frame);
