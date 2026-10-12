@@ -510,6 +510,7 @@ mod tests {
             costumes: vec![1; 3],
             base_slots: vec![4, 0, 0],
             items,
+            ..ChrTable::default()
         }
     }
 

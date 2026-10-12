@@ -1173,6 +1173,10 @@ pub struct ChrTable {
     /// Per character id: `costumes` (+0xA) and `baseSlots` (+0xE).
     pub costumes: Vec<i32>,
     pub base_slots: Vec<i32>,
+    /// Per character id: `cost` (+0xC), the DP a team battle with a limit counts, and `link` (+0x2C), the ids of
+    /// its other forms (0xFF none).
+    pub costs: Vec<i32>,
+    pub links: Vec<[u8; 4]>,
     pub items: Vec<ItemInfo>,
 }
 
@@ -1193,6 +1197,16 @@ impl ChrTable {
             base_slots: (0..count)
                 .map(|id| u16_at(charas + id * 0x3C + 0xE).unwrap_or(0))
                 .collect(),
+            costs: (0..count)
+                .map(|id| u16_at(charas + id * 0x3C + 0xC).unwrap_or(0))
+                .collect(),
+            links: (0..count)
+                .map(|id| {
+                    let o = charas + id * 0x3C + 0x2C;
+                    file.get(o..o + 4)
+                        .map_or([0xFF; 4], |b| [b[0], b[1], b[2], b[3]])
+                })
+                .collect(),
             items: (0..ITEM_COUNT)
                 .map(|i| {
                     let e = items + i * ITEM_SIZE;
@@ -1207,6 +1221,37 @@ impl ChrTable {
                 })
                 .collect(),
         }
+    }
+
+    /// `ChrTbl_GetCost`.
+    pub fn cost(&self, chara: i32) -> i32 {
+        usize::try_from(chara)
+            .ok()
+            .and_then(|i| self.costs.get(i))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// `ChrTbl_IsRelated`: the same character or one naming the other among its forms; characters 0x4F, 0x6D and
+    /// 0x80 are related to nothing, themselves included.
+    pub fn is_related(&self, a: i32, b: i32) -> bool {
+        if [a, b].iter().any(|c| matches!(c, 0x4F | 0x6D | 0x80)) {
+            return false;
+        }
+        if a == b {
+            return true;
+        }
+        let links = |c: i32| {
+            usize::try_from(c)
+                .ok()
+                .and_then(|i| self.links.get(i))
+                .copied()
+                .unwrap_or([0xFF; 4])
+        };
+        let (la, lb) = (links(a), links(b));
+        (0..4).any(|i| {
+            (la[i] != 0xFF && i32::from(la[i]) == b) || (lb[i] != 0xFF && i32::from(lb[i]) == a)
+        })
     }
 
     /// `ChrTbl_GetItemSlots` without a saved level: the character's base slots plus `level`.

@@ -32,25 +32,25 @@ use bt3_data::chara_data::ChrTable;
 pub const ARCHIVE_SECTION: usize = 2;
 pub const FACE_FILE: u32 = 0x2F9;
 pub const STAGE_FILE: u32 = 0x39D;
-const BGM_FIRST: u32 = 0x10B16;
-const BGM_RANDOM_FIRST: u32 = 0x10B1E;
-const FADE_FRAMES: i32 = 0x14;
+pub(crate) const BGM_FIRST: u32 = 0x10B16;
+pub(crate) const BGM_RANDOM_FIRST: u32 = 0x10B1E;
+pub(crate) const FADE_FRAMES: i32 = 0x14;
 
-const COLS: usize = 7;
-const STAGE_COLS: i32 = 6;
-const STAGE_BGM_COL: i32 = 6;
+pub(crate) const COLS: usize = 7;
+pub(crate) const STAGE_COLS: i32 = 6;
+pub(crate) const STAGE_BGM_COL: i32 = 6;
 const FORM_MAX: usize = 7;
 /// `MCHR_*` / `CHRGRID_ID_*` marker cells.
-const ID_RANDOM: i32 = 0xA1;
-const ID_LOCKED: i32 = 0xA2;
-const ID_CUSTOM: i32 = 0xA3;
-const ID_EMPTY: i32 = 0xA4;
-const CELL_MAX: usize = 165;
+pub(crate) const ID_RANDOM: i32 = 0xA1;
+pub(crate) const ID_LOCKED: i32 = 0xA2;
+pub(crate) const ID_CUSTOM: i32 = 0xA3;
+pub(crate) const ID_EMPTY: i32 = 0xA4;
+pub(crate) const CELL_MAX: usize = 165;
 const CUSTOM_MAX: usize = 14;
-const STAGE_RANDOM: i32 = 0x23;
-const STAGE_LOCKED: i32 = 0x24;
-const BGM_RANDOM: i32 = 0x18;
-const BGM_LOCKED: i32 = 0x19;
+pub(crate) const STAGE_RANDOM: i32 = 0x23;
+pub(crate) const STAGE_LOCKED: i32 = 0x24;
+pub(crate) const BGM_RANDOM: i32 = 0x18;
+pub(crate) const BGM_LOCKED: i32 = 0x19;
 
 const FLAG_STARTED: u32 = 2;
 const FLAG_STAGE_PHASE: u32 = 4;
@@ -94,7 +94,7 @@ enum Clip {
 }
 
 /// `gCharSel->tex[n]` of movie 0 (`None` for the slots filled at run time: chips, portraits).
-fn flash_textures(players: i32) -> [ImageTexture; 49] {
+pub(crate) fn flash_textures(players: i32) -> [ImageTexture; 49] {
     let mut t = [None; 49];
     t[0] = tex(47, 0);
     t[17] = tex(1, 0);
@@ -127,7 +127,7 @@ fn flash_textures(players: i32) -> [ImageTexture; 49] {
 }
 
 /// `gCharSel->sideTex[side]`, movies 1 and 2.
-fn side_textures(side: usize) -> [ImageTexture; 25] {
+pub(crate) fn side_textures(side: usize) -> [ImageTexture; 25] {
     let mut t = [None; 25];
     t[0] = tex(17 + side, 0);
     t[2] = tex(17 + side, 1);
@@ -143,7 +143,7 @@ fn side_textures(side: usize) -> [ImageTexture; 25] {
 }
 
 /// `gCharSel->plateTex[side]`, movies 3 and 4.
-fn plate_textures(side: usize) -> [ImageTexture; 11] {
+pub(crate) fn plate_textures(side: usize) -> [ImageTexture; 11] {
     let mut t = [None; 11];
     t[4] = tex(23, 1);
     t[9] = tex(48 + side, 0);
@@ -159,8 +159,45 @@ fn plate_textures(side: usize) -> [ImageTexture; 11] {
     t
 }
 
+/// `gTeamSel->tex`: movie 0 as the character select has it, with the DP gauges' textures in a DP battle.
+pub(crate) fn team_flash_textures(players: i32, dp: bool) -> [ImageTexture; 49] {
+    let mut t = flash_textures(players);
+    if dp {
+        t[28] = tex(13, 0);
+        t[31] = tex(13, 1);
+        t[29] = tex(14, 0);
+        t[30] = tex(14, 1);
+    }
+    t
+}
+
+/// `gTeamSel->sideTex[side]`, movies 3 and 4: the character select's reels, with the cost digits in a DP battle.
+pub(crate) fn team_side_textures(side: usize, dp: bool) -> [ImageTexture; 25] {
+    let mut t = side_textures(side);
+    if dp {
+        t[9] = tex(16, 2);
+    }
+    t
+}
+
+/// `gTeamSel->teamTex[side]`, movies 1 and 2 (the same for both sides; slots 1 and 4..7 are the members' chips).
+pub(crate) fn team_textures(dp: bool) -> [ImageTexture; 13] {
+    let mut t = [None; 13];
+    t[0] = tex(34, 0);
+    t[8] = tex(35, 0);
+    t[11] = tex(35, 1);
+    t[10] = tex(35, 2);
+    t[9] = tex(36, 0);
+    t[12] = tex(36, 1);
+    t[3] = tex(23, 0);
+    if dp {
+        t[2] = tex(16, 2);
+    }
+    t
+}
+
 /// `IconWin_Init(MPACK_AT(res, 54), res 55)`.
-const ICON_TEXTURES: [ImageTexture; 5] = [
+pub(crate) const ICON_TEXTURES: [ImageTexture; 5] = [
     Some(((54, 1), 1)),
     Some(((54, 1), 0)),
     tex(55, 0),
@@ -170,10 +207,10 @@ const ICON_TEXTURES: [ImageTexture; 5] = [
 
 /// A cell of the character grid (`MChrCell`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Cell {
-    id: i32,
-    form_count: i32,
-    form: [i32; FORM_MAX],
+pub(crate) struct Cell {
+    pub(crate) id: i32,
+    pub(crate) form_count: i32,
+    pub(crate) form: [i32; FORM_MAX],
 }
 
 /// What `CharSel_Init` reads from its unpacked section.
@@ -190,11 +227,13 @@ pub struct CharSelData {
     /// Section 43 / 44: character and form names, one line per character id.
     pub name_text: Vec<u8>,
     pub form_text: Vec<u8>,
+    /// Sections 37 / 38: the team select's member lists (`TeamSel`'s movies 1 and 2).
+    pub team_fods: [Vec<u8>; 2],
     /// Section 42: the master character grid.
-    master: Vec<Cell>,
+    pub(crate) master: Vec<Cell>,
     /// Section 39: the stage grid; section 56: the music list.
-    stage_ids: Vec<i32>,
-    bgm_ids: Vec<i32>,
+    pub(crate) stage_ids: Vec<i32>,
+    pub(crate) bgm_ids: Vec<i32>,
     /// Sections 53 and 51: the item panels and the details page.
     pub items: ItemAssets,
     pub layout: CharSelLayout,
@@ -203,17 +242,22 @@ pub struct CharSelData {
 /// Texture indices (the clamped texture, followed by its wrapping twin).
 #[derive(Clone, Debug, Default)]
 pub struct CharSelLayout {
-    flash: [Vec<Option<usize>>; 2],
-    side: [Vec<Option<usize>>; 2],
-    plate: [Vec<Option<usize>>; 2],
-    icon: Vec<Option<usize>>,
-    panel: [Vec<Option<usize>>; 2],
-    help: Vec<Option<usize>>,
+    pub(crate) flash: [Vec<Option<usize>>; 2],
+    pub(crate) side: [Vec<Option<usize>>; 2],
+    pub(crate) plate: [Vec<Option<usize>>; 2],
+    pub(crate) icon: Vec<Option<usize>>,
+    pub(crate) panel: [Vec<Option<usize>>; 2],
+    pub(crate) help: Vec<Option<usize>>,
     /// Entry 0 of section 55 (the icon window's icons).
-    icons: usize,
+    pub(crate) icons: usize,
     /// Per character id + 1: the reel chip (section 45); per stage id + 1: the stage chip (section 46).
-    chips: Vec<usize>,
-    stage_chips: Vec<usize>,
+    pub(crate) chips: Vec<usize>,
+    pub(crate) stage_chips: Vec<usize>,
+    /// The team select's: movie 0 by [two pads][DP battle], the reels by [side][DP battle], the member lists by
+    /// [side][DP battle].
+    pub(crate) team_flash: [[Vec<Option<usize>>; 2]; 2],
+    pub(crate) team_side: [[Vec<Option<usize>>; 2]; 2],
+    pub(crate) team: [[Vec<Option<usize>>; 2]; 2],
 }
 
 impl CharSelLayout {
@@ -228,6 +272,12 @@ impl CharSelLayout {
             icons: first((55, 0)),
             chips: (1..=CELL_MAX).map(|n| first((45, n))).collect(),
             stage_chips: (1..=38).map(|n| first((46, n))).collect(),
+            team_flash: [0, 1].map(|players| {
+                [false, true].map(|dp| image_indices(&team_flash_textures(players, dp), &first))
+            }),
+            team_side: [0, 1]
+                .map(|s| [false, true].map(|dp| image_indices(&team_side_textures(s, dp), &first))),
+            team: [0, 1].map(|_| [false, true].map(|dp| image_indices(&team_textures(dp), &first))),
         }
     }
 }
@@ -254,6 +304,10 @@ impl CharSelAssets {
             panel_textures(0).to_vec(),
             panel_textures(1).to_vec(),
             help_textures().to_vec(),
+            team_flash_textures(1, true).to_vec(),
+            team_side_textures(0, true).to_vec(),
+            team_side_textures(1, true).to_vec(),
+            team_textures(true).to_vec(),
         ];
         tables.push((1..=CELL_MAX).map(|n| Some(((45, n), 0))).collect());
         tables.push((1..=38).map(|n| Some(((46, n), 0))).collect());
@@ -274,6 +328,7 @@ impl CharSelAssets {
         Ok(Self {
             data: CharSelData {
                 fods: [fod(15)?, fod(24)?, fod(25)?, fod(32)?, fod(33)?],
+                team_fods: [fod(37)?, fod(38)?],
                 icon_fod: pack_section(pack_section(res, 54)?, 2)?.to_vec(),
                 name_text: fod(43)?,
                 form_text: fod(44)?,
@@ -308,7 +363,11 @@ pub struct Pick {
 /// The character select's fields of `gProgress`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CharSelProgress {
+    /// Each side's choice; the team select's first member.
     pub side: [Pick; 2],
+    /// The team select's other four members of each side (`gProgress->team[side].member[1..]`, the character
+    /// select's pick being member 0).
+    pub team: [[Pick; 4]; 2],
     /// Index in the stage grid.
     pub stage: i32,
     /// Id in the music list.
@@ -1045,6 +1104,7 @@ impl CharSelScreen {
                 self.fade = ColorFade::start_out(true, FADE_FRAMES);
                 self.progress = CharSelProgress {
                     side: [self.side[0].pick, self.side[1].pick],
+                    team: self.progress.team,
                     stage: self.stage.col + self.stage.row * STAGE_COLS,
                     bgm: self.bgm_ids[self.stage.bgm_playing as usize],
                 };
@@ -2035,7 +2095,7 @@ impl CharSelScreen {
 }
 
 /// `ChrGrid_IsSelectable`: a character, the custom cell or the random cell.
-fn chr_grid_is_selectable(cells: &[Cell], index: usize) -> bool {
+pub(crate) fn chr_grid_is_selectable(cells: &[Cell], index: usize) -> bool {
     cells
         .get(index)
         .is_some_and(|c| c.id < ID_LOCKED || c.id == ID_CUSTOM)
@@ -2048,7 +2108,7 @@ fn cell_id(cells: &[Cell], col: i32, row: i32) -> i32 {
 }
 
 /// `ChrGrid_MoveRight`: the next selectable cell to the right, wrapping; false if there is no other one.
-fn chr_grid_move_right(cells: &[Cell], col: &mut i32, row: i32) -> bool {
+pub(crate) fn chr_grid_move_right(cells: &[Cell], col: &mut i32, row: i32) -> bool {
     let start = *col;
     loop {
         *col += 1;
@@ -2066,7 +2126,7 @@ fn chr_grid_move_right(cells: &[Cell], col: &mut i32, row: i32) -> bool {
 }
 
 /// `ChrGrid_MoveLeft`.
-fn chr_grid_move_left(cells: &[Cell], col: &mut i32, row: i32) -> bool {
+pub(crate) fn chr_grid_move_left(cells: &[Cell], col: &mut i32, row: i32) -> bool {
     let start = *col;
     loop {
         *col -= 1;
@@ -2084,7 +2144,7 @@ fn chr_grid_move_left(cells: &[Cell], col: &mut i32, row: i32) -> bool {
 }
 
 /// `ChrGrid_MoveDown`: the next row (wrapping) with a selectable cell, sliding right in the row if needed.
-fn chr_grid_move_down(cells: &[Cell], col: &mut i32, row: &mut i32, rows: i32) {
+pub(crate) fn chr_grid_move_down(cells: &[Cell], col: &mut i32, row: &mut i32, rows: i32) {
     loop {
         *row += 1;
         if *row > rows - 1 {
@@ -2098,7 +2158,7 @@ fn chr_grid_move_down(cells: &[Cell], col: &mut i32, row: &mut i32, rows: i32) {
 }
 
 /// `ChrGrid_MoveUp`.
-fn chr_grid_move_up(cells: &[Cell], col: &mut i32, row: &mut i32, rows: i32) {
+pub(crate) fn chr_grid_move_up(cells: &[Cell], col: &mut i32, row: &mut i32, rows: i32) {
     loop {
         *row -= 1;
         if *row < 0 {
@@ -2112,7 +2172,7 @@ fn chr_grid_move_up(cells: &[Cell], col: &mut i32, row: &mut i32, rows: i32) {
 }
 
 /// `ChrGrid_NextForm`: the next of the seven chips that is a character.
-fn chr_grid_next_form(forms: &[i32; 7], index: &mut i32) {
+pub(crate) fn chr_grid_next_form(forms: &[i32; 7], index: &mut i32) {
     let start = *index;
     loop {
         *index += 1;
@@ -2126,7 +2186,7 @@ fn chr_grid_next_form(forms: &[i32; 7], index: &mut i32) {
 }
 
 /// `ChrGrid_PrevForm`.
-fn chr_grid_prev_form(forms: &[i32; 7], index: &mut i32) {
+pub(crate) fn chr_grid_prev_form(forms: &[i32; 7], index: &mut i32) {
     let start = *index;
     loop {
         *index -= 1;
@@ -2140,7 +2200,7 @@ fn chr_grid_prev_form(forms: &[i32; 7], index: &mut i32) {
 }
 
 /// `ChrGrid_FixCursor`: off a marker cell, right in the row first, then down.
-fn chr_grid_fix_cursor(cells: &[Cell], col: &mut i32, row: &mut i32, rows: i32) {
+pub(crate) fn chr_grid_fix_cursor(cells: &[Cell], col: &mut i32, row: &mut i32, rows: i32) {
     if cell_id(cells, *col, *row) >= ID_RANDOM && !chr_grid_move_right(cells, col, *row) {
         chr_grid_move_down(cells, col, row, rows);
     }
@@ -2153,7 +2213,7 @@ fn stage_id(ids: &[i32], col: i32, row: i32) -> i32 {
 }
 
 /// `StgGrid_MoveRight`: stops in column 6, the music entry.
-fn stg_grid_move_right(ids: &[i32], col: &mut i32, row: i32) {
+pub(crate) fn stg_grid_move_right(ids: &[i32], col: &mut i32, row: i32) {
     loop {
         *col += 1;
         if *col >= 7 {
@@ -2168,7 +2228,7 @@ fn stg_grid_move_right(ids: &[i32], col: &mut i32, row: i32) {
 }
 
 /// `StgGrid_MoveLeft`: from column 0 to column 6.
-fn stg_grid_move_left(ids: &[i32], col: &mut i32, row: i32) {
+pub(crate) fn stg_grid_move_left(ids: &[i32], col: &mut i32, row: i32) {
     loop {
         *col -= 1;
         if *col < 0 {
@@ -2199,7 +2259,7 @@ fn stg_grid_move_right_wrap(ids: &[i32], col: &mut i32, row: i32) -> bool {
 }
 
 /// `StgGrid_MoveDown`.
-fn stg_grid_move_down(ids: &[i32], col: &mut i32, row: &mut i32, rows: i32) {
+pub(crate) fn stg_grid_move_down(ids: &[i32], col: &mut i32, row: &mut i32, rows: i32) {
     loop {
         *row += 1;
         if *row > rows - 1 {
@@ -2212,7 +2272,7 @@ fn stg_grid_move_down(ids: &[i32], col: &mut i32, row: &mut i32, rows: i32) {
 }
 
 /// `StgGrid_MoveUp`.
-fn stg_grid_move_up(ids: &[i32], col: &mut i32, row: &mut i32, rows: i32) {
+pub(crate) fn stg_grid_move_up(ids: &[i32], col: &mut i32, row: &mut i32, rows: i32) {
     loop {
         *row -= 1;
         if *row < 0 {
@@ -2225,7 +2285,7 @@ fn stg_grid_move_up(ids: &[i32], col: &mut i32, row: &mut i32, rows: i32) {
 }
 
 /// `StgGrid_ApplyUnlocks` in mode 39: a locked stage becomes `STGGRID_ID_LOCKED`; the random entry stays.
-fn stage_grid_apply_unlocks(ids: &mut [i32], save: &SaveData) {
+pub(crate) fn stage_grid_apply_unlocks(ids: &mut [i32], save: &SaveData) {
     for id in ids.iter_mut() {
         if *id != STAGE_RANDOM && !save.stage_unlocked(*id) {
             *id = STAGE_LOCKED;
@@ -2234,7 +2294,7 @@ fn stage_grid_apply_unlocks(ids: &mut [i32], save: &SaveData) {
 }
 
 /// `BgmList_ApplyUnlocks` outside mode 0x3E: an entry without its bit becomes `BGMLIST_ID_LOCKED`.
-fn bgm_list_apply_unlocks(ids: &mut [i32], save: &SaveData) {
+pub(crate) fn bgm_list_apply_unlocks(ids: &mut [i32], save: &SaveData) {
     for id in ids.iter_mut() {
         if *id != BGM_RANDOM && !save.bgm_unlocked(*id) {
             *id = BGM_LOCKED;
@@ -2244,7 +2304,7 @@ fn bgm_list_apply_unlocks(ids: &mut [i32], save: &SaveData) {
 
 /// `ChrGrid_Build` in mode 39: locked characters become `LOCKED`, a cell keeps its unlocked forms, the grid is padded
 /// to whole rows; then the list of saved custom characters.
-fn chr_grid_build(master: &[Cell], save: &SaveData) -> (Vec<Cell>, Vec<Cell>, i32) {
+pub(crate) fn chr_grid_build(master: &[Cell], save: &SaveData) -> (Vec<Cell>, Vec<Cell>, i32) {
     let mut out = Vec::new();
     for cell in master {
         if cell.form_count != 0 {

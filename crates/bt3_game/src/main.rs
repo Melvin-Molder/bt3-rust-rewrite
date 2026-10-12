@@ -118,6 +118,7 @@ mod stg_pan_blur;
 mod stg_rigid;
 mod stg_scroll;
 mod stg_tint;
+mod team_select;
 mod title;
 mod windows;
 
@@ -191,6 +192,8 @@ enum Scene {
     MainMenu(Box<MainMenuScreen>),
     DuelMenu(Box<DuelMenuScreen>),
     CharSelect(Box<CharSelScreen>),
+    /// `TeamSel_Run(2)`, progress mode 40.
+    TeamSelect(Box<team_select::TeamSelScreen>),
     Black,
     Loading(LoadingScreen),
     /// `Battle_Load`: the loading screen while the battle's files are read.
@@ -222,6 +225,7 @@ impl Scene {
             | Scene::MainMenu(_)
             | Scene::DuelMenu(_)
             | Scene::CharSelect(_)
+            | Scene::TeamSelect(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
                 2.0 * VBLANK_SECONDS
@@ -1384,10 +1388,9 @@ fn run_frames(
                             game.dc.visits += 1;
                             start_char_select(game, &mut commands);
                         }
-                        (replay_menu::ReplayMenuResult::Select(mode), _) => {
+                        (replay_menu::ReplayMenuResult::Select(_), _) => {
                             game.dc.visits += 1;
-                            info!("progress mode {mode} (team select) is not ported yet");
-                            game.scene = Scene::Black;
+                            start_team_select(game, &mut commands);
                         }
                         _ => start_dc_menu(game, &mut commands),
                     }
@@ -1490,10 +1493,7 @@ fn run_frames(
                     match result {
                         DuelMenuResult::Back => start_main_menu(game, &mut commands, &mut audio),
                         DuelMenuResult::Select(39) => start_char_select(game, &mut commands),
-                        DuelMenuResult::Select(mode) => {
-                            info!("progress mode {mode} (team select) is not ported yet");
-                            game.scene = Scene::Black;
-                        }
+                        DuelMenuResult::Select(_) => start_team_select(game, &mut commands),
                     }
                 }
             }
@@ -1517,6 +1517,33 @@ fn run_frames(
                 play_sounds(game, &mut commands, frame.sounds);
                 if let Some(result) = result {
                     // Duel_Main: Adx_StopAll after CharSel_Run.
+                    stop_all(game, &mut commands);
+                    match result {
+                        CharSelResult::Back => start_duel_menu(game, &mut commands),
+                        CharSelResult::Battle(setup) => start_battle(game, setup),
+                    }
+                }
+            }
+            Scene::TeamSelect(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    [(pressed, held), (pressed2, held2)],
+                    &mut loader,
+                    &game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                game.char_progress = screen.progress();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Duel_Main: Adx_StopAll after TeamSel_Run.
                     stop_all(game, &mut commands);
                     match result {
                         CharSelResult::Back => start_duel_menu(game, &mut commands),
@@ -1675,6 +1702,9 @@ fn leave_battle(
         start_main_menu(game, commands, audio);
     } else if reason & 0x10 != 0 && game.duel.battle_type == 0 {
         start_char_select(game, commands);
+    } else if reason & 0x10 != 0 {
+        // Progress_Main: a team or DP battle's "Character Select" goes to mode 40.
+        start_team_select(game, commands);
     } else if reason & 0x80 != 0 {
         start_duel_menu(game, commands);
     } else {
@@ -2427,7 +2457,9 @@ impl char_select::PictureLoader for Pictures<'_> {
 }
 
 /// Progress_Main mode 39: `CharSel_Run(2)` (it starts its own music).
-fn start_char_select(game: &mut Game, commands: &mut Commands) {
+/// Common file 4's character table and the duel archive's section 2, shared by both character selects; false
+/// (and a black screen) when they cannot be read.
+fn load_char_select(game: &mut Game) -> bool {
     if game.chr_table.costumes.is_empty() {
         // Common file 4: the character entries and the item table.
         match Iso9660::open(&game.iso_path)
@@ -2459,9 +2491,16 @@ fn start_char_select(game: &mut Game, commands: &mut Commands) {
             Err(error) => {
                 error!("cannot load the character select: {error}");
                 game.scene = Scene::Black;
-                return;
+                return false;
             }
         }
+    }
+    true
+}
+
+fn start_char_select(game: &mut Game, commands: &mut Commands) {
+    if !load_char_select(game) {
+        return;
     }
     let data = game
         .char_select
@@ -2490,6 +2529,43 @@ fn start_char_select(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the character select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Duel_Main` mode 40: `TeamSel_Run(2)`.
+fn start_team_select(game: &mut Game, commands: &mut Commands) {
+    if !load_char_select(game) {
+        return;
+    }
+    let data = game
+        .char_select
+        .as_ref()
+        .expect("character select assets are loaded");
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    let mut sounds = Vec::new();
+    match team_select::TeamSelScreen::new(
+        data,
+        game.duel,
+        game.char_progress,
+        &game.save,
+        game.chr_table.clone(),
+        &mut loader,
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            game.scene = Scene::TeamSelect(Box::new(screen));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start the team select: {error}");
             game.scene = Scene::Black;
         }
     }
