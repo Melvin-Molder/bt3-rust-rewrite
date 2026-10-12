@@ -1702,6 +1702,8 @@ pub struct BattleFrame {
     pub effects: Vec<EffectTri>,
     /// `StgFx_DrawPre`: what is drawn over the stage before the fighters (the back tints).
     pub under: Vec<EffectTri>,
+    /// `StgFx_DrawPre`'s depth tint (`StgDepthTint_Draw`), over the stage before the back tints.
+    pub depth_tint: Option<crate::stg_depth::DepthClutDraw>,
     /// `StgFx_DrawPost`: the frame redrawn through the work buffers after the effects, before the HUD (the
     /// radial blur, the shock waves).
     pub post: Vec<crate::post::PostOp>,
@@ -1792,6 +1794,8 @@ pub struct Battle {
     pub(crate) xfade: ScrXfade,
     /// `gGfxWater`: the underwater wobble of each view.
     pub(crate) water_wobble: crate::gfx_water::Wobble,
+    /// `gStgDepthTint`: the stage's depth tints in the air and under water.
+    pub(crate) depth_tints: crate::stg_depth::DepthTints,
     pub(crate) hud: Hud,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
     pub(crate) fade: Fade,
@@ -2132,6 +2136,7 @@ impl Battle {
         roster.scene.tints = crate::stg_tint::Tints::new(assets.stage.tint);
         let mut water_wobble = crate::gfx_water::Wobble::default();
         water_wobble.load_stage_color(assets.stage.water_color);
+        let depth_tints = crate::stg_depth::DepthTints::new(&assets.stage.depth_tints);
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -2179,6 +2184,7 @@ impl Battle {
             eft_cam: crate::battle_seq::EftCam::default(),
             xfade: ScrXfade::default(),
             water_wobble,
+            depth_tints,
             hud,
             fade: Fade::start_in(1.0),
             roots,
@@ -2410,6 +2416,8 @@ impl Battle {
                                 crate::stg_tint::Tints::new(self.assets.stage.tint);
                             self.water_wobble
                                 .load_stage_color(self.assets.stage.water_color);
+                            self.depth_tints =
+                                crate::stg_depth::DepthTints::new(&self.assets.stage.depth_tints);
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -2864,6 +2872,7 @@ impl Battle {
         self.roster.scene.tints = crate::stg_tint::Tints::new(self.assets.stage.tint);
         self.water_wobble
             .load_stage_color(self.assets.stage.water_color);
+        self.depth_tints = crate::stg_depth::DepthTints::new(&self.assets.stage.depth_tints);
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         // BtlChar_ResetAll's BtlReplay_Rewind / BtlReplay_ResetViewer.
         self.replay.rewind();
@@ -3284,6 +3293,19 @@ impl Battle {
             vec![(view, view_side)]
         };
         self.views_drawn = views.len();
+        // StgDepthTint_Draw (in StgFx_DrawPre, nothing while a stage loads): the tint of the medium the shown
+        // camera is in, the air's in split screen.
+        let depth_tint = if self.loading {
+            None
+        } else {
+            let under_water = views.len() == 1
+                && self
+                    .assets
+                    .stage
+                    .water_level
+                    .is_some_and(|level| level < views[0].0.eye()[1]);
+            self.depth_tints.draw(under_water)
+        };
         // StgFx_DrawPost's ScrWarp_Update: the shock waves step (not while paused), each new one placed by its
         // view's camera in split screen's two views; they draw with the post pass.
         if !self.seq.paused {
@@ -3404,6 +3426,7 @@ impl Battle {
             exit: self.seq.left.then_some(self.seq.reason),
             effects,
             under,
+            depth_tint,
             post,
             texture_updates,
             shadows,
@@ -7877,6 +7900,41 @@ mod tests {
         // 64 drops a frame (some off screen), and the lightning on the horizon ahead.
         assert!(rain > 1000, "{rain}");
         assert!(bolts > 0);
+    }
+
+    #[test]
+    fn real_stages_tint_their_depth() {
+        // Stage 0's air tint (section +0x40, flags 3) is added by its curve from byte 0x14 on, the sky (byte 0xFF)
+        // at full strength; stage 16's tints are off.
+        for (stage, on) in [(0, true), (16, false)] {
+            let mut setup = BattleSetup::default();
+            setup.stage = stage;
+            setup.sides[1].pad = 1;
+            let Some(mut battle) = fight_battle(&setup) else {
+                return;
+            };
+            let mut libc = LibcRandom::new(2);
+            let mut random = GameRandom::from_key(&[2]);
+            let f = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            assert_eq!(f.depth_tint.is_some(), on, "{stage}");
+            if let Some(d) = f.depth_tint {
+                assert!(d.additive);
+                assert_eq!(d.clut[0], [0, 0, 0, 0x80]);
+                assert!(
+                    d.clut[0xFF][..3].iter().any(|&c| c > 0),
+                    "{:?}",
+                    d.clut[0xFF]
+                );
+            }
+        }
     }
 
     #[test]

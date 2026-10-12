@@ -110,6 +110,7 @@ mod stage_draw;
 mod stage_fx;
 mod stg_amb;
 mod stg_blur;
+mod stg_depth;
 mod stg_obj;
 mod stg_rigid;
 mod stg_scroll;
@@ -287,6 +288,8 @@ struct Game {
     effect_point: Vec<usize>,
     /// `StgFx_DrawPost`'s redraws of the frame (the radial blur).
     post_ops: Vec<post::PostOp>,
+    /// The battle frame's depth tint (`StgDepthTint_Draw`).
+    depth_tint: Option<stg_depth::DepthClutDraw>,
     /// The effect textures whose texels changed this frame (the draw writes them again).
     effect_updates: Vec<usize>,
     /// The HUD sheets of the battle and this frame's HUD sprites.
@@ -398,6 +401,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut memcard_dir = PathBuf::from("memcard");
     let mut battle_split = false;
     let mut log_fps = false;
+    let mut shot = None;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--title" {
@@ -407,6 +411,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_to_menu = true;
         } else if argument == "--fps" {
             log_fps = true;
+        } else if argument == "--shot" {
+            // A debugging aid: the window saved as a PNG after 600 updates, then the program ends.
+            shot = Some(PathBuf::from(
+                arguments.next().ok_or("--shot requires a file")?,
+            ));
         } else if argument == "--battle" {
             skip_to_title = true;
             skip_to_battle = true;
@@ -595,6 +604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rumble_sent: [0; 2],
             effect_point: Vec::new(),
             post_ops: Vec::new(),
+            depth_tint: None,
             effect_updates: Vec::new(),
             hud_textures: Vec::new(),
             hud_prims: Vec::new(),
@@ -666,6 +676,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_quads,
                 model_draw::sync_models,
                 model_draw::sync_stage,
+                model_draw::sync_depth_tint,
                 model_draw::sync_effects,
                 model_draw::sync_hud,
                 model_draw::sync_frame_buffers,
@@ -676,6 +687,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     model_draw::add_to(&mut app);
     post_draw::add_to(&mut app);
+    if let Some(path) = shot {
+        app.insert_resource(Shot(path))
+            .add_systems(Update, take_shot);
+    }
     if log_fps {
         app.add_plugins((
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
@@ -685,6 +700,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.run();
 
     Ok(())
+}
+
+/// `--shot`: where the window is saved.
+#[derive(Resource)]
+struct Shot(PathBuf);
+
+/// Saves the window after 600 updates and ends the program 60 updates later.
+fn take_shot(
+    mut commands: Commands,
+    shot: Res<Shot>,
+    mut frames: Local<u32>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    *frames += 1;
+    if *frames == 600 {
+        commands
+            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .observe(bevy::render::view::screenshot::save_to_disk(shot.0.clone()));
+    }
+    if *frames == 660 {
+        exit.write(AppExit::Success);
+    }
 }
 
 fn load_screen_textures(
@@ -1509,6 +1546,7 @@ fn run_frames(
                 game.under_effects = frame.under;
                 game.shadow_effects = frame.shadows;
                 game.post_ops = frame.post;
+                game.depth_tint = frame.depth_tint;
                 game.effect_updates.clear();
                 for (i, t) in frame.texture_updates {
                     if let Some(slot) = game.effect_textures.get_mut(i) {
@@ -1576,6 +1614,7 @@ fn leave_battle(
     game.under_effects.clear();
     game.shadow_effects.clear();
     game.post_ops.clear();
+    game.depth_tint = None;
     game.hud_prims.clear();
     game.hud_layer = None;
     game.xfade_alpha = 0;
@@ -1698,6 +1737,7 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
     game.under_effects.clear();
     game.shadow_effects.clear();
     game.post_ops.clear();
+    game.depth_tint = None;
     game.hud_prims.clear();
     game.hud_layer = None;
     game.scene = Scene::BattleLoad(Box::new(BattleLoad {

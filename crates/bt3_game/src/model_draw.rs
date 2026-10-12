@@ -31,6 +31,12 @@ const GS_MODEL_SHADER: Handle<Shader> = uuid_handle!("6f0b8f0e-4a8e-4c1e-9d55-2b
 const GS_STAGE_SHADER: Handle<Shader> = uuid_handle!("2b7f4c1d-8e3a-4f6b-a5c9-1d0e7f3b6a24");
 const GS_HUD_SHADER: Handle<Shader> = uuid_handle!("9c3e5a71-0d2b-4e8f-b6a4-7f15c2d8e903");
 const GS_EFFECT_SHADER: Handle<Shader> = uuid_handle!("d41c7e2a-5b93-4f06-8e1d-3a7c9b2f6e58");
+const GS_DEPTH_SHADER: Handle<Shader> = uuid_handle!("8a1f3c52-6d07-4b9e-a2c4-5e9d0b7f1c36");
+const GS_DEPTH_CLUT_SHADER: Handle<Shader> = uuid_handle!("3b6e9d14-2f8a-4c71-b5e0-9a4d7c2e8f15");
+/// The layer of the camera that draws the depth buffer's spare byte.
+const DEPTH_LAYER: usize = 12;
+/// `StgFx_DrawPre`'s depth tint: after the stage, before the back tints.
+const DEPTH_TINT_SORT: f32 = -250.0;
 /// GS Z is 24 bits.
 const GS_Z_RANGE: f32 = 16_777_216.0;
 /// Sort positions in the 2D pass: stage groups from -900 (100 apart), the fighters after them.
@@ -167,6 +173,207 @@ impl Material2d for GsStageMaterial {
         );
         Ok(())
     }
+}
+
+/// A depth-writing stage material as the depth byte's pass draws it (`gs_depth.wgsl`): the stage pass's alpha test
+/// and depth, the byte for colour.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct GsDepthMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    texture: Handle<Image>,
+    #[uniform(2)]
+    params: Vec4,
+    order: u16,
+}
+
+impl Material2d for GsDepthMaterial {
+    fn fragment_shader() -> ShaderRef {
+        GS_DEPTH_SHADER.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    fn depth_bias(&self) -> f32 {
+        f32::from(self.order) * 0.01
+    }
+
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        set_pipeline_state(descriptor, None, true);
+        Ok(())
+    }
+}
+
+/// `GfxPost_DrawDepthClut` over the frame (`gs_depth_clut.wgsl`): blended or added, no depth test.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[bind_group_data(GsDepthClutKey)]
+pub struct GsDepthClutMaterial {
+    #[texture(0)]
+    plane: Handle<Image>,
+    #[texture(1)]
+    clut: Handle<Image>,
+    additive: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GsDepthClutKey {
+    additive: bool,
+}
+
+impl From<&GsDepthClutMaterial> for GsDepthClutKey {
+    fn from(material: &GsDepthClutMaterial) -> Self {
+        Self {
+            additive: material.additive,
+        }
+    }
+}
+
+impl Material2d for GsDepthClutMaterial {
+    fn fragment_shader() -> ShaderRef {
+        GS_DEPTH_CLUT_SHADER.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    fn depth_bias(&self) -> f32 {
+        DEPTH_TINT_SORT
+    }
+
+    /// ALPHA 0x44 (`(Cs - Cd) * As + Cd`) or 0x48 (`Cs * As + Cd`); TEST 0x30000 (always), no depth write.
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let blend = if key.bind_group_data.additive {
+            BlendState {
+                color: BlendComponent {
+                    src_factor: BlendFactor::SrcAlpha,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::Add,
+                },
+                alpha: BlendComponent::OVER,
+            }
+        } else {
+            BlendState::ALPHA_BLENDING
+        };
+        set_pipeline_state(descriptor, Some(blend), false);
+        if let Some(depth) = &mut descriptor.depth_stencil {
+            depth.depth_compare = Some(bevy::render::render_resource::CompareFunction::Always);
+        }
+        Ok(())
+    }
+}
+
+/// The depth byte camera's materials, and the depth tint's CLUT and materials (blended, added).
+#[derive(Resource)]
+pub struct DepthPlane {
+    clut: Handle<Image>,
+    tint: [Handle<GsDepthClutMaterial>; 2],
+    materials: HashMap<(usize, usize, usize), Handle<GsDepthMaterial>>,
+    rev: u32,
+}
+
+/// The depth tint's full-screen quad.
+#[derive(Component)]
+pub struct DepthTintSlot;
+
+/// A stage slot's twin in the depth byte's pass (same mesh).
+#[derive(Component)]
+pub struct DepthSlot(usize);
+
+fn spawn_depth_plane(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<GsDepthClutMaterial>>,
+) {
+    let image = images.add(Image::new_target_texture(
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        None,
+    ));
+    let clut = images.add(Image::new_fill(
+        Extent3d {
+            width: 256,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    ));
+    // Before the scene: cleared to 255 (no depth), the stage's depth-writing triangles over it.
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: -1,
+            clear_color: ClearColorConfig::Custom(Color::WHITE),
+            ..default()
+        },
+        RenderTarget::from(image.clone()),
+        RenderLayers::layer(DEPTH_LAYER),
+    ));
+    let tint = [false, true].map(|additive| {
+        materials.add(GsDepthClutMaterial {
+            plane: image.clone(),
+            clut: clut.clone(),
+            additive,
+        })
+    });
+    commands.spawn((
+        DepthTintSlot,
+        Mesh2d(meshes.add(Rectangle::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32))),
+        MeshMaterial2d(tint[0].clone()),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
+    commands.insert_resource(DepthPlane {
+        clut,
+        tint,
+        materials: HashMap::new(),
+        rev: u32::MAX,
+    });
+}
+
+/// Runs after the frame logic: the depth tint's CLUT and blend, shown while a tint draws.
+pub fn sync_depth_tint(
+    game: Res<Game>,
+    plane: Res<DepthPlane>,
+    mut images: ResMut<Assets<Image>>,
+    mut slot: Query<
+        (&mut MeshMaterial2d<GsDepthClutMaterial>, &mut Visibility),
+        With<DepthTintSlot>,
+    >,
+) {
+    if !game.is_changed() {
+        return;
+    }
+    let Ok((mut material, mut visibility)) = slot.single_mut() else {
+        return;
+    };
+    let Some(draw) = &game.depth_tint else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    if let Some(mut image) = images.get_mut(&plane.clut) {
+        image.data = Some(draw.clut.iter().flatten().copied().collect());
+    }
+    let wanted = &plane.tint[usize::from(draw.additive)];
+    if material.0 != *wanted {
+        material.0 = wanted.clone();
+    }
+    *visibility = Visibility::Visible;
 }
 
 /// One HUD sprite's texture, mask and blend.
@@ -637,17 +844,26 @@ pub fn add_to(app: &mut App) {
     load_internal_asset!(app, GS_STAGE_SHADER, "gs_stage.wgsl", Shader::from_wgsl);
     load_internal_asset!(app, GS_HUD_SHADER, "gs_hud.wgsl", Shader::from_wgsl);
     load_internal_asset!(app, GS_EFFECT_SHADER, "gs_effect.wgsl", Shader::from_wgsl);
+    load_internal_asset!(app, GS_DEPTH_SHADER, "gs_depth.wgsl", Shader::from_wgsl);
+    load_internal_asset!(
+        app,
+        GS_DEPTH_CLUT_SHADER,
+        "gs_depth_clut.wgsl",
+        Shader::from_wgsl
+    );
     app.add_plugins((
         Material2dPlugin::<GsModelMaterial>::default(),
         Material2dPlugin::<GsStageMaterial>::default(),
         Material2dPlugin::<GsHudMaterial>::default(),
         Material2dPlugin::<GsEffectMaterial>::default(),
+        Material2dPlugin::<GsDepthMaterial>::default(),
+        Material2dPlugin::<GsDepthClutMaterial>::default(),
     ))
     .init_resource::<ModelTextures>()
     .init_resource::<StageTextures>()
     .init_resource::<HudTextures>()
     .init_resource::<EffectTextures>()
-    .add_systems(Startup, spawn_cameras);
+    .add_systems(Startup, (spawn_cameras, spawn_depth_plane));
 }
 
 /// The 2D layer shown on the window: the frame buffers and the quads.
@@ -773,6 +989,7 @@ pub fn sync_frame_buffers(
 }
 
 /// Runs after the frame logic, like `sync_quads`.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn sync_stage(
     mut commands: Commands,
     game: Res<Game>,
@@ -780,12 +997,25 @@ pub fn sync_stage(
     mut textures: ResMut<StageTextures>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GsStageMaterial>>,
-    mut slots: Query<(
-        &StageSlot,
-        &Mesh2d,
-        &mut MeshMaterial2d<GsStageMaterial>,
-        &mut Visibility,
-    )>,
+    mut plane: ResMut<DepthPlane>,
+    mut depth_materials: ResMut<Assets<GsDepthMaterial>>,
+    mut slots: Query<
+        (
+            &StageSlot,
+            &Mesh2d,
+            &mut MeshMaterial2d<GsStageMaterial>,
+            &mut Visibility,
+        ),
+        Without<DepthSlot>,
+    >,
+    mut twins: Query<
+        (
+            &DepthSlot,
+            &mut MeshMaterial2d<GsDepthMaterial>,
+            &mut Visibility,
+        ),
+        Without<StageSlot>,
+    >,
 ) {
     if !game.is_changed() {
         return;
@@ -817,6 +1047,37 @@ pub fn sync_stage(
         textures.materials.insert(key, handle.clone());
         handle
     };
+    // The depth byte's twins: the depth-writing groups (1, 2, 6) only.
+    if plane.rev != textures.rev {
+        plane.rev = textures.rev;
+        plane.materials.clear();
+    }
+    let mut depth_material = |batch: &StageBatch, textures: &StageTextures| {
+        let key = (batch.group, batch.order, batch.texture);
+        plane
+            .materials
+            .entry(key)
+            .or_insert_with(|| {
+                depth_materials.add(GsDepthMaterial {
+                    texture: textures.images[batch.texture].clone(),
+                    params: Vec4::new(stage_alpha_ref(batch.group), 0.0, 0.0, 0.0),
+                    order: batch.order as u16,
+                })
+            })
+            .clone()
+    };
+    for (slot, mut handle, mut visibility) in &mut twins {
+        match game.stage_batches.get(slot.0) {
+            Some(batch) if matches!(batch.group, 1 | 2 | 6) => {
+                let wanted = depth_material(batch, &textures);
+                if handle.0 != wanted {
+                    handle.0 = wanted;
+                }
+                *visibility = Visibility::Visible;
+            }
+            _ => *visibility = Visibility::Hidden,
+        }
+    }
     let mut existing = 0;
     for (slot, mesh, mut handle, mut visibility) in &mut slots {
         existing = existing.max(slot.0 + 1);
@@ -839,11 +1100,24 @@ pub fn sync_stage(
             RenderAssetUsages::default(),
         );
         write_stage_mesh(&mut mesh, batch);
+        let mesh = meshes.add(mesh);
         commands.spawn((
             StageSlot(index),
-            Mesh2d(meshes.add(mesh)),
+            Mesh2d(mesh.clone()),
             MeshMaterial2d(material(batch, &mut textures)),
             Transform::default(),
+        ));
+        commands.spawn((
+            DepthSlot(index),
+            Mesh2d(mesh),
+            MeshMaterial2d(depth_material(batch, &textures)),
+            Transform::default(),
+            RenderLayers::layer(DEPTH_LAYER),
+            if matches!(batch.group, 1 | 2 | 6) {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            },
         ));
     }
 }

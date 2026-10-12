@@ -145,6 +145,9 @@
 !/crates/bt3_game/src/stage_fx.rs
 !/crates/bt3_game/src/stg_scroll.rs
 !/crates/bt3_game/src/gs_stage.wgsl
+!/crates/bt3_game/src/gs_depth.wgsl
+!/crates/bt3_game/src/gs_depth_clut.wgsl
+!/crates/bt3_game/src/stg_depth.rs
 !/crates/bt3_game/src/battle_seq.rs
 !/crates/bt3_game/src/btl_flags.rs
 !/crates/bt3_game/src/btl_act.rs

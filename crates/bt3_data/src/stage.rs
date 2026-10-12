@@ -63,6 +63,15 @@ pub struct StageResource {
     /// `StgDataA.tint` (+0x80 / +0x84, `BtlStage_GetList80`): the two colours of the stage tint's slot 0 (the
     /// darkening of request 0x12), RGBA each.
     pub tint: Option<[u8; 8]>,
+    /// `StgDataA` +0x40 / +0x44 (`BtlStage_GetList40`): the depth tints in the air and under water, 0x10 bytes each
+    /// (flags, RGBA, three curve keys).
+    pub depth_tints: Vec<[u8; 16]>,
+    /// +0x48 (`BtlStage_GetList48`): the sky glare (flags, step, max, hold, min, alpha).
+    pub glare: Option<[u8; 12]>,
+    /// +0x50 (`BtlStage_GetList50`): the depth fog filter (flags, three curve keys).
+    pub fog: Option<[u8; 10]>,
+    /// +0xA0 (`BtlStage_GetListA0`): the depth haze (`StgHazeParam`).
+    pub haze: Option<[u8; 0x18]>,
 }
 
 /// `StgSurfRec`: what the reflecting surface takes over its file's parameters (the light's y and z negated as
@@ -448,6 +457,42 @@ impl StageResource {
             )?;
             Some(bytes[o..o + 8].try_into().unwrap())
         };
+        // The first `max` records of `size` bytes of the list whose count and offset are at `at`; a list that does
+        // not fit the file is taken as empty (these only draw).
+        let records =
+            |at: usize, size: usize, max: usize, label: &str| -> io::Result<Vec<Vec<u8>>> {
+                let count = read_count(bytes, data_offset + at, label)?.min(max);
+                if count == 0 {
+                    return Ok(Vec::new());
+                }
+                let o = resolve_relative(
+                    bytes,
+                    data_offset,
+                    read_u32(bytes, data_offset + at + 4)?,
+                    size * count,
+                    label,
+                )?;
+                Ok((0..count)
+                    .map(|i| bytes[o + i * size..o + (i + 1) * size].to_vec())
+                    .collect())
+            };
+        let depth_tints = records(0x40, 16, 2, "stage depth tints")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.try_into().unwrap())
+            .collect();
+        let glare = records(0x48, 12, 1, "stage glare")
+            .unwrap_or_default()
+            .pop()
+            .map(|r| r.try_into().unwrap());
+        let fog = records(0x50, 10, 1, "stage fog")
+            .unwrap_or_default()
+            .pop()
+            .map(|r| r.try_into().unwrap());
+        let haze = records(0xA0, 0x18, 1, "stage haze")
+            .unwrap_or_default()
+            .pop()
+            .map(|r| r.try_into().unwrap());
         let geysers = parse_mef_list(bytes, 0)?
             .into_iter()
             .map(|o| {
@@ -492,6 +537,10 @@ impl StageResource {
             dust,
             water_fx,
             water_color,
+            depth_tints,
+            glare,
+            fog,
+            haze,
             smoke,
             geysers,
             weather,
