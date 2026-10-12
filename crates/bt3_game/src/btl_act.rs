@@ -1058,8 +1058,9 @@ impl Ctx<'_, '_> {
         true
     }
 
-    /// `BtlAct_UpdateGauges`: ki regeneration in a motion with flag 0x10000, blast gain with 0x20000, the charge
-    /// gauge's decay. Abilities, skills and the powered-up mode are not ported.
+    /// `BtlAct_UpdateGauges`: the max power gauge's drain (not while flag 0xBB holds it: charging, firing a
+    /// technique), which ends the powered-up mode (flag 6) when it empties; ki regeneration in a motion with flag
+    /// 0x10000, blast gain with 0x20000, the charge gauge's decay. Abilities, skills and stats are not ported.
     fn update_gauges(&mut self) {
         if self.time_stopped
             || !self.flag(3)
@@ -1068,6 +1069,23 @@ impl Ctx<'_, '_> {
             || self.flag(0x128)
         {
             return;
+        }
+        if !self.flag(0xBB) {
+            // BtlParam_GetMaxPowerDrain: the whole gauge over parameter +0x54 seconds (at least a frame; the
+            // stats' extra time is not ported), three times as fast under flag 0xBC, twice under 0xBD.
+            let t = self.data.tables.params.f32_at(0x54).max(1.0 / 30.0);
+            let mut amount = 30000 / ((t * 30.0) as i32).max(1);
+            if self.flag(0xBC) {
+                amount *= 3;
+            } else if self.flag(0xBD) {
+                amount *= 2;
+            }
+            let g = &mut self.me.gauge;
+            g.max_power = (g.max_power - amount).max(0);
+            if g.max_power <= 0 {
+                // BtlStat_EndKind3: the stats are not ported.
+                self.clear(6);
+            }
         }
         let mflags = self.anim_flags(self.anim_id());
         if self.me.is_dead() {

@@ -3511,6 +3511,78 @@ mod tests {
     }
 
     #[test]
+    fn real_max_power_drains_and_lets_the_fighter_charge_again() {
+        // Goku charges with a blast stock into the powered-up mode (flag 6, the max power gauge full); let go, the
+        // gauge drains over the parameter's time (+0x54 seconds) and the mode ends, after which the charge input
+        // starts the ki charge (0x37) again.
+        use crate::btl_input::pad::{L2, START};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        battle.roster.chars[0].gauge.blast = 100_000;
+        let mut powered_at = None;
+        for i in 0..600 {
+            frame(&mut battle, L2);
+            if battle.roster.chars[0].flags.test(6) {
+                powered_at = Some(i);
+                break;
+            }
+        }
+        assert!(powered_at.is_some(), "never reached max power");
+        assert_eq!(battle.roster.chars[0].gauge.max_power, 30000);
+        let secs = battle.assets.fighters[0].tables.params.f32_at(0x54);
+        let step = 30000 / (secs * 30.0) as i32;
+        let mut ended_at = None;
+        for i in 0..2000 {
+            frame(&mut battle, 0);
+            let c = &battle.roster.chars[0];
+            if !c.flags.test(6) {
+                ended_at = Some(i);
+                break;
+            }
+        }
+        let ended_at = ended_at.expect("the powered-up mode never ended");
+        assert_eq!(battle.roster.chars[0].gauge.max_power, 0);
+        // The last motion of the charge (0x36) still holds the gauge (flag 0xBB) for a few frames.
+        let frames = (30000 + step - 1) / step;
+        assert!(
+            (frames..frames + 60).contains(&(ended_at as i32 + 1)),
+            "{ended_at} for {frames}"
+        );
+        let mut charging = false;
+        for _ in 0..30 {
+            frame(&mut battle, L2);
+            charging |= battle.roster.chars[0].act.current == 0x37;
+        }
+        assert!(charging);
+    }
+
+    #[test]
     fn real_technique_emitters_draw_and_end() {
         // The technique sets' emitters drive every particle module: Goku's Kamehameha (slot 2) sprite animations,
         // a ribbon, particles, sprites, a ray burst and rays; character 1's slot 2 chains; character 106's ring
