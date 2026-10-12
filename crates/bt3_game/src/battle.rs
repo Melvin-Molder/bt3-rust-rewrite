@@ -4370,6 +4370,7 @@ mod tests {
         let mash = [LEFT, UP, RIGHT, DOWN];
         let health = battle.roster.chars[1].gauge.health;
         let (mut struggle_at, mut lost_at, mut moved) = (None, None, false);
+        let (mut clash_frames, mut cut_frames) = (0, 0);
         let mut first_pos = None;
         for i in 0..300 {
             let (p1, p2) = match i {
@@ -4391,6 +4392,12 @@ mod tests {
                 assert_eq!(r.chars[0].act.current, 0x130);
                 assert_eq!(r.chars[1].act.current, 0x130);
             }
+            // While the clash runs, its one-frame cuts (with the screen's priority, flag 0xD3) hold one of the
+            // fighter cameras.
+            if (2..=4).contains(&r.clash.state) {
+                clash_frames += 1;
+                cut_frames += i32::from(r.chars.iter().any(|c| c.flags.test(0xD3)));
+            }
             if lost_at.is_none() && r.chars[1].act.current == 0x104 {
                 lost_at = Some(i);
             }
@@ -4399,6 +4406,11 @@ mod tests {
         let struggle_at = struggle_at.expect("no struggle");
         let lost_at = lost_at.expect("P2 did not lose");
         assert!(moved, "the struggle point never moved");
+        // (The frame state 1 becomes 2 sets no cut yet.)
+        assert!(
+            clash_frames > 100 && cut_frames == clash_frames - 1,
+            "{cut_frames} / {clash_frames}"
+        );
         assert!(lost_at > struggle_at + 106, "{struggle_at} {lost_at}");
         assert_eq!(health - r.chars[1].gauge.health, 10910);
         assert!(!(0x130..=0x132).contains(&r.chars[0].act.current));
@@ -4736,6 +4748,37 @@ mod tests {
         battle.restart(&mut sounds);
         assert_eq!(battle.assets.stage_id, from);
         assert_eq!(battle.assets.stage.stage_id, from);
+    }
+
+    #[test]
+    fn real_auto_rush_runs_its_camera_cut() {
+        // Flag 0x7E forces the auto rush (0x45), which asks for the common cut 0x11 / 0x12 by the camera's side.
+        let mut setup = BattleSetup::default();
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut cut = None;
+        for _ in 0..40 {
+            battle.roster.chars[0].flags.set_held(0x7E);
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            let c = &battle.roster.chars[0];
+            if c.act.current == 0x45 && crate::chr_cam::is_cut_active(c) {
+                cut = Some(c.cut.req_index);
+                break;
+            }
+        }
+        assert!(matches!(cut, Some(0x11 | 0x12)), "{cut:?}");
     }
 
     #[test]

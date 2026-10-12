@@ -353,6 +353,11 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 impl Struggle {
+    /// Both fighters' powers (side 0 is fighter 0's record).
+    pub(crate) fn powers(&self) -> [f32; 2] {
+        [self.side[0].power, self.side[1].power]
+    }
+
     /// `EftStruggle_Start` / `EftStruggle_Init`: both sides' powers (the definition's +0x88), the point from the
     /// clash bias. The spark is drawing only.
     fn start(a: &HitRec, b: &HitRec, bias: f32) -> Option<Self> {

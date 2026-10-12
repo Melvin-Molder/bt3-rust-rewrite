@@ -8,11 +8,16 @@
 //! effects reset (a throw technique's win would throw: not ported). Clash B (states 6..8): both in 0xFA, trading blows for 76 frames; the one who counted more inputs wins
 //! (flags 0xBF / 0xC0). Clash C (states 9..11): both in 0xFB, then 0xFC exchanges placed on the stage paths; each
 //! exchange (both raising 0xC4) scores one for the fighter whose answer is right, and after seven with a leader
-//! the winner gets 0xC7, the loser 0xC8. Not ported: the clash cameras (`ChrCam_SetCut` / `RequestCut`), the voices and the streamed sounds.
+//! the winner gets 0xC7, the loser 0xC8. The clash cameras are one-frame cuts (`ChrCam_SetCut`) and the clash B cut. Not ported: the voices and
+//! the streamed sounds.
 
-use crate::btl_chr::{Chr, Env, SideData};
+use std::f32::consts::{FRAC_PI_2, PI};
+
+use crate::btl_chr::{Chr, Env, SideData, length, opp_delta, scale3};
 use crate::btl_hit::raise_first_clash;
+use crate::btl_input::wrap_angle;
 use crate::btl_tech_fx::tech_damage;
+use crate::chr_cam::{CutSpec, set_cut};
 
 /// `BtlClashC` (roster + 0x7C): read by the exchange action and the placement.
 #[derive(Clone, Copy, Debug, Default)]
@@ -39,6 +44,97 @@ pub(crate) struct ClashA {
     pub lead: i32,
     /// `clashBias`: the lead squashed into -0.8..0.8; where the struggle point is.
     pub bias: f32,
+    /// `mid`: between the fighters' nodes 0x11 by the bias, where the middle cut looks from.
+    pub mid: [f32; 3],
+}
+
+/// The beam struggle's powers by fighter, while one runs (`gEftStruggle`).
+pub(crate) type StrugglePowers = Option<[f32; 2]>;
+
+/// `EftStruggle_GetCamDist`: the orbit cut's extra distance in mode 0, (20 + 5 x the fighter's power, at least
+/// 0.5) times its scale (height / 19.35); 0 otherwise or without a struggle.
+fn struggle_cam_dist(powers: StrugglePowers, player: usize, mode: i32, height: f32) -> f32 {
+    let Some(p) = powers else {
+        return 0.0;
+    };
+    if mode != 0 {
+        return 0.0;
+    }
+    let power = p[player].max(0.5);
+    (20.0 + power * 5.0) * (height / 19.35)
+}
+
+/// A one-frame cut (`ChrCam_SetCut(.., 1, 0x45)`).
+fn one_frame_cut(vecs: [[f32; 3]; 3], nodes: [i32; 3], yaw: f32, pitch: f32, dist: f32) -> CutSpec {
+    CutSpec {
+        vec_a: vecs[0],
+        vec_a_delta: [0.0; 3],
+        vec_b: vecs[1],
+        vec_b_delta: [0.0; 3],
+        vec_c: vecs[2],
+        vec_c_delta: [0.0; 3],
+        node_a: nodes[0],
+        val_a: yaw,
+        val_a_delta: 0.0,
+        val_b: pitch,
+        val_b_delta: 0.0,
+        val_c: dist,
+        val_c_delta: 0.0,
+        node_a2: nodes[0],
+        node_c: nodes[1],
+        node_c2: nodes[2],
+        time: 1,
+        flags: 0x45,
+    }
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let l = length(v);
+    if l > 0.0 { scale3(v, 1.0 / l) } else { v }
+}
+
+/// `BtlClash_SetOrbitCut`: a one-frame cut round fighter `player`: wide (type 0, 2.4 rad from its facing), from the
+/// side (1, 0.5 rad) or close on its head node from behind (2), the two first mirrored for fighter 1.
+fn set_orbit_cut(
+    chars: &mut [Chr; 2],
+    data: [&SideData; 2],
+    player: usize,
+    kind: i32,
+    powers: StrugglePowers,
+) {
+    let d = normalize(opp_delta(&chars[player], &chars[player ^ 1]));
+    let height = data[player].height();
+    let side = if player == 0 { 1.0 } else { -1.0 };
+    let chr = &mut chars[player];
+    let yaw0 = chr.pose.rot[1];
+    let (nodes, yaw, pitch, dist) = match kind {
+        0 => ([3, 0x11, 0x11], wrap_angle(yaw0 - 2.4 * side), 0.0, height),
+        1 => ([3, 0x11, 0x11], wrap_angle(yaw0 - 0.5 * side), 0.0, height),
+        _ => (
+            [0x30; 3],
+            wrap_angle(yaw0 - PI),
+            d[1].asin() - 0.2,
+            height * 0.4,
+        ),
+    };
+    let dist = dist + struggle_cam_dist(powers, player, kind, height);
+    set_cut(chr, &one_frame_cut([[0.0; 3]; 3], nodes, yaw, pitch, dist));
+}
+
+/// `BtlClash_SetMidCut`: a one-frame cut on fighter 0 from the point between the fighters, looking between their
+/// nodes 0x11 (nearer the one behind), swinging with the balance; 50 away, plus the struggle's 40 + 20 x its larger
+/// power.
+fn set_mid_cut(chars: &mut [Chr; 2], mid: [f32; 3], bias: f32, powers: StrugglePowers) {
+    let d = normalize(opp_delta(&chars[0], &chars[1]));
+    let (a, b) = (chars[0].obj.node_pos(0x11), chars[1].obj.node_pos(0x11));
+    let t = bias * 0.6 + 0.5;
+    let look = std::array::from_fn(|k| b[k] * t + a[k] * (1.0 - t));
+    let ang = bias * FRAC_PI_2 * 0.5 - FRAC_PI_2;
+    let yaw = wrap_angle(d[0].atan2(d[2]) + ang);
+    let pitch = -d[1].asin() * bias;
+    let mid_dist = powers.map_or(0.0, |p| 40.0 + p[0].max(p[1]) * 20.0);
+    let cut = one_frame_cut([mid, mid, look], [-1; 3], yaw, pitch, mid_dist + 50.0);
+    set_cut(&mut chars[0], &cut);
 }
 
 /// `BtlClash_CalcBias`: x / (|x| + 1) with x = lead / 20, at most 0.8 either way.
@@ -110,7 +206,7 @@ impl Clash {
     }
 
     /// `BtlClash_Update`: starts a sequence when both fighters enter a clash action, then steps it. `frame` is the
-    /// roster's frame counter (`BtlChar_FrameMod`).
+    /// roster's frame counter (`BtlChar_FrameMod`); `powers` the beam struggle's.
     pub(crate) fn update(
         &mut self,
         chars: &mut [Chr; 2],
@@ -118,6 +214,7 @@ impl Clash {
         env: &Env,
         rand_state: &mut u32,
         frame: u32,
+        powers: StrugglePowers,
     ) {
         let both_a = |c: &[Chr; 2]| Self::in_clash_a(&c[0]) && Self::in_clash_a(&c[1]);
         if self.state == 0 {
@@ -139,7 +236,7 @@ impl Clash {
                 }
             }
             1..=5 => {
-                self.state = self.update_a(chars, data, env, frame);
+                self.state = self.update_a(chars, data, env, frame, powers);
                 if !both_a(chars) {
                     Self::hold_clash_a(chars);
                     self.state = 0;
@@ -151,13 +248,16 @@ impl Clash {
         }
     }
 
-    /// `BtlClash_UpdateA`. The cameras, voices and streamed sounds are not ported.
+    /// `BtlClash_UpdateA` with its one-frame cuts: each fighter in turn from afar for 30 frames, then by the
+    /// balance (a fighter far behind from the side, else the middle cut); the leader close up, the middle while the
+    /// lead grows, the loser from afar. The voices and streamed sounds are not ported.
     fn update_a(
         &mut self,
         chars: &mut [Chr; 2],
         data: [&SideData; 2],
         env: &Env,
         frame: u32,
+        powers: StrugglePowers,
     ) -> i32 {
         let (count0, count1) = (chars[0].clash_count_a, chars[1].clash_count_a);
         let a = &mut self.a;
@@ -169,12 +269,23 @@ impl Clash {
                 state += 1;
             }
             2 => {
-                if a.timer >= 0x3C {
+                if a.timer < 0x1E {
+                    set_orbit_cut(chars, data, 0, 0, powers);
+                } else if a.timer < 0x3C {
+                    set_orbit_cut(chars, data, 1, 0, powers);
+                } else {
                     if count1 < count0 {
                         a.lead += 1;
                     }
                     if count0 < count1 {
                         a.lead -= 1;
+                    }
+                    if a.bias < -0.64 {
+                        set_orbit_cut(chars, data, 0, 1, powers);
+                    } else if 0.64 < a.bias {
+                        set_orbit_cut(chars, data, 1, 1, powers);
+                    } else {
+                        set_mid_cut(chars, a.mid, a.bias, powers);
                     }
                 }
                 a.timer += 1;
@@ -187,6 +298,7 @@ impl Clash {
                 if a.timer == 0 && a.lead == 0 {
                     a.lead = if frame % 2 != 0 { 1 } else { -1 };
                 }
+                set_orbit_cut(chars, data, if a.lead > 0 { 0 } else { 1 }, 2, powers);
                 a.timer += 1;
                 if a.timer >= 0x10 {
                     a.timer = 0;
@@ -195,6 +307,7 @@ impl Clash {
             }
             4 => {
                 a.lead += if a.lead > 0 { 4 } else { -4 };
+                set_mid_cut(chars, a.mid, a.bias, powers);
                 if a.lead.abs() >= 0x47 {
                     a.timer = 0;
                     state += 1;
@@ -245,12 +358,17 @@ impl Clash {
                     raise_first_clash(winner, loser);
                     self.a.winner = w as i32;
                 }
+                let loser = if self.a.winner == 0 { 1 } else { 0 };
+                set_orbit_cut(chars, data, loser, 0, powers);
                 self.a.lead = 0;
                 state = 0;
             }
             _ => {}
         }
         self.a.bias = calc_bias(self.a.lead);
+        let (n0, n1) = (chars[0].obj.node_pos(0x11), chars[1].obj.node_pos(0x11));
+        let t = self.a.bias * 0.5 + 0.5;
+        self.a.mid = std::array::from_fn(|k| n1[k] * t + n0[k] * (1.0 - t));
         state
     }
 
@@ -261,6 +379,7 @@ impl Clash {
             6 => {
                 self.b_timer = 0;
                 state = 7;
+                crate::chr_cam::request_cut(&mut chars[0], 1, 6);
             }
             7 => {
                 self.b_timer += 1;
@@ -294,6 +413,7 @@ impl Clash {
                     winner.flags.set(0xBF);
                     loser.flags.set(0xC0);
                     raise_first_clash(winner, loser);
+                    crate::chr_cam::end_cut(&mut chars[0]);
                     self.b_winner = win as i32;
                 }
                 self.b_timer += 1;
@@ -334,6 +454,22 @@ impl Clash {
                 state += 1;
             }
             10 => {
+                // BtlClash_SetPathCut: from the path's first point, looking along its angles.
+                if Self::both_in(chars, 0xFC)
+                    && let Some(p) = usize::try_from(c.path)
+                        .ok()
+                        .and_then(|n| env.stage.paths.get(n))
+                        .and_then(|path| path.points.first())
+                {
+                    let pos = [p[0], p[1], p[2]];
+                    let look = [
+                        pos[0] + p[5].sin(),
+                        pos[1] - p[4].sin(),
+                        pos[2] + p[5].cos(),
+                    ];
+                    let cut = one_frame_cut([pos, pos, look], [-1; 3], 0.0, 0.0, 0.0);
+                    set_cut(&mut chars[0], &cut);
+                }
                 if chars[0].flags.test(0xC4) && chars[1].flags.test(0xC4) {
                     let scorer = if chars[0].clash_answer_frame >= 0 {
                         0

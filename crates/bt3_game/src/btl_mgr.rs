@@ -355,8 +355,15 @@ impl Roster {
                 chr.flags.set_stage(10);
             }
         }
-        self.clash
-            .update(&mut self.chars, data, env, &mut self.rand, self.frame);
+        let powers = self.scene.struggle.as_ref().map(|s| s.powers());
+        self.clash.update(
+            &mut self.chars,
+            data,
+            env,
+            &mut self.rand,
+            self.frame,
+            powers,
+        );
         if let Some(winner) = self.clash.struggle_end.take() {
             self.scene.end_struggle(&mut self.chars, winner);
         }
