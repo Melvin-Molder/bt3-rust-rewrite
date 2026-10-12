@@ -69,6 +69,8 @@ pub struct ModelPart {
     pub offset_b: [f32; 4],
     /// Translation from the parent node in the rest pose (`BobjBone.rest`).
     pub rest: [f32; 4],
+    /// `BObjBound.extent`; w is the part's size factor (`BtlCharApi_GetNodeBoundSize`).
+    pub extent: [f32; 4],
     pub batches: Vec<Batch>,
 }
 
@@ -107,7 +109,7 @@ impl CharaModel {
         let mut offset = u32_at(model, 0x6C) as usize;
         loop {
             let record = model
-                .get(offset..offset + 0x40)
+                .get(offset..offset + RECORD_HEADER)
                 .ok_or_else(|| invalid_data("mesh record outside the model"))?;
             let next = u32_at(record, 0) as usize;
             let last = u16_at(record, 6) != 0;
@@ -131,6 +133,7 @@ impl CharaModel {
                 offset_a: vec4(0x10),
                 offset_b: vec4(0x20),
                 rest: vec4(0x30),
+                extent: vec4(0x50),
                 batches,
             });
             if last {

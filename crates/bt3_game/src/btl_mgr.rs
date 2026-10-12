@@ -259,6 +259,8 @@ impl Roster {
             }
             .update();
             me.anim_apply_blend();
+            // BtlObj_SaveNodePositions: relative to node 0's translation with flag 0x2B.
+            me.obj.save_node_positions(me.flags.test(0x2B));
             // The placement requests in the original's order (0xF3, the restart's, and the warps 0xFC / 0xFD of
             // the story's actions are not ported).
             me.place_center(data[i], env);
@@ -349,6 +351,7 @@ impl Roster {
             );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             self.scene.spawn_held_disc(me, data[i]);
+            speed_fx(me, opp, data[i], &mut self.scene, libc);
             ground_fx(me, data[i], env, &mut self.scene.gdust, libc, vu0);
             water_fx(
                 me,
@@ -599,6 +602,84 @@ impl Roster {
             chr.flags.set_stage(12);
         }
         self.snapshot(5);
+    }
+}
+
+/// `BtlFx_SpawnPartFxEvent8`, `BtlFx_SpawnFastMoveFx` and `BtlFx_SpawnSpeedLines`: animation event 8 sends
+/// streaks from each model part its value names, along the part's movement turned into the world; request 0xB,
+/// moving faster than half the reference speed, leaves trails behind the body; request 0x15 starts the screen's
+/// speed lines (a mode 2 ray burst), longer lived the farther the opponent is off the camera's heading, their
+/// inner end farther in with the distance.
+pub(crate) fn speed_fx(
+    me: &Chr,
+    opp: &Chr,
+    data: &SideData,
+    scene: &mut crate::btl_blast::Scene,
+    libc: &mut crate::rng::LibcRandom,
+) {
+    let side = me.player;
+    let height = data.height();
+    if me.anim_test_attr(8) {
+        let bits = me.obj.event_arg(8);
+        for i in 0..0x13 {
+            let bit = bits & (1 << i);
+            if bit == 0 {
+                continue;
+            }
+            let part = crate::btl_obj::mask_to_node(bit) as u32;
+            let v = me.obj.node_velocity(part);
+            let d = crate::battle::apply(&me.obj.mtx, [v[0], v[1], v[2], 0.0]);
+            // BtlCharApi_GetNodeBoundSize: 1 for a node without a record.
+            let size = data
+                .obj
+                .model
+                .parts
+                .iter()
+                .find(|p| u32::from(p.node) == part)
+                .map_or(1.0, |p| p.extent[3]);
+            scene.spdlines.spawn_part_streaks(
+                side,
+                [d[0], d[1], d[2]],
+                me.obj.node_pos(part),
+                size,
+                height,
+                libc,
+            );
+        }
+    }
+    if me.test_fx(0xB) {
+        let p = &me.pose;
+        if p.speed > 0.01 && crate::btl_chr::length(p.vel) / p.speed > 0.5 {
+            scene
+                .spdlines
+                .spawn_body_trails(side, p.dir, height, |n| me.obj.node_pos(n), libc);
+        }
+    }
+    if me.test_fx(0x15) {
+        let d = crate::btl_chr::opp_delta(me, opp);
+        let eps = 0.001;
+        let mut angle = 0.0;
+        if d[0].abs() > eps || d[2].abs() > eps {
+            angle = crate::btl_input::wrap_angle(d[0].atan2(d[2]) - me.cam.yaw);
+        }
+        let arg = crate::eft_ray::RayArg {
+            pos: [0.0; 3],
+            color: [0x80, 0x80, 0x80, 0x40],
+            life: angle.abs() / 3.141_592_7 * 0.5 + 0.3,
+            length: 800.0,
+            width: 1.5,
+            inner: (-20.0 - crate::btl_chr::length(d) * 0.1).max(-50.0),
+            jitter: 50.0,
+            mode: crate::eft_ray::MODE_TECH,
+            count: 0x30,
+            chr: side,
+            blend: 1,
+            space: 1,
+            delay: 0,
+            fade_frames: 0,
+            auto_kill: true,
+        };
+        scene.fx.spawn_ray(&arg, libc);
     }
 }
 

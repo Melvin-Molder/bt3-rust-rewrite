@@ -44,6 +44,7 @@ mod eft_ray;
 mod eft_rays;
 mod eft_ribbon;
 mod eft_smoke;
+mod eft_spdline;
 mod eft_storm;
 mod eft_surf;
 mod eft_water;

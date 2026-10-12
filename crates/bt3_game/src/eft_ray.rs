@@ -18,7 +18,7 @@ const PI_F: f32 = 3.141_592_7;
 
 // EFT_RAY_MODE_*.
 pub(crate) const MODE_SPIN: u32 = 1;
-const MODE_TECH: u32 = 2;
+pub(crate) const MODE_TECH: u32 = 2;
 pub(crate) const MODE_CUT: u32 = 3;
 
 // EFT_RAY_*.
@@ -86,7 +86,8 @@ struct Ray {
 pub(crate) struct RayBurst {
     pub id: u32,
     chr: usize,
-    pub set: crate::eft::SetRef,
+    /// The emitter set that started it; none for the speed lines (`EftRay_CreateByValue`).
+    pub set: Option<crate::eft::SetRef>,
     rays: Vec<Ray>,
     pos: V3,
     scale: [f32; 2],
@@ -108,7 +109,7 @@ impl RayBurst {
     /// width and offset at random (five libc draws each, six on the screen). At most 48 rays.
     pub(crate) fn new(
         id: u32,
-        set: crate::eft::SetRef,
+        set: Option<crate::eft::SetRef>,
         arg: &RayArg,
         libc: &mut LibcRandom,
     ) -> Self {
@@ -167,6 +168,11 @@ impl RayBurst {
 
     pub(crate) fn chr(&self) -> usize {
         self.chr
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mode(&self) -> u32 {
+        self.mode
     }
 
     /// `EftRay_IsAlive`: a burst whose fade is over is reported dead once, and ends itself.

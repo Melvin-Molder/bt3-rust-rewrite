@@ -319,6 +319,8 @@ pub(crate) struct Scene {
     deferred: Vec<Deferred>,
     /// The ground dust (`gEftGndDust`).
     pub gdust: crate::eft_gdust::GndDust,
+    /// The speed lines (`gEftSpdLine`, layer 3; kept through a reset).
+    pub spdlines: crate::eft_spdline::SpdLines,
     /// The stage effects of layer 0.
     pub stage: crate::stage_fx::StageFx,
 }
@@ -1082,7 +1084,12 @@ impl Scene {
                 }
             }
         }
-        // Layer 3: the struggle, the discs, the blast objects, then the particle modules.
+        // Layer 3: the speed lines, the struggle, the discs, the blast objects, then the particle modules.
+        let spd = std::array::from_fn(|i| crate::eft_spdline::SpdChr {
+            height: w.data[i].height(),
+            moved: w.chars[i].pose.moved,
+        });
+        self.spdlines.update(w.paused, &spd, w.libc);
         if !w.paused {
             self.step_struggle(w);
         }
@@ -1098,6 +1105,8 @@ impl Scene {
             clash_a: [false; 2],
             node3: [[0.0; 3]; 2],
             ray_texture: None,
+            paused: w.paused,
+            in_technique: [0, 1].map(|s| crate::btl_act::is_technique_id(w.chars[s].act.current)),
         };
         self.fx.update(&fxw, w.libc, w.vu0);
         self.clamp_to_stage(w.env);

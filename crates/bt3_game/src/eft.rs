@@ -1402,6 +1402,10 @@ pub(crate) struct FxWorld<'a> {
     pub node3: [V3; 2],
     /// The ray bursts' texture (`gEftRay->tex[0]`, from common effect entry 10).
     pub ray_texture: Option<usize>,
+    /// `BtlScene_IsTimeStopped`: the pause.
+    pub paused: bool,
+    /// `BtlCharApi_IsInTechnique` of each fighter.
+    pub in_technique: [bool; 2],
 }
 
 impl FxWorld<'_> {
@@ -1565,11 +1569,25 @@ impl Modules {
             self.bills.iter().filter(|b| of(b.set)).count(),
             self.quads.iter().filter(|e| of(e.set)).count(),
             self.chains.iter().filter(|c| of(c.set)).count(),
-            self.rays.iter().filter(|r| of(r.set)).count(),
+            self.rays.iter().filter(|r| r.set.is_some_and(of)).count(),
             self.rays_parts.iter().filter(|r| of(r.set)).count(),
             self.part10s.iter().filter(|e| of(e.set)).count(),
             self.links.iter().filter(|l| of(l.set)).count(),
         ]
+    }
+
+    /// `EftRay_Create`: a burst without an emitter set; nothing when the list is full.
+    pub(crate) fn spawn_ray(&mut self, arg: &RayArg, libc: &mut LibcRandom) {
+        if self.rays.len() < RAYS {
+            self.next_id += 1;
+            self.rays.push(RayBurst::new(self.next_id, None, arg, libc));
+        }
+    }
+
+    /// Live ray bursts of mode `mode`.
+    #[cfg(test)]
+    pub(crate) fn rays_of_mode(&self, mode: u32) -> usize {
+        self.rays.iter().filter(|r| r.mode() == mode).count()
     }
 
     /// Kind 15 sprites of the pool in use.
@@ -1854,13 +1872,14 @@ impl Modules {
                 i += 1;
             }
         }
-        // EftRay_Update. Mode 2 bursts (technique starts) are not created by the emitters, and the technique camera
-        // cuts are not ported.
+        // EftRay_Update: a burst's kind is 2 (BtlScene_IsEffectStopped: the pause); mode 2 (the speed lines) ends
+        // when either fighter is in a technique. The technique camera cuts are not ported.
         let mut i = 0;
         while i < self.rays.len() {
             let r = &mut self.rays[i];
-            let stopped = w.effect_stopped(r.set, r.chr());
-            if r.update(stopped, false, false, libc) {
+            let c = r.chr();
+            let tech = w.in_technique[c] || w.in_technique[c ^ 1];
+            if r.update(w.paused, tech, false, libc) {
                 self.rays.remove(i);
             } else {
                 i += 1;
@@ -2707,7 +2726,7 @@ fn spawn_type0(
         handles[n] = if fx.rays.len() < RAYS {
             fx.next_id += 1;
             fx.rays
-                .push(RayBurst::new(fx.next_id, c.set_ref, &arg, libc));
+                .push(RayBurst::new(fx.next_id, Some(c.set_ref), &arg, libc));
             Some(Handle::Ray(fx.next_id))
         } else {
             None

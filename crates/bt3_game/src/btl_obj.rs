@@ -49,6 +49,8 @@ pub(crate) struct Node {
     from_rot: [f32; 4],
     pub mtx: Mtx,
     pub parent: Mtx,
+    /// `prevPos`: the position in the object's frame at the last `BtlObj_SaveNodePositions`.
+    pub prev_pos: [f32; 3],
 }
 
 impl Default for Node {
@@ -60,6 +62,7 @@ impl Default for Node {
             from_rot: [0.0, 0.0, 0.0, 1.0],
             mtx: IDENTITY,
             parent: IDENTITY,
+            prev_pos: [0.0; 3],
         }
     }
 }
@@ -310,6 +313,33 @@ impl Obj {
     pub(crate) fn node(&self, id: u32) -> Option<&Node> {
         let i = (*self.node_index.get(id as usize)?)?;
         self.nodes.get(usize::from(i))
+    }
+
+    /// `BtlObj_SaveNodePositions`: every node's position in the object's frame, less node 0's local translation
+    /// when `relative`.
+    pub(crate) fn save_node_positions(&mut self, relative: bool) {
+        let inv = crate::battle::inverse_rt(&self.mtx);
+        let r = match self.node(0) {
+            Some(n) if relative => n.pos,
+            _ => [0.0; 3],
+        };
+        for n in &mut self.nodes {
+            let p = apply(&inv, n.mtx[3]);
+            n.prev_pos = [p[0] - r[0], p[1] - r[1], p[2] - r[2]];
+        }
+    }
+
+    /// `BtlObj_GetNodeVelocity`: node `id`'s movement in the object's frame since the snapshot; zero without it.
+    pub(crate) fn node_velocity(&self, id: u32) -> [f32; 3] {
+        let Some(n) = self.node(id) else {
+            return [0.0; 3];
+        };
+        let p = apply(&crate::battle::inverse_rt(&self.mtx), n.mtx[3]);
+        [
+            p[0] - n.prev_pos[0],
+            p[1] - n.prev_pos[1],
+            p[2] - n.prev_pos[2],
+        ]
     }
 
     /// `BtlCharApi_GetNodePos`: node `id`'s world position (the object's position without the node).

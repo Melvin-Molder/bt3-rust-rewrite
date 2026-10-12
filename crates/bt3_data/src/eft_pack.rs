@@ -448,6 +448,9 @@ pub fn common_entry(file: &[u8], idx: usize) -> Option<&[u8]> {
 /// `EftRayMgr_Init`: the ray bursts' texture set is common effect entry 10.
 pub const COMMON_RAY_TEXTURES: usize = 10;
 
+/// `EftSpdLine_Init`: the speed lines' texture set is common effect entry 0x237.
+pub const COMMON_SPDLINE_TEXTURES: usize = 0x237;
+
 /// `EftShotTechMgr_Init` / `EftRushShotMgr_Init`: the camera animation a rush technique of slot `slot` (2..4)
 /// plays once it connects: sub-entry `slot - 1` of entry 8 of the character pack (`BtlScene_GetCharPackEntry`,
 /// entry 6 of the second animation file); `None` when it is empty.

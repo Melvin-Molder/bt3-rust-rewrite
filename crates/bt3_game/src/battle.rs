@@ -126,6 +126,8 @@ pub struct BattleAssets {
     pub(crate) ray_texture: Option<usize>,
     /// `gEftGndDust->tex`: the ground dust's texture set (common effect entry 0xB) among the effect textures.
     pub(crate) dust_textures: Vec<usize>,
+    /// `gEftSpdLine->tex[0]`: the speed lines' texture (common effect entry 0x237) among the effect textures.
+    pub(crate) spdline_texture: Option<usize>,
     /// Stage pack entry 0x12's textures among the effect textures, on a stage that has the entry.
     pub(crate) stage_pack12: Option<Vec<usize>>,
     /// Stage pack entry 0xE's textures (the storm's) among the effect textures.
@@ -356,6 +358,7 @@ pub fn load(
         effect_textures: Vec::new(),
         ray_texture: None,
         dust_textures: Vec::new(),
+        spdline_texture: None,
         stage_pack12: None,
         stage_pack14: None,
         stage_pack11: None,
@@ -448,6 +451,17 @@ pub fn load(
                 .effect_textures
                 .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
         }
+    }
+    // EftSpdLine_Init: EftTexSet_Load4 of common effect entry 0x237; every segment draws the first texture.
+    if let Some(entry) =
+        bt3_data::eft_pack::common_entry(&common_fx, bt3_data::eft_pack::COMMON_SPDLINE_TEXTURES)
+        && let Ok(res) = TextureResource::parse(entry)
+        && let Some(e) = res.entries.first()
+    {
+        assets.spdline_texture = Some(assets.effect_textures.len());
+        assets
+            .effect_textures
+            .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
     }
     assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
     assets.stage_pack14 = pack14.map(|t| assets.push_effect_textures(t));
@@ -2362,6 +2376,9 @@ impl Battle {
                     .map(crate::btl_clash::Clash::in_clash_a),
                 node3: self.roster.chars.each_ref().map(|c| c.obj.node_pos(3)),
                 ray_texture: self.assets.ray_texture,
+                // Drawing does not test them.
+                paused: false,
+                in_technique: [false; 2],
             };
             // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else side 0's view.
             let demo = self.demo.is_active();
@@ -2378,6 +2395,13 @@ impl Battle {
                 self.seq.paused,
                 &mut *libc,
             );
+            // Layer 3: the speed lines, then the particle modules.
+            self.roster
+                .scene
+                .spdlines
+                .draw(&mut ot, &ctx, self.assets.spdline_texture, |chr| {
+                    demo || chr == 0
+                });
             self.roster
                 .scene
                 .fx
@@ -3218,9 +3242,11 @@ mod tests {
             battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
         }
         assert_eq!(battle.seq.state, SeqState::Fight);
-        battle.roster.chars[0].gauge.health -= 1000;
+        // Mode 5 gives back 200 health a frame: P1's is held 1000 down (a tie would be a libc coin flip).
+        let full = battle.roster.chars[0].gauge.health;
         let mut frames = 0;
         while battle.seq.state == SeqState::Fight && frames < 2000 {
+            battle.roster.chars[0].gauge.health = full - 1000;
             battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
             frames += 1;
         }
@@ -3229,6 +3255,74 @@ mod tests {
         assert_eq!(battle.seq.winner, crate::battle_seq::WIN_P2);
         // 45 s at 30 frames a second, give or take the clock's 34 / 32 ms steps.
         assert!((1340..=1360).contains(&frames), "{frames}");
+    }
+
+    #[test]
+    fn real_speed_line_requests_raise_trails_and_the_screen_rays() {
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..10 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        // The common effect file's speed-line textures load.
+        assert!(battle.assets.spdline_texture.is_some());
+        let data = [
+            side_data(&battle.assets.fighters[0]),
+            side_data(&battle.assets.fighters[1]),
+        ];
+        // The model's parts carry a size factor.
+        assert!(data[0].obj.model.parts.iter().any(|p| p.extent[3] > 0.0));
+        let roster = &mut battle.roster;
+        // A snapshot taken where the nodes are: no movement since.
+        roster.chars[0].obj.save_node_positions(false);
+        let v = roster.chars[0].obj.node_velocity(0x13);
+        assert!(v.iter().all(|c| c.abs() < 1e-3), "{v:?}");
+        // Request 0xB while moving fast: a trail behind each of the eleven body nodes (more along long limbs).
+        roster.chars[0].set_fx(0xB);
+        roster.chars[0].pose.speed = 1.0;
+        roster.chars[0].pose.vel = [0.0, 0.0, 1.0];
+        roster.chars[0].pose.dir = [0.0, 0.0, 1.0];
+        // Request 0x15: the screen's speed lines, a mode 2 ray burst.
+        roster.chars[0].set_fx(0x15);
+        crate::btl_mgr::speed_fx(
+            &roster.chars[0],
+            &roster.chars[1],
+            &data[0],
+            &mut roster.scene,
+            &mut libc,
+        );
+        let (trails, streaks) = roster.scene.spdlines.counts();
+        assert!(trails >= 11, "{trails}");
+        assert_eq!(streaks, 0);
+        assert_eq!(roster.scene.fx.rays_of_mode(crate::eft_ray::MODE_TECH), 1);
+        // The trails last two updates; the burst at most 0.8 s, then it is gone at once (no fade frames).
+        for _ in 0..2 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        assert_eq!(battle.roster.scene.spdlines.counts().0, 0);
+        assert_eq!(
+            battle
+                .roster
+                .scene
+                .fx
+                .rays_of_mode(crate::eft_ray::MODE_TECH),
+            1
+        );
+        for _ in 0..24 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        assert_eq!(
+            battle
+                .roster
+                .scene
+                .fx
+                .rays_of_mode(crate::eft_ray::MODE_TECH),
+            0
+        );
     }
 
     #[test]
@@ -3258,9 +3352,20 @@ mod tests {
         let mut pressed = 0u32;
         let mut min_gap = start_gap;
         let mut dust = 0;
+        let (mut trails, mut streaks, mut speed_rays) = (0, 0, 0);
         for _ in 0..5400 {
             battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
             dust = dust.max(battle.roster.scene.gdust.fighter_parts());
+            let (t, s) = battle.roster.scene.spdlines.counts();
+            trails = trails.max(t);
+            streaks = streaks.max(s);
+            speed_rays = speed_rays.max(
+                battle
+                    .roster
+                    .scene
+                    .fx
+                    .rays_of_mode(crate::eft_ray::MODE_TECH),
+            );
             actions.insert(battle.roster.chars[1].act.current);
             pressed |= battle.roster.chars[1].input.inject_buttons;
             min_gap = min_gap.min(gap(&battle));
@@ -3275,6 +3380,8 @@ mod tests {
         assert!(pressed != 0, "the CPU pressed nothing");
         // The fight raises the fighters' dust (dashes, landings, falls).
         assert!(dust > 0);
+        // Dashes leave trails, fast limbs streaks (event 8).
+        assert!(trails > 0 && streaks > 0, "{trails} {streaks} {speed_rays}");
         assert!(min_gap < start_gap - 10.0, "the CPU did not close in");
         assert!(
             battle.roster.chars[0].gauge.health < health,

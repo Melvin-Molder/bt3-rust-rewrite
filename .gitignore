@@ -87,6 +87,7 @@
 !/crates/bt3_game/src/eft_rays.rs
 !/crates/bt3_game/src/eft_ribbon.rs
 !/crates/bt3_game/src/eft_smoke.rs
+!/crates/bt3_game/src/eft_spdline.rs
 !/crates/bt3_game/src/eft_storm.rs
 !/crates/bt3_game/src/eft_surf.rs
 !/crates/bt3_data/src/eft_mesh.rs
