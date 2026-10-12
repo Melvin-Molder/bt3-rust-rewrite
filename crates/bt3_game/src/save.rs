@@ -26,6 +26,13 @@ pub struct SaveData {
     pub rules: [i32; 6],
     /// `rec[14].chara`: the saved custom characters, -1 for none.
     pub rec_chara: [i32; 14],
+    /// `rec[14].item` / `.level`: their item sets and levels.
+    pub rec_items: [[u16; 8]; 14],
+    pub rec_level: [u16; 14],
+    /// `custom[97]`: per character slot of the grid the three item sets (`item[3][8]`, 1-based ids, empty in a new
+    /// save: items are equipped in the customisation menu) and the level.
+    pub custom_items: Vec<[[u16; 8]; 3]>,
+    pub custom_level: Vec<u16>,
 }
 
 impl Default for SaveData {
@@ -43,6 +50,10 @@ impl Default for SaveData {
             bgm_bits: (1 << BGM_COUNT) - 1,
             rules: DEFAULT_RULES,
             rec_chara: [-1; 14],
+            rec_items: [[0; 8]; 14],
+            rec_level: [0; 14],
+            custom_items: vec![[[0; 8]; 3]; 97],
+            custom_level: vec![0; 97],
         }
     }
 }

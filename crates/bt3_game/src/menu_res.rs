@@ -50,11 +50,20 @@ pub fn decode_picture(res: &[u8], section: usize) -> Result<Vec<RgbaTexture>, Bo
     Ok(tiles)
 }
 
+/// Every entry of a texture file; an entry that only uploads a palette (no pixels, as the item pages' extra CLUTs)
+/// keeps its place as an empty texture.
 pub fn decode_file(data: &[u8]) -> Result<Vec<RgbaTexture>, Box<dyn Error>> {
     Ok(TextureResource::parse(data)?
         .entries
         .iter()
-        .map(decode_sprite_texture)
+        .map(|e| match e.pixel_data {
+            None => Ok(RgbaTexture {
+                width: 1,
+                height: 1,
+                pixels: vec![0; 4],
+            }),
+            Some(_) => decode_sprite_texture(e),
+        })
         .collect::<Result<Vec<_>, _>>()?)
 }
 

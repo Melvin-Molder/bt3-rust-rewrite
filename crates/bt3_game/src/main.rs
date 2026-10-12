@@ -48,6 +48,7 @@ mod hud_combo;
 mod hud_gauge;
 mod hud_gs;
 mod hud_team;
+mod item_panel;
 mod loading;
 mod logo;
 mod main_menu;
@@ -233,8 +234,8 @@ struct Game {
     char_select: Option<CharSelData>,
     /// The character select's fields of `gProgress`.
     char_progress: CharSelProgress,
-    /// `ChrTbl_WrapCostume`'s table (common file 4): costumes per character id.
-    costumes: Vec<i32>,
+    /// Common file 4's character and item tables (`ChrTbl_*`, `ItemTbl_*`).
+    chr_table: bt3_data::chara_data::ChrTable,
     /// Portraits and stage pictures by file: their first texture.
     pictures: HashMap<u32, usize>,
     save: save::SaveData,
@@ -431,7 +432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             duel: DuelProgress::default(),
             char_select: None,
             char_progress: CharSelProgress::default(),
-            costumes: Vec::new(),
+            chr_table: Default::default(),
             pictures: HashMap::new(),
             save: save::SaveData::default(),
             bgm_sources: HashMap::new(),
@@ -1618,24 +1619,13 @@ impl char_select::PictureLoader for Pictures<'_> {
 
 /// Progress_Main mode 39: `CharSel_Run(2)` (it starts its own music).
 fn start_char_select(game: &mut Game, commands: &mut Commands) {
-    if game.costumes.is_empty() {
-        // Common file 4: word 1 is the byte offset of the 0x3C-byte character entries; +0xA the costume count.
+    if game.chr_table.costumes.is_empty() {
+        // Common file 4: the character entries and the item table.
         match Iso9660::open(&game.iso_path)
             .map_err(Into::into)
             .and_then(|mut image| read_file(&mut image, 4))
         {
-            Ok(file) => {
-                let base = file.get(4..8).map_or(0, |b| {
-                    u32::from_le_bytes(b.try_into().unwrap()) as usize & !3
-                });
-                game.costumes = (0..0xA1)
-                    .map(|id| {
-                        let at = base + id * 0x3C + 0xA;
-                        file.get(at..at + 2)
-                            .map_or(1, |b| i32::from(u16::from_le_bytes([b[0], b[1]])))
-                    })
-                    .collect();
-            }
+            Ok(file) => game.chr_table = bt3_data::chara_data::ChrTable::parse(&file, 0xA1),
             Err(error) => error!("cannot read the character table: {error}"),
         }
     }
@@ -1680,7 +1670,7 @@ fn start_char_select(game: &mut Game, commands: &mut Commands) {
         game.duel.players,
         game.char_progress,
         &game.save,
-        game.costumes.clone(),
+        game.chr_table.clone(),
         &mut loader,
         &mut game.random,
         &mut sounds,

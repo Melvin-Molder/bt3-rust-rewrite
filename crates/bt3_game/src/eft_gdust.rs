@@ -140,6 +140,7 @@ impl GndDust {
     }
 
     /// The particles alive.
+    #[cfg(test)]
     pub(crate) fn count(&self) -> usize {
         self.tasks.iter().map(|t| t.parts.len()).sum()
     }

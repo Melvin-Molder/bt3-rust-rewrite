@@ -999,6 +999,111 @@ impl CommonTables {
 const ITEM_TYPE_AI: u8 = 2;
 const ITEM_AI_FIRST: i32 = 0x87;
 const ITEM_SIZE: usize = 0x28;
+/// `SAVE_ITEM_COUNT`: the item table's entries.
+pub const ITEM_COUNT: usize = 350;
+/// `ITEMSET_USABLE`: the ids of a set `ItemSet_Fit` looks at.
+const ITEMSET_USABLE: usize = 7;
+
+/// The menus' view of an item entry (`ItemTblEntry` / `VItemEntry`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ItemInfo {
+    /// The column of its kind icon.
+    pub kind: u8,
+    pub group: u8,
+    /// The details page's picture: its texture, and its cell of the icon sheet.
+    pub picture: u8,
+    /// How many of a character's item slots it takes.
+    pub slots: u8,
+    pub flags: i32,
+}
+
+impl ItemInfo {
+    /// `ItemTbl_GetClass`: 0 / 1 for an item flagged 8 (without / with flag 0x10), else 2.
+    pub fn class(&self) -> i32 {
+        if self.flags & 8 != 0 {
+            i32::from(self.flags & 0x10 != 0)
+        } else {
+            2
+        }
+    }
+}
+
+/// The character and item tables of common file 4 as the menus read them (`ChrTbl_*`, `ItemTbl_*`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChrTable {
+    /// Per character id: `costumes` (+0xA) and `baseSlots` (+0xE).
+    pub costumes: Vec<i32>,
+    pub base_slots: Vec<i32>,
+    pub items: Vec<ItemInfo>,
+}
+
+impl ChrTable {
+    /// The `count` characters and the item table of common file 4.
+    pub fn parse(file: &[u8], count: usize) -> Self {
+        let section = |n: usize| (u32_at(file, n * 4) & !3) as usize;
+        let u16_at = |o: usize| {
+            file.get(o..o + 2)
+                .map(|b| i32::from(u16::from_le_bytes([b[0], b[1]])))
+        };
+        let charas = section(1);
+        let items = section(2);
+        Self {
+            costumes: (0..count)
+                .map(|id| u16_at(charas + id * 0x3C + 0xA).unwrap_or(1))
+                .collect(),
+            base_slots: (0..count)
+                .map(|id| u16_at(charas + id * 0x3C + 0xE).unwrap_or(0))
+                .collect(),
+            items: (0..ITEM_COUNT)
+                .map(|i| {
+                    let e = items + i * ITEM_SIZE;
+                    let b = |k: usize| file.get(e + k).copied().unwrap_or(0);
+                    ItemInfo {
+                        kind: b(0),
+                        group: b(1),
+                        picture: b(2),
+                        slots: b(3),
+                        flags: u32_at(file, e + 0x14) as i32,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// `ChrTbl_GetItemSlots` without a saved level: the character's base slots plus `level`.
+    pub fn item_slots(&self, chara: i32, level: i32) -> i32 {
+        usize::try_from(chara)
+            .ok()
+            .and_then(|c| self.base_slots.get(c))
+            .map_or(0, |&b| b + level)
+    }
+
+    /// `ItemSet_Fit`: the items of the first seven ids that fit in `capacity` slots (the rest of the set from the
+    /// first that does not is emptied); returns the slots taken and, as `used`, the ids kept plus the slots left.
+    pub fn item_set_fit(&self, ids: &mut [u16; 8], capacity: i32) -> (i32, i32) {
+        let mut total = 0;
+        let mut used = 0;
+        for i in 0..ITEMSET_USABLE {
+            let id = ids[i];
+            if id == 0 {
+                continue;
+            }
+            let slots = self
+                .items
+                .get(usize::from(id) - 1)
+                .map_or(0, |e| i32::from(e.slots));
+            let sum = total + slots;
+            if sum <= capacity {
+                total = sum;
+                used = i as i32 + 1;
+            } else {
+                ids[i..ITEMSET_USABLE].fill(0);
+                break;
+            }
+        }
+        (total, used + capacity - total)
+    }
+}
 
 /// What a member's items add up to in a battle (`ItemSet_GetStats`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -54,6 +54,7 @@
 !/crates/bt3_game/src/menu_res.rs
 !/crates/bt3_game/src/duel_menu.rs
 !/crates/bt3_game/src/char_select.rs
+!/crates/bt3_game/src/item_panel.rs
 !/crates/bt3_game/src/chr_cam.rs
 !/crates/bt3_game/src/save.rs
 !/crates/bt3_game/src/battle.rs

@@ -1,9 +1,10 @@
 //! The character / stage / music select of the versus modes (`CharSel_Run(2)`, src/menu/char_select.c, progress
 //! mode 39): two seven-column character reels with forms, item sets and costumes, then the stage reel and the
-//! music list. It ends by writing the battle setup.
+//! music list. It ends by writing the battle setup, the chosen item set's items taken from the save.
 //!
-//! Not ported yet: the item panel and the item description window (`ItemPanel_*`, `ItemHelp_*`), so an item set
-//! cannot be looked at; the saved custom characters are never listed because nothing is saved.
+//! An item set is looked at in the side's item panel (`ItemPanel_*`) and an item in the details page
+//! (`ItemHelp_*`, `item_panel`). Nothing is saved yet, so the sets are those of a new save (empty) and the saved
+//! custom characters are never listed.
 
 use std::error::Error;
 
@@ -15,6 +16,7 @@ use crate::flash::{
     ClipRef, FLASH_PAD, Flash, PROP_MASK, PROP_MASK_SET, PROP_VISIBLE, Uv, screen_quads,
 };
 use crate::font::Font;
+use crate::item_panel::{ItemAssets, ItemHelp, ItemPanel, help_textures, panel_textures};
 use crate::logo::{ColorFade, picture_quads};
 use crate::menu_res::{FileKey, ImageTexture, decode_files, image_indices, tex};
 use crate::rng::GameRandom;
@@ -24,6 +26,7 @@ use crate::title::{
     TitleSound,
 };
 use crate::windows::{IconWin, TextBox, TextDraw, draw_texts};
+use bt3_data::chara_data::ChrTable;
 
 /// `CharSel_Run(2)` unpacks section 2 of gMenuArc5.
 pub const ARCHIVE_SECTION: usize = 2;
@@ -192,6 +195,8 @@ pub struct CharSelData {
     /// Section 39: the stage grid; section 56: the music list.
     stage_ids: Vec<i32>,
     bgm_ids: Vec<i32>,
+    /// Sections 53 and 51: the item panels and the details page.
+    pub items: ItemAssets,
     pub layout: CharSelLayout,
 }
 
@@ -202,6 +207,8 @@ pub struct CharSelLayout {
     side: [Vec<Option<usize>>; 2],
     plate: [Vec<Option<usize>>; 2],
     icon: Vec<Option<usize>>,
+    panel: [Vec<Option<usize>>; 2],
+    help: Vec<Option<usize>>,
     /// Entry 0 of section 55 (the icon window's icons).
     icons: usize,
     /// Per character id + 1: the reel chip (section 45); per stage id + 1: the stage chip (section 46).
@@ -216,6 +223,8 @@ impl CharSelLayout {
             side: [0, 1].map(|s| image_indices(&side_textures(s), &first)),
             plate: [0, 1].map(|s| image_indices(&plate_textures(s), &first)),
             icon: image_indices(&ICON_TEXTURES, &first),
+            panel: [0, 1].map(|s| image_indices(&panel_textures(s), &first)),
+            help: image_indices(&help_textures(), &first),
             icons: first((55, 0)),
             chips: (1..=CELL_MAX).map(|n| first((45, n))).collect(),
             stage_chips: (1..=38).map(|n| first((46, n))).collect(),
@@ -242,6 +251,9 @@ impl CharSelAssets {
             plate_textures(0).to_vec(),
             plate_textures(1).to_vec(),
             ICON_TEXTURES.to_vec(),
+            panel_textures(0).to_vec(),
+            panel_textures(1).to_vec(),
+            help_textures().to_vec(),
         ];
         tables.push((1..=CELL_MAX).map(|n| Some(((45, n), 0))).collect());
         tables.push((1..=38).map(|n| Some(((46, n), 0))).collect());
@@ -268,6 +280,7 @@ impl CharSelAssets {
                 master,
                 stage_ids,
                 bgm_ids,
+                items: ItemAssets::parse(res)?,
                 layout: CharSelLayout::default(),
             },
             files,
@@ -414,8 +427,12 @@ pub struct CharSelScreen {
     /// The portrait / stage picture the loader is bringing in.
     loading_face: Option<usize>,
     loading_stage: Option<usize>,
-    /// `ChrTbl_WrapCostume`'s table: costumes per character id.
-    costumes: Vec<i32>,
+    /// Common file 4's tables (`ChrTbl_WrapCostume`, `ChrTbl_GetItemSlots`, the items).
+    chr: ChrTable,
+    /// The item panels of both sides, the details page and the item it shows (`itemInfo`).
+    panels: [ItemPanel; 2],
+    help: ItemHelp,
+    item_info: usize,
     progress: CharSelProgress,
     running: bool,
     done: Option<CharSelResult>,
@@ -429,7 +446,7 @@ impl CharSelScreen {
         players: i32,
         progress: CharSelProgress,
         save: &SaveData,
-        costumes: Vec<i32>,
+        chr: ChrTable,
         loader: &mut dyn PictureLoader,
         random: &mut GameRandom,
         sounds: &mut Vec<TitleSound>,
@@ -493,7 +510,13 @@ impl CharSelScreen {
             face_mask: 0,
             loading_face: None,
             loading_stage: None,
-            costumes,
+            panels: [
+                ItemPanel::new(0, &data.items, data.layout.panel[0].clone())?,
+                ItemPanel::new(1, &data.items, data.layout.panel[1].clone())?,
+            ],
+            help: ItemHelp::new(&data.items, data.layout.help.clone())?,
+            item_info: 0,
+            chr,
             progress,
             running: true,
             done: None,
@@ -817,7 +840,7 @@ impl CharSelScreen {
                 };
             }
         } else {
-            self.input(pad, random, &mut frame.sounds);
+            self.input(pad, save, random, &mut frame.sounds);
         }
         frame
     }
@@ -887,6 +910,9 @@ impl CharSelScreen {
     fn update(&mut self) {
         for f in &mut self.flash {
             f.advance();
+        }
+        for p in &mut self.panels {
+            p.update();
         }
         for i in 0..2 {
             if self.side[i].mask != 0 && self.flash[1 + i].trig() & 1 != 0 {
@@ -1154,6 +1180,10 @@ impl CharSelScreen {
         }
         font.flush(quads);
         self.icon.draw(quads);
+        for p in &mut self.panels {
+            p.draw(&self.chr, font, quads);
+        }
+        self.help.draw(self.item_info, &self.chr, font, quads);
     }
 
     /// `IconWin_SetIcon(icon)`: texture `icon + 1` of the icon file.
@@ -1166,6 +1196,7 @@ impl CharSelScreen {
     fn input(
         &mut self,
         pad: [(u32, u32); 2],
+        save: &SaveData,
         random: &mut GameRandom,
         sounds: &mut Vec<TitleSound>,
     ) {
@@ -1378,8 +1409,43 @@ impl CharSelScreen {
                         self.clip_goto(plate, n, Clip::CustomPlate, "fl_on_start");
                         se(sounds, 1, 0);
                     } else if pressed & if n == 0 { PAD_RIGHT } else { PAD_LEFT } != 0 {
-                        // Looking at the item set opens the item panel (ItemPanel_*), which is not ported yet.
-                        continue;
+                        // Towards the middle of the screen: look at the item set.
+                        let plate = self.side[n].pick.custom_plate;
+                        if plate <= 0 || self.cell(n).id == ID_RANDOM {
+                            continue;
+                        }
+                        self.clip_goto(n + 3, n, Clip::CustomPlate, "fl_ok");
+                        let p = self.side[n].pick;
+                        let chara = self.side[n].chara;
+                        if self.cell(n).id == ID_CUSTOM {
+                            let slot = (p.custom_col + p.custom_row * 7) as usize;
+                            let items = save.rec_items.get(slot).copied().unwrap_or_default();
+                            let level = save.rec_level.get(slot).copied().unwrap_or(0);
+                            self.panels[n].set_chara(
+                                chara,
+                                items,
+                                level.into(),
+                                0,
+                                true,
+                                &self.chr,
+                            );
+                        } else {
+                            let slot = (p.col + p.row * 7) as usize;
+                            let set = (plate - 1) as usize;
+                            let items = save.custom_items.get(slot).map_or([0; 8], |s| s[set]);
+                            let level = save.custom_level.get(slot).copied().unwrap_or(0);
+                            self.panels[n].set_chara(
+                                chara,
+                                items,
+                                level.into(),
+                                plate - 1,
+                                false,
+                                &self.chr,
+                            );
+                        }
+                        self.panels[n].show(sounds);
+                        self.side[n].flags |= SIDE_ITEMS;
+                        self.side[n].state = ST_ITEMS;
                     } else if pressed & PAD_CROSS != 0 {
                         self.flash[plate].goto_label("fl_color_in", true);
                         self.clip_goto(plate, n, Clip::CustomPlate, "fl_ok");
@@ -1393,7 +1459,26 @@ impl CharSelScreen {
                         se(sounds, 1, 2);
                     }
                 }
-                ST_ITEMS | ST_ITEMINFO => {}
+                ST_ITEMS => {
+                    let r = self.panels[n].input(pressed, repeat, sounds);
+                    if r > 0 {
+                        self.help.open();
+                        self.item_info = (r - 1) as usize;
+                        self.side[n].state = ST_ITEMINFO;
+                    } else if r < 0 {
+                        self.panels[n].hide(sounds);
+                        self.side[n].flags &= !SIDE_ITEMS;
+                        self.clip_goto(plate, n, Clip::CustomPlate, "fl_on_start");
+                        self.side[n].state = ST_ITEMSET;
+                    }
+                }
+                ST_ITEMINFO => {
+                    if pressed & (PAD_CROSS | PAD_TRIANGLE) != 0 {
+                        self.help.close();
+                        self.side[n].state = ST_ITEMS;
+                        se(sounds, 1, 2);
+                    }
+                }
                 ST_COLOR => {
                     if repeat & (PAD_LEFT | PAD_RIGHT) != 0 {
                         self.clip_goto(plate, n, Clip::ColorPlate, "fl_off_start");
@@ -1409,7 +1494,7 @@ impl CharSelScreen {
                         self.clip_goto(plate, n, Clip::ColorPlate, "fl_on_start");
                         se(sounds, 1, 0);
                     } else if pressed & PAD_CROSS != 0 {
-                        self.confirm_color(n, i, random);
+                        self.confirm_color(n, i, save, random);
                         se(sounds, 1, 1);
                     } else if pressed & PAD_TRIANGLE != 0 {
                         self.flash[plate].goto_label("fl_color_cansel", true);
@@ -1538,6 +1623,7 @@ impl CharSelScreen {
     /// `ChrTbl_WrapCostume(chara, &colorPlate)`.
     fn wrap_costume(&mut self, n: usize) -> i32 {
         let count = self
+            .chr
             .costumes
             .get(self.side[n].chara as usize)
             .copied()
@@ -1549,23 +1635,39 @@ impl CharSelScreen {
     }
 
     /// Cross on the costume: the side's character is final (the random cell draws one now).
-    fn confirm_color(&mut self, n: usize, i: usize, random: &mut GameRandom) {
+    fn confirm_color(&mut self, n: usize, i: usize, save: &SaveData, random: &mut GameRandom) {
         let (reel, plate) = (n + 1, n + 3);
         self.side[n].mask = 0;
         self.flash[plate].goto_label("fl_color_ok", true);
         self.flash[reel].goto_label("fl_out", true);
         self.clip_goto(plate, n, Clip::ColorPlate, "fl_ok");
         self.clip_goto(plate, n, Clip::CustomPlate, "fl_off_start");
-        // The saved item sets are all empty (nothing is saved yet), so every plate gives no items.
-        self.side[n].pick.items = [0; 8];
+        // The items of the chosen set (plate 0: none): a saved custom character's, else the character slot's set.
         let s = self.side[n];
+        let set = (s.pick.custom_plate - 1).max(0) as usize;
+        let rec = |slot: i32| {
+            save.rec_items
+                .get(slot as usize)
+                .copied()
+                .unwrap_or_default()
+        };
+        let custom = |slot: usize| save.custom_items.get(slot).map_or([0; 8], |c| c[set]);
+        let custom_slot = s.pick.custom_col + s.pick.custom_row * 7;
+        let has_set = s.pick.custom_plate != 0;
         if s.flags & SIDE_FORMS != 0 {
             self.side[n].pick.picked = s.chip[s.pick.form as usize];
+            self.side[n].pick.items = match has_set {
+                false => [0; 8],
+                true if self.cell(n).id == ID_CUSTOM => rec(custom_slot),
+                true => custom((s.pick.col + s.pick.row * 7) as usize),
+            };
             self.clip_goto(reel, n, Clip::FormChip, "fl_off_start");
         } else if s.flags & SIDE_CUSTOM != 0 {
             self.side[n].pick.picked = s.chip[s.pick.custom_col as usize];
+            self.side[n].pick.items = if has_set { rec(custom_slot) } else { [0; 8] };
             self.clip_goto(reel, n, Clip::CustomChip, "fl_off_start");
         } else {
+            let mut slot = (s.pick.col + s.pick.row * 7) as usize;
             if self.cell(n).id == ID_RANDOM {
                 let cells = &self.cells[n];
                 let k = loop {
@@ -1579,9 +1681,11 @@ impl CharSelScreen {
                     chara = cells[k].form[random.range(cells[k].form_count as u32) as usize];
                 }
                 self.side[n].pick.picked = chara;
+                slot = k;
             } else {
                 self.side[n].pick.picked = self.side[n].chip[self.side[n].pick.col as usize];
             }
+            self.side[n].pick.items = if has_set { custom(slot) } else { [0; 8] };
             self.clip_goto(reel, n, Clip::Chip, "fl_off_start");
         }
         self.side[n].state = ST_DONE;
@@ -2063,7 +2167,9 @@ mod tests {
             data.stage_ids,
             data.bgm_ids
         );
-        let save = SaveData::default();
+        // Side 0's character (grid slot 1) has items in its first set.
+        let mut save = SaveData::default();
+        save.custom_items[1][0] = [3, 7, 0, 0, 0, 0, 0, 0];
         let mut font = Font::new(Vec::new(), 20);
         let mut random = GameRandom::from_key(&[3, 1, 4, 1]);
         let mut sounds = Vec::new();
@@ -2072,7 +2178,10 @@ mod tests {
             0,
             CharSelProgress::default(),
             &save,
-            vec![2; 0xA1],
+            ChrTable {
+                costumes: vec![2; 0xA1],
+                ..ChrTable::default()
+            },
             &mut NoPictures,
             &mut random,
             &mut sounds,
@@ -2104,9 +2213,32 @@ mod tests {
         let quads = step!(0).quads.len();
         println!("{quads} quads on screen");
         assert!(quads > 50);
-        // Side 0: one to the right, then confirm until the costume is taken.
+        // Side 0: one to the right, then confirm until the costume is taken; on the item sets, set 1 is looked at
+        // in the panel and its first item in the details page.
         step!(PAD_RIGHT);
+        let mut looked = false;
         for _ in 0..4 {
+            if screen.side[0].state == ST_ITEMSET && !looked {
+                looked = true;
+                let before = step!(0).quads.len();
+                step!(PAD_DOWN);
+                wait!();
+                assert_eq!(screen.side[0].pick.custom_plate, 1);
+                step!(PAD_RIGHT);
+                wait!();
+                assert_eq!(screen.side[0].state, ST_ITEMS);
+                let shown = step!(0).quads.len();
+                assert!(shown > before + 20, "{before} -> {shown}");
+                step!(PAD_CROSS);
+                wait!();
+                assert_eq!((screen.side[0].state, screen.item_info), (ST_ITEMINFO, 2));
+                step!(PAD_TRIANGLE);
+                wait!();
+                assert_eq!(screen.side[0].state, ST_ITEMS);
+                step!(PAD_TRIANGLE);
+                wait!();
+                assert_eq!(screen.side[0].state, ST_ITEMSET);
+            }
             let state = screen.side[0].state;
             step!(PAD_CROSS);
             wait!();
@@ -2143,5 +2275,7 @@ mod tests {
         assert_eq!(setup.sides[1].cpu_level, 13);
         assert_eq!(setup.time_limit, 4);
         assert_eq!(screen.progress().side[0].picked, setup.sides[0].chara);
+        assert!(looked);
+        assert_eq!(setup.sides[0].items, [3, 7, 0, 0, 0, 0, 0, 0]);
     }
 }

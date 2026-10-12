@@ -173,11 +173,13 @@ impl Burst {
     }
 
     /// `EftBurst_End`: drawn no more.
+    #[cfg(test)]
     pub(crate) fn end(&mut self) {
         self.ended = true;
     }
 
     /// The particles alive.
+    #[cfg(test)]
     pub(crate) fn count(&self) -> usize {
         self.ptcl.iter().filter(|p| p.life != 0).count()
     }
