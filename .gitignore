@@ -3,6 +3,7 @@
 !/Cargo.toml
 !/Cargo.lock
 !/README.md
+!/PROGRESS.md
 !/AGENTS.md
 !/bt3-format-research.md
 !/crates/
