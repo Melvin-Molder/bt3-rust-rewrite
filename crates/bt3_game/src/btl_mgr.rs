@@ -348,7 +348,14 @@ impl Roster {
             );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             self.scene.spawn_held_disc(me, data[i]);
-            water_fx(me, data[i], env, self.scene.water.as_mut(), libc);
+            water_fx(
+                me,
+                data[i],
+                env,
+                self.scene.water.as_mut(),
+                self.scene.bubbles.as_mut(),
+                libc,
+            );
             me.obj.build_volumes(&data[i].obj);
         }
         self.update_queued_damage(data, env);
@@ -595,13 +602,14 @@ impl Roster {
 
 /// `BtlFx_UpdateWaterFx`: when flag 0x11 (in the water) changes, not while flag 0x24 holds the fighter, a splash
 /// on the surface below it sized by its vertical speed and sound 0x3A going in / 0x3B coming out; effect bit 0x19
-/// (the wake) while it moves faster than 6.48 with flag 0x12 (at the surface). `EftBubble_StartBurst` is not
-/// ported.
+/// (the wake) while it moves faster than 6.48 with flag 0x12 (at the surface); going in also starts its bubbles'
+/// burst.
 fn water_fx(
     me: &mut Chr,
     data: &SideData,
     env: &Env,
     mut water: Option<&mut crate::eft_water::Water>,
+    bubbles: Option<&mut crate::eft_bubble::Bubbles>,
     libc: &mut crate::rng::LibcRandom,
 ) {
     if me.flags.test(0x11) != me.flags.test_prev(0x11)
@@ -615,6 +623,11 @@ fn water_fx(
         }
         let id = if me.flags.test(0x11) { 0x3A } else { 0x3B };
         me.play_common(&mut env.snd(), id);
+        if me.flags.test(0x11)
+            && let Some(b) = bubbles
+        {
+            b.start_burst(me.player, me.pose.speed);
+        }
     }
     if me.flags.test(0x12) && crate::btl_chr::length(me.pose.vel) > 6.481_480_6 {
         me.set_fx(0x19);

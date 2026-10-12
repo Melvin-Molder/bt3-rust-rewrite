@@ -1228,14 +1228,14 @@ fn step_spray(s: &mut Spray) -> bool {
 
 /// A projected vertex: GS x, y in 1/16 pixel and the integer z (`Mtx_ProjectPoint`), and Q.
 #[derive(Clone, Copy, Debug)]
-struct Scr {
-    x: i32,
-    y: i32,
-    z: i32,
-    q: f32,
+pub(crate) struct Scr {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub q: f32,
 }
 
-fn project(m: &Mtx, p: V3) -> Scr {
+pub(crate) fn project(m: &Mtx, p: V3) -> Scr {
     let v = apply(m, point(p));
     let q = 1.0 / v[3];
     Scr {
@@ -1247,7 +1247,7 @@ fn project(m: &Mtx, p: V3) -> Scr {
 }
 
 /// `EftWater_IsOnScreen`'s boxes: 2 a little wider than the screen (the drops), else the GS range.
-fn on_screen(v: &Scr, margin: u32) -> bool {
+pub(crate) fn on_screen(v: &Scr, margin: u32) -> bool {
     let (x0, x1, y0, y1) = match margin {
         2 => (0x6800, 0x97FF, 0x6B00, 0x94FF),
         _ => (0, 0xFFEF, 0, 0xFFEF),

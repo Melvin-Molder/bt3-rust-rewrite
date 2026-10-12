@@ -72,6 +72,7 @@
 !/crates/bt3_game/src/eft_bill.rs
 !/crates/bt3_game/src/eft_gdust.rs
 !/crates/bt3_game/src/eft_water.rs
+!/crates/bt3_game/src/eft_bubble.rs
 !/crates/bt3_game/src/eft_burst.rs
 !/crates/bt3_game/src/eft_chain.rs
 !/crates/bt3_game/src/eft_ptcl.rs

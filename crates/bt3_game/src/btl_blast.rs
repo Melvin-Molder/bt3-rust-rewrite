@@ -319,8 +319,9 @@ pub(crate) struct Scene {
     deferred: Vec<Deferred>,
     /// The ground dust (`gEftGndDust`).
     pub gdust: crate::eft_gdust::GndDust,
-    /// The water effects (`gEftDust`), on a stage with them.
+    /// The water effects (`gEftDust`) and the bubbles (`gEftBubble`), on a stage with them.
     pub water: Option<crate::eft_water::Water>,
+    pub bubbles: Option<crate::eft_bubble::Bubbles>,
 }
 
 /// A generator draw made outside the scene update.
@@ -1031,6 +1032,19 @@ impl Scene {
         self.gdust.update(w.paused);
         if let Some(water) = &mut self.water {
             water.update(&water_chars(w.chars, w.data), w.paused, w.libc);
+        }
+        if let Some(b) = &mut self.bubbles {
+            let chars = std::array::from_fn(|i| {
+                let c = &w.chars[i];
+                crate::eft_bubble::BubbleChr {
+                    pos: c.pose.pos,
+                    dir: c.pose.dir,
+                    height: w.data[i].height(),
+                    in_water: c.flags.test(0x11),
+                    nodes: std::array::from_fn(|n| c.obj.node_pos(n as u32)),
+                }
+            });
+            b.update(&chars, w.paused, w.libc);
         }
         // Layer 1: the technique effects.
         self.tech.update(

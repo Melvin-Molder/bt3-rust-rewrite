@@ -1095,6 +1095,15 @@ impl BattleAssets {
         Some(w)
     }
 
+    /// `EftBubble_Init`: the bubble task of stage effect kind 7, with at least six textures in the set.
+    pub(crate) fn new_bubbles(&self) -> Option<crate::eft_bubble::Bubbles> {
+        let textures = self.water_textures.clone()?;
+        let level = self.stage.water_level.unwrap_or(0.0);
+        let mut b = crate::eft_bubble::Bubbles::new(level, self.fx_tables.sin_coef, textures)?;
+        b.split = self.screen_mode == 1;
+        Some(b)
+    }
+
     /// `BtlLoad_EndStageSwap`'s stage half (`StgModel_InitStage`, `StgNav_Rebind`): the stage's resources, its
     /// objects whole, its textures to upload again.
     fn install_stage(&mut self, s: LoadedStage, stage_id: i32) {
@@ -1135,6 +1144,7 @@ impl Battle {
         let mut roster = roster;
         roster.scene.gdust = crate::eft_gdust::GndDust::new(assets.stage.dust.as_ref());
         roster.scene.water = assets.new_water();
+        roster.scene.bubbles = assets.new_bubbles();
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -1388,6 +1398,7 @@ impl Battle {
                             self.assets.install_stage(loaded, stage);
                             // EftStage_CreateKinds: the new stage's effects.
                             self.roster.scene.water = self.assets.new_water();
+                            self.roster.scene.bubbles = self.assets.new_bubbles();
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -1634,6 +1645,7 @@ impl Battle {
                 Ok(loaded) => {
                     self.assets.install_stage(loaded, start);
                     self.roster.scene.water = self.assets.new_water();
+                    self.roster.scene.bubbles = self.assets.new_bubbles();
                     self.assets
                         .reload_bank(read, 8, SND_STAGE_FILE + start.max(0) as u32);
                     self.light_dir =
@@ -1703,6 +1715,7 @@ impl Battle {
         // The scene's dust manager keeps the starting stage's template.
         self.roster.scene.gdust = crate::eft_gdust::GndDust::new(self.assets.stage.dust.as_ref());
         self.roster.scene.water = self.assets.new_water();
+        self.roster.scene.bubbles = self.assets.new_bubbles();
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         self.fade = Fade::start_in(1.0);
         self.started = false;
@@ -1955,6 +1968,9 @@ impl Battle {
             }
         }
         self.amb_cam = Some(view.eye());
+        if let Some(b) = &mut self.roster.scene.bubbles {
+            b.cam = Some(view.world2view);
+        }
         input.sounds.append(&mut self.amb.out);
         self.step_change_job(paused);
         // EftBurst_Update (not while paused): its particles, frame and sounds.
@@ -2069,6 +2085,9 @@ impl Battle {
             // Layer 0's stage effects, then the others.
             if let Some(w) = &self.roster.scene.water {
                 w.draw(&mut ot, &ctx);
+            }
+            if let Some(b) = &self.roster.scene.bubbles {
+                b.draw(&mut ot, &ctx.world2view, &ctx.world2screen);
             }
             self.roster
                 .scene
@@ -5053,6 +5072,30 @@ mod tests {
                 .count();
         }
         assert!(drawn > 20, "stage {stage}: {drawn}");
+        // The bubbles need six textures: only stage 22's set has them.
+        for &(s, n) in &water {
+            assert_eq!(n >= 6, s == 22, "stage {s}: {n}");
+        }
+        assert!(battle.roster.scene.bubbles.is_none());
+        setup.stage = 22;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let b = battle.roster.scene.bubbles.as_mut().unwrap();
+        b.start_burst(0, 10.0);
+        assert_eq!(b.burst(0), 50.0);
+        for _ in 0..8 {
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+        }
+        assert_eq!(battle.roster.scene.bubbles.as_ref().unwrap().burst(0), 0.0);
     }
 
     #[test]
