@@ -324,6 +324,8 @@ pub(crate) struct Scene {
     pub bubbles: Option<crate::eft_bubble::Bubbles>,
     /// The boundary walls (`gEftBound`).
     pub bound: Option<crate::eft_bound::Bound>,
+    /// The scrolling sheet (`gEftStageScroll`).
+    pub scroll: Option<crate::stg_scroll::Scroll>,
 }
 
 /// A generator draw made outside the scene update.
@@ -1030,8 +1032,11 @@ impl Scene {
                 }
             }
         }
-        // The ground dust (BtlScene_IsTimeStopped: paused), the water.
+        // The ground dust (BtlScene_IsTimeStopped: paused); the stage effects of layer 0 in their table's order.
         self.gdust.update(w.paused);
+        if let Some(s) = &mut self.scroll {
+            s.update(w.paused);
+        }
         if let Some(water) = &mut self.water {
             water.update(&water_chars(w.chars, w.data), w.paused, w.libc);
         }

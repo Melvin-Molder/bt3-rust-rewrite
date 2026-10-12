@@ -9,6 +9,7 @@ pub mod bpe;
 pub mod burst;
 pub mod cam_anim;
 pub mod chara_data;
+pub mod eft_mesh;
 pub mod eft_pack;
 pub mod elf;
 pub mod fod;

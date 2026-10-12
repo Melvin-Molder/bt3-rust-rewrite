@@ -130,6 +130,8 @@ pub struct BattleAssets {
     pub(crate) water_textures: Option<Vec<usize>>,
     /// The boundary wall's parameters and texture (stage pack entries 0x15..0x17), on a stage with them.
     pub(crate) bound: Option<(bt3_data::stage::StageBound, Option<usize>)>,
+    /// The scrolling sheet (stage pack entry 7) and its first texture among the stage textures.
+    pub(crate) scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
     pub(crate) fighters: Vec<FighterModel>,
     /// The light ramp the shading rows are looked up through, and common file 2 (`BtlLoad_StepChara` reloads a
     /// side with them).
@@ -280,6 +282,7 @@ pub fn load(
         nav,
         water_textures,
         bound,
+        scroll,
     } = load_stage(read, setup.stage)?;
     // BtlLoad_StepInitial: the common, stage and both sides' sample banks.
     let mut snd = crate::btl_snd::CharSound::default();
@@ -345,6 +348,7 @@ pub fn load(
         dust_textures: Vec::new(),
         water_textures: None,
         bound: None,
+        scroll,
         fighters: Vec::new(),
         ramp: Vec::new(),
         common_file: Vec::new(),
@@ -755,6 +759,8 @@ pub(crate) struct LoadedStage {
     water_textures: Option<Vec<RgbaTexture>>,
     /// `EftBoundMgr_Init`: the parameters (entry 23), colour (22) and textures (21), when all three are there.
     bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
+    /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
+    scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
 }
 
 /// Reads stage `stage_id`'s file (`BTL_FILE_STAGE + stage`).
@@ -767,7 +773,7 @@ fn load_stage(
     let stage = StageResource::parse(&stage_file).map_err(error)?;
     let object = StageModel::object(&stage_file).map_err(error)?;
     let model = StageModel::parse(object).map_err(error)?;
-    let textures = TextureResource::parse_at(object, model.texture_header)
+    let mut textures = TextureResource::parse_at(object, model.texture_header)
         .map_err(error)?
         .entries
         .iter()
@@ -820,6 +826,21 @@ fn load_stage(
     } else {
         None
     };
+    let scroll = if entry_size(7) > 0 {
+        let sheet =
+            bt3_data::eft_mesh::StageScroll::parse(pack_section(&stage_file, 7).map_err(error)?)
+                .map_err(error)?;
+        let base = textures.len();
+        for e in &TextureResource::parse(pack_section(&stage_file, 6).map_err(error)?)
+            .map_err(error)?
+            .entries
+        {
+            textures.push(decode_sprite_texture(e).map_err(error)?);
+        }
+        Some((sheet, base))
+    } else {
+        None
+    };
     Ok(LoadedStage {
         stage,
         model,
@@ -827,6 +848,7 @@ fn load_stage(
         cuts,
         water_textures,
         bound,
+        scroll,
         collision: StageCollision::parse(&stage_file).map_err(error)?,
         nav: StageNav::parse(&stage_file).map_err(error)?,
     })
@@ -1118,6 +1140,12 @@ impl BattleAssets {
         Some(w)
     }
 
+    /// `EftStageScroll_Init`: the sheet of kind 0, with `loads` loads to run before its first update.
+    pub(crate) fn new_scroll(&self, loads: u32) -> Option<crate::stg_scroll::Scroll> {
+        let (sheet, base) = self.scroll.clone()?;
+        Some(crate::stg_scroll::Scroll::new(sheet, base, loads))
+    }
+
     /// `EftBoundMgr_Init`: the boundary walls of kind 8, with the fighters' body radii.
     pub(crate) fn new_bound(&self) -> Option<crate::eft_bound::Bound> {
         let (param, texture) = self.bound?;
@@ -1150,6 +1178,7 @@ impl BattleAssets {
         self.bound = s
             .bound
             .map(|(p, t)| (p, self.push_effect_textures(t).first().copied()));
+        self.scroll = s.scroll;
         self.stage_id = stage_id;
         self.stage_rev += 1;
     }
@@ -1180,6 +1209,8 @@ impl Battle {
         roster.scene.water = assets.new_water();
         roster.scene.bubbles = assets.new_bubbles();
         roster.scene.bound = assets.new_bound();
+        // The task's init and Battle_Restart's reset.
+        roster.scene.scroll = assets.new_scroll(2);
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -1339,7 +1370,7 @@ impl Battle {
     /// frames are over, the fade out to the slot's colour; covered, the transition ends; the new stage in
     /// (`BtlLoad_EndStageSwap`: the fighters back at their starting places); the fade in. The stage's sound bank,
     /// the transition's particles and the stage effects are not ported.
-    fn step_stage_job(&mut self, paused: bool) {
+    fn step_stage_job(&mut self, paused: bool, libc: &mut LibcRandom) {
         let Some(job) = &mut self.stage_job else {
             return;
         };
@@ -1355,6 +1386,12 @@ impl Battle {
                 if let Some(w) = &mut self.roster.scene.water {
                     w.reset();
                 }
+                if let Some(s) = &mut self.roster.scene.scroll {
+                    s.load(libc);
+                }
+                // EftStage_FreeKinds.
+                let scene = &mut self.roster.scene;
+                (scene.water, scene.bubbles, scene.bound, scene.scroll) = (None, None, None, None);
                 self.amb.stop();
                 let id = if self.assets.stage_id == 3 {
                     TRANSITION_FILE_3
@@ -1435,6 +1472,7 @@ impl Battle {
                             self.roster.scene.water = self.assets.new_water();
                             self.roster.scene.bubbles = self.assets.new_bubbles();
                             self.roster.scene.bound = self.assets.new_bound();
+                            self.roster.scene.scroll = self.assets.new_scroll(1);
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -1673,6 +1711,12 @@ impl Battle {
         self.loading = false;
         self.burst = None;
         self.fade2 = Fade::default();
+        // Battle_Restart's BtlScene_Reset loads the sheet again; loading the first stage back resets it twice
+        // more (the reload's stage swap) and makes the new one.
+        let mut scroll = self.roster.scene.scroll.take();
+        if let Some(s) = &mut scroll {
+            s.reload();
+        }
         let start = self.assets.start_stage;
         if self.assets.stage_id != start
             && let Some(read) = self.loader.as_mut()
@@ -1683,6 +1727,13 @@ impl Battle {
                     self.roster.scene.water = self.assets.new_water();
                     self.roster.scene.bubbles = self.assets.new_bubbles();
                     self.roster.scene.bound = self.assets.new_bound();
+                    let burn = scroll
+                        .as_ref()
+                        .map_or(0, |s| if s.random() { 2 } else { 0 });
+                    scroll = self.assets.new_scroll(1);
+                    if let Some(s) = &mut scroll {
+                        s.burn = burn;
+                    }
                     self.assets
                         .reload_bank(read, 8, SND_STAGE_FILE + start.max(0) as u32);
                     self.light_dir =
@@ -1754,6 +1805,7 @@ impl Battle {
         self.roster.scene.water = self.assets.new_water();
         self.roster.scene.bubbles = self.assets.new_bubbles();
         self.roster.scene.bound = self.assets.new_bound();
+        self.roster.scene.scroll = scroll;
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         self.fade = Fade::start_in(1.0);
         self.started = false;
@@ -1795,6 +1847,9 @@ impl Battle {
         // Battle_Loop: a restart asked for last frame happens first.
         if std::mem::take(&mut self.seq.restart) {
             self.restart(&mut sounds);
+        }
+        if let Some(s) = &mut self.roster.scene.scroll {
+            s.run_pending(libc);
         }
         let menu = std::array::from_fn(|i| {
             use crate::btl_input::pad::{CROSS, DOWN, LEFT, RIGHT, START, TRIANGLE, UP};
@@ -2021,7 +2076,7 @@ impl Battle {
                 input.sounds,
             );
         }
-        self.step_stage_job(paused);
+        self.step_stage_job(paused, &mut *input.libc);
         for side in 0..2 {
             if let Some(n) = self.roster.chars[side].obj.node(0) {
                 self.roots[side] = n.mtx;
@@ -2051,6 +2106,12 @@ impl Battle {
         } else {
             draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view)
         };
+        // EftStageScroll_Draw, from the stage draw after group 0.
+        if !self.loading
+            && let Some(s) = &self.roster.scene.scroll
+        {
+            stage.extend(s.draw(&view));
+        }
         if !self.loading {
             let objs = self
                 .assets
@@ -5109,6 +5170,41 @@ mod tests {
                 .all(|t| t.texture == battle.assets.bound.unwrap().1)
         );
         assert!(battle.roster.scene.bound.is_some());
+    }
+
+    #[test]
+    fn real_stage_8_scrolls_its_sheet_behind_the_stage() {
+        let mut setup = BattleSetup::default();
+        setup.stage = 8;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let (sheet, base) = battle.assets.scroll.clone().unwrap();
+        // Stage 8: size 1, a random direction, two textures after the stage's own.
+        assert_eq!((sheet.size, sheet.angle < 0), (1, true));
+        assert_eq!(base + 2, battle.assets.stage_textures.len());
+        let mut libc = LibcRandom::new(3);
+        let mut random = GameRandom::from_key(&[3]);
+        let mut shown = 0;
+        for _ in 0..30 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            shown += frame
+                .stage
+                .iter()
+                .filter(|b| b.group == 0 && b.order >= 1000 && b.texture >= base)
+                .filter(|b| b.vertices.iter().any(|v| v.rgba[3] > 0.0))
+                .count();
+        }
+        assert!(shown > 0);
     }
 
     #[test]

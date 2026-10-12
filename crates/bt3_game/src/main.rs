@@ -67,6 +67,7 @@ mod stage_draw;
 mod stg_amb;
 mod stg_obj;
 mod stg_rigid;
+mod stg_scroll;
 mod title;
 mod windows;
 
