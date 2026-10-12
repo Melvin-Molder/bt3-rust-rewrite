@@ -94,9 +94,9 @@ impl Material2d for GsPostMaterial {
     }
 }
 
-/// The two work buffers (frame blocks 0x150 / 0x16C).
+/// The two work buffers (frame blocks 0x150 / 0x16C), and the 512-wide one over the same memory.
 #[derive(Resource)]
-pub struct WorkBuffers([Handle<Image>; 2]);
+pub struct WorkBuffers([Handle<Image>; 2], Handle<Image>);
 
 /// The materials made so far, by source image, blend and order.
 #[derive(Resource, Default)]
@@ -126,6 +126,12 @@ fn spawn_post_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>)
             None,
         ))
     });
+    let wide = images.add(Image::new_target_texture(
+        512,
+        224,
+        TextureFormat::Rgba8UnormSrgb,
+        None,
+    ));
     for i in 0..POST_CAMERAS {
         commands.spawn((
             Camera2d,
@@ -140,7 +146,7 @@ fn spawn_post_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>)
             PostCamera(i, Some(work[0].id())),
         ));
     }
-    commands.insert_resource(WorkBuffers(work));
+    commands.insert_resource(WorkBuffers(work, wide));
 }
 
 /// The frame's ops, grouped (consecutive ops with the same source and target share a camera).
@@ -183,6 +189,7 @@ pub fn sync_post(
     let image = |b: PostBuf| match b {
         PostBuf::Frame => frames.current(),
         PostBuf::Work(i) => work.0[i & 1].clone(),
+        PostBuf::Wide => work.1.clone(),
     };
     let groups = groups(&game.post_ops);
     for (mut cam, mut camera, mut target) in &mut cameras {

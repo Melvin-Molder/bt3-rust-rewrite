@@ -11,6 +11,9 @@ pub enum PostBuf {
     Frame,
     /// Work buffer 0 or 1 (256 x 224).
     Work(usize),
+    /// Frame block 0x150 as a 512 x 224 buffer (frame width 8: both work buffers' memory), the underwater
+    /// wobble's copy.
+    Wide,
 }
 
 impl PostBuf {
@@ -19,6 +22,7 @@ impl PostBuf {
         match self {
             PostBuf::Frame => [512.0, 448.0],
             PostBuf::Work(_) => [256.0, 224.0],
+            PostBuf::Wide => [512.0, 224.0],
         }
     }
 }

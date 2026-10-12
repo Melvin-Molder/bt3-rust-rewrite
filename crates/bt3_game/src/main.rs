@@ -78,6 +78,7 @@ mod eft_weather;
 mod fade;
 mod flash;
 mod font;
+mod gfx_water;
 mod hud;
 mod hud_combo;
 mod hud_gauge;

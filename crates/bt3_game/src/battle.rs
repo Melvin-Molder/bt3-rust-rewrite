@@ -1766,6 +1766,8 @@ pub struct Battle {
     /// `gEftCam`: a rush technique's camera animation.
     pub(crate) eft_cam: crate::battle_seq::EftCam,
     pub(crate) xfade: ScrXfade,
+    /// `gGfxWater`: the underwater wobble of each view.
+    pub(crate) water_wobble: crate::gfx_water::Wobble,
     pub(crate) hud: Hud,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
     pub(crate) fade: Fade,
@@ -2101,6 +2103,8 @@ impl Battle {
         roster.scene.stage.reset();
         // StgFx_Reset: the tints off.
         roster.scene.tints = crate::stg_tint::Tints::new(assets.stage.tint);
+        let mut water_wobble = crate::gfx_water::Wobble::default();
+        water_wobble.load_stage_color(assets.stage.water_color);
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -2147,6 +2151,7 @@ impl Battle {
             demo: DemoCam::default(),
             eft_cam: crate::battle_seq::EftCam::default(),
             xfade: ScrXfade::default(),
+            water_wobble,
             hud,
             fade: Fade::start_in(1.0),
             roots,
@@ -2376,6 +2381,8 @@ impl Battle {
                             // BtlLoad_EndStageSwap's StgFx_Reset.
                             self.roster.scene.tints =
                                 crate::stg_tint::Tints::new(self.assets.stage.tint);
+                            self.water_wobble
+                                .load_stage_color(self.assets.stage.water_color);
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -2658,6 +2665,23 @@ impl Battle {
         self.eft_cam.side()
     }
 
+    /// `GfxWater_Draw`: the underwater wobble of each view (its layer by its place: split screen's left and right)
+    /// whose camera is below the stage's water level, on a stage with the water record's bit 0.
+    fn draw_water(&mut self, views: &[(View, usize)]) -> Vec<crate::post::PostOp> {
+        let mut ops = Vec::new();
+        if self.assets.stage.water_color.is_some()
+            && let Some(level) = self.assets.stage.water_level
+        {
+            let two = views.len() == 2;
+            for (i, (v, _)) in views.iter().enumerate() {
+                if level < v.eye()[1] {
+                    ops.extend(self.water_wobble.draw(i, two, self.seq.paused));
+                }
+            }
+        }
+        ops
+    }
+
     /// `Battle_Restart` for a rematch: `Battle_ResetWork` (sounds stopped, the battle music again, the result
     /// cleared), `StgFx_Reset` (the cross-fade), `BtlGame_Reset` (the menus, the HUD, the sequence),
     /// `BtlChar_ResetAll` and the 1 s fade-in. The AI is not reset, as in the original.
@@ -2773,6 +2797,8 @@ impl Battle {
         );
         self.roster.scene.stage = stage_fx;
         self.roster.scene.tints = crate::stg_tint::Tints::new(self.assets.stage.tint);
+        self.water_wobble
+            .load_stage_color(self.assets.stage.water_color);
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         // BtlChar_ResetAll's BtlReplay_Rewind / BtlReplay_ResetViewer.
         self.replay.rewind();
@@ -3240,17 +3266,18 @@ impl Battle {
             );
         }
         let (capture, xfade_alpha) = self.xfade.draw_pass();
-        // StgFx_DrawPost (nothing while a stage loads): StgBlur_DrawAll, the view shown (view 0 under the demo
-        // camera) or both halves, each from its fighter's camera, then ScrWarp_DrawAll.
+        // StgFx_DrawPost (nothing while a stage loads): GfxWater_Draw for each view whose camera is below the
+        // water, StgBlur_DrawAll, the view shown (view 0 under the demo camera) or both halves, each from its
+        // fighter's camera, then ScrWarp_DrawAll.
         let post = if self.loading {
             Vec::new()
         } else {
+            let mut ops = self.draw_water(&views);
             let fighter_view = |side: usize| {
                 let cam = self.roster.chars[side].cam;
                 view_matrix(cam.pos, cam.rot)
             };
             let two = views.len() == 2;
-            let mut ops = Vec::new();
             if two {
                 for (v, side) in &views {
                     let mut o = self
@@ -7838,6 +7865,13 @@ mod tests {
                 .count();
         }
         assert!(drawn > 20, "stage {stage}: {drawn}");
+        // The underwater wobble (the water record's colour) draws only for a camera below the level (y down).
+        let at = |y: f32| vec![(View::new([0.0, y, 0.0], [0.0; 3]), 0)];
+        assert!(battle.draw_water(&at(level - 10.0)).is_empty());
+        let ops = battle.draw_water(&at(level + 10.0));
+        assert_eq!(ops.len(), 2);
+        let color = battle.assets.stage.water_color.unwrap();
+        assert!(ops[1].tris.iter().flatten().all(|v| v.rgba == color));
         // The bubbles need six textures: only stage 22's set has them.
         for &(s, n) in &water {
             assert_eq!(n >= 6, s == 22, "stage {s}: {n}");

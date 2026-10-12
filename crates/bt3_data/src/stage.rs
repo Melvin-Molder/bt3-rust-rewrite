@@ -42,6 +42,9 @@ pub struct StageResource {
     /// Bit 0 of the first water record (`StgDataA` +0x90 / +0x94, `BtlStage_GetList90`): with stage pack entry
     /// 0x12 the stage has the water effects (`EftStage_HasKind(7)`).
     pub water_fx: bool,
+    /// The same record's colour (bytes 4..8, RGBA) when its bit 0 is set: the underwater wobble's tint
+    /// (`GfxWater_LoadStageColor`).
+    pub water_color: Option<[u8; 4]>,
     /// The MEF0 block's list 1 (stage pack entry 0x13, `BtlStage_GetFxResB2`): the smoke emitters, used with
     /// stage flag 2.
     pub smoke: Vec<StageSmoke>,
@@ -335,16 +338,20 @@ impl StageResource {
             })
         };
 
-        let water_fx = read_count(bytes, data_offset + 0x90, "stage water")? != 0 && {
+        let water_color = if read_count(bytes, data_offset + 0x90, "stage water")? != 0 {
             let o = resolve_relative(
                 bytes,
                 data_offset,
                 read_u32(bytes, data_offset + 0x94)?,
-                4,
+                8,
                 "stage water",
             )?;
-            read_u32(bytes, o)? & 1 != 0
+            (read_u32(bytes, o)? & 1 != 0)
+                .then(|| [bytes[o + 4], bytes[o + 5], bytes[o + 6], bytes[o + 7]])
+        } else {
+            None
         };
+        let water_fx = water_color.is_some();
 
         let smoke = parse_mef_list(bytes, 1)?
             .into_iter()
@@ -484,6 +491,7 @@ impl StageResource {
             paths,
             dust,
             water_fx,
+            water_color,
             smoke,
             geysers,
             weather,
@@ -696,6 +704,7 @@ mod tests {
         put_i32(&mut bytes, 0x100 + 0x90, 1);
         put_u32(&mut bytes, 0x100 + 0x94, 0x280);
         put_u32(&mut bytes, 0x380, 3);
+        put_u32(&mut bytes, 0x384, 0x8040_2010);
         // A MEF0 block (pack entry 0x13 at 0x300, entry 0x14 after it) with one smoke emitter in list 1.
         put_u32(&mut bytes, 0x4C, 0x300);
         put_u32(&mut bytes, 0x50, 0x3C0);
@@ -713,6 +722,7 @@ mod tests {
         assert_eq!(stage.flags, 2);
         assert_eq!(stage.water_level, Some(32.0));
         assert!(stage.water_fx);
+        assert_eq!(stage.water_color, Some([0x10, 0x20, 0x40, 0x80]));
         assert_eq!(stage.smoke.len(), 1);
         assert!(stage.geysers.is_empty());
         assert_eq!(stage.weather, None);
