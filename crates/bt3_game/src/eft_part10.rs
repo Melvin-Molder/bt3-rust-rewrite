@@ -1273,6 +1273,7 @@ pub(crate) fn billboard(
                 texture,
                 blend,
                 clamp: false,
+                zwrite: false,
                 vertices: [vert(i), vert(i + 1), vert(i + 2)],
             },
         );

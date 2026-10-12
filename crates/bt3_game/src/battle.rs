@@ -952,8 +952,12 @@ pub struct Battle {
     pub(crate) loading: bool,
     /// Fade slot 2, the stage change's.
     fade2: Fade,
-    /// `gEftBurst->frame`: the transition's frame while it runs (its particles and sounds are not ported).
-    burst: Option<i32>,
+    /// `gEftBurst`: the transition while it runs.
+    burst: Option<crate::eft_burst::Burst>,
+    /// `gEftBurstRes` by transition file (loaded once).
+    burst_res: Option<(u32, crate::eft_burst::BurstRes)>,
+    /// `gEftBurstStreakAngle`: never reset.
+    streak_angle: f32,
     /// `gStgAmb`: the stage's looping sound and thunder.
     amb: crate::stg_amb::StgAmb,
     /// The camera's position of the last frame (`gBtlCamView` when the stage updates).
@@ -1138,6 +1142,8 @@ impl Battle {
             loading: false,
             fade2: Fade::default(),
             burst: None,
+            burst_res: None,
+            streak_angle: 0.0,
             amb: crate::stg_amb::StgAmb::default(),
             amb_cam: None,
         }
@@ -1256,6 +1262,13 @@ impl Battle {
                     TRANSITION_FILE
                 };
                 job.transition = self.loader.as_mut().and_then(|read| read(id).ok());
+                if self.burst_res.as_ref().is_none_or(|(f, _)| *f != id)
+                    && let Some(pack) = job.transition.as_deref()
+                {
+                    let res =
+                        crate::eft_burst::BurstRes::load(pack, &mut self.assets.effect_textures);
+                    self.burst_res = Some((id, res));
+                }
                 job.state = 2;
             }
             2 => job.state = 3,
@@ -1263,7 +1276,8 @@ impl Battle {
                 if paused {
                     return;
                 }
-                self.burst = Some(0);
+                // EftBurst_Start: the transition task.
+                self.burst = Some(crate::eft_burst::Burst::new());
                 let anim = job
                     .transition
                     .as_deref()
@@ -1295,7 +1309,7 @@ impl Battle {
                 }
                 match job.state {
                     6 => {
-                        if paused || self.burst.is_some_and(|f| f < 150) {
+                        if paused || self.burst.as_ref().is_some_and(|b| b.is_busy()) {
                             return;
                         }
                         self.fade2 = Fade::start_colored(self.assets.fade_colors, false, 1.0);
@@ -1883,9 +1897,15 @@ impl Battle {
         self.amb_cam = Some(view.eye());
         input.sounds.append(&mut self.amb.out);
         self.step_change_job(paused);
-        // The transition's task counts its frames (EftBurst_Update, not while paused).
-        if !paused && let Some(f) = &mut self.burst {
-            *f = (*f + 1).min(151);
+        // EftBurst_Update (not while paused): its particles, frame and sounds.
+        if !paused && let Some(b) = &mut self.burst {
+            let mut snd = self.assets.snd.lock().unwrap_or_else(|e| e.into_inner());
+            b.update(
+                &mut *input.libc,
+                &mut self.streak_angle,
+                &mut snd,
+                input.sounds,
+            );
         }
         self.step_stage_job(paused);
         for side in 0..2 {
@@ -1994,7 +2014,13 @@ impl Battle {
                 .scene
                 .gdust
                 .draw(&mut ot, &ctx, &self.assets.dust_textures);
-            ot.into_list()
+            // EftBurst_Draw sends its packets straight to the GS while the scene draws: before the table.
+            let mut list = match (&self.burst, &self.burst_res) {
+                (Some(b), Some((_, res))) => b.draw(res, &view.world2view, &view.world2screen),
+                _ => Vec::new(),
+            };
+            list.extend(ot.into_list());
+            list
         };
         self.hud.set_paused(self.seq.paused);
         let mut hud = self.hud.draw(libc, shown);
@@ -4837,6 +4863,7 @@ mod tests {
         battle.request_stage_change(to);
         assert_eq!(battle.assets.stage_id, to);
         let (mut loading_frames, mut cam_frames, mut frames) = (0, 0, 0);
+        let (mut burst_frames, mut drawn_model, mut drawn_ptcl, mut burst_sounds) = (0, 0, 0, 0);
         let time = battle.seq.time_left();
         while battle.stage_job.is_some() && frames < 400 {
             let frame = battle.run_frame(
@@ -4856,8 +4883,36 @@ mod tests {
                 );
                 cam_frames += i32::from(battle.demo.is_active());
             }
+            // The transition: its model writes depth, its particles (once they start) do not; its sounds.
+            if battle.burst.as_ref().is_some_and(|b| b.frame > 12) {
+                burst_frames += 1;
+                let model = frame.effects.iter().filter(|t| t.zwrite).count();
+                let ptcl = frame.effects.iter().filter(|t| !t.zwrite).count();
+                drawn_model = drawn_model.max(model);
+                drawn_ptcl = drawn_ptcl.max(ptcl);
+            }
+            burst_sounds += frame
+                .sounds
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s,
+                        TitleSound::SeEx {
+                            id: 0x4A,
+                            pitch: -0x352,
+                            ..
+                        }
+                    )
+                })
+                .count();
             frames += 1;
         }
+        assert!(burst_frames > 100, "{burst_frames}");
+        assert!(
+            drawn_model > 100 && drawn_ptcl > 100,
+            "{drawn_model} {drawn_ptcl}"
+        );
+        assert!(burst_sounds >= 2, "{burst_sounds}");
         // The transition's 150 frames, the fade out (30) and the steps around them.
         assert!(battle.stage_job.is_none() && !battle.loading, "{frames}");
         assert!((180..200).contains(&loading_frames), "{loading_frames}");

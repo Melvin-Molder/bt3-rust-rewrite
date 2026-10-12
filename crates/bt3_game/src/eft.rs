@@ -223,7 +223,7 @@ impl EffectBlend {
 
 /// A vertex as the GS gets it: screen position in pixels of the 512 x 448 frame and GS Z, (s, t, q) with s and t
 /// already multiplied by q, and the vertex colour (128 = 1.0).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EffectVertex {
     pub position: [f32; 3],
     pub stq: [f32; 3],
@@ -237,6 +237,8 @@ pub struct EffectTri {
     pub blend: EffectBlend,
     /// CLAMP 5 (clamped) rather than the pass's wrapping.
     pub clamp: bool,
+    /// ZBUF without ZMSK: the triangle writes its depth (the transition's model).
+    pub zwrite: bool,
     pub vertices: [EffectVertex; 3],
 }
 
@@ -453,6 +455,7 @@ pub(crate) fn queue_tri_clip(ot: &mut OrderTable, ctx: &DrawCtx, tri: [ClipVtx; 
                 texture: prim.texture,
                 blend,
                 clamp: prim.clamp,
+                zwrite: false,
                 vertices: [a.0, b.0, c.0],
             },
         );
@@ -534,6 +537,7 @@ pub(crate) fn draw_sprite(
                 texture,
                 blend,
                 clamp: false,
+                zwrite: false,
                 vertices: [vert(k), vert(k + 1), vert(k + 2)],
             },
         );
@@ -650,6 +654,7 @@ fn queue_strip_at(
                 texture,
                 blend,
                 clamp: false,
+                zwrite: false,
                 vertices: [vert(k), vert(k + 1), vert(k + 2)],
             },
         );
@@ -3343,6 +3348,7 @@ mod tests {
             texture: None,
             blend: b,
             clamp: false,
+            zwrite: false,
             vertices: [EffectVertex {
                 position: [0.0; 3],
                 stq: [0.0; 3],

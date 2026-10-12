@@ -390,6 +390,7 @@ fn draw_quad_2d(
                     texture,
                     blend: blend_eq,
                     clamp: false,
+                    zwrite: false,
                     vertices: [v[k], v[k + 1], v[k + 2]],
                 },
             );

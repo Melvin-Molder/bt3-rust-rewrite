@@ -6,6 +6,7 @@ pub mod adx;
 pub mod afs;
 pub mod ai_data;
 pub mod bpe;
+pub mod burst;
 pub mod cam_anim;
 pub mod chara_data;
 pub mod eft_pack;

@@ -115,6 +115,7 @@ impl StgAmb {
                 10,
                 (vol as f32 * self.se_scale) as i32,
                 pan,
+                0,
                 &mut self.out,
             );
         }

@@ -204,12 +204,13 @@ pub enum TitleSound {
     FadeOutStep,
     /// `Snd_PlaySe(bank, id)`.
     Effect(u32, u32),
-    /// `Snd_PlaySeEx(mask, id, volume, pan, 0)`, the sound known by `handle`.
+    /// `Snd_PlaySeEx(mask, id, volume, pan, pitch)`, the sound known by `handle`.
     SeEx {
         mask: u32,
         id: u32,
         volume: i32,
         pan: i32,
+        pitch: i32,
         handle: u32,
     },
     /// `Snd_StopHandle`.

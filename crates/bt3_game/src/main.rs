@@ -30,6 +30,7 @@ mod draw;
 mod duel_menu;
 mod eft;
 mod eft_bill;
+mod eft_burst;
 mod eft_chain;
 mod eft_gdust;
 mod eft_link;
@@ -743,8 +744,9 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 id,
                 volume,
                 pan,
+                pitch,
                 handle,
-            } => game.se.play_se_ex(mask, id, volume, pan, 0, handle),
+            } => game.se.play_se_ex(mask, id, volume, pan, pitch, handle),
             TitleSound::SeStop(handle) => game.se.stop_handle(handle),
             TitleSound::SeStopBanks(mask) => game.se.stop_banks(mask),
             TitleSound::MapBgm(id) => {

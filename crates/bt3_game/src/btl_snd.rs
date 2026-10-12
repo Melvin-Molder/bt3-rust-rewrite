@@ -163,6 +163,7 @@ impl CharSound {
         id: i32,
         vol: i32,
         pan: i32,
+        pitch: i32,
         out: &mut Vec<TitleSound>,
     ) -> i32 {
         if self.loop_bits[kind].is_empty() || !(0..0x100).contains(&id) {
@@ -174,6 +175,7 @@ impl CharSound {
             id: id as u32,
             volume: vol,
             pan,
+            pitch,
             handle: self.next_handle,
         });
         self.next_handle as i32
@@ -234,11 +236,11 @@ impl CharSound {
                             .iter()
                             .any(|s| s.handle >= 0 && s.id == req.id && s.kind == k);
                         if !playing {
-                            let h = self.play_se(kind, req.id, vol, pan, out);
+                            let h = self.play_se(kind, req.id, vol, pan, 0, out);
                             self.loops[owner].store(h, k, req.id, false);
                         }
                     } else {
-                        let h = self.play_se(kind, req.id, vol, pan, out);
+                        let h = self.play_se(kind, req.id, vol, pan, 0, out);
                         self.sets[owner].store(h, k, req.id, true);
                     }
                 }
