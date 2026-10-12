@@ -1766,7 +1766,7 @@ fn unk_c7_scale(data: &SideData) -> f32 {
 }
 
 /// `BtlSuper_GetDamage` of slot 2..4: of one hit (or all with `total`), plain or guarded; times curve row 9
-/// (slots 2, 3) or 10 (slot 4) at level 0, then the modifiers, each rounded up to 10: flag 0xA4 3 / 10, the
+/// (slots 2, 3) or 10 (slot 4), then the modifiers, each rounded up to 10: flag 0xA4 3 / 10, the
 /// powered-up state + 1 / 5 (not slot 4), held flag 0x9C + 1 / 10, flag 0x98 + 3 / 10 with technique flag 0x8000,
 /// the charge, and the cases of techniques 0x268, 0x2CD and 0x2D5. The abilities are not ported.
 pub(crate) fn tech_damage(
@@ -1786,7 +1786,7 @@ pub(crate) fn tech_damage(
         t.damage(slot)
     };
     let row = if slot == 4 { 10 } else { 9 };
-    let mut d = (raw as f32 * env.curve_base(row)) as i32;
+    let mut d = (raw as f32 * atk.curve(env, row)) as i32;
     if !total {
         d /= t.hit_count(slot);
     }

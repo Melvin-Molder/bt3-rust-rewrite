@@ -589,14 +589,23 @@ impl Ai<'_, '_, '_, '_> {
         f & 0x2800 != 0 && f & 0x8000 == 0
     }
 
-    /// `BtlCharApi_GetOppTechniqueKind`: no technique action is ported, so the opponent is never in one.
+    /// `BtlCharApi_GetOppTechniqueKind`: the AI kind of the opponent's technique (actions 0x105..0x132), else -1.
     fn opp_technique_kind(&self) -> i32 {
-        -1
+        let cur = self.chr(self.op()).act.current;
+        if !crate::btl_act::is_technique_id(cur) {
+            return -1;
+        }
+        let slot = crate::btl_act::id_class(cur) - 2;
+        self.skill_kind(self.op(), slot.max(0) as usize)
     }
 
-    /// `BtlCharApi_GetOppSkillKind`: the kind of the opponent's move action 0xFD..0x102 (none is ported).
+    /// `BtlCharApi_GetOppSkillKind`: the AI kind of the opponent's skill (actions 0xFD..0x102), else -1.
     fn opp_skill_kind(&self) -> i32 {
-        -1
+        let cur = self.chr(self.op()).act.current;
+        if !(0xFD..0x103).contains(&cur) {
+            return -1;
+        }
+        self.move_kind(self.op(), crate::btl_act::id_class(cur) as usize)
     }
 
     /// `BtlCharApi_FindIncomingBlast`: the first record not the fighter's own nor seen (`BtlCharApi_SkipBlastRec`:

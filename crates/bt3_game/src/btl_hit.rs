@@ -192,7 +192,7 @@ pub(crate) fn throw_drains(me: &Chr, data: &SideData, env: &Env) -> (i32, i32) {
 /// `BtlAtk_GetLaunchSpeed`: record +0x14 in 10 km/h, times curve row 8.
 pub(crate) fn launch_speed(me: &Chr, data: &SideData, env: &Env) -> f32 {
     let (r, _) = record(me, data, env);
-    f32::from(r.u8_at(0x14)) * 10.0 * kmh(1.0) * env.curve_base(8)
+    f32::from(r.u8_at(0x14)) * 10.0 * kmh(1.0) * me.curve(env, 8)
 }
 
 /// The number of hit windows of the motion (`BtlObjAnim_QueryEvent(obj, 1, 0, 3)`).
@@ -203,7 +203,7 @@ fn hit_windows(me: &Chr, data: &SideData) -> i32 {
 /// `BtlAtk_GetDamage`: record damage times curve row 4, divided by the motion's hits.
 pub(crate) fn damage(me: &Chr, data: &SideData, env: &Env) -> i32 {
     let (r, _) = record(me, data, env);
-    let mut v = (i32::from(r.u16_at(4)) as f32 * env.curve_base(4)) as i32;
+    let mut v = (i32::from(r.u16_at(4)) as f32 * me.curve(env, 4)) as i32;
     let hits = hit_windows(me, data);
     if hits >= 2 {
         v /= hits;
@@ -650,7 +650,7 @@ impl Pair<'_, '_> {
                 } else if let Some(full) = check_guard(me, opp, data, env) {
                     if full {
                         let mut guard = (i32::from(record(me, data, env).0.u16_at(6)) as f32
-                            * env.curve_base(4)) as i32;
+                            * me.curve(env, 4)) as i32;
                         let hits = hit_windows(me, data);
                         if hits >= 2 {
                             guard /= hits;

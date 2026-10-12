@@ -4189,6 +4189,117 @@ mod tests {
         assert!(c.gauge.blast < 300_000 - 190_000, "{}", c.gauge.blast);
     }
 
+    /// Holds charge (L2) and presses guard (circle; with up for slot 1) to use a skill, then runs `frames`; the
+    /// actions side 0 went through.
+    fn run_skill(battle: &mut Battle, up: bool, frames: usize) -> Vec<i32> {
+        use crate::btl_input::pad::{CIRCLE, L2, UP};
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut acts = vec![battle.roster.chars[0].act.current];
+        for i in 0..frames {
+            let mut held = match i {
+                2..4 => L2,
+                4..6 => L2 | CIRCLE,
+                _ => 0,
+            };
+            if up && held != 0 {
+                held |= UP;
+            }
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+            let a = battle.roster.chars[0].act.current;
+            if acts.last() != Some(&a) {
+                acts.push(a);
+            }
+        }
+        acts
+    }
+
+    #[test]
+    fn real_skills() {
+        // Character 1's second skill (id 0x56, two stocks, sequence 0: action 0xFE) is applied when its motion
+        // ends (attribute 0x80): 20000 ki, the timed levels 3 / 4 / 3 / 4 for 600 frames and a charge gauge floor
+        // of 30000.
+        let Some(mut battle) = transform_battle(1, false) else {
+            return;
+        };
+        battle.roster.chars[0].gauge.blast = 300_000;
+        battle.roster.chars[0].gauge.ki = 0;
+        let acts = run_skill(&mut battle, true, 120);
+        assert!(acts.contains(&0xFE), "{acts:x?}");
+        let c = &battle.roster.chars[0];
+        assert!(c.gauge.blast < 300_000 - 150_000, "{}", c.gauge.blast);
+        assert!(c.gauge.ki >= 20000, "{}", c.gauge.ki);
+        assert_eq!(c.gauge.used[1], 1);
+        assert!(c.slot_on[1]);
+        assert_eq!([0, 1, 2, 3].map(|s| c.stat_mod(s)), [3, 4, 3, 4]);
+        assert!(c.stat[0].timer[1] > 400, "{}", c.stat[0].timer[1]);
+        assert!(c.charge_gauge >= 30000, "{}", c.charge_gauge);
+        assert_eq!(c.stat_level(1), 3);
+        // With one stock left it is refused.
+        let acts = run_skill(&mut battle, true, 60);
+        assert!(!acts.contains(&0xFE), "{acts:x?}");
+
+        // Character 2's first skill (id 0x37, sequence 2: action 0x101) gives one automatic evasion at once and is
+        // refused while it lasts; its second (id 0x49, kind 3, attributes 0x800280) enters the powered-up mode with
+        // a penalty on stat 2 that the mode ignores, and its levels end with the mode.
+        let mut battle = transform_battle(2, false).unwrap();
+        battle.roster.chars[0].gauge.blast = 500_000;
+        let acts = run_skill(&mut battle, false, 30);
+        assert!(acts.contains(&0x101), "{acts:x?}");
+        assert_eq!(battle.roster.chars[0].dodges_b, 1);
+        let acts = run_skill(&mut battle, false, 30);
+        assert!(!acts.contains(&0x101), "{acts:x?}");
+        let acts = run_skill(&mut battle, true, 120);
+        assert!(acts.contains(&0xFE), "{acts:x?}");
+        let c = &battle.roster.chars[0];
+        assert!(c.flags.test(6));
+        assert_eq!(c.stat[2].penalty[1], -10);
+        assert_eq!([0, 1, 2, 3].map(|s| c.stat_mod(s)), [3, 1, 2, 2]);
+        battle.roster.chars[0].gauge.max_power = 1;
+        run_skill(&mut battle, false, 0);
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        for _ in 0..3 {
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+        }
+        let c = &battle.roster.chars[0];
+        assert!(!c.flags.test(6));
+        assert!(!c.slot_on[1]);
+        assert_eq!([0, 1, 2, 3].map(|s| c.stat_mod(s)), [0, 0, -10, 0]);
+
+        // Character 3's first skill (id 0, lock-on, sequence 1: action 0xFF) vanishes and comes back behind the
+        // opponent.
+        let mut battle = transform_battle(3, false).unwrap();
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let d0 = crate::btl_chr::sub(
+            battle.roster.chars[1].pose.pos,
+            battle.roster.chars[0].pose.pos,
+        );
+        let acts = run_skill(&mut battle, false, 120);
+        assert!(acts.contains(&0xFF), "{acts:x?}");
+        let d1 = crate::btl_chr::sub(
+            battle.roster.chars[1].pose.pos,
+            battle.roster.chars[0].pose.pos,
+        );
+        // The opponent was ahead; now the fighter is on its other side.
+        assert!(crate::btl_chr::dot(d0, d1) < 0.0, "{d0:?} {d1:?}");
+    }
+
     #[test]
     fn real_transformations() {
         use crate::btl_input::pad::DOWN;

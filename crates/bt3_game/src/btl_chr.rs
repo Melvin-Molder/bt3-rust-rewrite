@@ -105,6 +105,31 @@ pub(crate) struct Gauge {
     pub fired: [i32; 5],
 }
 
+/// `BtlStatMod` (fighter + 0xF50, one per stat): the signed levels of each source, per skill slot.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct StatMod {
+    /// Kept for good (`BTL_STAT_KIND_KEEP`).
+    pub base: [i32; 2],
+    /// With a frame timer (`timed` / `timer`).
+    pub timed: [i32; 2],
+    pub timer: [i32; 2],
+    /// Until the technique actions are left (`untilA`), and until `BtlStat_EndKind3` / `EndKind4` (`untilB` /
+    /// `untilC`).
+    pub until_a: [i32; 2],
+    pub until_b: [i32; 2],
+    pub until_c: [i32; 2],
+    /// Ignored in the powered-up mode (flag 6).
+    pub penalty: [i32; 2],
+    /// Lasts one frame.
+    pub frame: i32,
+}
+
+/// `BTL_STAT_KIND_*`: how long a skill's stat levels last.
+pub(crate) const STAT_KIND_TIMED: i32 = 1;
+pub(crate) const STAT_KIND_ACTION: i32 = 2;
+pub(crate) const STAT_KIND_3: i32 = 3;
+pub(crate) const STAT_KIND_4: i32 = 4;
+
 /// `BtlMemberCombo`: the hits taken in a row.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Combo {
@@ -402,9 +427,15 @@ impl Env<'_> {
             .unwrap_or(0)
     }
 
-    /// `BtlStat_EvalCurve` at level 0 (no skills, items or abilities are ported): the row's base value.
-    pub(crate) fn curve_base(&self, row: usize) -> f32 {
-        self.stat_curve[row][1]
+    /// `BtlStat_EvalCurve`: row `row` at `level`, linear from the base (level 0) to the value at 80 and to the
+    /// value at -20.
+    pub(crate) fn eval_curve(&self, level: i32, row: usize) -> f32 {
+        let [max, base, min] = self.stat_curve[row];
+        if level >= 0 {
+            (max - base) * (level as f32 / 80.0) + base
+        } else {
+            (min - base) * (level as f32 / -20.0) + base
+        }
     }
 
     /// `BtlStage_GetInnerRadius`.
@@ -501,7 +532,7 @@ pub(crate) struct Chr {
     pub clash_count_a: i32,
     /// `clashAnswerFrame`: the clash C answer, -1 none yet, -2 a wrong button, else the frame it came.
     pub clash_answer_frame: i32,
-    /// `skillCount3` (fighter + 0xE5C): a skill counter technique 0x268 scales with (the skills are not ported).
+    /// `skillCount3` (fighter + 0xE5C): skill id 0x41's counter (0..3), which technique 0x268 scales with.
     pub skill_count3: i32,
     /// `boostStock` (0..10): raised by the throws of character 0x6E.
     pub boost_stock: i32,
@@ -565,11 +596,31 @@ pub(crate) struct Chr {
     pub throw_break_window: i32,
     pub rush_break_window: i32,
     pub unk1080: i32,
+    /// The skill block (+0xE00 .. +0xE40, zeroed by `BtlChar_BindObject`): `skillStackA` / `skillStackB`, the
+    /// automatic evasions skill ids 0xC / 0x32 and 0x37 give.
     pub dodges: i32,
     pub dodges_b: i32,
+    /// `skillTimer`: skill id 0x33's frames left (flag 0x56 while it runs).
+    pub skill_timer: i32,
+    /// `skillSlot`: the slot of the skill that set one of the three above.
     pub skill_slot: i32,
+    /// `skillKiRate`: the ki skill id 0x18 drains each frame.
+    pub skill_ki_rate: i32,
+    /// `skillTimerC`: a kind-1 skill with attribute 0x800 (held at 1 while `kind2_on` / `kind3_on`).
     pub skill_timer_c: i32,
+    /// `skillTimerD`: a skill with attribute 0x400.
     pub skill_timer_d: i32,
+    /// `skillTimerE` / `skillValE`: the charge gauge's floor; `skillTimerF` / `skillValF`.
+    pub skill_timer_e: i32,
+    pub skill_val_e: i32,
+    pub skill_timer_f: i32,
+    pub skill_val_f: i32,
+    pub kind2_on: bool,
+    pub kind3_on: bool,
+    /// `slotOn`: a skill of kind != 0 of the slot is in effect.
+    pub slot_on: [bool; 2],
+    /// `stat` (+0xF50): the four stats' modifiers.
+    pub stat: [StatMod; 4],
     pub no_flinch: i32,
     pub sec_timer: i32,
     pub input_off_timer: i32,
@@ -704,9 +755,19 @@ impl Chr {
             unk1080: 0,
             dodges: 0,
             dodges_b: 0,
+            skill_timer: 0,
             skill_slot: 0,
+            skill_ki_rate: 0,
             skill_timer_c: 0,
             skill_timer_d: 0,
+            skill_timer_e: 0,
+            skill_val_e: 0,
+            skill_timer_f: 0,
+            skill_val_f: 0,
+            kind2_on: false,
+            kind3_on: false,
+            slot_on: [false; 2],
+            stat: [StatMod::default(); 4],
             no_flinch: 0,
             sec_timer: 0,
             input_off_timer: 0,
@@ -1327,6 +1388,7 @@ impl Chr {
         self.anim.sub = -1;
         self.flags.clear(0xBE);
         self.flags.clear_range(0x98, 0x99);
+        self.clear_skill_block();
         self.flags.set(0x12B);
         // BtlAnim_FlushRequest.
         if self.flags.test(anim_flag::REQ) {
@@ -1560,6 +1622,127 @@ impl Chr {
         sub(self.snap_pos(to), self.snap_pos(from))
     }
 
+    // ---- the stats (btl_stats.c) ----------------------------------------------------------------------------------
+
+    /// `BtlChar_BindObject`'s part: the skill block (+0xE00 .. +0xE40) and `BtlStat_Reset`.
+    pub(crate) fn clear_skill_block(&mut self) {
+        self.dodges = 0;
+        self.dodges_b = 0;
+        self.skill_timer = 0;
+        self.skill_slot = 0;
+        self.skill_ki_rate = 0;
+        self.skill_timer_c = 0;
+        self.skill_timer_d = 0;
+        self.skill_timer_e = 0;
+        self.skill_val_e = 0;
+        self.skill_timer_f = 0;
+        self.skill_val_f = 0;
+        self.kind2_on = false;
+        self.kind3_on = false;
+        self.slot_on = [false; 2];
+        self.stat = [StatMod::default(); 4];
+    }
+
+    /// `BtlStat_ClearSlotOn`: the slot's skill is no longer in effect if its kind is `kind`.
+    fn clear_slot_on(&mut self, data: &SideData, slot: usize, kind: i32) {
+        if data.tables.skill().stat_kind(slot as i32) == kind {
+            self.slot_on[slot] = false;
+        }
+    }
+
+    /// `BtlStat_EndKind2`: the technique-long modifiers end.
+    pub(crate) fn end_stat_kind2(&mut self, data: &SideData) {
+        for m in &mut self.stat {
+            m.until_a = [0; 2];
+        }
+        self.kind2_on = false;
+        self.clear_slot_on(data, 0, STAT_KIND_ACTION);
+        self.clear_slot_on(data, 1, STAT_KIND_ACTION);
+    }
+
+    /// `BtlStat_EndKind3`: the powered-up mode's modifiers end.
+    pub(crate) fn end_stat_kind3(&mut self, data: &SideData) {
+        for m in &mut self.stat {
+            m.until_b = [0; 2];
+        }
+        self.kind3_on = false;
+        self.clear_slot_on(data, 0, STAT_KIND_3);
+        self.clear_slot_on(data, 1, STAT_KIND_3);
+    }
+
+    /// `BtlStat_EndKind4`: skill id 0x18's modifiers end.
+    pub(crate) fn end_stat_kind4(&mut self, data: &SideData) {
+        for m in &mut self.stat {
+            m.until_c = [0; 2];
+        }
+        self.clear_slot_on(data, 0, STAT_KIND_4);
+        self.clear_slot_on(data, 1, STAT_KIND_4);
+    }
+
+    /// `BtlStat_ClearPenalty`.
+    pub(crate) fn clear_stat_penalty(&mut self) {
+        for m in &mut self.stat {
+            m.penalty = [0; 2];
+        }
+    }
+
+    /// `BtlStat_ClearFrameMods` and, on a body-changed fighter, -10 to every stat this frame
+    /// (`BtlStat_SetFrameMod`).
+    pub(crate) fn set_stat_frame_mods(&mut self) {
+        let v = if self.gauge.body_changed { -10 } else { 0 };
+        for m in &mut self.stat {
+            m.frame = v;
+        }
+    }
+
+    /// `BtlStat_Update`: the timed modifiers' timers, and the technique-long ones end when the technique actions
+    /// are left (unless the last frame had flag 0xA4).
+    pub(crate) fn update_stats(&mut self, data: &SideData) {
+        for slot in 0..2 {
+            for i in 0..4 {
+                let m = &mut self.stat[i];
+                m.timer[slot] -= 1;
+                if m.timer[slot] <= 0 {
+                    m.timer[slot] = 0;
+                    m.timed[slot] = 0;
+                    self.clear_slot_on(data, slot, STAT_KIND_TIMED);
+                }
+            }
+        }
+        if !crate::btl_act::is_technique_id(self.act.current)
+            && crate::btl_act::is_technique_id(self.prev_action)
+            && !self.flags.test_prev(0xA4)
+        {
+            self.end_stat_kind2(data);
+        }
+    }
+
+    /// `BtlStat_GetMod`: stat `stat`'s modifiers added up (the penalties not in the powered-up mode), -20..20. The
+    /// abilities' extras (lost health, stages) are not ported.
+    pub(crate) fn stat_mod(&self, stat: usize) -> i32 {
+        let m = &self.stat[stat];
+        let mut sum: i32 = (0..2)
+            .map(|i| m.base[i] + m.timed[i] + m.until_a[i] + m.until_b[i] + m.until_c[i])
+            .sum();
+        if !self.flags.test(6) {
+            sum += m.penalty[0] + m.penalty[1];
+        }
+        sum += m.frame;
+        sum.clamp(-20, 20)
+    }
+
+    /// `BtlStat_GetLevel0..6`: the member's bonus `n` (the items, 0 here) plus its stat's modifier, -20..80.
+    pub(crate) fn stat_level(&self, n: usize) -> i32 {
+        const STAT: [usize; 7] = [2, 0, 1, 2, 3, 3, 3];
+        self.stat_mod(STAT[n]).clamp(-20, 80)
+    }
+
+    /// `BtlStat_GetKiChargeBonus` .. `GetMaxPowerExtraTime`: curve row `row` at this fighter's level.
+    pub(crate) fn curve(&self, env: &Env, row: usize) -> f32 {
+        const LEVEL: [usize; 13] = [0, 0, 0, 4, 1, 1, 1, 2, 3, 5, 6, 0, 0];
+        env.eval_curve(self.stat_level(LEVEL[row]), row)
+    }
+
     // ---- gauges (btl_char_member.c) ------------------------------------------------------------------------------
 
     /// `BtlMember_AddHealth`.
@@ -1714,7 +1897,7 @@ impl Chr {
         if flags & NO_DEFENSE == 0 {
             let scaled = (amount as f32 * data.tables.params.f32_at(0x7C)) as i32;
             amount = if scaled <= 0 && amount > 0 { 1 } else { scaled };
-            let scaled = (amount as f32 * env.curve_base(7)) as i32;
+            let scaled = (amount as f32 * self.curve(env, 7)) as i32;
             amount = if scaled <= 0 && amount > 0 { 1 } else { scaled };
         }
         if amount <= 0 {
@@ -1783,8 +1966,8 @@ impl Chr {
         let mut v = data.tables.moves.speed[n] * 10.0 * kmh(1.0);
         match n {
             15 | 19 => {}
-            4 | 5 => v *= self.pose.dash_boost * env.curve_base(8),
-            _ => v *= env.curve_base(8),
+            4 | 5 => v *= self.pose.dash_boost * self.curve(env, 8),
+            _ => v *= self.curve(env, 8),
         }
         v.min(kmh(4000.0))
     }

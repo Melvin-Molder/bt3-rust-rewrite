@@ -521,8 +521,14 @@ impl Roster {
         }
     }
 
-    /// `BtlChars_EndFrame`: stages 11 and 12, the frame's movement vectors.
+    /// `BtlChars_EndFrame`: the late updates (`BtlChar_UpdateLate`: this frame's stat modifiers; the effects,
+    /// sounds and voices are not ported), stages 11 and 12, the frame's movement vectors.
     pub(crate) fn end_frame(&mut self) {
+        for chr in &mut self.chars {
+            if !chr.is_frozen() {
+                chr.set_stat_frame_mods();
+            }
+        }
         for chr in &mut self.chars {
             if chr.is_frozen() {
                 continue;

@@ -518,15 +518,15 @@ pub(crate) fn hits_of(data: &SideData, kind: i32) -> i32 {
     i32::from(record(data, kind).hits())
 }
 
-/// `BtlKiBlast_GetDamageOf` / `GetGuardDamageOf`: times curve row 6, divided by the hits (2 or more for the plain
-/// damage, any for the guarded one).
-fn damage_of(rec: &KiBlastRecord, env: &Env, guard: bool) -> i32 {
+/// `BtlKiBlast_GetDamageOf` / `GetGuardDamageOf`: times the owner's curve row 6 (`scale`), divided by the hits (2
+/// or more for the plain damage, any for the guarded one).
+fn damage_of(rec: &KiBlastRecord, scale: f32, guard: bool) -> i32 {
     let base = if guard {
         rec.guard_damage()
     } else {
         rec.damage()
     };
-    let mut d = (base as f32 * env.curve_base(6)) as i32;
+    let mut d = (base as f32 * scale) as i32;
     let hits = i32::from(rec.hits());
     if (guard && hits > 0) || hits >= 2 {
         d /= hits;
@@ -2321,7 +2321,9 @@ fn guard_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if kind != 6 && (flags & 1 != 0 || is_facing(chr, yaw)) {
         return false;
     }
-    let mut dmg = damage_of(&blast, env, true);
+    let scale = w.chars[rec.atk.src].curve(env, 6);
+    let chr = &mut w.chars[target];
+    let mut dmg = damage_of(&blast, scale, true);
     if rec.atk.hits >= 2 {
         dmg /= rec.atk.hits;
     }
@@ -2438,7 +2440,9 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
         chr.set_impulse_dir(dir, push_of(&blast, false));
     }
     chr.set_fx(0x1D);
-    let mut dmg = damage_of(&blast, env, false);
+    let scale = w.chars[rec.atk.src].curve(env, 6);
+    let chr = &mut w.chars[target];
+    let mut dmg = damage_of(&blast, scale, false);
     if rec.atk.hits >= 2 {
         dmg /= rec.atk.hits;
     }

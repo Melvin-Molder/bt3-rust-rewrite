@@ -23,6 +23,7 @@ use crate::btl_chr::{
     opp_yaw_from_facing, opp_yaw_from_its_facing, scale_speed_by_approach, scale3,
     snap_to_opponent, steer_at_opponent, sub, warp_ahead_of_opponent, warp_behind_opponent,
 };
+use crate::btl_chr::{STAT_KIND_3, STAT_KIND_4, STAT_KIND_ACTION, STAT_KIND_TIMED};
 use crate::btl_clash::{ClashC, count_and_mark};
 use crate::btl_input::{DIR_MASK, wrap_angle};
 use crate::btl_obj::{mask_to_node, node_side};
@@ -123,8 +124,8 @@ pub(crate) struct Ctx<'a, 'd> {
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xEB..=0xFC | 0x103
-        | 0x104 | 0x105..=0x13B)
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xEB..=0xFC | 0xFD..=0x102
+        | 0x103 | 0x104 | 0x105..=0x13B)
 }
 
 impl Ctx<'_, '_> {
@@ -327,8 +328,6 @@ impl Ctx<'_, '_> {
     }
 
     /// `BtlDecide_Main`: the main input table of a free fighter; the first satisfied input queues its action.
-    /// The techniques, skills, transformations, fusions and member switches are not ported: their inputs are not
-    /// recognised.
     fn decide_main(&mut self, mask: u32) -> u32 {
         if !self.me.is_free() {
             return 0;
@@ -425,7 +424,9 @@ impl Ctx<'_, '_> {
                 return n;
             }
         }
-        // Mask 0x800000 (skills): not ported.
+        if mask & 0x80_0000 != 0 && self.check_skill_input() {
+            return 1;
+        }
         if mask & 0x80 != 0 && !self.flag(6) && !self.flag(0x98) {
             if self.data.tables.params.chara_flags() & 0x80 != 0 {
                 if self.me.gauge.ki >= self.me.gauge.ki_max
@@ -876,6 +877,9 @@ impl Ctx<'_, '_> {
             0xE7 => self.wall_slam(phase),
             0xE8 | 0xE9 => self.wall_recover(phase),
             0xEC | 0xF0 => self.transform_a(phase),
+            0xFD | 0xFE => self.skill_basic(phase),
+            0xFF | 0x100 => self.skill_teleport(phase),
+            0x101 | 0x102 => self.skill_instant(phase),
             0x103 => self.change_random_chara(phase),
             0xEB => self.wait_member_change(phase),
             0xF1 | 0xF2 => self.fusion(phase),
@@ -1124,7 +1128,8 @@ impl Ctx<'_, '_> {
 
     /// `BtlAct_UpdateGauges`: the max power gauge's drain (not while flag 0xBB holds it: charging, firing a
     /// technique), which ends the powered-up mode (flag 6) when it empties; ki regeneration in a motion with flag
-    /// 0x10000, blast gain with 0x20000, the charge gauge's decay. Abilities, skills and stats are not ported.
+    /// 0x10000, blast gain with 0x20000, skill 0x18's ki drain, the stats' and skills' timers, the charge gauge's
+    /// decay. The abilities are not ported.
     fn update_gauges(&mut self) {
         if self.time_stopped
             || !self.flag(3)
@@ -1135,9 +1140,10 @@ impl Ctx<'_, '_> {
             return;
         }
         if !self.flag(0xBB) {
-            // BtlParam_GetMaxPowerDrain: the whole gauge over parameter +0x54 seconds (at least a frame; the
-            // stats' extra time is not ported), three times as fast under flag 0xBC, twice under 0xBD.
-            let t = self.data.tables.params.f32_at(0x54).max(1.0 / 30.0);
+            // BtlParam_GetMaxPowerDrain: the whole gauge over parameter +0x54 seconds plus curve row 12 (at least a
+            // frame), three times as fast under flag 0xBC, twice under 0xBD.
+            let t = (self.data.tables.params.f32_at(0x54) + self.me.curve(self.env, 12))
+                .max(1.0 / 30.0);
             let mut amount = 30000 / ((t * 30.0) as i32).max(1);
             if self.flag(0xBC) {
                 amount *= 3;
@@ -1147,8 +1153,16 @@ impl Ctx<'_, '_> {
             let g = &mut self.me.gauge;
             g.max_power = (g.max_power - amount).max(0);
             if g.max_power <= 0 {
-                // BtlStat_EndKind3: the stats are not ported.
                 self.clear(6);
+                self.me.end_stat_kind3(self.data);
+            }
+        }
+        if self.flag(0x98) && !self.flag(0x99) && !self.in_technique() {
+            // Skill id 0x18: the ki drains while it lasts.
+            let rate = self.me.skill_ki_rate;
+            self.me.spend_ki(rate, false);
+            if self.me.is_ki_empty() {
+                self.end_flag98();
             }
         }
         let mflags = self.anim_flags(self.anim_id());
@@ -1164,7 +1178,7 @@ impl Ctx<'_, '_> {
             if self.flag(0xBE) {
                 // BtlParam_GetKiRecoverRate.
                 let mut amount =
-                    (p.s32_at(0x3C) / 30 + (self.env.curve_base(2) / 30.0) as i32).max(10);
+                    (p.s32_at(0x3C) / 30 + (self.me.curve(self.env, 2) / 30.0) as i32).max(10);
                 self.set(0xE7);
                 if self.me.input.is_pressed(0x10_0000) {
                     amount *= 4;
@@ -1177,7 +1191,7 @@ impl Ctx<'_, '_> {
                 // BtlParam_GetKiRegenLimit / BtlParam_GetKiRegenRate.
                 if !self.me.has_ki(p.s32_at(0x28).min(100_000)) {
                     let rate =
-                        (p.s32_at(0x38) / 30 + (self.env.curve_base(1) / 30.0) as i32).max(0);
+                        (p.s32_at(0x38) / 30 + (self.me.curve(self.env, 1) / 30.0) as i32).max(0);
                     self.me.add_ki(rate);
                 }
                 if matches!(self.env.mode, 5 | 6) {
@@ -1187,13 +1201,20 @@ impl Ctx<'_, '_> {
         }
         if mflags & 0x2_0000 != 0 {
             // BtlParam_GetBlastGainRate.
-            let rate = (p.s32_at(0x44) / 30 + (self.env.curve_base(3) / 30.0) as i32).max(20);
+            let rate = (p.s32_at(0x44) / 30 + (self.me.curve(self.env, 3) / 30.0) as i32).max(20);
             self.me.add_blast(rate);
             if matches!(self.env.mode, 5 | 6) {
                 self.me.add_blast(0xD05);
             }
         }
-        self.me.charge_gauge = (self.me.charge_gauge - 400).max(0);
+        self.me.update_stats(self.data);
+        self.update_skill_timers();
+        // The charge gauge's decay, down to 50000 with powered skill 1, or skill value E.
+        let mut floor = if self.powered_skill(1) { 50000 } else { 0 };
+        if self.me.skill_val_e > 0 {
+            floor = floor.max(self.me.skill_val_e);
+        }
+        self.me.charge_gauge = (self.me.charge_gauge - 400).max(floor);
         // The switch gauge fills over the parameter's +0x64 seconds (`BtlParam_GetGauge99CTime`; its abilities are
         // not ported).
         if self.env.switch_enabled[self.me.player] {
@@ -1651,25 +1672,29 @@ impl Ctx<'_, '_> {
                     if self.flag(0xF) {
                         self.me.set_fx(0x36);
                     }
-                    // BtlParam_GetRateA / B: per second / 30 plus the curve's row 0, at least 200.
+                    // BtlParam_GetRateA / B: per second / 30 plus the curve's row 0 and skill value F / 30, at
+                    // least 200 (the abilities' scaling is not ported).
                     let p = &self.data.tables.params;
                     let per_second = if self.flag(0x11) {
                         p.s32_at(0x34)
                     } else {
                         p.s32_at(0x30)
                     };
-                    let amount =
-                        (per_second / 30 + (self.env.curve_base(0) / 30.0) as i32).max(200);
+                    let amount = (per_second / 30
+                        + (self.me.curve(self.env, 0) / 30.0) as i32
+                        + self.me.skill_val_f / 30)
+                        .max(200);
                     self.me.add_ki(amount);
                     if self.me.gauge.ki >= self.me.gauge.ki_max {
                         if self.me.gauge.blast >= 100_000 {
                             // BtlParam_GetStepA: the whole gauge over parameter +0x50 seconds / curve row 11.
-                            let t = p.f32_at(0x50) / self.env.curve_base(11);
+                            let t = p.f32_at(0x50) / self.me.curve(self.env, 11);
                             let frames = (t * 30.0) as i32;
                             let step = if frames != 0 { 30000 / frames } else { 0 };
                             self.me.gauge.max_power = (self.me.gauge.max_power + step).min(30000);
                             self.set(0xBB);
                         }
+                        self.me.clear_stat_penalty();
                     }
                     if self.me.gauge.max_power >= 30000 {
                         self.request_anim(0x36, 0.15);
@@ -9062,6 +9087,374 @@ impl Ctx<'_, '_> {
         }
     }
 
+    // ---- the skills (btl_act_decide.c, btl_act_change.c) --------------------------------------------------------
+
+    fn skill(&self) -> bt3_data::chara_data::SkillTable<'_> {
+        self.data.tables.skill()
+    }
+
+    /// `BtlSkill_GetBlastCost`: the skill's stocks (at least 1; ability 0x15 is not ported) in gauge units.
+    fn skill_cost(&self, slot: i32) -> i32 {
+        self.skill().stocks(slot).max(1) * 100_000
+    }
+
+    /// `BtlAct_GetSkillAction`: by the skill's sequence, 0xFD / 0xFF / 0x101 plus the slot.
+    fn skill_action(&self, slot: i32) -> i32 {
+        slot + match self.skill().sequence(slot) {
+            1 => 0xFF,
+            2 => 0x101,
+            _ => 0xFD,
+        }
+    }
+
+    /// `BtlAct_CanUseSkill`: not body-changed, lock-on for a skill with flag 1, the blast stocks, a skill with flag
+    /// 0x10 only once, and room for what it gives (the evasions of ids 0xC / 0x32 and 0x37: none left, or fewer
+    /// than 3 when it stacks; id 0x41's counter below 3).
+    fn can_use_skill(&self, slot: i32) -> bool {
+        if !(0..2).contains(&slot) {
+            return false;
+        }
+        let s = self.skill();
+        let flags = s.flags(slot);
+        let stack = flags & 0x100 != 0;
+        if self.me.gauge.body_changed {
+            return false;
+        }
+        if !self.flag(5) && flags & 1 != 0 {
+            return false;
+        }
+        if self.me.gauge.blast < self.skill_cost(slot) {
+            return false;
+        }
+        if flags & 0x10 != 0 && self.me.gauge.used[slot as usize] > 0 {
+            return false;
+        }
+        let full = |n: i32| if stack { n >= 3 } else { n > 0 };
+        match s.id(slot) {
+            0xC | 0x32 => !full(self.me.dodges),
+            0x37 => !full(self.me.dodges_b),
+            0x41 => self.me.skill_count3 < 3,
+            _ => true,
+        }
+    }
+
+    /// `BtlAct_CheckSkillInput`: inputs 113 / 114 are slots 0 / 1; during a motion with flag 0x10 only a skill with
+    /// flag 8.
+    fn check_skill_input(&mut self) -> bool {
+        let mut slot = -1;
+        if self.test(0x71) {
+            slot = 0;
+        }
+        if self.test(0x72) {
+            slot = 1;
+        }
+        if slot < 0 || !self.can_use_skill(slot) || !self.me.is_free() {
+            return false;
+        }
+        if self.anim_flags(self.anim_id()) & 0x10 != 0 && self.skill().flags(slot) & 8 == 0 {
+            return false;
+        }
+        let action = self.skill_action(slot);
+        self.set_queue(0, action);
+        true
+    }
+
+    /// `BtlSkill_Apply`: the skill of slot 0 / 1 takes effect: its id's own effect, the powered-up mode
+    /// (attribute 0x200), a penalty to stat 2 (0x800000), the timers (0x800, 0x400), health and ki, the four stat
+    /// levels by its kind, the two timed values, the use counter and the blast stocks.
+    fn apply_skill(&mut self, slot: i32) {
+        let s = self.data.tables.skill();
+        let idx = usize::from(slot != 0);
+        let id = s.id(slot);
+        let attr = s.flags(slot);
+        let mut health = self.me.gauge.health_max * s.health_pct(slot) / 100;
+        let mut ki = s.ki(slot);
+        let time = s.frames(slot);
+        let kind = s.stat_kind(slot);
+        let add = attr & 0x100 != 0;
+        let stack = |n: i32| if add { (n + 1).min(3) } else { 1 };
+        match id {
+            0xC | 0x32 => {
+                self.me.dodges = stack(self.me.dodges);
+                self.me.skill_slot = slot;
+            }
+            0x33 => {
+                self.me.skill_timer = time;
+                self.me.skill_slot = slot;
+            }
+            0x37 => {
+                self.me.dodges_b = stack(self.me.dodges_b);
+                self.me.skill_slot = slot;
+            }
+            0x17 => health = -3000,
+            0x18 => {
+                self.held(0x98);
+                self.set(0x99);
+                ki = self.me.gauge.ki_max;
+                if time > 0 {
+                    self.me.skill_ki_rate = ki / time;
+                }
+            }
+            0x41 => self.me.skill_count3 = (self.me.skill_count3 + 1).clamp(0, 3),
+            _ => {}
+        }
+        if attr & 0x200 != 0 {
+            ki = self.me.gauge.ki_max;
+            self.me.gauge.max_power = (self.me.gauge.max_power + 30000).min(30000);
+            self.held(6);
+            self.set(0xBB);
+        }
+        if attr & 0x80_0000 != 0 {
+            self.me.stat[2].penalty[idx] = -10;
+        }
+        if attr & 0x800 != 0 {
+            match kind {
+                STAT_KIND_TIMED => self.me.skill_timer_c = time,
+                STAT_KIND_ACTION => self.me.kind2_on = true,
+                STAT_KIND_3 => self.me.kind3_on = true,
+                _ => {}
+            }
+        }
+        if attr & 0x400 != 0 {
+            self.me.skill_timer_d = time;
+        }
+        if health > 0 {
+            self.me.add_health(health);
+        }
+        if health < 0 {
+            self.me.damage(self.env, self.data, -health, 0x41B);
+        }
+        if ki > 0 {
+            self.me.add_ki(ki);
+        }
+        if ki < 0 {
+            self.me.spend_ki(-ki, true);
+        }
+        for stat in 0..4 {
+            let lv = s.stat_level(slot, stat);
+            let m = &mut self.me.stat[stat];
+            let v = match kind {
+                0 => &mut m.base[idx],
+                STAT_KIND_TIMED => {
+                    m.timer[idx] = time;
+                    &mut m.timed[idx]
+                }
+                STAT_KIND_ACTION => &mut m.until_a[idx],
+                STAT_KIND_3 => &mut m.until_b[idx],
+                STAT_KIND_4 => &mut m.until_c[idx],
+                _ => continue,
+            };
+            *v = if add { *v + lv } else { lv };
+        }
+        let (val_e, val_f) = (s.val_e(slot), s.val_f(slot));
+        if val_e > 0 {
+            self.me.skill_val_e = val_e;
+            self.me.skill_timer_e = time;
+        }
+        if val_f > 0 {
+            self.me.skill_val_f = val_f;
+            self.me.skill_timer_f = time;
+        }
+        self.me.gauge.used[slot as usize] += 1;
+        if kind != 0 {
+            self.me.slot_on[idx] = true;
+        }
+        let cost = self.skill_cost(slot);
+        self.me.gauge.blast = (self.me.gauge.blast - cost).max(0);
+    }
+
+    /// `BtlSkill_UpdateTimers` (not while time is stopped).
+    fn update_skill_timers(&mut self) {
+        if self.time_stopped {
+            return;
+        }
+        let me = &mut *self.me;
+        me.skill_timer_e -= 1;
+        if me.skill_timer_e < 0 {
+            me.skill_timer_e = 0;
+            me.skill_val_e = 0;
+        }
+        me.skill_timer_f -= 1;
+        if me.skill_timer_f < 0 {
+            me.skill_timer_f = 0;
+            me.skill_val_f = 0;
+        }
+        me.skill_timer_c = (me.skill_timer_c - 1).max(0);
+        if me.kind2_on || me.kind3_on {
+            me.skill_timer_c = 1;
+        }
+        me.skill_timer_d = (me.skill_timer_d - 1).max(0);
+        if me.skill_timer > 0 {
+            me.skill_timer -= 1;
+            self.set(0x56);
+        }
+    }
+
+    /// `BtlAct_EndFlag98`: skill id 0x18's state ends (the model's colour mode is not ported).
+    fn end_flag98(&mut self) {
+        if self.flag(0x98) {
+            self.clear(0x98);
+            self.me.end_stat_kind4(self.data);
+        }
+    }
+
+    /// `BtlCharApi_IsInTechnique`.
+    fn in_technique(&self) -> bool {
+        is_technique_id(self.current())
+    }
+
+    /// The start of a skill action: motion 0x103 / 0x104 by the class (`BtlSkill_PlayAnim`) and flag 0xDE / 0xDF
+    /// (`BtlSkill_SetFlag`).
+    fn skill_enter(&mut self, cls: i32) {
+        self.play(if cls == 0 { 0x103 } else { 0x104 }, 0.15);
+        self.set(if cls == 0 { 0xDE } else { 0xDF });
+    }
+
+    /// Actions 0xFD / 0xFE (`BtlAct_SkillBasic`): the skill motion, the skill applied at the start (or at its end
+    /// with attribute 0x80), turned about with attributes 2 / 4; then action 0xB. The camera cut (0x40000) and the
+    /// model's colour mode (id 0x18) are not ported.
+    fn skill_basic(&mut self, phase: u32) {
+        let cls = self.current_class();
+        let attr = self.skill().flags(cls);
+        if phase == ENTER {
+            self.skill_enter(cls);
+            self.me.set_fx(if cls == 0 { 0x3C } else { 0x3D });
+            if attr & 0x80 == 0 {
+                self.apply_skill(cls);
+            }
+            for bit in [2, 4] {
+                if attr & bit != 0 {
+                    self.me.turn_yaw(self.opp, 2, PI);
+                    self.me
+                        .turn_pitch(self.data, self.opp, self.opp_data, 5, PI);
+                    if bit == 4 {
+                        self.me.turn_model_yaw(PI, 1.0);
+                    }
+                }
+            }
+        }
+        if phase == RUN {
+            if !self.flag(0xE) && !self.flag(0xF) {
+                self.held(0xE);
+            }
+            if self.me.anim_advance(0) {
+                self.request(0xB);
+                if attr & 0x80 != 0 {
+                    self.apply_skill(cls);
+                }
+                self.set(0x9A);
+            }
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            let attr = self.skill().flags(cls);
+            if attr & 0x100_0000 != 0 {
+                self.set(0x42);
+                self.set(0x43);
+            }
+            if attr & 0x200_0000 != 0 {
+                self.set(0x44);
+            }
+            if attr & 0x400_0000 != 0 {
+                self.set(0x46);
+            }
+            if attr & 0x800_0000 != 0 {
+                self.set(0x45);
+            }
+            if attr & 0x4_0000 != 0 {
+                for f in [0x125, 0x12A, 0x42, 0x43, 0x44, 0x45, 0x46, 0x128, 0xBB] {
+                    self.set(f);
+                }
+            }
+            if self.skill().id(cls) == 1 {
+                self.set(0x137);
+            }
+        }
+        if phase == LEAVE && self.skill().id(cls) == 1 {
+            self.held(cls as u32 + 0x4C);
+        }
+    }
+
+    /// Actions 0xFF / 0x100 (`BtlAct_SkillTeleport`): the skill applied at once and its motion; when the motion
+    /// raises flag 0x31 the fighter vanishes and, locked on, comes back behind the opponent; action 0xB nine frames
+    /// later. The sound and the vibration are not ported.
+    fn skill_teleport(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.skill_enter(cls);
+            self.held(0xE);
+            self.apply_skill(cls);
+        }
+        if phase == RUN {
+            if !self.flag(0x31) {
+                self.me.anim_advance(0);
+                if self.me.anim_passed_ratio(0.8) {
+                    self.me.set_fx(0xC);
+                }
+                self.step(6, 6, 7, 0.0, kmh(100.0));
+                self.me.apply_gravity();
+            } else {
+                for f in 0x42..=0x46 {
+                    self.set(f);
+                }
+                self.me.pose.speed = 0.0;
+                self.me.pose.fall_speed = 0.0;
+                let t = self.me.work[2];
+                self.me.work[2] += 1;
+                let locked = self.flag(5);
+                match t {
+                    5 if locked => {
+                        snap_to_opponent(self.me, self.opp);
+                        self.set(0xCC);
+                    }
+                    6 if locked => {
+                        warp_behind_opponent(self.me, self.data, self.opp, self.opp_data, 0.0);
+                        self.me.turn_yaw(self.opp, 2, PI);
+                        self.me
+                            .turn_pitch(self.data, self.opp, self.opp_data, 1, PI);
+                        self.me.turn_model_yaw(PI, 1.0);
+                        self.me.set_direction(3);
+                        for f in [0x3F, 0xCC, 0x24] {
+                            self.set(f);
+                        }
+                        self.me.set_fx(0xD);
+                    }
+                    7 if locked => {
+                        self.set(0xCD);
+                        self.set(0xD5);
+                    }
+                    9 => self.request(0xB),
+                    _ => {}
+                }
+                if self.me.work[2] >= 4 {
+                    self.set(0x26);
+                }
+                if self.me.work[2] < 9 {
+                    self.set(0xB);
+                }
+            }
+        }
+    }
+
+    /// Actions 0x101 / 0x102 (`BtlAct_SkillInstant`): the skill applied with no motion of its own, and left at once.
+    fn skill_instant(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.apply_skill(cls);
+        }
+        if phase == RUN {
+            self.me.anim_advance(0);
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+        }
+        if phase == DECIDE {
+            self.request(0xB);
+            if self.decide_main(0x8_0000) != 0 {
+                let q = self.queued();
+                self.request(q);
+            }
+        }
+    }
+
     // ---- the fusions (btl_act_decide.c, btl_act_change.c) ------------------------------------------------------
 
     /// `BtlMember_FindPresentIndex`: the present member of character `chara`.
@@ -11383,11 +11776,11 @@ mod tests {
     fn the_slice_s_actions_are_ported_and_others_are_not() {
         for id in [
             0xB, 0xD, 0xF, 0x38, 0x44, 0x60, 0x7B, 0xAE, 0xB1, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB,
-            0xE1, 0xEC, 0xF0, 0xF1, 0xF6,
+            0xE1, 0xEC, 0xF0, 0xF1, 0xF6, 0xFD, 0x100, 0x102,
         ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [0xEA, 0xFD, 0x13C] {
+        for id in [0xEA, 0x13C] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

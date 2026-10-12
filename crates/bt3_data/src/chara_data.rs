@@ -619,10 +619,91 @@ impl TechTable<'_> {
     }
 }
 
+/// The skill table (`BtlSkillData`, `mdl->skill`): every field an array of two for the slots 0..1.
+/// Out-of-range reads give 0.
+#[derive(Clone, Copy, Debug)]
+pub struct SkillTable<'a>(pub &'a [u8]);
+
+impl SkillTable<'_> {
+    fn at<const N: usize>(&self, base: usize, slot: i32) -> Option<[u8; N]> {
+        let i = usize::try_from(slot).ok().filter(|&i| i < 2)?;
+        let o = base + i * N;
+        self.0.get(o..o + N)?.try_into().ok()
+    }
+    fn u32_of(&self, base: usize, slot: i32) -> u32 {
+        self.at::<4>(base, slot).map_or(0, u32::from_le_bytes)
+    }
+    fn s32_of(&self, base: usize, slot: i32) -> i32 {
+        self.at::<4>(base, slot).map_or(0, i32::from_le_bytes)
+    }
+    fn f32_of(&self, base: usize, slot: i32) -> f32 {
+        self.at::<4>(base, slot).map_or(0.0, f32::from_le_bytes)
+    }
+    fn s8_of(&self, base: usize, slot: i32) -> i32 {
+        self.at::<1>(base, slot)
+            .map_or(0, |b| i32::from(b[0] as i8))
+    }
+    /// `BtlSkill_GetFlags` (+0x08): the attribute bits.
+    pub fn flags(&self, slot: i32) -> u32 {
+        self.u32_of(0x8, slot)
+    }
+    /// `BtlSkill_GetId` (+0x10).
+    pub fn id(&self, slot: i32) -> i32 {
+        self.at::<2>(0x10, slot)
+            .map_or(0, |b| i32::from(i16::from_le_bytes(b)))
+    }
+    /// `BtlSkill_GetSequence` (+0x64): the action block (0: 0xFD.., 1: 0xFF.., 2: 0x101..).
+    pub fn sequence(&self, slot: i32) -> i32 {
+        self.s8_of(0x64, slot)
+    }
+    /// `BtlSkill_GetStatKind` (+0x66): how long the stat levels last.
+    pub fn stat_kind(&self, slot: i32) -> i32 {
+        self.s8_of(0x66, slot)
+    }
+    /// `stocks` (+0x94): the blast stocks the skill costs (`BtlSkill_GetBlastCost` before its ability).
+    pub fn stocks(&self, slot: i32) -> i32 {
+        self.s8_of(0x94, slot)
+    }
+    /// `BtlSkill_GetStatLevel0..3` (+0x96, +0x9A, +0x98, +0x9C): the level the skill gives stat `stat`.
+    pub fn stat_level(&self, slot: i32, stat: usize) -> i32 {
+        match stat {
+            0 => self.s8_of(0x96, slot),
+            1 => self.s8_of(0x9A, slot),
+            2 => self.s8_of(0x98, slot),
+            3 => self.s8_of(0x9C, slot),
+            _ => 0,
+        }
+    }
+    /// `BtlSkill_GetFrames` (+0xA0, seconds).
+    pub fn frames(&self, slot: i32) -> i32 {
+        (self.f32_of(0xA0, slot) * 30.0) as i32
+    }
+    /// `healthPct` (+0xA8): percent of the maximum health given (negative: taken).
+    pub fn health_pct(&self, slot: i32) -> i32 {
+        self.s32_of(0xA8, slot)
+    }
+    /// `BtlSkill_GetKiChange` (+0xB0).
+    pub fn ki(&self, slot: i32) -> i32 {
+        self.s32_of(0xB0, slot)
+    }
+    /// `BtlSkill_GetValF` (+0xB8) / `GetValE` (+0xC0): the two timed values.
+    pub fn val_f(&self, slot: i32) -> i32 {
+        self.s32_of(0xB8, slot)
+    }
+    pub fn val_e(&self, slot: i32) -> i32 {
+        self.s32_of(0xC0, slot)
+    }
+}
+
 impl CharaTables {
     /// The technique table.
     pub fn tech(&self) -> TechTable<'_> {
         TechTable(&self.super_table)
+    }
+
+    /// The skill table.
+    pub fn skill(&self) -> SkillTable<'_> {
+        SkillTable(&self.skill_table)
     }
 }
 
