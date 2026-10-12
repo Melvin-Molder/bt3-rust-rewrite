@@ -197,8 +197,9 @@ struct Game {
     /// The battle's model textures (material, shading rows) and this frame's model triangles.
     model_textures: (Vec<RgbaTexture>, Vec<RgbaTexture>),
     model_batches: Vec<battle::ModelBatch>,
-    /// The stage texture file and this frame's stage triangles.
+    /// The stage texture file (a new revision after a stage change) and this frame's stage triangles.
     stage_textures: Vec<RgbaTexture>,
+    stage_rev: u32,
     stage_batches: Vec<stage_draw::StageBatch>,
     /// The fighters' effect textures and this frame's effect triangles in draw order.
     effect_textures: Vec<RgbaTexture>,
@@ -398,6 +399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model_textures: (Vec::new(), Vec::new()),
             model_batches: Vec::new(),
             stage_textures: Vec::new(),
+            stage_rev: 0,
             stage_batches: Vec::new(),
             effect_textures: Vec::new(),
             effects: Vec::new(),
@@ -964,6 +966,11 @@ fn run_frames(
                         have.extend_from_slice(&all[have.len()..]);
                     }
                 }
+                // A stage change's new stage textures.
+                if a.stage_rev != game.stage_rev {
+                    game.stage_textures = a.stage_textures.clone();
+                    game.stage_rev = a.stage_rev;
+                }
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
                 game.effects = frame.effects;
@@ -1100,6 +1107,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     };
     game.model_textures = (assets.base_textures.clone(), assets.shade_textures.clone());
     game.stage_textures = assets.stage_textures.clone();
+    game.stage_rev = assets.stage_rev;
     game.effect_textures = assets.effect_textures.clone();
     game.hud_textures = assets.hud_textures.clone();
     game.hud_clamp_from = assets.menu_sheet.base;

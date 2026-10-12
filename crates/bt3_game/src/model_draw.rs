@@ -489,6 +489,8 @@ pub struct ModelSlot(usize);
 /// The stage textures of the battle and the materials made of them by (group, order, texture).
 #[derive(Resource, Default)]
 pub struct StageTextures {
+    /// The stage revision the images are of.
+    rev: u32,
     images: Vec<Handle<Image>>,
     materials: HashMap<(usize, usize, usize), Handle<GsStageMaterial>>,
 }
@@ -632,8 +634,11 @@ pub fn sync_stage(
     if !game.is_changed() {
         return;
     }
-    if game.stage_textures.len() < textures.images.len() {
-        *textures = StageTextures::default();
+    if game.stage_textures.len() < textures.images.len() || textures.rev != game.stage_rev {
+        *textures = StageTextures {
+            rev: game.stage_rev,
+            ..StageTextures::default()
+        };
     }
     while textures.images.len() < game.stage_textures.len() {
         let texture = &game.stage_textures[textures.images.len()];

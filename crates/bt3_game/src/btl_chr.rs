@@ -1538,6 +1538,27 @@ impl Chr {
         self.place(data, pos, [0.0, yaw, 0.0], area);
     }
 
+    /// `BtlChar_OnStageLoaded` after a stage change: the pose cleared and the fighter put at its starting place on
+    /// the ground (flag 0xF held, 0xE cleared), held flag 0x13A when it was in the air (motion flag 0x10) or in a
+    /// reaction, else 0x139; its reaction ended (1), standing in motion 0. The head tracking and the vibration are
+    /// not ported.
+    pub(crate) fn on_stage_loaded(&mut self, data: &SideData, env: &Env) {
+        self.pose = Pose::default();
+        self.place_at_start(data, env);
+        self.flags.clear(0xE);
+        self.flags.set_held(0xF);
+        self.pose_to_obj(true);
+        if env.anim_flags(self.anim.cur) & 0x10 != 0 || self.react.reaction >= 3 {
+            self.flags.set_held(0x13A);
+        } else {
+            self.flags.set_held(0x139);
+        }
+        self.react.reaction = 1;
+        self.anim_play(data, 0, 0.0);
+        self.obj.sample_pose(&data.obj);
+        self.obj.calc_matrices(&data.obj);
+    }
+
     /// `BtlChar_OnModelLoaded` after a character change swapped the side's files in: the object set up again from
     /// the new model where it stood (`BtlObj_Rebind`, `BtlChar_BindObject`), the requested motion started on it,
     /// and for a transformation (0xEC..0xF0) the member's gauges reloaded for the new character keeping the health

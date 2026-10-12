@@ -72,6 +72,12 @@ const STAT_CURVE: u32 = 0x2E_E7C0;
 const STAGE_CUT_SECTION: usize = 3;
 /// `BTL_FILE_STAGE`: `0x171 + stage`.
 pub const STAGE_FILE: u32 = 0x171;
+/// `BTL_FILE_TRANSITION` / `BTL_FILE_TRANSITION_3`: the stage change's transition pack (a change to stage 3 has
+/// its own).
+const TRANSITION_FILE: u32 = 0x1C0;
+const TRANSITION_FILE_3: u32 = 0x1BF;
+/// `gFadeColors[2]`: the stage change's fade, clear then opaque (four floats each).
+const FADE_COLORS_SLOT2: u32 = 0x2C_6E60 + 2 * 0x20;
 /// `Battle_ResetWork`: `Bgm_Play(Battle_GetBgm() + 0x10B16)`.
 pub const BGM_FIRST: u32 = 0x10B16;
 /// `BtlObjLight_Init`: section 1 of common file 2 is the light's texture file.
@@ -125,6 +131,16 @@ pub struct BattleAssets {
     /// The stage's destructible objects (`gBtlStage->objs`).
     pub(crate) stage_objs: std::sync::Mutex<crate::stg_obj::StageObjs>,
     stage_id: i32,
+    /// `Battle_GetStartStage`: the stage a rematch loads back.
+    start_stage: i32,
+    /// `Battle_IsStageChangeEnabled`.
+    stage_change: bool,
+    /// `Battle_IsTimeLimitOff`.
+    time_limit_off: bool,
+    /// `gFadeColors[2]` (clear, opaque): the stage change's fade.
+    fade_colors: [[f32; 4]; 2],
+    /// Counts the stage swaps: the stage's textures are uploaded again when it changes.
+    pub stage_rev: u32,
     pub(crate) stage_cuts: Vec<Option<CamAnim>>,
     /// `Battle_GetMode`.
     pub(crate) mode: i32,
@@ -240,27 +256,19 @@ pub fn load(
         .first()
         .ok_or("the light file has no textures")?;
     let ramp = psmt8_row_from_upload(ramp_entry, 4, 0, 256).map_err(error)?;
-    let stage_file = read(STAGE_FILE + setup.stage.max(0) as u32)?;
-    let stage = StageResource::parse(&stage_file).map_err(error)?;
-    let object = StageModel::object(&stage_file).map_err(error)?;
-    let stage_model = StageModel::parse(object).map_err(error)?;
-    let stage_textures = TextureResource::parse_at(object, stage_model.texture_header)
-        .map_err(error)?
-        .entries
-        .iter()
-        .map(decode_sprite_texture)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(error)?;
-    let stage_cuts = (0..3)
-        .map(|i| {
-            pack_section(&stage_file, STAGE_CUT_SECTION + i)
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(CamAnim::parse)
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(error)?;
+    let LoadedStage {
+        stage,
+        model: stage_model,
+        textures: stage_textures,
+        cuts: stage_cuts,
+        collision,
+        nav,
+    } = load_stage(read, setup.stage)?;
+    let fade = elf.f32s(FADE_COLORS_SLOT2, 8).map_err(error)?;
+    let fade_colors = [
+        [fade[0], fade[1], fade[2], fade[3]],
+        [fade[4], fade[5], fade[6], fade[7]],
+    ];
     let hud_file = read(HUD_FILE)?;
     let (mut hud_textures, hud_sheets, hud_cpu) = load_hud(&hud_file).map_err(error)?;
     let menu_sheet = load_menu_sheet(&hud_file, &mut hud_textures).map_err(error)?;
@@ -275,8 +283,6 @@ pub fn load(
         None
     };
     let common_tables = CommonTables::parse(&common).map_err(error)?;
-    let collision = StageCollision::parse(&stage_file).map_err(error)?;
-    let nav = StageNav::parse(&stage_file).map_err(error)?;
     let ai = AiData::parse(&common).map_err(error)?;
     let ai_tables = AiTables::read(elf).map_err(error)?;
     let chara_table = read(CHARA_TABLE_FILE)?;
@@ -321,6 +327,11 @@ pub fn load(
         stage,
         stage_model,
         stage_id: setup.stage,
+        start_stage: setup.stage,
+        stage_change: setup.stage_change != 0,
+        time_limit_off: setup.time_limit == 0,
+        fade_colors,
+        stage_rev: 0,
         stage_cuts,
         mode: setup.mode,
         hud_textures,
@@ -681,6 +692,53 @@ fn motion_flags(common: &[u8], motion: usize) -> u32 {
     word((word(12) as usize & !3) + motion * 4)
 }
 
+/// What a stage file gives the battle (`BtlStage_Init`, `StgNav_Bind`, the stage's camera cuts).
+pub(crate) struct LoadedStage {
+    stage: StageResource,
+    model: StageModel,
+    textures: Vec<RgbaTexture>,
+    cuts: Vec<Option<CamAnim>>,
+    collision: StageCollision,
+    nav: StageNav,
+}
+
+/// Reads stage `stage_id`'s file (`BTL_FILE_STAGE + stage`).
+fn load_stage(
+    read: &mut dyn FnMut(u32) -> Result<Vec<u8>, String>,
+    stage_id: i32,
+) -> Result<LoadedStage, String> {
+    let error = |e: std::io::Error| e.to_string();
+    let stage_file = read(STAGE_FILE + stage_id.max(0) as u32)?;
+    let stage = StageResource::parse(&stage_file).map_err(error)?;
+    let object = StageModel::object(&stage_file).map_err(error)?;
+    let model = StageModel::parse(object).map_err(error)?;
+    let textures = TextureResource::parse_at(object, model.texture_header)
+        .map_err(error)?
+        .entries
+        .iter()
+        .map(decode_sprite_texture)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let cuts = (0..3)
+        .map(|i| {
+            pack_section(&stage_file, STAGE_CUT_SECTION + i)
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(CamAnim::parse)
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    Ok(LoadedStage {
+        stage,
+        model,
+        textures,
+        cuts,
+        collision: StageCollision::parse(&stage_file).map_err(error)?,
+        nav: StageNav::parse(&stage_file).map_err(error)?,
+    })
+}
+
 /// `BtlObjMdl_BindFiles` and `ObjDraw_UploadTextures`: a batch's TEX0_1 is its material texture at
 /// `tbp 0x3480 + tbpOfs`, `cbp 0x3C00 + cbpOfs` once `MdlTex_RebaseChain` moved it, and its TEX0_2 reads the
 /// CLUT that `TexFile_UploadRange(clutFirst, clutCount)` put at `0x3D00 + tbpOfs`.
@@ -848,6 +906,14 @@ pub struct Battle {
     pub loader: Option<Loader>,
     /// The loader's job of the change request being served (`BtlJob`).
     change_job: Option<ChangeJob>,
+    /// The stage change being made (`BtlLoad_StepStageChange`).
+    stage_job: Option<StageJob>,
+    /// `BATTLE_FLAG_LOADING`: a stage change holds the fighters and the clock, and the stage is not drawn.
+    pub(crate) loading: bool,
+    /// Fade slot 2, the stage change's.
+    fade2: Fade,
+    /// `gEftBurst->frame`: the transition's frame while it runs (its particles and sounds are not ported).
+    burst: Option<i32>,
 }
 
 /// What reads the files of a character change.
@@ -915,6 +981,30 @@ impl BattleAssets {
             }),
         }
     }
+}
+
+impl BattleAssets {
+    /// `BtlLoad_EndStageSwap`'s stage half (`StgModel_InitStage`, `StgNav_Rebind`): the stage's resources, its
+    /// objects whole, its textures to upload again.
+    fn install_stage(&mut self, s: LoadedStage, stage_id: i32) {
+        self.stage_objs =
+            std::sync::Mutex::new(crate::stg_obj::StageObjs::new(&s.stage.objects, &s.model));
+        self.stage = s.stage;
+        self.stage_model = s.model;
+        self.stage_textures = s.textures;
+        self.stage_cuts = s.cuts;
+        self.collision = s.collision;
+        self.nav = s.nav;
+        self.stage_id = stage_id;
+        self.stage_rev += 1;
+    }
+}
+
+/// `BtlLoad_StepStageChange`'s job: its state, the transition pack and the new stage once read.
+struct StageJob {
+    state: u8,
+    transition: Option<Vec<u8>>,
+    loaded: Option<LoadedStage>,
 }
 
 impl Battle {
@@ -986,6 +1076,191 @@ impl Battle {
             chara_bits: crate::save::SaveData::default().chara_bits,
             loader: None,
             change_job: None,
+            stage_job: None,
+            loading: false,
+            fade2: Fade::default(),
+            burst: None,
+        }
+    }
+
+    /// `BtlScene_CheckStageChange` (while fighting, outside modes 4..7, without a time limit under 10 seconds): the
+    /// first technique record that hit its fighter (task flag 1 alone of 1 / 2; a multi-hit only on its last hit)
+    /// with definition flag 0x200000 while the rule allows stage changes and the victim is below half its health
+    /// asks for the stage change (the record marked 2 and 8: no impact effect); one that can finish
+    /// (`BtlCharApi_CanTechniqueFinish`: technique flag 0x80000, not a throw, the victim not in its damaged look)
+    /// raises the victim's held flag 0xAB.
+    fn check_stage_change(&mut self) {
+        if (4..8).contains(&self.assets.mode) {
+            return;
+        }
+        if !self.assets.time_limit_off && self.assets.time_limit < 10 {
+            return;
+        }
+        if self.seq.state_id() != 3 {
+            return;
+        }
+        let chars = &self.roster.chars;
+        let mut found = None;
+        for i in 0..self.roster.scene.records.len() {
+            let rec = self.roster.scene.records[i];
+            let Some(src) = rec.tech else {
+                continue;
+            };
+            let (me, target) = (&chars[rec.owner], &chars[rec.owner ^ 1]);
+            let below_half = !me.is_dead()
+                && !target.is_dead()
+                && target.gauge.health < target.gauge.health_max / 2;
+            let can_finish = crate::btl_act::is_technique_id(me.act.current) && {
+                let t = self.assets.fighters[rec.owner].tables.tech();
+                let slot = crate::btl_act::id_class(me.act.current);
+                t.flags(slot) & 0x8_0000 != 0 && !t.is_throw(slot) && target.gauge.variant == 0
+            };
+            let hit = if self.assets.stage_change && src.def.flags & 0x20_0000 != 0 && below_half {
+                1
+            } else if can_finish {
+                2
+            } else {
+                0
+            };
+            let attr = self.roster.scene.task_flags(i);
+            if hit != 0
+                && attr & 3 == 1
+                && (attr & crate::btl_tech_fx::T_MULTI == 0 || rec.flags & 0x10 != 0)
+            {
+                if hit == 1 {
+                    self.roster.scene.records[i].flags |= 2 | 8;
+                }
+                found = Some((hit, rec.owner ^ 1));
+                break;
+            }
+        }
+        match found {
+            Some((1, _)) => {
+                // BtlStage_RequestChange: BtlStage_GetChangeTarget.
+                let target = match self.assets.stage.change_kind {
+                    1 => 0xF,
+                    2 => 3,
+                    _ => -1,
+                };
+                self.request_stage_change(target);
+            }
+            Some((_, target)) => self.roster.chars[target].flags.set_held(0xAB),
+            None => {}
+        }
+    }
+
+    /// `BtlLoad_RequestStageChange`: not while a character change loads or a stage loads, nor to the same stage;
+    /// the stage becomes the new one at once and the screen fades in from the slot's colour.
+    fn request_stage_change(&mut self, stage: i32) {
+        if self.change_job.is_some() || self.loading || stage < 0 || stage == self.assets.stage_id {
+            return;
+        }
+        self.stage_job = Some(StageJob {
+            state: 0,
+            transition: None,
+            loaded: None,
+        });
+        self.assets.stage_id = stage;
+        self.fade2 = Fade::start_colored(self.assets.fade_colors, true, 1.0);
+    }
+
+    /// `BtlLoad_StepStageChange`, one step a frame: the loading flag; the transition pack; the transition
+    /// (`EftBurst_Start`: its camera animation, pack entry 1, held); the new stage's file; once the transition's 150
+    /// frames are over, the fade out to the slot's colour; covered, the transition ends; the new stage in
+    /// (`BtlLoad_EndStageSwap`: the fighters back at their starting places); the fade in. The stage's sound bank,
+    /// the transition's particles and the stage effects are not ported.
+    fn step_stage_job(&mut self, paused: bool) {
+        let Some(job) = &mut self.stage_job else {
+            return;
+        };
+        match job.state {
+            0 => {
+                self.loading = true;
+                job.state = 1;
+            }
+            1 => {
+                let id = if self.assets.stage_id == 3 {
+                    TRANSITION_FILE_3
+                } else {
+                    TRANSITION_FILE
+                };
+                job.transition = self.loader.as_mut().and_then(|read| read(id).ok());
+                job.state = 2;
+            }
+            2 => job.state = 3,
+            3 => {
+                if paused {
+                    return;
+                }
+                self.burst = Some(0);
+                let anim = job
+                    .transition
+                    .as_deref()
+                    .and_then(|t| pack_section(t, 1).ok())
+                    .and_then(|s| CamAnim::parse(s).ok());
+                job.state = 4;
+                if let Some(anim) = anim {
+                    self.eft_cam.start(&mut self.demo, anim, None, 0.0);
+                    self.eft_cam.set_hold(true);
+                }
+            }
+            4 => {
+                let stage = self.assets.stage_id;
+                job.loaded = self.loader.as_mut().and_then(|read| {
+                    load_stage(read, stage)
+                        .map_err(|e| bevy::log::error!("cannot load stage {stage}: {e}"))
+                        .ok()
+                });
+                job.state = 5;
+            }
+            _ => {
+                if job.state == 5 {
+                    job.state = 6;
+                }
+                match job.state {
+                    6 => {
+                        if paused || self.burst.is_some_and(|f| f < 150) {
+                            return;
+                        }
+                        self.fade2 = Fade::start_colored(self.assets.fade_colors, false, 1.0);
+                        job.state = 7;
+                    }
+                    7 => {
+                        if self.fade2.is_done() {
+                            // EftBurst_End.
+                            self.burst = None;
+                            self.eft_cam.stop(&mut self.demo);
+                            job.state = 8;
+                        }
+                    }
+                    8 => {
+                        if paused {
+                            return;
+                        }
+                        self.loading = false;
+                        if let Some(loaded) = job.loaded.take() {
+                            let stage = self.assets.stage_id;
+                            self.assets.install_stage(loaded, stage);
+                            self.light_dir =
+                                normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
+                            self.with_roster(|roster, data, env| {
+                                for (chr, data) in roster.chars.iter_mut().zip(data) {
+                                    chr.on_stage_loaded(data, env);
+                                }
+                                false
+                            });
+                        }
+                        if let Some(job) = &mut self.stage_job {
+                            job.transition = None;
+                            job.state = 9;
+                        }
+                    }
+                    _ => {
+                        self.fade2 = Fade::start_colored(self.assets.fade_colors, true, 1.0);
+                        self.stage_job = None;
+                    }
+                }
+            }
         }
     }
 
@@ -1188,6 +1463,25 @@ impl Battle {
         sounds.push(TitleSound::VoiceStop);
         sounds.push(TitleSound::Bgm(BGM_FIRST + self.assets.bgm.max(0) as u32));
         self.xfade = ScrXfade::default();
+        // BtlLoad_Reload: a running stage change is dropped and the starting stage loaded back (Fade_ResetAll
+        // clears slot 2).
+        self.stage_job = None;
+        self.loading = false;
+        self.burst = None;
+        self.fade2 = Fade::default();
+        let start = self.assets.start_stage;
+        if self.assets.stage_id != start
+            && let Some(read) = self.loader.as_mut()
+        {
+            match load_stage(read, start) {
+                Ok(loaded) => {
+                    self.assets.install_stage(loaded, start);
+                    self.light_dir =
+                        normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
+                }
+                Err(e) => bevy::log::error!("cannot load stage {start} back: {e}"),
+            }
+        }
         // BtlStage_Reset: every stage object whole again.
         let objs = self.assets.stage_objs.get_mut();
         objs.unwrap_or_else(|e| e.into_inner()).reset_stage();
@@ -1329,6 +1623,7 @@ impl Battle {
             self.seq_start(&mut input);
         }
         self.fade.update();
+        self.fade2.update();
         if self.with_roster(|roster, data, env| roster.check_start(data, env)) {
             self.seq.started = true;
         }
@@ -1373,23 +1668,30 @@ impl Battle {
             self.ai.update(&mut ctx);
         }
         let mut vu0 = self.vu0;
+        let loading = self.loading;
         self.with_roster(|roster, data, env| {
-            // BtlChars_SampleInput, UpdateInput, UpdateMain and PostScene do nothing while paused; the effect
-            // scene runs with its time stopped.
-            if !paused {
+            // BtlChars_SampleInput, UpdateInput, UpdateMain and PostScene do nothing while paused or while a stage
+            // loads; the effect scene runs with its time stopped.
+            if !paused && !loading {
                 roster.sample_input(&pads, data, env);
                 roster.update_input(data, env);
                 roster.update_main(data, env);
             }
             roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
-            if !paused {
+            if !paused && !loading {
                 roster.post_scene(data, env, &mut *input.libc);
-                // BtlStage_Update: BtlStage_UpdateObjs (not while paused).
-                env.objs()
-                    .update(env.inner_radius(), &mut vu0, &mut *input.libc);
             }
             false
         });
+        self.check_stage_change();
+        if !paused && !self.loading {
+            // BtlStage_Update: BtlStage_UpdateObjs and StgRigid_Update (not while paused or loading).
+            self.with_roster(|_, _, env| {
+                env.objs()
+                    .update(env.inner_radius(), &mut vu0, &mut *input.libc);
+                false
+            });
+        }
         let objs = self.assets.stage_objs.get_mut();
         objs.unwrap_or_else(|e| e.into_inner())
             .sync_model(&mut self.assets.stage_model);
@@ -1416,12 +1718,19 @@ impl Battle {
                 view = demo;
             }
         }
-        // BtlChars_EndFrame: BtlChange_Update runs even while paused.
-        self.roster.change.update();
-        if !paused {
-            self.roster.end_frame();
+        // BtlChars_EndFrame (not while a stage loads): BtlChange_Update runs even while paused.
+        if !self.loading {
+            self.roster.change.update();
+            if !paused {
+                self.roster.end_frame();
+            }
         }
         self.step_change_job(paused);
+        // The transition's task counts its frames (EftBurst_Update, not while paused).
+        if !paused && let Some(f) = &mut self.burst {
+            *f = (*f + 1).min(151);
+        }
+        self.step_stage_job(paused);
         for side in 0..2 {
             if let Some(n) = self.roster.chars[side].obj.node(0) {
                 self.roots[side] = n.mtx;
@@ -1445,8 +1754,13 @@ impl Battle {
         {
             font.reset_icon_anim();
         }
-        let mut stage = draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view);
-        {
+        // StgModel_Cull / StgModel_Draw: nothing while a stage loads.
+        let mut stage = if self.loading {
+            Vec::new()
+        } else {
+            draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view)
+        };
+        if !self.loading {
             let objs = self
                 .assets
                 .stage_objs
@@ -1544,7 +1858,13 @@ impl Battle {
             models: batches,
             capture,
             xfade_alpha,
-            quads: self.fade.quad().into_iter().collect(),
+            // StgFx_DrawPost's fade slot 2, then Fade_DrawScreen's slot 0.
+            quads: self
+                .fade2
+                .quad()
+                .into_iter()
+                .chain(self.fade.quad())
+                .collect(),
             hud,
             sounds,
             exit: self.seq.left.then_some(self.seq.reason),
@@ -4296,6 +4616,83 @@ mod tests {
             battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
         }
         Some(battle)
+    }
+
+    #[test]
+    fn real_stage_change_swaps_the_stage_behind_a_fade() {
+        // The first stage whose environment names a change (`changeKind` 1: to stage 0xF, 2: to stage 3).
+        let Some(mut probe) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let read = probe.loader.as_mut().unwrap();
+        let Some((from, to)) = (0..0x27).find_map(|s| {
+            let kind = load_stage(read, s).ok()?.stage.change_kind;
+            let to = match kind {
+                1 => 0xF,
+                2 => 3,
+                _ => return None,
+            };
+            (to != s).then_some((s, to))
+        }) else {
+            panic!("no stage changes");
+        };
+        let mut setup = BattleSetup::default();
+        setup.stage = from;
+        setup.stage_change = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let rev = battle.assets.stage_rev;
+        battle.request_stage_change(to);
+        assert_eq!(battle.assets.stage_id, to);
+        let (mut loading_frames, mut cam_frames, mut frames) = (0, 0, 0);
+        let time = battle.seq.time_left();
+        while battle.stage_job.is_some() && frames < 400 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            if battle.loading {
+                loading_frames += 1;
+                assert!(
+                    frame.stage.is_empty(),
+                    "the stage is not drawn while it loads"
+                );
+                cam_frames += i32::from(battle.demo.is_active());
+            }
+            frames += 1;
+        }
+        // The transition's 150 frames, the fade out (30) and the steps around them.
+        assert!(battle.stage_job.is_none() && !battle.loading, "{frames}");
+        assert!((180..200).contains(&loading_frames), "{loading_frames}");
+        // The transition's camera animation (pack entry 1) holds the view meanwhile.
+        assert!(cam_frames > 150, "{cam_frames}");
+        assert_eq!(
+            battle.seq.time_left(),
+            time,
+            "the clock stops while the stage loads"
+        );
+        assert_eq!(battle.assets.stage_rev, rev + 1);
+        assert_eq!(battle.assets.stage.stage_id, to);
+        // The fighters stand at the new stage's starting places.
+        for side in 0..2 {
+            let p = battle.assets.stage.starting_placements[side].position;
+            let c = &battle.roster.chars[side];
+            assert!((c.pose.pos[0] - p[0]).abs() < 1.0 && (c.pose.pos[2] - p[2]).abs() < 1.0);
+        }
+        // A rematch loads the first stage back.
+        let mut sounds = Vec::new();
+        battle.restart(&mut sounds);
+        assert_eq!(battle.assets.stage_id, from);
+        assert_eq!(battle.assets.stage.stage_id, from);
     }
 
     #[test]

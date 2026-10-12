@@ -1098,7 +1098,8 @@ impl Scene {
         }
     }
 
-    fn task_flags(&mut self, i: usize) -> u32 {
+    /// `EftHit_GetTaskFlags`.
+    pub(crate) fn task_flags(&mut self, i: usize) -> u32 {
         self.rec_tag(i).map_or(0, |t| t.flags)
     }
 

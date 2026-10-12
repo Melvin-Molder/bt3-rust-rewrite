@@ -1,37 +1,51 @@
 use crate::loading::Quad;
 
-/// Fade slot 0 (black) of src/sys/fade.c: a float alpha ramp from `from` to `to` over `seconds * 30` steps.
-#[derive(Clone, Copy, Debug)]
+/// A fade slot of src/sys/fade.c: a colour ramp from `from` to `to` over `seconds * 30` steps (slot 0 black,
+/// slot 2 the stage change's colour).
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Fade {
     active: bool,
     done: bool,
-    alpha: f32,
-    from: f32,
-    delta: f32,
+    color: [f32; 4],
+    from: [f32; 4],
+    delta: [f32; 4],
     ramp_value: f32,
     ramp_frames: f32,
     ramp_step: f32,
 }
 
+/// `gFadeColors[0]`: clear and opaque black.
+const BLACK: [[f32; 4]; 2] = [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 128.0]];
+
 impl Fade {
     /// `Fade_Start(0, FADE_IN, seconds)`: black to clear.
     pub fn start_in(seconds: f32) -> Self {
-        Self::start(128.0, 0.0, seconds)
+        Self::start(BLACK[1], BLACK[0], seconds)
     }
 
     /// `Fade_Start(0, FADE_OUT, seconds)`: clear to black.
     pub fn start_out(seconds: f32) -> Self {
-        Self::start(0.0, 128.0, seconds)
+        Self::start(BLACK[0], BLACK[1], seconds)
     }
 
-    fn start(from: f32, to: f32, seconds: f32) -> Self {
+    /// `Fade_Start(slot, dir, seconds)` with the slot's colours (`gFadeColors[slot]`: clear, opaque): `fade_in`
+    /// from opaque to clear, else from clear to opaque.
+    pub fn start_colored(colors: [[f32; 4]; 2], fade_in: bool, seconds: f32) -> Self {
+        if fade_in {
+            Self::start(colors[1], colors[0], seconds)
+        } else {
+            Self::start(colors[0], colors[1], seconds)
+        }
+    }
+
+    fn start(from: [f32; 4], to: [f32; 4], seconds: f32) -> Self {
         let frames = seconds * 30.0;
         let mut fade = Self {
             active: true,
             done: false,
-            alpha: from,
+            color: from,
             from,
-            delta: to - from,
+            delta: std::array::from_fn(|k| to[k] - from[k]),
             ramp_value: 0.0,
             ramp_frames: frames,
             ramp_step: 1.0 / frames,
@@ -46,9 +60,9 @@ impl Fade {
         if !self.active {
             return;
         }
-        self.alpha = self.delta * self.ramp_value + self.from;
+        self.color = std::array::from_fn(|k| self.delta[k] * self.ramp_value + self.from[k]);
         if self.done {
-            if self.alpha as i32 == 0 {
+            if self.color[3] as i32 == 0 {
                 self.active = false;
             }
         } else if self.step_ramp() {
@@ -77,7 +91,7 @@ impl Fade {
             texture: None,
             screen: [0, 0, 512, 448],
             uv: [0; 4],
-            rgba: [0, 0, 0, self.alpha as u32 as u8],
+            rgba: self.color.map(|c| c as u32 as u8),
         })
     }
 }

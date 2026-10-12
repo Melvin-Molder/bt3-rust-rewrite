@@ -121,6 +121,11 @@ impl EftCam {
         self.hold = false;
     }
 
+    /// `EftCam_SetHold`: past its animation's length the cut stays on its last frame.
+    pub(crate) fn set_hold(&mut self, hold: bool) {
+        self.hold = hold;
+    }
+
     /// The fighter whose rush times the cut.
     pub(crate) fn side(&self) -> Option<usize> {
         self.side
@@ -708,7 +713,7 @@ impl Battle {
         if self.seq.winner & 0x1F != 0 {
             return true;
         }
-        if self.seq.paused {
+        if self.seq.paused || self.loading {
             return false;
         }
         if self.roster.chars.iter().any(|c| c.flags.test(0x128)) {

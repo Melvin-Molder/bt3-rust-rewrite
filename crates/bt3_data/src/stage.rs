@@ -11,6 +11,8 @@ const OBJECT_DEF_SIZE: usize = 0x40;
 pub struct StageResource {
     pub stage_id: i32,
     pub flags: i32,
+    /// `StgEnv.changeKind`: what a stage change leads to (`BtlStage_GetChangeTarget`: 1 stage 0xF, 2 stage 3).
+    pub change_kind: i32,
     /// The first word of the stage data's table at +0x74 (`d->flags[0]`): 1 / 2 / 4 the stage effects, 8, 0x10
     /// the moon (`BtlStage_HasMoon`); 0 when there is none.
     pub stage_flags: u32,
@@ -121,6 +123,7 @@ impl StageResource {
 
         let stage_id = read_i32(bytes, environment_offset)?;
         let flags = read_i32(bytes, environment_offset + 4)?;
+        let change_kind = read_i32(bytes, environment_offset + 0xC)?;
         let stored_water_level = read_f32(bytes, environment_offset + 8)?;
         let water_level = (flags & 2 != 0).then_some(-stored_water_level);
 
@@ -152,6 +155,7 @@ impl StageResource {
         Ok(Self {
             stage_id,
             flags,
+            change_kind,
             stage_flags,
             water_level,
             object_count,
