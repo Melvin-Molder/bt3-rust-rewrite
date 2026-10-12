@@ -76,6 +76,7 @@
 !/crates/bt3_game/src/eft_absorb.rs
 !/crates/bt3_game/src/eft_shock.rs
 !/crates/bt3_game/src/eft_rushburst.rs
+!/crates/bt3_game/src/eft_transform.rs
 !/crates/bt3_game/src/scr_warp.rs
 !/crates/bt3_game/src/btl_fx.rs
 !/crates/bt3_game/src/eft_geyser.rs

@@ -327,6 +327,8 @@ pub(crate) struct Scene {
     pub shotfx: crate::eft_shotfx::ShotFx,
     /// The impacts (`gEftImpactList`, layer 3).
     pub impacts: crate::eft_impact::Impacts,
+    /// The transformation effect (`gEftTransformList`, layer 3).
+    pub transforms: crate::eft_transform::Transforms,
     /// Each fighter's drain glows (its kind 9 manager, layer 2).
     pub absorbs: [crate::eft_absorb::Absorbs; 2],
     /// Each fighter's shocks (its kind 4 manager, layer 2).
@@ -1178,11 +1180,60 @@ impl Scene {
         }
         self.tech
             .update_discs(w, &mut self.fx, &mut self.records, HIT_MAX);
-        // EftImpact_Update: what EftEmit_Spawn reads of each fighter, taken first.
+        // What EftEmit_Spawn reads of each fighter, taken first.
         let scale = [0, 1].map(|s| w.data[s].height() / 19.35);
         let flags = [0, 1].map(|s| w.data[s].tables.params.chara_flags());
         let node3 = [0, 1].map(|s| w.chars[s].obj.node_pos(3));
         let impact_sets = w.env.impact;
+        let transform_sets = w.env.transform;
+        // EftTransform_Update, then the fighters' colour modes it asked for.
+        {
+            let chars = &*w.chars;
+            let pos = [0, 1].map(|s| move |n: u32| chars[s].obj.node_pos(n));
+            let z = [0, 1].map(|s| {
+                move |n: u32| {
+                    chars[s]
+                        .obj
+                        .node(n)
+                        .map_or([0.0; 3], |m| [m.mtx[2][0], m.mtx[2][1], m.mtx[2][2]])
+                }
+            });
+            let attr = [0, 1].map(|s| move |m: u64| chars[s].anim_test_attr(m));
+            let attr_node = [0, 1].map(|s| move |m: u64| attr_kind(&chars[s], m));
+            let tc = std::array::from_fn(|s| crate::eft_transform::TransformChr {
+                side: s,
+                height: w.data[s].height(),
+                node_pos: &pos[s],
+                node_z: &z[s],
+                attr: &attr[s],
+                attr_node: &attr_node[s],
+            });
+            self.transforms.update(
+                &mut self.fx,
+                &mut self.warps,
+                transform_sets,
+                &tc,
+                w.paused,
+                |chr, k, s| crate::eft::SpawnCtx {
+                    chr,
+                    set: &s.set,
+                    assets: &s.assets,
+                    set_ref: SetRef {
+                        side: chr,
+                        list: crate::eft_transform::FIRST_LIST + k,
+                    },
+                    char_scale: [scale[chr], scale[chr ^ 1]],
+                    opp_chara_flags: flags[chr ^ 1],
+                    opp_node3: node3[chr ^ 1],
+                },
+                w.libc,
+                w.vu0,
+            );
+        }
+        for r in &self.transforms.model_requests {
+            w.chars[r.chr].obj.set_color_mode(3, r.silhouette);
+        }
+        // EftImpact_Update.
         self.impacts.update(
             &mut self.fx,
             impact_sets,
@@ -1205,7 +1256,9 @@ impl Scene {
         self.tech
             .update_shots(w, &mut self.fx, &mut self.records, HIT_MAX);
         let fxw = FxWorld {
-            sets: std::array::from_fn(|s| world_sets(w.data[s].fx_sets(), impact_sets)),
+            sets: std::array::from_fn(|s| {
+                world_sets(w.data[s].fx_sets(), impact_sets, transform_sets)
+            }),
             any_frozen: stopped,
             stopped: [0, 1].map(|s| crate::btl_tech_fx::stopped(w, s)),
             // The update does not draw.
@@ -1250,6 +1303,9 @@ impl Scene {
             }
         }
         self.tech.discs.post_update(w, &mut self.fx);
+        if !transform_sets.is_empty() {
+            self.transforms.post_update(transform_sets, &mut self.fx);
+        }
         self.impacts
             .post_update(&mut self.fx, impact_sets, w.paused);
         self.tech.post_update_shots(w, &mut self.fx);
@@ -2184,15 +2240,29 @@ fn absorb_ctx<'d>(w: &World<'_, 'd>, side: usize) -> Option<(&'d EmitSet, SpawnC
     ))
 }
 
-/// A side's emitter sets with the impacts' common sets after them.
+/// A side's emitter sets with the impacts' and the transformation's common sets after them.
 pub(crate) fn world_sets<'a>(
     mut own: [Option<&'a SetAssets>; crate::eft::SET_LISTS],
-    common: &'a [crate::eft_impact::ImpactSet],
+    impact: &'a [crate::eft_impact::ImpactSet],
+    transform: &'a [crate::eft_impact::ImpactSet],
 ) -> [Option<&'a SetAssets>; crate::eft::SET_LISTS] {
-    for (k, s) in common.iter().enumerate() {
+    for (k, s) in impact.iter().enumerate() {
         own[crate::eft_impact::FIRST_LIST + k] = Some(&s.assets);
     }
+    for (k, s) in transform.iter().enumerate() {
+        own[crate::eft_transform::FIRST_LIST + k] = Some(&s.assets);
+    }
     own
+}
+
+/// `BtlCharApi_ObjGetAttrKind`: the node of an animation event's value, 0 without one.
+fn attr_kind(chr: &Chr, mask: u64) -> u32 {
+    let bits = chr.obj.event_arg(mask);
+    if bits == 0 {
+        0
+    } else {
+        mask_to_node(bits) as u32
+    }
 }
 
 /// `EftKiBlast_EndTrail`: the ribbon emitters (group 17) restart.

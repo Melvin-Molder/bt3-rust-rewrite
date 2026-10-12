@@ -352,6 +352,7 @@ impl Roster {
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             crate::btl_fx::update_all(me, data[i], env, &mut self.scene.impacts);
             self.scene.spawn_held_disc(me, data[i]);
+            transform_fx(me, data[i], env, &mut self.scene.transforms);
             movement_fx(me, opp, data[i], &mut self.scene, libc);
             ground_fx(me, data[i], env, &mut self.scene.gdust, libc, vu0);
             water_fx(
@@ -639,6 +640,49 @@ impl Roster {
             chr.flags.set_stage(12);
         }
         self.snapshot(5);
+    }
+}
+
+/// `BtlChar_SpawnFxBits0`: requests 0..2 start, flash and end the transformation effect of the fighter's change
+/// kind (`form.kind`: 0 none; 1 -> 1, 2 -> 0, 3 -> 5, 4 -> 6, 5..7 -> 2..4, 8..11 -> 7..10).
+pub(crate) fn transform_fx(
+    me: &Chr,
+    data: &SideData,
+    env: &Env,
+    fx: &mut crate::eft_transform::Transforms,
+) {
+    let form = me.form.kind;
+    if me.test_fx(0) {
+        let kind = match form {
+            1 => 1,
+            2 => 0,
+            3 => 5,
+            4 => 6,
+            5..=7 => form - 3,
+            8..=11 => form - 1,
+            _ => -1,
+        };
+        if kind >= 0 && !env.transform.is_empty() {
+            let node_pos = |n| me.obj.node_pos(n);
+            let none = |_| [0.0; 3];
+            let no = |_| false;
+            let zero = |_| 0;
+            let c = crate::eft_transform::TransformChr {
+                side: me.player,
+                height: data.height(),
+                node_pos: &node_pos,
+                node_z: &none,
+                attr: &no,
+                attr_node: &zero,
+            };
+            fx.start(env.transform, kind, &c);
+        }
+    }
+    if me.test_fx(1) && form != 0 {
+        fx.flash();
+    }
+    if me.test_fx(2) && form != 0 {
+        fx.end();
     }
 }
 

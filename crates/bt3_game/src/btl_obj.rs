@@ -247,6 +247,8 @@ pub(crate) struct Obj {
     pub lean: [f32; 4],
     /// Object flags (+0xA40).
     pub flags: u32,
+    /// `state.modeBits`: the colour mode requests (`BtlObj_SetColorMode`; 3 the black silhouette). Kept, not drawn.
+    pub color_modes: u32,
     /// `area`: the zone the object is in.
     pub area: i32,
     pub body: Body,
@@ -292,6 +294,7 @@ impl Obj {
             lean: [0.0, 0.0, 0.0, 1.0],
             // BtlObj_InitFlags for a fighter (type 0): visible (2) among others.
             flags: 0x1200_0016,
+            color_modes: 0,
             area: -1,
             // BtlObjBody_Init: curRadius 4.1, then BtlObjBody_Reset (index 1, prev 0, cur 1).
             body: Body {
@@ -340,6 +343,18 @@ impl Obj {
             p[1] - n.prev_pos[1],
             p[2] - n.prev_pos[2],
         ]
+    }
+
+    /// `BtlObj_SetColorMode`: a requester's bit on or off; bit 7 clears them all.
+    pub(crate) fn set_color_mode(&mut self, bit: u32, on: bool) {
+        if on {
+            self.color_modes |= 1 << bit;
+        } else {
+            self.color_modes &= !(1 << bit);
+        }
+        if bit == 7 {
+            self.color_modes = 0;
+        }
     }
 
     /// `BtlCharApi_GetNodePos`: node `id`'s world position (the object's position without the node).

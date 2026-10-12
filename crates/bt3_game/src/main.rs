@@ -53,6 +53,7 @@ mod eft_smoke;
 mod eft_spdline;
 mod eft_storm;
 mod eft_surf;
+mod eft_transform;
 mod eft_water;
 mod eft_weather;
 mod fade;

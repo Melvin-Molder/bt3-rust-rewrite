@@ -464,6 +464,8 @@ pub(crate) struct Env<'a> {
     pub fx: &'a crate::btl_tech_volley::FxTables,
     /// The impacts' emitter sets of the common effect pack.
     pub impact: &'a [crate::eft_impact::ImpactSet],
+    /// The transformation effect's emitter sets of the common effect pack.
+    pub transform: &'a [crate::eft_impact::ImpactSet],
     /// `BattleSide_GetChangeAllowed` by player.
     pub change_allowed: [i32; 2],
     /// `BattleSide.members` (character, costume) by player, `memberCount` of them, and `switchEnabled`.

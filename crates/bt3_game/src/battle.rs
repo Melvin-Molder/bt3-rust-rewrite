@@ -129,6 +129,11 @@ pub struct BattleAssets {
     /// `EftImpactMgr_Init`: the impacts' fourteen emitter sets of the common effect pack (empty when one does not
     /// load).
     pub(crate) impact_sets: Vec<crate::eft_impact::ImpactSet>,
+    /// `EftTransformMgr_Init`: the transformation effect's eight sets (empty when one does not load).
+    pub(crate) transform_sets: Vec<crate::eft_impact::ImpactSet>,
+    /// `gEftStage->sprite`: the stage pack's entry 0x14 texture (the sun the transformation of kind 5 shows),
+    /// among the effect textures, on a stage that has it.
+    pub(crate) stage_sun: Option<usize>,
     /// `gEftSpdLine->tex[0]` / `gEftShotFx->tex[0]`: the speed and vanish lines' texture (common effect entry 0x237)
     /// among the effect textures.
     pub(crate) spdline_texture: Option<usize>,
@@ -302,6 +307,7 @@ pub fn load(
         pack12,
         pack14,
         pack11,
+        sun,
         bound,
         scroll,
         surf,
@@ -370,6 +376,8 @@ pub fn load(
         dust_textures: Vec::new(),
         spdline_texture: None,
         impact_sets: Vec::new(),
+        transform_sets: Vec::new(),
+        stage_sun: None,
         stage_pack12: None,
         stage_pack14: None,
         stage_pack11: None,
@@ -490,9 +498,26 @@ pub fn load(
     if impact_sets.len() == crate::eft_impact::SET_ENTRIES.len() {
         assets.impact_sets = impact_sets;
     }
+    // EftTransformMgr_Init.
+    let mut transform_sets = Vec::new();
+    for &e in &crate::eft_transform::SET_ENTRIES {
+        let Ok(set) = bt3_data::eft_pack::EmitSet::parse(&common_fx, e) else {
+            break;
+        };
+        let assets_of =
+            crate::eft::SetAssets::load(&set, &mut assets.effect_textures).map_err(error)?;
+        transform_sets.push(crate::eft_impact::ImpactSet {
+            set,
+            assets: assets_of,
+        });
+    }
+    if transform_sets.len() == crate::eft_transform::SET_ENTRIES.len() {
+        assets.transform_sets = transform_sets;
+    }
     assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
     assets.stage_pack14 = pack14.map(|t| assets.push_effect_textures(t));
     assets.stage_pack11 = pack11.map(|t| assets.push_effect_textures(t));
+    assets.stage_sun = sun.and_then(|t| assets.push_effect_textures(t).first().copied());
     assets.surf = surf.map(|s| assets.install_surf(s));
     assets.bound = bound.map(|(p, t)| (p, assets.push_effect_textures(t).first().copied()));
     for (index, side) in setup.sides.into_iter().enumerate() {
@@ -844,6 +869,8 @@ pub(crate) struct LoadedStage {
     pack14: Option<Vec<RgbaTexture>>,
     /// Stage pack entry 0xB's textures (`EftWeather_Init`), when the entry is not empty.
     pack11: Option<Vec<RgbaTexture>>,
+    /// `EftStage_LoadSprite`: stage pack entry 0x14's textures, when the entry is not empty.
+    sun: Option<Vec<RgbaTexture>>,
     /// `EftBoundMgr_Init`: the parameters (entry 23), colour (22) and textures (21), when all three are there.
     bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
     /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
@@ -940,6 +967,7 @@ fn load_stage(
     };
     let pack14 = entry_textures(0xE)?;
     let pack11 = entry_textures(0xB)?;
+    let sun = entry_textures(0x14)?;
     let pack12 = if entry_size(0x12) > 0 {
         let res = TextureResource::parse(pack_section(&stage_file, 0x12).map_err(error)?)
             .map_err(error)?;
@@ -1023,6 +1051,7 @@ fn load_stage(
         pack12,
         pack14,
         pack11,
+        sun,
         bound,
         scroll,
         collision: StageCollision::parse(&stage_file).map_err(error)?,
@@ -1275,6 +1304,7 @@ impl BattleAssets {
             gate,
             fx: &self.fx_tables,
             impact: &self.impact_sets,
+            transform: &self.transform_sets,
             change_allowed: self.change_allowed,
             team: self.team,
             team_count: self.team_count,
@@ -1449,6 +1479,9 @@ impl BattleAssets {
         self.stage_pack12 = s.pack12.map(|t| self.push_effect_textures(t));
         self.stage_pack14 = s.pack14.map(|t| self.push_effect_textures(t));
         self.stage_pack11 = s.pack11.map(|t| self.push_effect_textures(t));
+        self.stage_sun = s
+            .sun
+            .and_then(|t| self.push_effect_textures(t).first().copied());
         self.bound = s
             .bound
             .map(|(p, t)| (p, self.push_effect_textures(t).first().copied()));
@@ -2426,6 +2459,7 @@ impl Battle {
                     crate::btl_blast::world_sets(
                         side_data(&self.assets.fighters[s]).fx_sets(),
                         &self.assets.impact_sets,
+                        &self.assets.transform_sets,
                     )
                 }),
                 any_frozen: self.roster.chars.iter().any(|c| c.is_frozen()),
@@ -2468,6 +2502,23 @@ impl Battle {
                 .scene
                 .shotfx
                 .draw(&mut ot, &ctx, self.assets.spdline_texture);
+            // EftTransform_Draw: kind 5's sun sprite (EftStage_DrawSprite, 16 wide), on a stage that has one.
+            if self.assets.stage_sun.is_some() {
+                for pos in self.roster.scene.transforms.sprites() {
+                    crate::eft::quad_depth(
+                        &mut ot,
+                        &ctx,
+                        pos,
+                        [128.0; 4],
+                        0,
+                        false,
+                        self.assets.stage_sun,
+                        [16.0, 16.0],
+                        [0.0, 0.0, 1.0, 1.0],
+                        0.0,
+                    );
+                }
+            }
             self.roster
                 .scene
                 .fx
@@ -7081,6 +7132,56 @@ mod tests {
         let (log, _, _) = run_transform(&mut battle, 0, 420);
         assert!(log.iter().any(|l| l.1 == 0xEF), "{log:x?}");
         assert_eq!(log.last().map(|l| (l.1, l.2)), Some((0xB, 106)), "{log:x?}");
+    }
+
+    #[test]
+    fn real_transformation_effect_flashes_the_fighter() {
+        use crate::btl_input::pad::R3;
+        // Character 1's transformation (R3): request 0 starts the effect of its change kind, request 1 turns the
+        // fighter into a silhouette for ten frames and starts two shock waves, request 2 ends it.
+        let Some(mut battle) = transform_battle(1, true) else {
+            return;
+        };
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let (mut live, mut dark, mut objects, mut waves) = (0, 0, 0, 0);
+        let lists: Vec<_> = (0..crate::eft_transform::SET_ENTRIES.len())
+            .map(|k| crate::eft::SetRef {
+                side: 0,
+                list: crate::eft_transform::FIRST_LIST + k,
+            })
+            .collect();
+        for i in 0..400 {
+            let held = if (2..4).contains(&i) { R3 } else { 0 };
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+            let scene = &battle.roster.scene;
+            live = live.max(scene.transforms.count());
+            if battle.roster.chars[0].obj.color_modes & 8 != 0 {
+                dark += 1;
+            }
+            objects = objects.max(
+                lists
+                    .iter()
+                    .map(|&l| scene.fx.counts(Some(l)).iter().sum::<usize>())
+                    .sum::<usize>(),
+            );
+            waves = waves.max(scene.warps.count());
+        }
+        // Change kind 2 (effect kind 0): one effect, eleven frames of silhouette, its set's objects, two waves;
+        // it ends with the transformation.
+        assert_eq!(battle.roster.chars[0].form.kind, 2);
+        assert_eq!((live, dark, waves), (1, 11, 2));
+        assert!(objects > 0);
+        assert_eq!(battle.roster.scene.transforms.count(), 0);
+        assert_eq!(battle.roster.chars[0].obj.color_modes, 0);
     }
 
     #[test]
