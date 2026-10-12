@@ -112,6 +112,7 @@
 !/crates/bt3_game/src/obj_shadow.rs
 !/crates/bt3_game/src/hud_prompt.rs
 !/crates/bt3_game/src/stage_anim.rs
+!/crates/bt3_game/src/btl_vib.rs
 !/crates/bt3_game/src/model_draw.rs
 !/crates/bt3_game/src/gs_model.wgsl
 !/crates/bt3_game/src/gs_effect.wgsl

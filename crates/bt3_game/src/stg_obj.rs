@@ -5,7 +5,7 @@
 //! A break plays its sound; the falling pieces raise dust (`EftGndDust_SpawnDebris`) and, of an object of type
 //! 0x80, splash where they fall through y = 0 (`EftWater_AddSplashAt`).
 //!
-//! Not ported: the pads' rumble, the hidden item of mode 1 and the way-point graph's object flags (nothing reads
+//! Not ported: the hidden item of mode 1 and the way-point graph's object flags (nothing reads
 //! them).
 
 use bt3_data::stage::StageObjectDef;
@@ -60,6 +60,8 @@ pub(crate) struct Shake {
     pub far: f32,
     pub strength: f32,
     pub time: f32,
+    /// `BtlCharApi_RumbleNear` with it: the far distance, power and time (the near one is the shake's).
+    pub rumble: Option<(f32, f32, f32)>,
 }
 
 /// `gBtlStage->objs` with the definitions they reload from.
@@ -351,21 +353,22 @@ impl StageObjs {
         {
             let mut shake = None;
             if o.kind & SHAKE_L != 0 {
-                shake = Some((3.0, 0.7, 300.0));
+                shake = Some((3.0, 0.7, 300.0, 1.0, 0.3));
             }
             if o.kind & SHAKE_M != 0 {
-                shake = Some((2.0, 0.5, 100.0));
+                shake = Some((2.0, 0.5, 100.0, 0.8, 0.2));
             }
             if o.kind & SHAKE_S != 0 {
-                shake = Some((1.0, 0.3, 100.0));
+                shake = Some((1.0, 0.3, 100.0, 0.5, 0.1));
             }
-            if let Some((strength, time, near)) = shake {
+            if let Some((strength, time, near, power, rumble_time)) = shake {
                 self.shakes.push(Shake {
                     pos,
                     near: near + r,
                     far: 1500.0 + r,
                     strength,
                     time,
+                    rumble: Some((1000.0 + r, power, rumble_time)),
                 });
             }
         }

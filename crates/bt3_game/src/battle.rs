@@ -1439,6 +1439,8 @@ pub struct BattleFrame {
     pub texture_updates: Vec<(usize, RgbaTexture)>,
     /// `BtlObjDraw_DrawShadows`: the fighters' ground shadows, after the fighters.
     pub shadows: Vec<EffectTri>,
+    /// `Pad_SendActuator`: each pad's `vibData` (big motor power << 1, small motor bit 0).
+    pub rumble: [u8; 2],
 }
 
 /// The battle as far as it is ported.
@@ -3080,6 +3082,7 @@ impl Battle {
             post,
             texture_updates,
             shadows,
+            rumble: self.roster.pad_vib.each_mut().map(|p| p.send()),
         }
     }
 }
@@ -8964,6 +8967,41 @@ mod tests {
             most = most.max((angle(rot(&battle)) - rest).abs());
         }
         assert!(most > 0.01, "{most}");
+    }
+
+    #[test]
+    fn real_pads_vibrate_while_asked() {
+        let Some(mut battle) = fight_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert_eq!(frame.rumble, [0, 0]);
+        // Both motors for 0.3 s: the big one at 75 % at first (the modulating sine starts at 0), the small one every
+        // other frame; a pad whose vibration is off (as a CPU's) gets nothing.
+        battle.roster.chars[0].vibrate(1.0, 0.3);
+        battle.roster.chars[1].vib.enabled = false;
+        battle.roster.chars[1].vibrate(1.0, 0.3);
+        let mut data = Vec::new();
+        for _ in 0..11 {
+            let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            assert_eq!(frame.rumble[1], 0);
+            data.push(frame.rumble[0]);
+        }
+        assert_eq!(data[0], (95 << 1) | 1);
+        assert_eq!(data[1] & 1, 0);
+        assert!(data[1] >> 1 > 95);
+        assert!(data[..9].iter().all(|&d| d >> 1 >= 63));
+        assert_eq!(&data[9..], [0, 0]);
+        // Rumbles near a point reach the fighters by their nearness.
+        let [a, b] = &mut battle.roster.chars;
+        let at = a.pose.pos;
+        crate::btl_vib::rumble_near([a, b], at, 100.0, 1000.0, 1.0, 0.3);
+        assert_eq!(battle.roster.chars[0].vib.time, 9);
+        let far = battle.roster.chars[1].vib.time;
+        assert!(far < 9, "{far}");
     }
 
     #[test]

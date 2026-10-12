@@ -2095,8 +2095,8 @@ pub(crate) fn tech_damage(
 }
 
 /// `BtlColl_GuardStrike`: a fighter in a guard motion not facing away from a skill's record takes its guarded
-/// damage and push, unless flag 0x45 lets it through or the skill has attribute 0x200000. The sound, shake and
-/// vibration are not ported.
+/// damage and push, unless flag 0x45 lets it through or the skill has attribute 0x200000, with its camera shake
+/// and pad vibration.
 pub(crate) fn guard_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let Some(src) = rec.tech else {
         return false;
@@ -2130,13 +2130,15 @@ pub(crate) fn guard_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
     );
     let chr = &mut w.chars[target];
     chr.set_impulse_dir(dir, s.guard_push(src.slot));
+    crate::chr_cam::add_shake(chr, 3.0, 0.2);
+    chr.vibrate(1.0, 0.2);
     true
 }
 
 /// `BtlColl_HitByStrike`: a skill's record hits (one not of hit direction kind 4 only from in front of its user):
 /// the reaction by the victim's state (0x800), 0 meaning 3 and 1 nothing; the push, the stun of reactions
-/// 0x17..0x1C, the hit sound, the damage. Flag 0x45 lets it through. The shake, vibration and events are not
-/// ported.
+/// 0x17..0x1C, the hit sound, the damage with its camera shake and pad vibration. Flag 0x45 lets it through.
+/// The battle events are not ported.
 pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let Some(src) = rec.tech else {
         return false;
@@ -2201,14 +2203,16 @@ pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool 
     );
     let flags = if slot == 0 { 0x20_0000 } else { 0x40_0000 };
     chr.damage(env, w.data[target], s.damage(slot), flags);
+    crate::chr_cam::add_shake(chr, 3.0, 0.2);
+    chr.vibrate(1.0, 0.2);
     true
 }
 
 /// `BtlColl_GuardRush`: a fighter in a guard motion facing the technique takes the guarded damage (a catch or
 /// throw technique is shrugged off by a size class 4 fighter, and only guarded from behind, kind 6); the push on
 /// the last hit, the recoil on the attacker. Flag 0x46 lets it through; technique flag 1 (unblockable), and a full
-/// charge of a charge type with flag 2, are only guarded by kind 6. The shake, vibration, sound and events are not
-/// ported.
+/// charge of a charge type with flag 2, are only guarded by kind 6. The guard shakes the camera and vibrates
+/// the pad; the battle events are not ported.
 pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let Some(src) = rec.tech else {
         return false;
@@ -2290,6 +2294,8 @@ pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if alt {
         chr.set_impulse_dir(dir, t.guard_push(slot) * 10.0 * kmh(1.0));
     }
+    crate::chr_cam::add_shake(chr, 5.0, 0.3);
+    chr.vibrate(1.0, 0.3);
     recoil(w, side, slot);
     true
 }
@@ -2392,6 +2398,9 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         );
         chr.damage(env, w.data[target], dmg, hit_damage_flags(slot));
         recoil(w, side, slot);
+        let [a, b] = &mut *w.chars;
+        crate::chr_cam::shake_cams_near([&mut *a, &mut *b], rec.pos, 100.0, 1500.0, 5.0, 0.3);
+        crate::btl_vib::rumble_near([a, b], rec.pos, 100.0, 1000.0, 1.0, 0.3);
         return true;
     }
     // BtlColl_ApplyRushHit (the stage timer concerns stages 4 / 27).
@@ -2417,6 +2426,12 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         w.frame,
     );
     chr.damage(env, w.data[target], dmg, hit_damage_flags(slot));
+    {
+        let [a, b] = &mut *w.chars;
+        crate::chr_cam::shake_cams_near([&mut *a, &mut *b], rec.pos, 100.0, 1500.0, 5.0, 0.3);
+        crate::btl_vib::rumble_near([a, b], rec.pos, 100.0, 1000.0, 1.0, 0.3);
+    }
+    let chr = &mut w.chars[target];
     chr.flags.set_held(0x1D);
     chr.flags.set_held(0x1E);
     chr.dodge_window = 0;

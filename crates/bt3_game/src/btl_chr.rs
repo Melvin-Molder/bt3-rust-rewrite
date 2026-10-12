@@ -674,6 +674,8 @@ pub(crate) struct Chr {
     pub blind_level: i32,
     /// The head tracking (`look`).
     pub look: crate::btl_head::Look,
+    /// `vib`: the pad vibration the fighter asks for.
+    pub vib: crate::btl_vib::Vib,
     /// `filter`: the screen filter's (radial blur's) strength 0..1, by requests 9 / 0xA.
     pub filter: f32,
     /// `trigger1E` / `trigger1F`: requests 0x1E / 0x1F flash the model every fourth frame.
@@ -852,6 +854,7 @@ impl Chr {
             blind_timer: 0,
             blind_level: 0,
             look: crate::btl_head::Look::default(),
+            vib: crate::btl_vib::Vib::default(),
             filter: 0.0,
             trigger_1e: 0,
             trigger_1f: 0,

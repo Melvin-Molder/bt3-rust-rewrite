@@ -16,7 +16,7 @@
 //!
 //! The fighters' answers play their sounds and voices (`BtlColl_*`), the shots their fire and stage-contact sounds.
 //!
-//! Not ported: the struggle's spark; the particles, impact effects, camera shake, pad vibration and battle events.
+//! Not ported: the struggle's spark; the particles, impact effects and battle events.
 
 use std::f32::consts::PI;
 
@@ -867,6 +867,7 @@ impl Scene {
             _ => (frame % 2) as i32 + 0xF,
         };
         me.play_common(snd, sound);
+        me.set_small_vibration(0.1);
     }
 
     /// The disc's libc draws, in order with the others.
@@ -1861,7 +1862,7 @@ impl Scene {
             let from = if s.kind == 0 { s.b.pos } else { s.a_start };
             s.stage_dist = length(sub(from, hit));
             // EftHit_IsStoppedByHit and EftHit_NotifyBlastTask (a bomb keeps the triangle's normal), the contact
-            // sound (BtlColl_PlayContactSound) and a technique's camera shake; the vibration is not ported.
+            // sound (BtlColl_PlayContactSound) and a technique's camera shake and pad vibration.
             let stops = tech.is_none_or(|t| {
                 if t.def.kind == 0 {
                     t.def.sub != 4
@@ -1879,6 +1880,7 @@ impl Scene {
                         far: 1500.0,
                         strength: 3.0,
                         time: 0.5,
+                        rumble: Some((1000.0, 1.0, 0.3)),
                     });
                 }
                 self.set_task_flag(i, T_HIT_STAGE, contact);
@@ -3048,6 +3050,8 @@ fn guard_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     );
     let chr = &mut w.chars[target];
     chr.set_impulse_dir(dir, push_of(&blast, true));
+    crate::chr_cam::add_shake(chr, 3.0, 0.1);
+    chr.vibrate(1.0, 0.1);
     true
 }
 
@@ -3193,6 +3197,8 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
         dmg /= rec.atk.hits;
     }
     chr.damage(env, data, dmg, 0);
+    crate::chr_cam::add_shake(chr, 3.0, 0.1);
+    chr.vibrate(1.0, 0.1);
     if !chr.flags.test(0x93) {
         chr.flags.set_held(5);
     }

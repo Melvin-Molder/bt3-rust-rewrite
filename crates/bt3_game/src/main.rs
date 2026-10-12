@@ -27,6 +27,7 @@ mod btl_tech_shots;
 mod btl_tech_sweep;
 mod btl_tech_volley;
 mod btl_text;
+mod btl_vib;
 mod char_select;
 mod chr_cam;
 mod dialog;
@@ -247,6 +248,9 @@ struct Game {
     under_effects: Vec<eft::EffectTri>,
     /// The fighters' ground shadows, after the fighters.
     shadow_effects: Vec<eft::EffectTri>,
+    /// The pads' vibration of the last battle frame (`Pad.vibData`), and what pad 0's gamepads were last sent.
+    rumble: [u8; 2],
+    rumble_sent: u8,
     /// Effect textures sampled point by point (TEX1 0: the shadow pages).
     effect_point: Vec<usize>,
     /// `StgFx_DrawPost`'s redraws of the frame (the radial blur).
@@ -460,6 +464,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             effects: Vec::new(),
             under_effects: Vec::new(),
             shadow_effects: Vec::new(),
+            rumble: [0; 2],
+            rumble_sent: 0,
             effect_point: Vec::new(),
             post_ops: Vec::new(),
             effect_updates: Vec::new(),
@@ -514,6 +520,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Update,
             (
                 run_frames,
+                send_rumble.after(run_frames),
                 sync_quads,
                 model_draw::sync_models,
                 model_draw::sync_stage,
@@ -840,6 +847,33 @@ fn play_stream_se(game: &mut Game, commands: &mut Commands, player: usize, id: u
     game.pending_stream_se[player] = Some((decode_adx_file(game.iso_path.clone(), id), volume));
 }
 
+/// `Pad_SendActuator` of pad 0 (every connected gamepad, as pad 0 reads them all): the last battle frame's motors,
+/// held for one 30 Hz frame and replaced by the next request.
+fn send_rumble(
+    gamepads: Query<Entity, With<Gamepad>>,
+    mut game: ResMut<Game>,
+    mut rumble: MessageWriter<bevy::input::gamepad::GamepadRumbleRequest>,
+) {
+    let data = game.rumble[0];
+    if data == game.rumble_sent && data == 0 {
+        return;
+    }
+    game.rumble_sent = data;
+    for gamepad in &gamepads {
+        rumble.write(bevy::input::gamepad::GamepadRumbleRequest::Stop { gamepad });
+        if data != 0 {
+            rumble.write(bevy::input::gamepad::GamepadRumbleRequest::Add {
+                gamepad,
+                duration: std::time::Duration::from_millis(50),
+                intensity: bevy::input::gamepad::GamepadRumbleIntensity {
+                    strong_motor: f32::from(data >> 1) / 127.0,
+                    weak_motor: if data & 1 != 0 { 1.0 } else { 0.0 },
+                },
+            });
+        }
+    }
+}
+
 fn run_frames(
     mut commands: Commands,
     time: Res<Time>,
@@ -1122,6 +1156,7 @@ fn run_frames(
                     game.xfade_captures += 1;
                 }
                 game.xfade_alpha = frame.xfade_alpha;
+                game.rumble = frame.rumble;
                 play_sounds(game, &mut commands, frame.sounds);
                 if let Some(reason) = frame.exit {
                     leave_battle(game, &mut commands, &mut audio, reason);

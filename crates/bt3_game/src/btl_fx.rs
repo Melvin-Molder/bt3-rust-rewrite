@@ -258,6 +258,17 @@ pub(crate) fn face_events(me: &mut Chr) {
     }
 }
 
+/// `BtlFx_ShakeCamOnEvent` and `BtlFx_VibrateOnEvent`: motion event bit 46 shakes the fighter's camera (3.0 for
+/// 0.3 s), bit 45 vibrates its pad (1.0 for 0.2 s).
+pub(crate) fn shake_and_vibrate_on_events(me: &mut Chr) {
+    if me.anim_test_attr(0x4000_0000_0000) {
+        crate::chr_cam::add_shake(me, 3.0, 0.3);
+    }
+    if me.anim_test_attr(0x2000_0000_0000) {
+        me.vibrate(1.0, 0.2);
+    }
+}
+
 /// `BtlFx_PushBackOnEvent400`: in a rush sequence of a technique without flag 0x1000000, animation event 0x400
 /// raises flag 0x9F, while which the chains are pushed straight back (the partner object's are not ported).
 pub(crate) fn push_back_on_event_400(me: &mut Chr, data: &SideData) {

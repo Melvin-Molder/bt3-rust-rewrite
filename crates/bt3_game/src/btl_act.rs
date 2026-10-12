@@ -1583,6 +1583,7 @@ impl Ctx<'_, '_> {
             self.me.set_fx(0x1A);
             if mflags & 0x1_0000 != 0 {
                 self.me.stun_timer -= 1;
+                self.me.set_small_vibration(0.1);
                 self.set(0xE7);
                 if self.me.input.is_pressed(0x10_0000) {
                     self.me.stun_timer = (self.me.stun_timer - 3).max(0);
@@ -2033,6 +2034,7 @@ impl Ctx<'_, '_> {
                         ];
                         self.push_dir(dir, 0.3, 3.0);
                     }
+                    self.me.set_vibration(0.8, 0.1);
                     if self.flag(0xF) {
                         self.me.set_fx(0x36);
                     }
@@ -2072,6 +2074,8 @@ impl Ctx<'_, '_> {
                         self.snd(sound);
                         self.voice(0x13);
                         self.held(6);
+                        self.add_shake(4.0, 0.3);
+                        self.me.vibrate(0.8, 0.4);
                     }
                 }
                 0x36 => {
@@ -2567,7 +2571,7 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x17 / 0x18 (`BtlAct_FastAscendHandler` / `BtlAct_FastDescendHandler`): the fast rise (motions
     /// 0x2E, 0x2F, 0x30) or fall (0x31, 0x32, 0x33), draining ki while it lasts; the dash sound as the loop
-    /// starts. The vibration is not ported.
+    /// starts, which vibrates the pad (and on, more gently, while it moves).
     fn fast_vertical(&mut self, phase: u32) {
         let up = self.current() == 0x17;
         let first = if up { 0x2E } else { 0x31 };
@@ -2589,6 +2593,7 @@ impl Ctx<'_, '_> {
                     if self.me.anim_advance_then(first + 1, 0.15, 0) {
                         let sound = self.dash_sound();
                         self.snd(sound);
+                        self.me.vibrate(0.8, 0.3);
                     }
                     self.me.move_vertical(0.0, kmh(100.0));
                 }
@@ -2597,6 +2602,7 @@ impl Ctx<'_, '_> {
                     self.me.move_vertical(vspeed, 10000.0);
                     self.me.set_fx(4);
                     self.set(9);
+                    self.me.set_vibration(0.7, 0.1);
                 }
                 2 => {
                     if self.me.anim_advance(0) {
@@ -2661,7 +2667,7 @@ impl Ctx<'_, '_> {
 
     /// Action 0x19 (`BtlAct_HomingDashHandler`): the ki-draining dash that homes on the opponent, motions 0x18 /
     /// 0x2D (start) -> 0x19 (loop) -> 0x1A or 0x15 (stop). work[2] counts slow frames. Voice kind 0x1C out of a
-    /// charged smash, 0x24 from a standing start; the dash sound as the loop starts. The vibration is not ported.
+    /// charged smash, 0x24 from a standing start; the dash sound and the pad's vibration as the loop starts.
     fn homing_dash(&mut self, phase: u32) {
         if phase == ENTER {
             let prev = self.me.act.prev;
@@ -2720,12 +2726,14 @@ impl Ctx<'_, '_> {
                         let sound = self.dash_sound();
                         self.snd(sound);
                         self.set(0xD1);
+                        self.me.vibrate(0.8, 0.3);
                         if self.me.height_above_ground() < 20.0 {
                             self.me.set_fx(0x35);
                         }
                     }
                     self.set(0x47);
                     lean = 1.0;
+                    self.me.set_vibration(0.7, 0.1);
                 }
                 0x15 | 0x1A => {
                     if self.me.anim_advance(0) {
@@ -2853,8 +2861,8 @@ impl Ctx<'_, '_> {
 
     /// Action 0x1A (`BtlAct_DragonDashHandler`): the dash in the direction held, motions 0x18 / 0x2D (start) ->
     /// 0x19 (loop) -> 0x1A or 0x15 (stop); ASCEND / DESCEND move up and down. It stops when blocked, slower than
-    /// 100 km/h for 16 frames (work[2]) or out of ki. The dash sound as the loop starts; the vibration is not
-    /// ported.
+    /// 100 km/h for 16 frames (work[2]) or out of ki. The dash sound and the pad's vibration as the loop
+    /// starts.
     fn dragon_dash(&mut self, phase: u32) {
         if phase == ENTER {
             let mut anim = if matches!(self.me.act.prev, 0x19 | 0x1A) {
@@ -2881,6 +2889,9 @@ impl Ctx<'_, '_> {
                     if self.me.anim_is_new() {
                         let sound = self.dash_sound();
                         self.snd(sound);
+                        self.me.vibrate(0.8, 0.3);
+                    } else {
+                        self.me.set_vibration(0.7, 0.1);
                     }
                 }
                 0x15 | 0x1A => {
@@ -3232,7 +3243,7 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0x24 (`BtlAct_VanishBehindHandler`): vanish (motion 0xF6), then reappear behind the opponent facing
-    /// it, for 20000 ki; sound 0x20 and voice kind 0x1D. The vibration is not ported.
+    /// it, for 20000 ki; sound 0x20 and voice kind 0x1D; the small motor vibrates.
     fn vanish_behind(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0xF6, 0.15);
@@ -3244,6 +3255,7 @@ impl Ctx<'_, '_> {
             self.me.pose.speed = 0.0;
             self.me.pose.fall_speed = 0.0;
             self.me.work[2] = 7;
+            self.me.set_small_vibration(0.2);
         }
         if phase == RUN {
             if !self.me.anim_advance(0) {
@@ -3441,8 +3453,8 @@ impl Ctx<'_, '_> {
     /// (0x50.., 0x53.., 0x56.., 0x59.., 0x4A.., 0x4D..). Holding charges it (the rate of the character, faster with
     /// the gauge); a full charge held one frame becomes the instant smash (flag 0x84: seven untouchable frames at
     /// 3500 km/h), held longer the full smash 0x4D..0x52 under powered skill 0x200. Sounds 0x2E (wind-up),
-    /// 0x13 + 0xF (full charge), 0x20 (instant smash), 0x2F (a full release) and the record's voice; the vibration
-    /// is not ported.
+    /// 0x13 + 0xF (full charge), 0x20 (instant smash), 0x2F (a full release) and the record's voice; the full
+    /// release vibrates.
     fn smash_charge(&mut self, phase: u32) {
         if phase == ENTER {
             let anim = match self.current() {
@@ -3495,6 +3507,7 @@ impl Ctx<'_, '_> {
                     if self.me.anim_is_new() {
                         if self.me.charge > 0.99 {
                             self.snd(0x2F);
+                            self.me.set_vibration(1.0, 0.3);
                         }
                         self.picked_voice();
                         self.me.pose.speed =
@@ -3603,7 +3616,7 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x4D..0x52 (`BtlAct_SmashFullHandler`): the fully charged smash, the wind-up and hold played fast
     /// with hit-stop flag 0x125, under camera cut 0x1C..0x1F by the action (ended as the strike starts), voice
-    /// kind 7 and sound 0x2F at the strike; the vibration is not ported.
+    /// kind 7, sound 0x2F and the pad's vibration at the strike.
     fn smash_full(&mut self, phase: u32) {
         if phase == ENTER {
             let (anim, cut) = match self.current() {
@@ -3642,6 +3655,7 @@ impl Ctx<'_, '_> {
                         self.snd(0x2F);
                         self.me.pose.speed =
                             crate::btl_hit::launch_speed(self.me, self.data, self.env);
+                        self.me.set_vibration(1.0, 0.3);
                     }
                     if self.flag(0x5C) {
                         mode = 6;
@@ -3676,7 +3690,7 @@ impl Ctx<'_, '_> {
     /// Actions 0x53..0x57 (`BtlAct_DashSmashHandler`): the charged smash out of a dash, motions wind-up -> hold ->
     /// release (0x65.., 0x68.., 0x5F.., 0x62.., 0x5C..), homing on the opponent at dash speed while it charges and
     /// spending the dash's ki. Letting go of the button (input 0x3F) or losing the lock-on releases it. Sounds 0x2E
-    /// and 0x13 + 0xF (full charge), the record's voice at the release; the vibration is not ported.
+    /// and 0x13 + 0xF (full charge), the record's voice at the release; the pad vibrates.
     fn dash_smash(&mut self, phase: u32) {
         if phase == ENTER {
             let anim = match self.current() {
@@ -3702,6 +3716,7 @@ impl Ctx<'_, '_> {
                     self.me.anim_advance_then(id + 1, 0.0, 0);
                     self.me.set_fx(4);
                     self.me.set_fx(9);
+                    self.me.set_vibration(0.7, 0.1);
                     self.me.spend_ki(cost, false);
                     self.set(0x47);
                 }
@@ -3720,12 +3735,14 @@ impl Ctx<'_, '_> {
                     }
                     self.me.set_fx(4);
                     self.me.set_fx(9);
+                    self.me.set_vibration(0.7, 0.1);
                     self.me.spend_ki(cost, false);
                     self.set(0x47);
                 }
                 0x5E | 0x61 | 0x64 | 0x67 | 0x6A => {
                     if self.me.anim_is_new() {
                         self.picked_voice();
+                        self.me.set_vibration(1.0, 0.3);
                     }
                     if self.me.anim_advance(0) {
                         self.request(0xB);
@@ -3835,7 +3852,7 @@ impl Ctx<'_, '_> {
     /// Action 0x58 (`BtlAct_FlyingKickHandler`): the kick out of a dash, motions 0x6B (wind-up) -> 0x6C (hold, the
     /// charge follows its progress) -> 0x6D (strike, on letting go: input 0x41). Within the parameter's angle of the
     /// opponent it homes on it. Sounds 0x2E and 0x2F (the strike), the record's voice. The follow-up attack records
-    /// 0x87 / 0x77 (`BtlDecide_QueueAttack`) and the vibration are not ported.
+    /// 0x87 / 0x77 (`BtlDecide_QueueAttack`) are not ported.
     fn flying_kick(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x6B, 0.15);
@@ -3860,6 +3877,7 @@ impl Ctx<'_, '_> {
                 0x6C => {
                     if self.me.anim_advance_then(0x6D, 0.0, 0) {
                         self.snd(0x2F);
+                        self.me.set_vibration(1.0, 0.3);
                     }
                     self.me.charge = self.me.anim_progress();
                     self.me.set_fx(0xB);
@@ -3952,8 +3970,8 @@ impl Ctx<'_, '_> {
     /// Action 0x59 (`BtlAct_LiftStrikeHandler`): the rising strike, motions 0x6E (wind-up) -> 0x6F (hold) -> 0x70
     /// (strike, on letting go: input 0x41), leaving flight. Within the parameter's angle of the opponent it heads
     /// for it, pitched up 27..81 degrees; otherwise straight up at 36 degrees. Under flags2 0x400000 a blast press on
-    /// a hit queues the finisher 0x5F. Sounds 0x2E and 0x2F (the strike), the record's voice; the vibration is not
-    /// ported.
+    /// a hit queues the finisher 0x5F. Sounds 0x2E and 0x2F (the strike), the record's voice; the pad vibrates at the
+    /// strike.
     fn lift_strike(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x6E, 0.15);
@@ -3982,6 +4000,7 @@ impl Ctx<'_, '_> {
                 0x6F => {
                     if self.me.anim_advance_then(0x70, 0.0, 0) {
                         self.snd(0x2F);
+                        self.me.set_vibration(1.0, 0.3);
                     }
                     self.me.charge = self.me.anim_progress();
                 }
@@ -4057,7 +4076,7 @@ impl Ctx<'_, '_> {
     /// strike's lead is measured from its motions on the sub layer (work[2] the step, work[3] the frame count,
     /// work[4] the motion, workF[0] the lead); then onto the opponent's body, then ahead of it on its path facing
     /// it, striking with a full charge (motions 0x65 / 0x68 / 0x5F / 0x62 and their releases at +2); the voice and
-    /// sound of its start. The vibration is not ported.
+    /// sound of its start, and the small motor.
     fn smash_vanish(&mut self, phase: u32) {
         if phase == ENTER {
             self.me.work[4] = match self.current() {
@@ -4075,6 +4094,7 @@ impl Ctx<'_, '_> {
             self.voice(kind);
             self.me.set_fx(0xC);
             self.snd(0x20);
+            self.me.set_small_vibration(0.2);
             self.me.pose.speed = 0.0;
             self.me.pose.fall_speed = 0.0;
             self.held(0xE);
@@ -4560,6 +4580,7 @@ impl Ctx<'_, '_> {
             self.begin_attack();
             self.play(0x2D, 0.15);
             self.picked_voice();
+            self.me.set_vibration(1.0, 0.3);
             self.held(0xE);
             if self.me.attack.cut >= 0 {
                 self.request_cut(1, self.me.attack.cut);
@@ -4672,11 +4693,12 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x2B, 0x2C (`BtlAct_VanishAttackHandler` / `...QuickHandler`): vanish (motion 0x26) for six frames
     /// (one for 0x2C) while the attack's lead time is measured, then onto the opponent's body and into the queued
-    /// attack; sound 0x20. The vibration is not ported.
+    /// attack; sound 0x20 and the small motor.
     fn vanish_attack(&mut self, phase: u32) {
         if phase == ENTER {
             self.me.set_fx(0xC);
             self.snd(0x20);
+            self.me.set_small_vibration(0.2);
             self.held(0xE);
         }
         if phase == RUN {
@@ -4798,7 +4820,7 @@ impl Ctx<'_, '_> {
 
     /// Action 0x31 (`BtlAct_RushToAttackHandler`): dashing at the opponent (motion 0xD) at the attack's speed until
     /// the closing time is below the attack's lead time, it is blocked or the lock-on is lost: then the queued
-    /// attack; stuck for eight frames, the stop motion 0xE. The dash sound; the vibration is not ported.
+    /// attack; stuck for eight frames, the stop motion 0xE. The dash sound and the pad's vibration.
     fn rush_attack(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0xD, 0.15);
@@ -4806,6 +4828,7 @@ impl Ctx<'_, '_> {
             self.set(0xD1);
             let sound = self.dash_sound();
             self.snd(sound);
+            self.me.set_vibration(0.8, 0.2);
         }
         if phase == RUN {
             let mut speed = 0.0;
@@ -4951,8 +4974,7 @@ impl Ctx<'_, '_> {
     /// Actions 0x5E..0x62, 0x64..0x66 (`BtlAct_RushFinishHandler`): the chargeable rush finishers, motions wind-up
     /// -> hold (the charge follows its progress; letting go, input 0x43, releases) -> release (0x41.., 0x44..,
     /// 0x47.., 0x56.., 0x59.., 0x90.., and 0x199.. for 0x66, whose release is followed by 0x19C). On a hit each
-    /// offers its attack records and the rush. Sound 0x2E, the record's voice at the release; the vibration is not
-    /// ported.
+    /// offers its attack records and the rush. Sound 0x2E, the record's voice at the release; the pad vibrates.
     fn rush_finish(&mut self, phase: u32) {
         if phase == ENTER {
             let anim = match self.current() {
@@ -5008,6 +5030,7 @@ impl Ctx<'_, '_> {
                             self.picked_voice();
                             self.me.set_fx(0x29);
                         }
+                        self.me.set_vibration(1.0, 0.1);
                         self.me.anim_advance_then(id + 1, 0.0, 0);
                         speed = crate::btl_hit::launch_speed(self.me, self.data, self.env);
                         if self.flag(0x13) {
@@ -5018,6 +5041,9 @@ impl Ctx<'_, '_> {
                             self.picked_voice();
                             self.me.pose.speed =
                                 crate::btl_hit::launch_speed(self.me, self.data, self.env);
+                            if self.me.charge > 0.99 {
+                                self.me.set_vibration(1.0, 0.3);
+                            }
                         }
                         if self.me.anim_advance(0) {
                             self.request(0xB);
@@ -5186,7 +5212,7 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x67..0x69 (`BtlAct_Action67to69`): the ki-spending pose 0xF7 (parameter +0x4C a second, halved
     /// by ability 0x28); out of ki it guards, without the guard input it idles; flag 0x70 chains into
-    /// `BtlAct_GetChainAction` by the parameter's chain kind. Voice kind 5; the vibration is not ported.
+    /// `BtlAct_GetChainAction` by the parameter's chain kind. Voice kind 5; the pad vibrates.
     fn ki_pose(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0xF7, 0.15);
@@ -5209,6 +5235,7 @@ impl Ctx<'_, '_> {
             self.step(6, 6, 7, 0.0, kmh(100.0));
             self.me.apply_gravity();
             self.set(0xD5);
+            self.me.set_vibration(0.7, 0.1);
             if self.flag(0x11) {
                 self.held(0xE);
             }
@@ -5266,6 +5293,7 @@ impl Ctx<'_, '_> {
             if self.me.dash_count > 0 {
                 self.request_cut(1, 0x20);
             }
+            self.me.set_vibration(1.0, 0.3);
         }
         if phase == RUN {
             if self.me.anim_advance(0) {
@@ -5328,7 +5356,7 @@ impl Ctx<'_, '_> {
     /// Action 0x33 (`BtlAct_CircleDashHandler`): round the opponent (motions 0x2D -> 0x19 loop -> 0x1A) toward the
     /// point opposite where the fighter faced at the start, on the side the opponent is turned from, spending the
     /// ki of kind 3; close and far enough round, attack record 0x90 or a homing strike. Each new loop of the dash
-    /// requests camera cut 4 and plays the dash sound; voice kind 5 at the start. The vibration is not ported.
+    /// requests camera cut 4 and plays the dash sound; voice kind 5 at the start. The pad vibrates.
     fn circle_dash(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x2D, 0.15);
@@ -5357,6 +5385,7 @@ impl Ctx<'_, '_> {
                     if self.me.anim_is_new() {
                         let sound = self.dash_sound();
                         self.snd(sound);
+                        self.me.vibrate(lean, 0.3);
                         self.request_cut(1, 4);
                     }
                 }
@@ -5465,8 +5494,8 @@ impl Ctx<'_, '_> {
 
     /// Action 0x34 (`BtlAct_RushDashHandler`): a dash at the opponent (motions 0x23 -> 0x24 loop -> 0x25 stop) at
     /// 1800 km/h, or vanished and untouchable at 2200 km/h with parameter flag bit 20; attack record 0x9C, the
-    /// rush 0x46 (input 0x34) or 0xB5 (input 0x5D) take over; sound 0x20 (vanished) or 0x31. The vibration is not
-    /// ported.
+    /// rush 0x46 (input 0x34) or 0xB5 (input 0x5D) take over; sound 0x20 (vanished) or 0x31, and the small
+    /// motor.
     fn rush_dash(&mut self, phase: u32) {
         let fast = (self.data.tables.params.flags() >> 20) & 1 != 0;
         if phase == ENTER {
@@ -5478,6 +5507,7 @@ impl Ctx<'_, '_> {
             } else {
                 self.snd(0x31);
             }
+            self.me.set_small_vibration(0.2);
         }
         if phase == RUN {
             let (mut yaw, mut accel, mut pitch) = (2, 10000.0, 1);
@@ -6084,8 +6114,7 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0x42 (`BtlAct_Action42`): the burst out of a combo, motion 0x192 over 25 frames for 5000 health,
-    /// untouchable (held flag 0x4B) for its first half; sound 0x24 and voice kind 6. The vibration is not
-    /// ported.
+    /// untouchable (held flag 0x4B) for its first half; sound 0x24, voice kind 6 and the pad's vibration.
     fn health_burst(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x192, 0.15);
@@ -6097,6 +6126,7 @@ impl Ctx<'_, '_> {
             self.snd(0x24);
             self.voice(6);
             self.me.set_fx(0x2B);
+            self.me.vibrate(0.8, 0.4);
         }
         if phase == RUN {
             self.me.anim_set_duration(25.0 / 30.0);
@@ -6511,7 +6541,7 @@ impl Ctx<'_, '_> {
     /// Action 0xBB (`BtlAct_SlamThrow`): the thrower dives with the victim, motion 0x96, the loop 0x99 at 1500 km/h
     /// down, then 0x98 on the ground, at the stage's bottom, when the victim is gone, after 91 frames, or (parameter
     /// flag 0x400) close above the water, under the camera cuts 7 and 8; voice kind 7 at the start and again with
-    /// the dash sound as the dive starts. The vibration is not ported.
+    /// the dash sound as the dive starts. The pad vibrates.
     fn slam_throw(&mut self, phase: u32) {
         if phase == ENTER {
             let blend = self.throw_blend();
@@ -6538,6 +6568,9 @@ impl Ctx<'_, '_> {
                         self.snd(sound);
                         self.voice(7);
                         self.request_cut(0, 8);
+                        self.me.vibrate(0.8, 0.3);
+                    } else {
+                        self.me.set_vibration(0.7, 0.1);
                     }
                     self.set(0x8B);
                     self.me.set_fx(4);
@@ -6588,8 +6621,8 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0xBC (`BtlAct_SlamThrown`): its victim, motion 0x97, the loop 0x9A diving with the thrower, 0x9B on
-    /// the ground once let go, then down (0xDE); out of the stage or without the thrower 0xE6. The camera shake and
-    /// the rumble are not ported.
+    /// the ground once let go, then down (0xDE); out of the stage or without the thrower 0xE6; landing shakes the
+    /// cameras and rumbles the pads near it.
     fn slam_thrown(&mut self, phase: u32) {
         if phase == ENTER {
             let blend = self.throw_blend();
@@ -6645,6 +6678,9 @@ impl Ctx<'_, '_> {
                 if self.me.react.back {
                     self.set(0x35);
                 }
+                let pos = self.me.pose.pos;
+                self.shake_cams_near(pos, 100.0, 1000.0, 3.0, 0.4);
+                self.rumble_near(0.8, 0.2);
                 self.request(0xDE);
             }
         }
@@ -6707,8 +6743,8 @@ impl Ctx<'_, '_> {
 
     /// Action 0xBF (`BtlAct_DraggedDown`, reaction 0x31): dragged down under the opponent in 0xBE (its position
     /// plus its movement, 0.3 of its height lower, by this model's node 0 less node 0x10), motion 0xC3 / 0xC4
-    /// (`BtlAct_GetPrev` is never 0xD5); on the ground 500 damage and 0xDE, out of the stage 0xE6 (0xD9 dead). The
-    /// camera shake and the rumble are not ported.
+    /// (`BtlAct_GetPrev` is never 0xD5); on the ground 500 damage and 0xDE, out of the stage 0xE6 (0xD9 dead), the
+    /// cameras near it shaken and the pads rumbled.
     fn dragged_down(&mut self, phase: u32) {
         if phase == ENTER {
             let air = self.me.is_air_motion(self.env, false);
@@ -6737,6 +6773,9 @@ impl Ctx<'_, '_> {
             if self.flag(0x1F) || self.flag(0xF) {
                 self.request(0xDE);
                 self.me.damage(self.env, self.data, 500, 0);
+                let pos = self.me.pose.pos;
+                self.shake_cams_near(pos, 100.0, 1000.0, 5.0, 0.5);
+                self.rumble_near(0.8, 0.2);
             }
             let out = |s: &Self| if s.me.is_dead() { 0xD9 } else { 0xE6 };
             if self.flag(0x16) {
@@ -6765,7 +6804,7 @@ impl Ctx<'_, '_> {
     /// unless technique flag 0x1000; the score starts at the clash power / 20 (+ 10 / 6 / 3 with ability 0x14 /
     /// 0x13 / 0x12, - 10 / 6 / 3 with 0x6A / 0x69 / 0x68) and every direction input from frame 16 adds one. The
     /// clash's flags end it: 0xC3 (won) 0xB, 0xC2 (lost) 0x104, 0x72 (a catch connected) the rush sequence. The
-    /// camera shakes. The vibration and the chains' push are not ported.
+    /// camera shakes, the pad vibrates and the chains are pushed back.
     fn clash_struggle(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -6821,6 +6860,7 @@ impl Ctx<'_, '_> {
             for f in [0xE6, 0xD2, 0x42, 0x43, 0x44, 0x45, 0x46, 0x134] {
                 self.set(f);
             }
+            self.me.vibrate(1.0, 0.1);
             self.push_angle(self.me.pose.rot[1] + PI, 1.0, 5.0);
             if self.me.action_frame >= 0x10 && self.test(0x33) {
                 self.me.clash_count_a += 1;
@@ -6914,7 +6954,7 @@ impl Ctx<'_, '_> {
     /// by player) while spinning round the opponent; every direction input counts, else one frame in 28 / 8 / 5
     /// counts by itself with ability 0x6A / 0x69 / 0x68, one in four without; abilities 0x14 / 0x13 / 0x12 add one
     /// count every 5 / 11 / 17 frames (the technique bonus needs `BtlAct_GetPrev`, which is never a technique). Won (flag 0xBF) motion 0x175 then 0xB, lost (0xC0) 0x176 with the damage of the
-    /// winner's count and voice kind 0x1A, then blown away. The vibration is not ported.
+    /// winner's count and voice kind 0x1A, then blown away. The pad vibrates.
     fn clash_blows(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(if self.me.player == 0 { 0x173 } else { 0x174 }, 0.15);
@@ -7005,6 +7045,7 @@ impl Ctx<'_, '_> {
             ] {
                 self.set(f);
             }
+            self.me.vibrate(1.0, 0.1);
         }
         if phase == LEAVE {
             self.me.clash_count_b = 0;
@@ -7045,7 +7086,7 @@ impl Ctx<'_, '_> {
     /// 0xFC); the frame the asked button is pressed is the answer (-2 for a wrong one). The sequence answers with
     /// 0xC5 (again), 0xC6 (over), 0xC7 (won: 0x175) and 0xC8 (lost: 0x176, damage by the winner's count, voice
     /// kind 0x1A). Side 0 plays the strike's sounds 0x4F / 0x4B, a player's answer sound 0x14 heard everywhere.
-    /// The vibration is not ported.
+    /// The pad vibrates at the strike.
     fn clash_exchange(&mut self, phase: u32) {
         let c = *self.clash;
         if phase == ENTER {
@@ -7080,6 +7121,7 @@ impl Ctx<'_, '_> {
                         }
                         if self.me.anim_passed_ratio(0.1) {
                             self.me.set_fx(0xC);
+                            self.me.vibrate(1.0, 0.3);
                             if self.me.player == 0 {
                                 self.me.set_fx(0x2D);
                                 self.snd(0x4F);
@@ -7392,9 +7434,10 @@ impl Ctx<'_, '_> {
     }
 
     /// `BtlAct_PlayLandFx`: a giant (size class 4) shakes the cameras near it with sound 0x25 and effect 0x35;
-    /// others effect 0x32 with sound 0xB (parameter flag 0x8000), 0x30 (hard) or 0x33. The rumble is not ported.
+    /// others effect 0x32 with sound 0xB (parameter flag 0x8000), 0x30 (hard) or 0x33. The giant also rumbles the pads near it.
     fn land_fx(&mut self, hard: bool) {
         if self.data.tables.params.size_class() == 4 {
+            self.rumble_near(0.8, 0.1);
             let pos = self.me.pose.pos;
             self.shake_cams_near(pos, 100.0, 1000.0, 3.0, 0.3);
             self.snd(0x25);
@@ -7427,6 +7470,20 @@ impl Ctx<'_, '_> {
             _ => 0,
         };
         self.request_cut(0, cut);
+    }
+
+    /// `BtlCharApi_RumbleNear` at the fighter: both fighters within 1000 vibrate by their nearness (full within
+    /// 100).
+    fn rumble_near(&mut self, power: f32, time: f32) {
+        let pos = self.me.pose.pos;
+        crate::btl_vib::rumble_near(
+            [&mut *self.me, &mut *self.opp],
+            pos,
+            100.0,
+            1000.0,
+            power,
+            time,
+        );
     }
 
     /// `BtlAct_PushAngle`: a push on the model's chains of `speed` along a yaw, kept at most `max`.
@@ -7466,10 +7523,10 @@ impl Ctx<'_, '_> {
 
     /// `BtlSuper_ShakeOnEvent`: technique flag 0x4000000 shakes the camera at the fire event (kind 0: four frames
     /// before a single one, or on each of several), flag 0x8000000 every frame of the firing loop (kind 1); with
-    /// flag 0x10000000 every camera near the fighter shakes. The rumble is not ported.
+    /// flag 0x10000000 every camera near the fighter shakes. The pad vibrates with it (the pads near it).
     fn shake_camera_on_event(&mut self, cls: i32, kind: u32) {
         let flags = self.tech().flags_a(cls);
-        let (strength, time) = match kind {
+        let (strength, time, vib) = match kind {
             0 if flags & 0x400_0000 != 0 => {
                 let n = self.query_event(0x400, 0, 3);
                 if n == 1 {
@@ -7477,21 +7534,23 @@ impl Ctx<'_, '_> {
                     if !self.me.anim_passed_frame(frame as f32) {
                         return;
                     }
-                    (10.0, 0.2)
+                    (10.0, 0.2, 0.3)
                 } else if n >= 2 && self.me.anim_test_attr(0x400) {
-                    (10.0, 0.1)
+                    (10.0, 0.1, 0.2)
                 } else {
                     return;
                 }
             }
-            1 if flags & 0x800_0000 != 0 => (3.0, 0.1),
+            1 if flags & 0x800_0000 != 0 => (3.0, 0.1, 0.1),
             _ => return,
         };
         if flags & 0x1000_0000 != 0 {
             let pos = self.me.pose.pos;
             self.shake_cams_near(pos, 100.0, 1000.0, strength, time);
+            self.rumble_near(1.0, vib);
         } else {
             self.add_shake(strength, time);
+            self.me.vibrate(1.0, vib);
         }
     }
 
@@ -7564,7 +7623,7 @@ impl Ctx<'_, '_> {
     /// motion 0x12A.., a sequence (0x72) to 0x12D..; a catching technique measures the sequence's motions while it
     /// fires. The self-destruct technique (flag 0x2000) of an undamaged fighter changes it to its damaged model
     /// before the fire. The technique's camera cut ends with the fire motion; the camera shakes at the fire
-    /// (`BtlSuper_ShakeOnEvent`). Not ported: the vibration and sounds.
+    /// (`BtlSuper_ShakeOnEvent`). The sounds are not ported.
     fn super_beam(&mut self, phase: u32) {
         let cls = self.current_class();
         let long = (0x10C..=0x10E).contains(&self.current());
@@ -7596,6 +7655,8 @@ impl Ctx<'_, '_> {
                     self.super_hit_stop(false);
                     self.super_set_class(cls);
                     self.super_add_sway();
+                    // BtlSuper_VibrateCharge.
+                    self.me.set_vibration(0.8, 0.1);
                     if long || !change {
                         self.super_wait_flag(0xA7, cls, 2);
                     } else {
@@ -7712,6 +7773,8 @@ impl Ctx<'_, '_> {
                 1 => {
                     self.me.anim_advance_loop(0);
                     self.super_add_sway();
+                    // BtlSuper_VibrateCharge.
+                    self.me.set_vibration(0.8, 0.1);
                     aim = true;
                     match self.me.work[4] {
                         0 => {
@@ -7861,6 +7924,8 @@ impl Ctx<'_, '_> {
                 1 => {
                     self.me.anim_advance_loop(0);
                     self.super_add_sway();
+                    // BtlSuper_VibrateCharge.
+                    self.me.set_vibration(0.8, 0.1);
                     aim = true;
                     self.super_set_class(cls);
                     self.set(0x53);
@@ -7949,6 +8014,8 @@ impl Ctx<'_, '_> {
                     self.me.anim_advance_loop(0);
                     self.super_hit_stop(false);
                     self.super_add_sway();
+                    // BtlSuper_VibrateCharge.
+                    self.me.set_vibration(0.8, 0.1);
                     self.super_set_class(cls);
                     self.super_boost_input();
                     aim = true;
@@ -8311,7 +8378,7 @@ impl Ctx<'_, '_> {
     /// loop 3) at the technique's speed homing on the opponent (turn rates scaled down within 100 of it), live
     /// (flag 0x49) in the loop, the straight one from motion 2's third frame; the end motion 6 after 16 slow frames,
     /// the technique's time, the lost lock-on or a miss (0x63). Then 0xB, pushed back (0x64: 0xCF) or the sequence
-    /// (0x72). The camera cut ends with the dash. The vibration is not ported.
+    /// (0x72). The camera cut ends with the dash. The pad vibrates.
     fn tech_rush_dash(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -8338,6 +8405,7 @@ impl Ctx<'_, '_> {
                     self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
                     self.super_set_class(cls);
                     if self.me.anim_is_new() {
+                        self.me.vibrate(0.8, 0.3);
                         self.set(0xD0);
                         self.end_cut();
                     }
@@ -8356,6 +8424,7 @@ impl Ctx<'_, '_> {
                     self.set(0x49);
                     self.set(0x47);
                     self.me.set_fx(4);
+                    self.me.set_small_vibration(0.1);
                 }
                 Some(6) => {
                     if self.me.anim_advance(0) {
@@ -8629,6 +8698,7 @@ impl Ctx<'_, '_> {
                 }
                 Some(2) => {
                     if self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0) {
+                        self.me.vibrate(0.8, 0.3);
                         self.set(0xD0);
                     }
                     self.super_set_class(cls);
@@ -8641,6 +8711,7 @@ impl Ctx<'_, '_> {
                     self.rush_fly_loop();
                     moving = true;
                     lean = 1.0;
+                    self.me.set_small_vibration(0.1);
                 }
                 Some(6) => {
                     if self.me.anim_advance(0) {
@@ -8689,6 +8760,7 @@ impl Ctx<'_, '_> {
                 Some(2) => {
                     self.me.anim_set_duration(0.1);
                     if self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0) {
+                        self.me.vibrate(0.8, 0.3);
                         self.set(0xD0);
                     }
                     lean = self.me.anim_progress();
@@ -8697,6 +8769,7 @@ impl Ctx<'_, '_> {
                     self.rush_fly_loop();
                     moving = true;
                     lean = 1.0;
+                    self.me.set_small_vibration(0.1);
                 }
                 Some(6) => {
                     if self.me.anim_advance(0) {
@@ -9339,7 +9412,7 @@ impl Ctx<'_, '_> {
     /// put back at the saved placement (0xF5), under the character's camera cuts 4, 5 (while waiting) and 6 with
     /// their shakes, voice kinds 0xE (start) and 0x22 (closing) and the sounds (0x54 then 0x4C / 0x53 by parameter
     /// flag 0x40000; the long one's 0x44, 0x22, 0x18 in the lead-in and 0x25, 0x14, 0x45, 0x2C in the closing).
-    /// The push-back, vibration and battle events are not ported.
+    /// Each shake comes with the pad's vibration. The battle events are not ported.
     fn transform_a(&mut self, phase: u32) {
         let long = self.current() == 0xF0;
         if phase == ENTER {
@@ -9397,6 +9470,7 @@ impl Ctx<'_, '_> {
                     }
                     if !long && self.me.anim_was_new() {
                         self.add_shake(5.0, 0.4);
+                        self.me.vibrate(1.0, 0.5);
                     }
                     if self.me.anim_advance(0) {
                         self.me.work[1] = 1;
@@ -9406,14 +9480,17 @@ impl Ctx<'_, '_> {
                         if self.me.anim_passed_ratio(0.12) && self.me.height_above_ground() < 5.0 {
                             self.snd(0x25);
                             self.add_shake(5.0, 0.2);
+                            self.me.vibrate(1.0, 0.15);
                         }
                         if self.me.anim_passed_ratio(0.35) {
                             self.snd(0x14);
                             self.add_shake(5.0, 0.2);
+                            self.me.vibrate(1.0, 0.15);
                         }
                         if self.me.anim_passed_ratio(0.63) {
                             self.snd(0x45);
                             self.add_shake(5.0, 0.1);
+                            self.me.vibrate(1.0, 0.1);
                         }
                         if self.me.anim_passed_ratio(0.75) {
                             self.snd(0x2C);
@@ -9529,6 +9606,7 @@ impl Ctx<'_, '_> {
                         self.me.set_fx(1);
                         self.voice(0x22);
                         self.set(0xD9);
+                        self.me.vibrate(1.0, 0.5);
                         self.snd_stream(0x8D36);
                     }
                     if self.me.anim_advance(0) {
@@ -10026,8 +10104,8 @@ impl Ctx<'_, '_> {
 
     /// Action 0xF8 (`BtlAct_KoSwitchFlyIn`): the next member flies to its start placement at 2500 km/h (motion
     /// 0x19), lands (0x2D), stands (0) 30 frames and asks for the round reset (flag 0xF9), under the enter cut
-    /// (`BtlActSwitch_SetEnterCut`); the dash sound, then on landing a shake, sound 0x25 and voice kind 0xF. The
-    /// vibration is not ported.
+    /// (`BtlActSwitch_SetEnterCut`); the dash sound, then on landing a shake, sound 0x25, voice kind 0xF and the
+    /// pad's vibration.
     fn ko_switch_fly_in(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x19, 0.0);
@@ -10079,6 +10157,7 @@ impl Ctx<'_, '_> {
                         self.voice(0xF);
                         self.me.pose.speed = 0.0;
                         self.add_shake(3.0, 0.7);
+                        self.me.vibrate(1.0, 0.5);
                     }
                 }
                 0 => {
@@ -10407,7 +10486,7 @@ impl Ctx<'_, '_> {
 
     /// Actions 0xFF / 0x100 (`BtlAct_SkillTeleport`): the skill applied at once and its motion; when the motion
     /// raises flag 0x31 the fighter vanishes and, locked on, comes back behind the opponent; action 0xB nine frames
-    /// later; sound 0x20 as it vanishes. The vibration is not ported.
+    /// later; sound 0x20 and the small motor as it vanishes.
     fn skill_teleport(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -10421,6 +10500,7 @@ impl Ctx<'_, '_> {
                 if self.me.anim_passed_ratio(0.8) {
                     self.me.set_fx(0xC);
                     self.snd(0x20);
+                    self.me.set_small_vibration(0.2);
                 }
                 self.step(6, 6, 7, 0.0, kmh(100.0));
                 self.me.apply_gravity();
@@ -10554,7 +10634,7 @@ impl Ctx<'_, '_> {
     /// partner object and then the fused character load; the two-fighter motion 0x1A2 / 0x1A3 at the stage's
     /// place, held until the fused character is in; the closing 0x1A4; put back at the saved placement; under
     /// the common camera cut 1; sound 0x31, then streamed sound 0x8D36 (0xF1) / 0x8D38 and voice kind 0x22 in the
-    /// closing. The partner object and the vibration are not ported.
+    /// closing, with the pad's vibration. The partner object is not ported.
     fn fusion(&mut self, phase: u32) {
         let first = self.current() == 0xF1;
         if phase == ENTER {
@@ -10611,6 +10691,7 @@ impl Ctx<'_, '_> {
                         self.set(0xF4);
                         self.set(0xD9);
                         self.me.set_fx(1);
+                        self.me.vibrate(1.0, 0.5);
                         self.snd_stream(if first { 0x8D36 } else { 0x8D38 });
                     }
                     if self.me.anim_passed_ratio(0.3) {
@@ -10983,8 +11064,8 @@ impl Ctx<'_, '_> {
     /// 0xD5 leans with the pitch, 0xD6 spins. A free fighter recovers in the air (inputs 0x28 / 0x29 raise flags
     /// 0x21 / 0x22, with the ki for it) or, with parameter bit 0x40, mashes out (0xD7). Into the floor: the air
     /// recovery or 500 damage and 0xDD; into a wall: 0xE8 / 0xE7 or the wall recovery; at the stage limit 0xE8 /
-    /// 0xE7; into the opponent 0xE9 / 0xE7. 0xD5 plays sound 0x48, cut short as it ends. The camera shake and
-    /// rumble are not ported.
+    /// 0xE7; into the opponent 0xE9 / 0xE7. 0xD5 plays sound 0x48, cut short as it ends. Striking the ground
+    /// shakes the cameras and rumbles the pads near it.
     fn blow_away(&mut self, phase: u32) {
         if phase == ENTER {
             let air = self.me.is_air_motion(self.env, true);
@@ -11081,6 +11162,16 @@ impl Ctx<'_, '_> {
                     self.request(q);
                 } else {
                     self.me.damage(self.env, self.data, 500, 0);
+                    let pos = self.me.pose.pos;
+                    crate::chr_cam::shake_cams_near(
+                        [&mut *self.me, &mut *self.opp],
+                        pos,
+                        100.0,
+                        1000.0,
+                        3.0,
+                        0.4,
+                    );
+                    self.rumble_near(0.8, 0.2);
                     if self.me.work[0] & 8 != 0 {
                         self.me.pose.speed = 0.0;
                     }
@@ -11094,6 +11185,16 @@ impl Ctx<'_, '_> {
                     self.request(q);
                 } else {
                     self.me.damage(self.env, self.data, 500, 0);
+                    let pos = self.me.pose.pos;
+                    crate::chr_cam::shake_cams_near(
+                        [&mut *self.me, &mut *self.opp],
+                        pos,
+                        100.0,
+                        1000.0,
+                        3.0,
+                        0.4,
+                    );
+                    self.rumble_near(0.8, 0.2);
                     self.request(0xE7);
                 }
             } else if self.flag(0x14) {

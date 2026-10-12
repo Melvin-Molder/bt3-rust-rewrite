@@ -5,8 +5,8 @@
 //! A hit is the attacker's current attack id (`BtlAtk_GetId`), the 0x30-byte record it selects in the character's
 //! attack table, the strike volumes of the motion's open hit window touching the defender's body boxes, and the
 //! reaction block `BtlHit_ApplyHit` fills on the defender. A rushing technique (flag 0x49) that touches its
-//! opponent starts its sequence (`BtlHit_CheckRush`, `BtlColl_StartThrow`). Not ported: camera shake, pad
-//! vibration, sounds and voices.
+//! opponent starts its sequence (`BtlHit_CheckRush`, `BtlColl_StartThrow`). Hits, guards and trades shake the
+//! cameras and vibrate the pads by the record. Not ported: sounds and voices.
 
 use std::f32::consts::PI;
 
@@ -809,6 +809,8 @@ impl Pair<'_, '_> {
                 b.status.target = -1;
                 for c in [a, b] {
                     c.set_fx(0x22);
+                    crate::chr_cam::add_shake(c, 2.0, 0.3);
+                    c.vibrate(1.0, 0.1);
                     c.flags.set_held(0x5D);
                 }
             }
@@ -937,6 +939,14 @@ impl Pair<'_, '_> {
         if rec.s8_at(0x23) != 0 {
             def.set_fx(0x1D);
         }
+        // The camera shake of the hit (record +0x17 / +0x18), the pads' vibration at half of it.
+        let (power, time) = (f32::from(rec.u8_at(0x17)), f32::from(rec.u8_at(0x18)) * 0.1);
+        if atk_flags & 0x800 != 0 {
+            crate::chr_cam::add_shake(atk, power, time);
+        }
+        crate::chr_cam::add_shake(def, power, time);
+        atk.vibrate(power * 0.5, time * 0.5);
+        def.vibrate(power * 0.5, time * 0.5);
         if atk_flags & 0x8_0000 == 0 {
             atk.set_fx(0x1B);
         }
@@ -1426,6 +1436,14 @@ fn apply_guard(
         1 => def.flags.set(0x67),
         _ => {}
     }
+    // The camera shake of a guarded hit (record +0x19 / +0x1A), the pads' vibration at half of it.
+    let (power, time) = (f32::from(rec.u8_at(0x19)), f32::from(rec.u8_at(0x1A)) * 0.1);
+    if flags & 0x800 != 0 {
+        crate::chr_cam::add_shake(atk, power, time);
+    }
+    crate::chr_cam::add_shake(def, power, time);
+    atk.vibrate(power * 0.5, time * 0.5);
+    def.vibrate(power * 0.5, time * 0.5);
 }
 
 #[cfg(test)]

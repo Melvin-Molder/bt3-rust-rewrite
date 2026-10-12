@@ -36,6 +36,8 @@ pub(crate) struct Roster {
     /// The character change requests (`change`).
     pub change: crate::btl_change::ChangeQueue,
     cpu: [bool; 2],
+    /// `gPad[].vibPower` / `vibSmall`: this frame's vibration requests by pad.
+    pub pad_vib: [crate::btl_vib::PadVib; 2],
 }
 
 impl Roster {
@@ -53,6 +55,7 @@ impl Roster {
             clash: Clash::default(),
             change: Default::default(),
             cpu,
+            pad_vib: Default::default(),
         };
         roster.sync_abilities();
         roster
@@ -377,6 +380,7 @@ impl Roster {
             crate::btl_fx::update_obj_flag80(me, data[i]);
             crate::btl_fx::push_back_on_event_400(me, data[i]);
             crate::btl_fx::obj_mask_event_400(me, data[i]);
+            crate::btl_fx::shake_and_vibrate_on_events(me);
             self.scene.spawn_held_disc(me, data[i]);
             // BtlFx_UpdateChargeFx: the charge aura while request 7 holds, its burst on request 8.
             if let Some(set) = crate::btl_blast::charge_set(data[i]) {
@@ -530,8 +534,8 @@ impl Roster {
 
     /// `BtlMembers_UpdateQueuedDamage`: each fighter deals what it queued against its opponent, a share on each of
     /// the motion's damage events (0x200000000), and drains health / ki past the drain's first frame while the
-    /// motion is a throw (table flag 8 without 0x10); flag 0x8C deals the rest and empties the queue. The
-    /// vibration is not ported.
+    /// motion is a throw (table flag 8 without 0x10); flag 0x8C deals the rest and empties the queue. Both pads
+    /// vibrate on each share.
     fn update_queued_damage(&mut self, data: [&SideData; 2], env: &Env) {
         for i in 0..2 {
             let (me, other) = split(&mut self.chars, i);
@@ -543,10 +547,15 @@ impl Roster {
                 if q.hits >= 2 {
                     other.damage(env, data[i ^ 1], q.per_hit, q.flags);
                     q.total -= q.per_hit;
+                    me.vibrate(1.0, 0.1);
+                    other.vibrate(1.0, 0.1);
                 } else {
                     other.damage(env, data[i ^ 1], q.total, q.flags);
                     q.total = 0;
+                    me.vibrate(1.0, 0.3);
+                    other.vibrate(1.0, 0.3);
                 }
+                let q = &mut me.queue;
                 q.hits -= 1;
                 other.unk_fe4 = 30;
                 if me.flags.test(0x13B) {
@@ -637,6 +646,10 @@ impl Roster {
         for s in shakes {
             let [a, b] = &mut self.chars;
             crate::chr_cam::shake_cams_near([a, b], s.pos, s.near, s.far, s.strength, s.time);
+            if let Some((far, power, time)) = s.rumble {
+                let [a, b] = &mut self.chars;
+                crate::btl_vib::rumble_near([a, b], s.pos, s.near, far, power, time);
+            }
         }
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
@@ -698,6 +711,8 @@ impl Roster {
                 chr.pose.vel = [0.0; 3];
                 chr.pose.moved = [0.0; 3];
             }
+            // BtlChar_UpdateVibration to the fighter's pad.
+            chr.update_vibration(&mut self.pad_vib[chr.player]);
             chr.flags.set_stage(12);
         }
         self.snapshot(5);
