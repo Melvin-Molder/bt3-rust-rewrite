@@ -485,6 +485,20 @@ impl TechTable<'_> {
     pub fn shot_scale(&self, slot: i32) -> f32 {
         self.f32_of(0x6C, slot)
     }
+    /// The impacts of the effect (`EftShot_BuildParam`): the effect id on a fighter (+0xA5) and on the stage
+    /// (+0xA2), negative for none, and their scales (+0x84, +0x78).
+    pub fn impact_fx(&self, slot: i32) -> i32 {
+        self.s8_of(0xA5, slot)
+    }
+    pub fn ground_fx(&self, slot: i32) -> i32 {
+        self.s8_of(0xA2, slot)
+    }
+    pub fn impact_scale(&self, slot: i32) -> f32 {
+        self.f32_of(0x84, slot)
+    }
+    pub fn ground_scale(&self, slot: i32) -> f32 {
+        self.f32_of(0x78, slot)
+    }
     /// `shotLife` (+0x30): frames a blast object of effect type 2 lives before it is stopped.
     pub fn shot_life(&self, slot: i32) -> f32 {
         self.f32_of(0x30, slot)
@@ -730,6 +744,14 @@ impl SkillTable<'_> {
     }
     pub fn shot_scale(&self, slot: i32) -> f32 {
         self.f32_of(0x30, slot)
+    }
+    /// The impacts of the effect (`EftShot_BuildParam`): the effect id on a fighter (+0x46) and on the stage
+    /// (+0x44), negative for none.
+    pub fn impact_fx(&self, slot: i32) -> i32 {
+        self.s8_of(0x46, slot)
+    }
+    pub fn ground_fx(&self, slot: i32) -> i32 {
+        self.s8_of(0x44, slot)
     }
     /// The hit factors as stored (+0x3A shots, +0x3C hits B, +0x40 hits C less 1), the hit shape (+0x3E) and the
     /// frames between two hits (+0x42).

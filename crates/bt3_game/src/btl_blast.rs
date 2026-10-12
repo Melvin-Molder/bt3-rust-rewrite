@@ -62,11 +62,13 @@ const T_NO_MODE2: u32 = 0x4_0000;
 const T_END: u32 = 0x3F;
 
 // EFT_HIT_FLAG_*.
+const H_NO_IMPACT: u32 = 0x2;
 const H_KIND9: u32 = 0x8;
 pub(crate) const H_LAST: u32 = 0x10;
 const H_ALWAYS: u32 = 0x20;
 const H_NEVER: u32 = 0x40;
 const H_NO_MODE1: u32 = 0x80;
+const H_GROUND: u32 = 0x400;
 pub(crate) const H_NO_LAST: u32 = 0x800;
 const T_TURN: u32 = 0xC0;
 
@@ -1185,6 +1187,7 @@ impl Scene {
             .post_update(&mut self.fx, impact_sets, w.paused);
         self.tech.post_update_shots(w, &mut self.fx);
         self.update_records(w);
+        self.spawn_impacts(w);
         for (i, chr) in w.chars.iter_mut().enumerate() {
             chr.live_blasts = [0; 2];
             for rec in self
@@ -1196,6 +1199,111 @@ impl Scene {
             }
         }
         self.tech.draw(w);
+    }
+
+    /// `EftHit_SpawnImpacts` (not while time is stopped): once per task, a record whose task hit something (not
+    /// absorbed, nor kept from it by a finishing stage change) leaves its impact. A ki blast's
+    /// (`EftHit_SpawnBlastImpact`): blast impact 0 (1 at 0.6 for a blast of type 1) where it was hit, along its
+    /// movement, rising 0.2 on a fighter, 1 on the stage, 0.5 otherwise; a thrown object's raises dust on a fighter
+    /// or the stage. A technique's (`EftHit_SpawnTechImpact`): its fighter impact on a hit (a multi-hit's on the
+    /// first one, a rush's at the opponent's node 0x11 every time), its stage impact on the stage unless the owner
+    /// has flag 0xA4, against the movement.
+    fn spawn_impacts(&mut self, w: &mut World) {
+        if w.paused {
+            return;
+        }
+        for i in 0..self.records.len() {
+            let rec = self.records[i];
+            let Some(t) = self.rec_tag(i) else {
+                continue;
+            };
+            let f = t.flags;
+            if f & T_IMPACT_DONE != 0
+                || rec.flags & H_NO_IMPACT != 0
+                || f & T_ABSORBED != 0
+                || f & T_END == 0
+            {
+                continue;
+            }
+            t.flags |= T_IMPACT_DONE;
+            let (at, hits) = (t.pos, t.hit_count);
+            let sets = w.env.impact;
+            let owner = rec.owner;
+            match rec.tech {
+                None => {
+                    let mut arg = crate::eft_impact::ImpactArg {
+                        pos: at,
+                        dir: norm(sub(rec.pos, rec.prev)),
+                        id: 0,
+                        chr: owner,
+                    };
+                    let mut scale = 1.0;
+                    if rec.atk.kind_type == 1 {
+                        arg.id = 1;
+                        scale = 0.6;
+                    }
+                    let dust = |s: &mut Self, w: &mut World| {
+                        let coef = w.env.fx.sin_coef;
+                        s.gdust.spawn_impact(owner, at, 1.0, w.libc, w.vu0, &coef);
+                    };
+                    if f & T_HIT_CHAR != 0 {
+                        if rec.flags & H_GROUND != 0 {
+                            dust(self, w);
+                        } else {
+                            self.impacts.spawn_blast(sets, &arg, scale, 0.2);
+                        }
+                    } else if f & T_HIT_STAGE != 0 {
+                        if rec.flags & H_GROUND == 0 {
+                            self.impacts.spawn_blast(sets, &arg, scale, 1.0);
+                        } else {
+                            dust(self, w);
+                        }
+                    } else {
+                        self.impacts.spawn_blast(sets, &arg, 1.0, 0.5);
+                    }
+                }
+                Some(src) => {
+                    let def = &src.def;
+                    let dir = norm(sub(rec.prev, rec.pos));
+                    if f & (T_HIT_CHAR | T_GUARDED) != 0 {
+                        if def.impact_fx >= 0 {
+                            let rush = if def.kind == 0 {
+                                def.sub == 4
+                            } else {
+                                def.sub == 9
+                            };
+                            let pos = if f & T_MULTI == 0 || (!rush && hits == 1) {
+                                Some(at)
+                            } else if rush {
+                                Some(w.chars[owner ^ 1].obj.node_pos(0x11))
+                            } else {
+                                None
+                            };
+                            if let Some(pos) = pos {
+                                let arg = crate::eft_impact::ImpactArg {
+                                    pos,
+                                    dir,
+                                    id: def.impact_fx,
+                                    chr: owner,
+                                };
+                                self.impacts.spawn_blast(sets, &arg, def.impact_scale, 0.5);
+                            }
+                        }
+                    } else if f & T_HIT_STAGE != 0
+                        && def.ground_fx >= 0
+                        && !w.chars[owner].flags.test(0xA4)
+                    {
+                        let arg = crate::eft_impact::ImpactArg {
+                            pos: at,
+                            dir,
+                            id: def.ground_fx,
+                            chr: owner,
+                        };
+                        self.impacts.spawn_blast(sets, &arg, def.ground_scale, 1.0);
+                    }
+                }
+            }
+        }
     }
 
     /// `BtlScene_UpdateRecords`: `EftWater_UpdateBlast` on every record (`EftBubble_OnBlastRecord` does nothing).

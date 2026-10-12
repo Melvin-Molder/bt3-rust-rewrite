@@ -3455,11 +3455,13 @@ mod tests {
         let mut dust = 0;
         let (mut trails, mut streaks, mut speed_rays, mut vanish) = (0, 0, 0, 0);
         let (mut sparks, mut spark_objects) = (std::collections::BTreeSet::new(), 0);
+        let mut blast_impacts = std::collections::BTreeSet::new();
         for _ in 0..5400 {
             battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
             dust = dust.max(battle.roster.scene.gdust.fighter_parts());
             vanish = vanish.max(battle.roster.scene.shotfx.count());
             sparks.extend(battle.roster.scene.impacts.ids(0));
+            blast_impacts.extend(battle.roster.scene.impacts.ids(1));
             spark_objects = spark_objects.max(impact_objects(&battle.roster.scene.fx));
             let (t, s) = battle.roster.scene.spdlines.counts();
             trails = trails.max(t);
@@ -3494,6 +3496,8 @@ mod tests {
             !sparks.is_empty() && spark_objects > 0,
             "{sparks:?} {spark_objects}"
         );
+        // Its ki blasts and techniques leave blast impacts where they hit.
+        assert!(!blast_impacts.is_empty(), "{blast_impacts:?}");
         assert!(min_gap < start_gap - 10.0, "the CPU did not close in");
         assert!(
             battle.roster.chars[0].gauge.health < health,
@@ -7490,6 +7494,14 @@ mod tests {
         }
         assert!(most > 0, "the ki blast drew nothing");
         assert!(particles > 0, "the ki blast emitted no particles");
+        // The blast impact where it hit plays on; once it is over the pool is empty.
+        for _ in 0..300 {
+            if battle.roster.scene.impacts.ids(1).is_empty() {
+                break;
+            }
+            battle.run_frame(false, pads(0), 0, &mut libc, &mut random, None, false);
+        }
+        assert!(battle.roster.scene.impacts.ids(1).is_empty());
         assert_eq!(
             battle.roster.scene.fx.particles_used(),
             0,

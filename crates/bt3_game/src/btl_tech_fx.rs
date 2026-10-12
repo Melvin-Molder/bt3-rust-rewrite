@@ -149,6 +149,12 @@ pub(crate) struct TechDef {
     pub item_speed: f32,
     /// `frames`: a skill's frame table of its events (-1 none; the techniques take them from the motion).
     pub frames: [i32; 6],
+    /// `impactFx` / `groundFx`: the blast impact on a fighter and on the stage (< 0 none), with their scales (1
+    /// for a skill).
+    pub impact_fx: i32,
+    pub ground_fx: i32,
+    pub impact_scale: f32,
+    pub ground_scale: f32,
 }
 
 impl TechDef {
@@ -180,6 +186,10 @@ impl TechDef {
                 shot_life: 0.0,
                 item_speed: 0.0,
                 frames: s.effect_frames(slot),
+                impact_fx: s.impact_fx(slot),
+                ground_fx: s.ground_fx(slot),
+                impact_scale: 1.0,
+                ground_scale: 1.0,
             };
         }
         let t = data.tables.tech();
@@ -205,6 +215,10 @@ impl TechDef {
             shot_life: t.shot_life(slot),
             item_speed: t.item_speed(slot),
             frames: [-1; 6],
+            impact_fx: t.impact_fx(slot),
+            ground_fx: t.ground_fx(slot),
+            impact_scale: t.impact_scale(slot),
+            ground_scale: t.ground_scale(slot),
         }
     }
 
