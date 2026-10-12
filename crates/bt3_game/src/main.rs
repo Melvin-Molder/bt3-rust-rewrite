@@ -30,6 +30,7 @@ mod draw;
 mod duel_menu;
 mod eft;
 mod eft_bill;
+mod eft_bound;
 mod eft_bubble;
 mod eft_burst;
 mod eft_chain;

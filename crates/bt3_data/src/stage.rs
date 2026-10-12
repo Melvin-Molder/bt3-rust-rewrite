@@ -54,6 +54,54 @@ pub struct StageDust {
     pub r_max: u8,
 }
 
+/// `EftBoundParam` (stage pack entry 23) and the colour of entry 22: the boundary wall that shows in front of a
+/// fighter near the stage's edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageBound {
+    /// The distance from the wall at which it starts to show.
+    pub range: f32,
+    pub height: f32,
+    /// Added to the stage's inner radius.
+    pub radius_add: f32,
+    pub alpha: f32,
+    /// How far from the point nearest to the fighter the wall fades out.
+    pub fade_dist: f32,
+    /// The angle the wall spans, and the texture's repeat in angle and height.
+    pub arc: f32,
+    pub tex_arc: f32,
+    pub tex_height: f32,
+    /// The texture's scroll and the pulse's turns per frame.
+    pub scroll: [f32; 2],
+    pub phase_rate: f32,
+    pub layer: i32,
+    pub color: [f32; 3],
+}
+
+impl StageBound {
+    /// Entries 23 (the parameters) and 22 (the colour) of a stage file's pack.
+    pub fn parse(param: &[u8], color: &[u8]) -> io::Result<Self> {
+        let f = |o: usize| read_f32(param, o);
+        Ok(Self {
+            range: f(0)?,
+            height: f(4)?,
+            radius_add: f(0xC)?,
+            alpha: f(0x14)?,
+            fade_dist: f(0x18)?,
+            arc: f(0x1C)?,
+            tex_arc: f(0x20)?,
+            tex_height: f(0x24)?,
+            scroll: [f(0x2C)?, f(0x30)?],
+            phase_rate: f(0x34)?,
+            layer: read_i32(param, 0x38)?,
+            color: [
+                read_f32(color, 0)?,
+                read_f32(color, 4)?,
+                read_f32(color, 8)?,
+            ],
+        })
+    }
+}
+
 /// `StgPath`: points `first .. end` are the usable ones; each point is 12 floats (x, y, z, ?, then the angles at
 /// 4 / 5 the clash camera looks along).
 #[derive(Clone, Debug, PartialEq)]

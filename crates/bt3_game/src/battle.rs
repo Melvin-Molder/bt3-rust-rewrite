@@ -128,6 +128,8 @@ pub struct BattleAssets {
     pub(crate) dust_textures: Vec<usize>,
     /// The water effects' textures (stage pack entry 0x12) among the effect textures, on a stage with them.
     pub(crate) water_textures: Option<Vec<usize>>,
+    /// The boundary wall's parameters and texture (stage pack entries 0x15..0x17), on a stage with them.
+    pub(crate) bound: Option<(bt3_data::stage::StageBound, Option<usize>)>,
     pub(crate) fighters: Vec<FighterModel>,
     /// The light ramp the shading rows are looked up through, and common file 2 (`BtlLoad_StepChara` reloads a
     /// side with them).
@@ -277,6 +279,7 @@ pub fn load(
         collision,
         nav,
         water_textures,
+        bound,
     } = load_stage(read, setup.stage)?;
     // BtlLoad_StepInitial: the common, stage and both sides' sample banks.
     let mut snd = crate::btl_snd::CharSound::default();
@@ -341,6 +344,7 @@ pub fn load(
         ray_texture: None,
         dust_textures: Vec::new(),
         water_textures: None,
+        bound: None,
         fighters: Vec::new(),
         ramp: Vec::new(),
         common_file: Vec::new(),
@@ -429,6 +433,7 @@ pub fn load(
         }
     }
     assets.water_textures = water_textures.map(|t| assets.push_effect_textures(t));
+    assets.bound = bound.map(|(p, t)| (p, assets.push_effect_textures(t).first().copied()));
     for (index, side) in setup.sides.into_iter().enumerate() {
         let load = SideLoad {
             chara: side.chara,
@@ -748,6 +753,8 @@ pub(crate) struct LoadedStage {
     /// `EftWater_Init`'s `EftTexSet_Load32` of stage pack entry 0x12, on a stage with the water effects
     /// (`EftStage_HasKind(7)`).
     water_textures: Option<Vec<RgbaTexture>>,
+    /// `EftBoundMgr_Init`: the parameters (entry 23), colour (22) and textures (21), when all three are there.
+    bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
 }
 
 /// Reads stage `stage_id`'s file (`BTL_FILE_STAGE + stage`).
@@ -798,12 +805,28 @@ fn load_stage(
     } else {
         None
     };
+    let bound = if (0x15..=0x17).all(|n| entry_size(n) > 0) {
+        let entry = |n| pack_section(&stage_file, n).map_err(error);
+        let param =
+            bt3_data::stage::StageBound::parse(entry(0x17)?, entry(0x16)?).map_err(error)?;
+        let textures = TextureResource::parse(entry(0x15)?)
+            .map_err(error)?
+            .entries
+            .iter()
+            .map(decode_sprite_texture)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        Some((param, textures))
+    } else {
+        None
+    };
     Ok(LoadedStage {
         stage,
         model,
         textures,
         cuts,
         water_textures,
+        bound,
         collision: StageCollision::parse(&stage_file).map_err(error)?,
         nav: StageNav::parse(&stage_file).map_err(error)?,
     })
@@ -1095,6 +1118,14 @@ impl BattleAssets {
         Some(w)
     }
 
+    /// `EftBoundMgr_Init`: the boundary walls of kind 8, with the fighters' body radii.
+    pub(crate) fn new_bound(&self) -> Option<crate::eft_bound::Bound> {
+        let (param, texture) = self.bound?;
+        let radius = [0, 1].map(|i| side_data(&self.fighters[i]).radius());
+        let inner = self.stage.bounds.radius - 100.0;
+        Some(crate::eft_bound::Bound::new(param, texture, inner, radius))
+    }
+
     /// `EftBubble_Init`: the bubble task of stage effect kind 7, with at least six textures in the set.
     pub(crate) fn new_bubbles(&self) -> Option<crate::eft_bubble::Bubbles> {
         let textures = self.water_textures.clone()?;
@@ -1116,6 +1147,9 @@ impl BattleAssets {
         self.collision = s.collision;
         self.nav = s.nav;
         self.water_textures = s.water_textures.map(|t| self.push_effect_textures(t));
+        self.bound = s
+            .bound
+            .map(|(p, t)| (p, self.push_effect_textures(t).first().copied()));
         self.stage_id = stage_id;
         self.stage_rev += 1;
     }
@@ -1145,6 +1179,7 @@ impl Battle {
         roster.scene.gdust = crate::eft_gdust::GndDust::new(assets.stage.dust.as_ref());
         roster.scene.water = assets.new_water();
         roster.scene.bubbles = assets.new_bubbles();
+        roster.scene.bound = assets.new_bound();
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -1399,6 +1434,7 @@ impl Battle {
                             // EftStage_CreateKinds: the new stage's effects.
                             self.roster.scene.water = self.assets.new_water();
                             self.roster.scene.bubbles = self.assets.new_bubbles();
+                            self.roster.scene.bound = self.assets.new_bound();
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -1646,6 +1682,7 @@ impl Battle {
                     self.assets.install_stage(loaded, start);
                     self.roster.scene.water = self.assets.new_water();
                     self.roster.scene.bubbles = self.assets.new_bubbles();
+                    self.roster.scene.bound = self.assets.new_bound();
                     self.assets
                         .reload_bank(read, 8, SND_STAGE_FILE + start.max(0) as u32);
                     self.light_dir =
@@ -1716,6 +1753,7 @@ impl Battle {
         self.roster.scene.gdust = crate::eft_gdust::GndDust::new(self.assets.stage.dust.as_ref());
         self.roster.scene.water = self.assets.new_water();
         self.roster.scene.bubbles = self.assets.new_bubbles();
+        self.roster.scene.bound = self.assets.new_bound();
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         self.fade = Fade::start_in(1.0);
         self.started = false;
@@ -2088,6 +2126,18 @@ impl Battle {
             }
             if let Some(b) = &self.roster.scene.bubbles {
                 b.draw(&mut ot, &ctx.world2view, &ctx.world2screen);
+            }
+            if let Some(b) = &self.roster.scene.bound {
+                let show = self
+                    .roster
+                    .chars
+                    .each_ref()
+                    .map(|c| crate::eft_bound::BoundShow {
+                        hidden: c.obj.flags & 2 == 0,
+                        locked_on: c.flags.test(5),
+                        rush_connected: c.flags.test(0xA1),
+                    });
+                b.draw(&mut ot, &ctx, &show);
             }
             self.roster
                 .scene
@@ -5019,6 +5069,46 @@ mod tests {
         battle.restart(&mut sounds);
         assert_eq!(battle.assets.stage_id, from);
         assert_eq!(battle.assets.stage.stage_id, from);
+    }
+
+    #[test]
+    fn real_stages_raise_their_boundary_wall_near_the_edge() {
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let read = battle.loader.as_mut().unwrap();
+        let mut with = 0;
+        for s in 0..0x27 {
+            let Some((p, textures)) = load_stage(read, s).ok().and_then(|s| s.bound) else {
+                continue;
+            };
+            with += 1;
+            assert!(!textures.is_empty(), "stage {s}");
+            assert!(
+                p.range > 0.0 && p.fade_dist > 0.0 && p.arc > 0.0,
+                "stage {s}: {p:?}"
+            );
+            assert!((0..4).contains(&p.layer), "stage {s}: {p:?}");
+        }
+        // Stages 4, 27 and 35..38 have none.
+        assert_eq!(with, 0x27 - 6);
+        // A fighter 50 from the edge: its wall draws, seen from the middle of the stage.
+        let mut b = battle.assets.new_bound().unwrap();
+        let edge = battle.assets.stage.bounds.radius - 100.0;
+        let mut chars = [crate::eft_bound::BoundChr::default(); 2];
+        chars[0].node3 = [0.0, -20.0, edge - 50.0];
+        b.update(&chars, false);
+        let view = View::new([0.0, -20.0, 0.0], [0.0; 3]);
+        let ctx = crate::eft::DrawCtx::new(view.world2screen, view.world2view);
+        let mut ot = crate::eft::OrderTable::new();
+        b.draw(&mut ot, &ctx, &[Default::default(); 2]);
+        let tris = ot.into_list();
+        assert!(!tris.is_empty());
+        assert!(
+            tris.iter()
+                .all(|t| t.texture == battle.assets.bound.unwrap().1)
+        );
+        assert!(battle.roster.scene.bound.is_some());
     }
 
     #[test]
