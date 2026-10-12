@@ -57,6 +57,8 @@ pub(crate) struct KiObj {
     blast: f32,
     frag_timer: i32,
     bomb: bool,
+    /// Where the bomb exploded this update (`EftImpact_SpawnBlast`, taken by the scene).
+    pub exploded: Option<[f32; 3]>,
 }
 
 fn norm(v: [f32; 3]) -> [f32; 3] {
@@ -87,6 +89,7 @@ impl KiObj {
             blast: 0.0,
             frag_timer: 15,
             bomb,
+            exploded: None,
         };
         if bomb {
             o.radius = 5.0;
@@ -194,7 +197,8 @@ impl KiObj {
         }
         if self.flags & K_EXPLODED == 0 && (self.life <= 0.0 || self.flags & K_EXPLODE != 0) {
             self.life = 0.0;
-            // The explosion effect (not drawn) and its sound, 0x1B or 0x11 by libc rand().
+            // The explosion's blast impact, then its sound, 0x1B or 0x11 by libc rand().
+            self.exploded = Some(self.pos);
             let id = if libc.rand() & 2 != 0 { 0x1B } else { 0x11 };
             snd.request(self.pos, -1, crate::btl_snd::KIND_COMMON, 200.0, 1500.0, id);
             self.radius = 28.0;

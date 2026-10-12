@@ -334,6 +334,9 @@ pub(crate) struct TechFx {
     beams: [[Vec<Beam>; 5]; 2],
     volleys: [[Vec<Volley>; 5]; 2],
     sweeps: [[Vec<Sweep>; 5]; 2],
+    /// The blast impacts the sweeps' marks started this update (`EftImpact_SpawnBlast`, rising 1), with their
+    /// scales, for the scene's impact list.
+    pub(crate) blast_impacts: Vec<(crate::eft_impact::ImpactArg, f32)>,
     follows: [[Vec<Follow>; 5]; 2],
     rush_shots: [[Vec<RushShot>; 5]; 2],
     obj_techs: [[Vec<ObjTech>; 5]; 2],
@@ -360,6 +363,7 @@ impl Default for TechFx {
             beams: Default::default(),
             volleys: Default::default(),
             sweeps: Default::default(),
+            blast_impacts: Vec::new(),
             follows: Default::default(),
             rush_shots: Default::default(),
             obj_techs: Default::default(),
@@ -1422,7 +1426,9 @@ impl TechFx {
                 let mut k = 0;
                 while k < self.sweeps[side][slot].len() {
                     let s = &mut self.sweeps[side][slot][k];
-                    if let Some(rec) = s.update(w, fx, self.events[side], self.cur_slot[side])
+                    let rec = s.update(w, fx, self.events[side], self.cur_slot[side]);
+                    self.blast_impacts.append(&mut s.mark_impacts);
+                    if let Some(rec) = rec
                         && records.len() < max
                     {
                         records.push(rec);

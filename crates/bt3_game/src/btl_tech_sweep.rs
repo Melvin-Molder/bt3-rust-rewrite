@@ -8,7 +8,8 @@
 //!
 //! The follow of type 7 (`EftFollow_*`, the tail of the same module) is here too.
 //!
-//! Not ported: the marks' impact effects and the stage objects they break.
+//! A mark pulls the beam's end back onto the stage, breaks the stage object the beam met and, ten frames later,
+//! starts the technique's stage impact there.
 
 use bt3_data::eft_pack::{EmitSet, SetHead};
 
@@ -61,9 +62,47 @@ pub(crate) struct Sweep {
     head_set: SetHead,
     trail_width: f32,
     trail_time: f32,
-    /// The stage marks' timers (`EftSweepMark`), `None` free.
-    marks: [Option<f32>; 15],
+    /// The stage marks' timers and positions (`EftSweepMark`), `None` free.
+    marks: [Option<(f32, [f32; 3])>; 15],
+    /// The blast impacts the marks started this update.
+    pub(crate) mark_impacts: Vec<(crate::eft_impact::ImpactArg, f32)>,
     dead: bool,
+}
+
+/// Where a mark lies: `half` from the hit back towards the beam's origin.
+fn mark_at(hit: [f32; 3], origin: [f32; 3], half: f32) -> [f32; 3] {
+    add(hit, scale3(crate::btl_blast::norm(sub(origin, hit)), half))
+}
+
+/// The marks count down; one that ran out starts the stage impact along `dir`. Whether any is left.
+fn step_marks(
+    marks: &mut [Option<(f32, [f32; 3])>; 15],
+    src: &TechSrc,
+    dir: [f32; 3],
+    out: &mut Vec<(crate::eft_impact::ImpactArg, f32)>,
+) -> bool {
+    let mut any = false;
+    let def = &src.def;
+    for m in marks.iter_mut() {
+        if let Some((t, at)) = m {
+            if *t <= 0.0 {
+                if def.ground_fx >= 0 {
+                    let arg = crate::eft_impact::ImpactArg {
+                        pos: *at,
+                        dir,
+                        id: def.ground_fx,
+                        chr: src.side,
+                    };
+                    out.push((arg, def.ground_scale));
+                }
+                *m = None;
+            } else {
+                any = true;
+                *t -= 1.0;
+            }
+        }
+    }
+    any
 }
 
 /// The distance between the fighters' node 3, plus 50, at most 800.
@@ -118,6 +157,7 @@ impl Sweep {
             trail_width: head_set.width[0],
             trail_time: 0.0,
             marks: [None; 15],
+            mark_impacts: Vec::new(),
             dead: false,
         };
         if head_set.flags & 4 != 0 {
@@ -166,36 +206,29 @@ impl Sweep {
         }
     }
 
-    /// `EftSweep_AddMark`: a free mark for ten frames (its position only places the impact effect); a standing
-    /// stage object the trace hit breaks, away from the beam's origin (the mark lies on the line from the hit to
-    /// the origin, so the direction is the hit's).
+    /// `EftSweep_AddMark`: a free mark for ten frames, half the beam's width back from the hit towards the origin;
+    /// the beam's end is pulled back to it, and a standing stage object the trace hit breaks, away from the
+    /// origin. Nothing without a free mark.
     fn add_mark(&mut self, w: &World, hit: bt3_data::stage_col::SegHit) {
+        let width = self.width * self.trail_width * 0.5;
         let Some(m) = self.marks.iter_mut().find(|m| m.is_none()) else {
             return;
         };
-        *m = Some(10.0);
+        let at = mark_at(hit.pos, self.pos, width);
+        *m = Some((10.0, at));
+        self.cur = at;
         if let Ok(obj) = usize::try_from(hit.obj) {
-            let d = sub(hit.pos, self.pos);
-            let len = length(d);
-            let dir = if len > 0.0 { scale3(d, 1.0 / len) } else { d };
+            let dir = crate::btl_blast::norm(sub(self.cur, self.pos));
             w.env.objs().destroy(obj, dir, &mut w.env.snd());
         }
     }
 
-    /// `EftSweep_UpdateMarks`: the marks count down; whether any is left.
+    /// `EftSweep_UpdateMarks`: the marks count down; whether any is left. A mark that ran out starts the
+    /// technique's stage impact (`markEffect` / `markSize`: the definition's `groundFx` and `groundScale`), along
+    /// the beam.
     fn update_marks(&mut self) -> bool {
-        let mut any = false;
-        for m in &mut self.marks {
-            if let Some(t) = m {
-                if *t <= 0.0 {
-                    *m = None;
-                } else {
-                    any = true;
-                    *t -= 1.0;
-                }
-            }
-        }
-        any
+        let dir = crate::btl_blast::norm(sub(self.cur, self.pos));
+        step_marks(&mut self.marks, &self.src, dir, &mut self.mark_impacts)
     }
 
     /// `EftSweep_Update`. Returns the record.
@@ -538,6 +571,40 @@ impl Follow {
 mod tests {
     use super::*;
     use crate::btl_chr::dot;
+
+    #[test]
+    fn a_mark_starts_the_stage_impact_ten_frames_on() {
+        // Half the beam's width back from the hit towards the origin.
+        assert_eq!(mark_at([10.0, 0.0, 0.0], [0.0; 3], 2.0), [8.0, 0.0, 0.0]);
+        let mut src = TechSrc {
+            side: 1,
+            slot: 2,
+            def: crate::btl_tech_fx::TechDef::default(),
+        };
+        src.def.ground_fx = 3;
+        src.def.ground_scale = 1.5;
+        let mut marks = [None; 15];
+        marks[4] = Some((10.0, [1.0, 2.0, 3.0]));
+        let mut out = Vec::new();
+        let dir = [0.0, 0.0, 1.0];
+        for _ in 0..10 {
+            assert!(step_marks(&mut marks, &src, dir, &mut out));
+            assert!(out.is_empty());
+        }
+        assert!(!step_marks(&mut marks, &src, dir, &mut out));
+        assert_eq!(out.len(), 1);
+        let (arg, scale) = &out[0];
+        assert_eq!(
+            (arg.pos, arg.dir, arg.id, arg.chr, *scale),
+            ([1.0, 2.0, 3.0], dir, 3, 1, 1.5)
+        );
+        // Without a stage impact the mark only ends.
+        src.def.ground_fx = -1;
+        marks[0] = Some((0.0, [0.0; 3]));
+        out.clear();
+        assert!(!step_marks(&mut marks, &src, dir, &mut out));
+        assert!(out.is_empty() && marks.iter().all(Option::is_none));
+    }
 
     #[test]
     fn row_rotations_follow_the_matrix_rows() {

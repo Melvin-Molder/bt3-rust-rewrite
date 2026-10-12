@@ -4955,12 +4955,19 @@ mod tests {
     fn real_sweep_crosses_the_opponent() {
         // Character 118's slot 2 (technique 0x1A0, effect type 3): from the FIRE event the beam's end sweeps round
         // the firing node and crosses P2 once, knocking it away; the sweep ends 0.6 s later, raising flag 0xA8.
-        let Some((hits, end_at, act)) = fire_slot_2(118, 150) else {
+        // Its one blast impact is the technique's on P2 (the beam never meets the stage here).
+        let (mut started, mut live) = (0, 0);
+        let Some((hits, end_at, act)) = fire_slot_with(118, 2, 150, |b, _, _| {
+            let n = b.roster.scene.impacts.ids(1).len();
+            started += n.saturating_sub(live);
+            live = n;
+        }) else {
             return;
         };
         assert_eq!(hits, [(6360, 0xF)]);
         assert_eq!(end_at, Some(62));
         assert_eq!(act, 0xB);
+        assert_eq!(started, 1);
     }
 
     #[test]
@@ -7145,8 +7152,11 @@ mod tests {
             let list = usize::from(bomb);
             let (mut most, mut created, mut gone, mut still) = (0, None, None, 0);
             let mut last = Vec::new();
+            let mut explosions = 0;
             for i in 0..200 {
                 frame(&mut battle, if i < hold { TRIANGLE } else { 0 });
+                let ids = battle.roster.scene.impacts.ids(1);
+                explosions = explosions.max(ids.iter().filter(|&&id| id == 1).count());
                 let objs = &battle.roster.scene.ki_objs[0][list];
                 most = most.max(objs.len());
                 if created.is_none() && !objs.is_empty() {
@@ -7163,6 +7173,8 @@ mod tests {
             }
             let (created, gone) = (created.unwrap(), gone.expect("never ended"));
             assert_eq!(most, if bomb { 2 } else { 1 });
+            // Each bomb's explosion is blast impact 1; the thrown object raises dust where it lands instead.
+            assert_eq!(explosions, if bomb { 2 } else { 0 });
             assert!(still >= 10, "it never stopped: {still}");
             if bomb {
                 assert!(gone - created > 60, "{created} {gone}");

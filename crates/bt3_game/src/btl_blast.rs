@@ -1045,6 +1045,10 @@ impl Scene {
             HIT_MAX,
             &mut self.next_id,
         );
+        // The sweeps' marks that ran out start their blast impacts.
+        for (arg, scale) in self.tech.blast_impacts.drain(..) {
+            self.impacts.spawn_blast(w.env.impact, &arg, scale, 1.0);
+        }
         // BtlScene_IsAnyCharStopped.
         let stopped = w.paused || w.chars.iter().any(Chr::is_frozen);
         for side in 0..2 {
@@ -1073,6 +1077,15 @@ impl Scene {
                     while i < self.ki_objs[side][list].len() {
                         let o = &mut self.ki_objs[side][list][i];
                         let rec = o.update(opp_pos, bottom, w.libc, w.paused, &mut w.env.snd());
+                        if let Some(pos) = o.exploded.take() {
+                            let arg = crate::eft_impact::ImpactArg {
+                                pos,
+                                dir: [0.0, -1.0, 0.0],
+                                id: 1,
+                                chr: o.arg.owner,
+                            };
+                            self.impacts.spawn_blast(w.env.impact, &arg, 1.0, 1.0);
+                        }
                         if let Some(rec) = rec
                             && self.records.len() < HIT_MAX
                         {
