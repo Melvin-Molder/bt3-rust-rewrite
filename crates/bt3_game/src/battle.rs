@@ -8868,6 +8868,76 @@ mod tests {
     }
 
     #[test]
+    fn real_powered_rush_combo_finishes_with_a_technique() {
+        // Powered up (flag 6), Goku's rush combo takes the blast button as a finisher (BtlAct_QueueComboFinish):
+        // the finisher mode of the attack's column queues slot 2's or slot 3's technique action, with or without the
+        // dash-in 0x2B / 0x2E first.
+        use crate::btl_input::pad::{L2, SQUARE, START, TRIANGLE, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        battle.roster.chars[0].gauge.blast = 300_000;
+        for _ in 0..600 {
+            frame(&mut battle, L2);
+            if battle.roster.chars[0].flags.test(6) {
+                break;
+            }
+        }
+        assert!(battle.roster.chars[0].flags.test(6));
+        for _ in 0..30 {
+            frame(&mut battle, 0);
+        }
+        for _ in 0..300 {
+            if battle.roster.chars[0].flags.test(0x13) {
+                break;
+            }
+            frame(&mut battle, UP);
+        }
+        let mut mine = Vec::new();
+        for i in 0..200 {
+            let held = match i % 8 {
+                0 | 1 => SQUARE,
+                4 | 5 => TRIANGLE,
+                _ => 0,
+            };
+            frame(&mut battle, held);
+            battle.roster.chars[0].gauge.ki = battle.roster.chars[0].gauge.ki_max;
+            mine.push(battle.roster.chars[0].act.current);
+        }
+        mine.dedup();
+        assert!(
+            mine.iter()
+                .any(|&a| matches!(a, 0x115..=0x11A | 0x127 | 0x128)),
+            "{mine:x?}"
+        );
+    }
+
+    #[test]
     fn real_max_power_drains_and_lets_the_fighter_charge_again() {
         // Goku charges with a blast stock into the powered-up mode (flag 6, the max power gauge full); let go, the
         // gauge drains over the parameter's time (+0x54 seconds) and the mode ends, after which the charge input

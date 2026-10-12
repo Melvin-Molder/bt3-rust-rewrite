@@ -968,23 +968,28 @@ impl Ctx<'_, '_> {
                 return 1;
             }
         }
-        // Past the vanish limit the powered combo finisher (BtlAct_QueueComboFinish) would be offered instead,
-        // which is not ported.
         if mask & 0x10_0000 != 0 {
             let n = self.queue_attack(0x9B);
             if n > 0 {
                 return n as u32;
             }
-        }
-        if mask & 0x10_0000 != 0
-            && self.me.vanish_count < self.me.vanish_limit
-            && self.flags2() & 0x2000 != 0
-        {
-            self.add_action_bit(0x5C);
-            for (input, action) in [(0x44, 0x5C), (0x45, 0x5D), (0x46, 0x5A), (0x47, 0x5B)] {
-                if self.test(input) {
-                    self.set_queue(0, action);
-                    return 1;
+            if self.me.vanish_count < self.me.vanish_limit {
+                if self.flags2() & 0x2000 != 0 {
+                    self.add_action_bit(0x5C);
+                    for (input, action) in [(0x44, 0x5C), (0x45, 0x5D), (0x46, 0x5A), (0x47, 0x5B)]
+                    {
+                        if self.test(input) {
+                            self.set_queue(0, action);
+                            return 1;
+                        }
+                    }
+                }
+            } else if self.data.tables.params.flags3() & 0x1000 != 0 && !self.me.gauge.body_changed
+            {
+                // Past the vanish limit: the powered combo finisher.
+                let n = self.queue_combo_finish();
+                if n > 0 {
+                    return n as u32;
                 }
             }
         }
@@ -4371,9 +4376,69 @@ impl Ctx<'_, '_> {
         queued as i32 + 1
     }
 
+    /// `BtlAct_QueueComboFinish`: in powered-up mode (flag 6) the blast input (80) during a rush combo queues a
+    /// technique as its finisher. The parameter's finisher mode of the attack's column (+0x8F) picks slot 2's or
+    /// slot 3's technique action by its type (0x118 / 0x119 for type 1, 0x127 / 0x128 for type 8, else 0x115 /
+    /// 0x116) or 0x115, with the dash-in 0x2B, 0x2E first for modes 3..5; the next attack is cleared. Returns the
+    /// actions queued.
+    fn queue_combo_finish(&mut self) -> i32 {
+        if !self.flag(6) || !self.test(0x50) {
+            return 0;
+        }
+        let col = match self.me.attack_id {
+            0xA6 => 3,
+            0xA7 | 0xA8 => 6,
+            0xA9 => 5,
+            0xAA => 4,
+            0xAB => 7,
+            0xAC => 8,
+            0xAD => 2,
+            0x5A..=0x5D => 0,
+            _ => 1,
+        };
+        let tech = self.data.tables.tech();
+        let tech2 = match tech.kind(2) {
+            1 => 0x118,
+            8 => 0x127,
+            _ => 0x115,
+        };
+        let tech3 = match tech.kind(3) {
+            1 => 0x119,
+            8 => 0x128,
+            _ => 0x116,
+        };
+        let queue: &[i32] = match self.data.tables.params.u8_at(0x8F + col) {
+            0 => &[tech2],
+            1 => &[tech3],
+            2 => &[0x115],
+            3 => &[0x2B, 0x2E, tech2],
+            4 => &[0x2B, 0x2E, tech3],
+            5 => &[0x2B, 0x2E, 0x115],
+            _ => &[],
+        };
+        for (n, &id) in queue.iter().enumerate() {
+            self.set_queue(n, id);
+        }
+        // BtlAct_ResetAttack.
+        self.me.next_attack = Attack {
+            flags: 0,
+            motion: [-1, -1],
+            parts: 0,
+            lead_in: 0,
+            cut: -1,
+            follow: [-1, -1],
+            rate: 1.0,
+            cancel_at: 1.0,
+            lead_time: 15.0,
+            speed: 0.0,
+            chained: false,
+        };
+        queue.len() as i32
+    }
+
     /// `BtlAct_DecideAttackFollow`: once the attack connects (flag 0x5B), its follow-up records and the inputs its
-    /// flags allow, started past `cancelAt` unless it clashed (0x5D). The combo finishers of flags 0x100 / 0x200
-    /// (`BtlAct_QueueComboFinish`) are not ported.
+    /// flags allow (flags 0x100 / 0x200 the powered combo finisher), started past `cancelAt` unless it clashed
+    /// (0x5D).
     fn decide_attack_follow(&mut self) {
         if !self.flag(0x5B) {
             return;
@@ -4392,6 +4457,11 @@ impl Ctx<'_, '_> {
         if atk.flags & 8 != 0 && self.test(0x34) {
             self.set_queue(0, 0x46);
             self.me.attack.chained = false;
+        }
+        for bit in [0x100, 0x200] {
+            if atk.flags & bit != 0 && self.queue_combo_finish() != 0 {
+                self.me.attack.chained = false;
+            }
         }
         if !self.flag(0x5D) && atk.cancel_at < self.me.anim_progress() {
             let q = self.queued();
