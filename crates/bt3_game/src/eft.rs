@@ -1000,7 +1000,7 @@ pub(crate) struct SetRef {
     pub list: usize,
 }
 
-/// `FxWorld::sets`' entries per side: the side's own nine, then the impacts' common sets.
+/// `FxWorld::sets`' entries per side: the side's own ten, then the impacts' common sets.
 pub(crate) const SET_LISTS: usize =
     crate::eft_impact::FIRST_LIST + crate::eft_impact::SET_ENTRIES.len();
 
@@ -1016,7 +1016,7 @@ pub(crate) fn tech_list(slot: i32) -> usize {
 impl SetRef {
     /// The kind of `BtlScene_IsEffectStopped` its objects are given (`EftEmit_Spawn`'s `srcKind`): 0 for the ki
     /// blasts' sets (`EftKiBlast_SpawnParts`), 1 for the techniques' (`EftEmit_SpawnOwn`), 3 for the drain
-    /// glow's and the shock's parts, 2 for the impacts' (both stopped by the pause alone).
+    /// glow's, the shock's parts and the rush burst's, 2 for the impacts' (both stopped by the pause alone).
     fn stop_kind(self) -> u8 {
         if self.list < 2 {
             0

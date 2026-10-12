@@ -362,6 +362,7 @@ impl Roster {
                 self.scene.stage.bubbles.as_mut(),
                 libc,
             );
+            rush_burst_fx(me, data[i], &mut self.scene.rush_bursts[i]);
             // BtlFx_UpdateReq38: the drain glow while the drain technique holds request 0x38.
             if let Some(set) = crate::btl_blast::absorb_set(data[i]) {
                 let node_pos = |n| me.obj.node_pos(n);
@@ -638,6 +639,38 @@ impl Roster {
             chr.flags.set_stage(12);
         }
         self.snapshot(5);
+    }
+}
+
+/// `BtlFx_UpdateAimedFxReq28`: the rush-finish burst at the burst node along attack 0x86's launch angles (request
+/// 0x28 begins), its second stage (0x29), its end (0x2A); for a character whose pack makes the manager.
+pub(crate) fn rush_burst_fx(
+    me: &Chr,
+    data: &SideData,
+    bursts: &mut crate::eft_rushburst::RushBursts,
+) {
+    use crate::btl_tech_volley::{mathf_cos, mathf_sin};
+    let Some(set) = crate::btl_blast::rush_burst_set(data) else {
+        return;
+    };
+    if me.fx_new(0x28) {
+        let pitch = crate::btl_hit::launch_angle_b_of(data, 0x86);
+        let yaw = crate::btl_input::wrap_angle(
+            me.pose.yaw + crate::btl_hit::launch_angle_a_of(data, 0x86),
+        );
+        let dir = [
+            mathf_cos(pitch) * mathf_sin(yaw),
+            -mathf_sin(pitch),
+            mathf_cos(pitch) * mathf_cos(yaw),
+        ];
+        let node = me.burst_node as u32;
+        bursts.start(set, node, me.obj.node_pos(node), dir);
+    }
+    if me.fx_new(0x29) {
+        bursts.stage2();
+    }
+    if me.fx_new(0x2A) {
+        bursts.stop();
     }
 }
 

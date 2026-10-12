@@ -331,6 +331,8 @@ pub(crate) struct Scene {
     pub absorbs: [crate::eft_absorb::Absorbs; 2],
     /// Each fighter's shocks (its kind 4 manager, layer 2).
     pub shocks: [crate::eft_shock::Shocks; 2],
+    /// Each fighter's rush-finish bursts (its kind 5 manager, layer 2).
+    pub rush_bursts: [crate::eft_rushburst::RushBursts; 2],
     /// The screen shock waves (`gScrWarp`).
     pub warps: crate::scr_warp::ScrWarps,
     /// The stage effects of layer 0.
@@ -988,6 +990,7 @@ impl Scene {
         }
         self.absorbs[side].reset(&mut self.fx);
         self.shocks[side].reset(&mut self.fx);
+        self.rush_bursts[side].reset(&mut self.fx);
         self.tech.reset_side(chars, &mut self.fx, side);
     }
 
@@ -1118,6 +1121,22 @@ impl Scene {
                 };
                 self.shocks[side].update(&mut self.fx, &mut self.warps, &c, pack, w.paused, w.vu0);
             }
+            // Kind 5, the rush-finish burst.
+            if let Some(set) = rush_burst_set(w.data[side])
+                && let Some(assets) = w.data[side].rush_burst_assets
+            {
+                let ctx = spawn_ctx(w, side, set, assets, crate::eft_rushburst::LIST);
+                let chars = &*w.chars;
+                let node_pos = |n| chars[side].obj.node_pos(n);
+                self.rush_bursts[side].update(
+                    &mut self.fx,
+                    &node_pos,
+                    &ctx,
+                    w.paused,
+                    w.libc,
+                    w.vu0,
+                );
+            }
             // Kind 9, the drain glow (the other kinds are not ported).
             if let Some((_, ctx)) = absorb_ctx(w, side) {
                 let chars = &*w.chars;
@@ -1222,6 +1241,9 @@ impl Scene {
                         self.ki_objs[side][list][k] = o;
                     }
                 }
+            }
+            if let Some(set) = rush_burst_set(w.data[side]) {
+                self.rush_bursts[side].post_update(set, &mut self.fx);
             }
             if let Some(set) = absorb_set(w.data[side]) {
                 self.absorbs[side].post_update(set, &mut self.fx);
@@ -2131,6 +2153,15 @@ pub(crate) fn absorb_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
         return None;
     }
     pack.absorb_set.as_ref()
+}
+
+/// The rush-finish burst's set, when the character's pack makes the kind 5 manager (pack bit 5).
+pub(crate) fn rush_burst_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
+    let pack = data.effect?;
+    if pack.kind_bits & (1 << 5) == 0 {
+        return None;
+    }
+    pack.rush_burst_set.as_ref()
 }
 
 /// The shock's animation, when the character's pack makes the kind 4 manager (pack bit 4).

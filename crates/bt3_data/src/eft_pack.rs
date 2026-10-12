@@ -413,6 +413,8 @@ pub struct EffectPack {
     pub blast_sets: [Option<EmitSet>; 2],
     /// The drain glow's emitter set (`EftAbsorbMgr_Init`, kind 9): entry 0xB, its header entry 1.
     pub absorb_set: Option<EmitSet>,
+    /// The rush-finish burst's emitter set (`EftRushBurstMgr_Init`, kind 5): entry 7, its header entry 1.
+    pub rush_burst_set: Option<EmitSet>,
     /// The shock's animation and texture set (`EftShockMgr_Init`, kind 4): entries 1 and 2 of entry 6.
     pub shock: Option<(Vec<u8>, Vec<u8>)>,
 }
@@ -440,6 +442,7 @@ impl EffectPack {
             kind_bits,
             blast_sets: [set(3), set(4)],
             absorb_set: set(0xB),
+            rush_burst_set: set(7),
             shock: pack_entry(pack, 6).and_then(|p| {
                 let at = |n: usize| p.get(entry_offset(p, n)..).map(<[u8]>::to_vec);
                 at(1).zip(at(2))

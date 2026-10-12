@@ -46,6 +46,7 @@ mod eft_quad;
 mod eft_ray;
 mod eft_rays;
 mod eft_ribbon;
+mod eft_rushburst;
 mod eft_shock;
 mod eft_shotfx;
 mod eft_smoke;

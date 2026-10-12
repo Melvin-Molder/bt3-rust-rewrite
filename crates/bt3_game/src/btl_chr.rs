@@ -385,6 +385,8 @@ pub(crate) struct SideData<'a> {
     pub absorb_assets: Option<&'a crate::eft::SetAssets>,
     /// The shock's animation and textures, as a set's assets (one sprite pack, one texture set).
     pub shock_assets: Option<&'a crate::eft::SetAssets>,
+    /// The rush-finish burst's set's assets.
+    pub rush_burst_assets: Option<&'a crate::eft::SetAssets>,
     /// The technique slots' effect packs (`BtlCharApi_GetPlayerEffectPack`).
     pub tech_packs: [Option<&'a crate::btl_tech_fx::TechPack>; 5],
     /// The costume of the side's character (`BtlMember_GetActive()->costume`).
@@ -403,6 +405,7 @@ impl<'a> SideData<'a> {
             5 | 6 => self.tech_packs[l - 5].and_then(|p| p.assets.as_ref()),
             crate::eft_absorb::LIST => self.absorb_assets,
             crate::eft_shock::LIST => self.shock_assets,
+            crate::eft_rushburst::LIST => self.rush_burst_assets,
             _ => None,
         })
     }

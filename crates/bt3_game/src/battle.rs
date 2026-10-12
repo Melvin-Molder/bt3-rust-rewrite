@@ -252,6 +252,8 @@ pub(crate) struct FighterModel {
     pub(crate) absorb_assets: Option<SetAssets>,
     /// The shock's animation and texture set (`EftShockMgr_Init`), as a set's assets.
     pub(crate) shock_assets: Option<SetAssets>,
+    /// The rush-finish burst's set's assets (`EftRushBurstMgr_Init`).
+    pub(crate) rush_burst_assets: Option<SetAssets>,
     /// The technique slots' effect packs (`effectPacks`, the second animation file's entries 1..5).
     pub(crate) tech_packs: [Option<TechPack>; 5],
     /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
@@ -613,6 +615,10 @@ pub(crate) fn load_side(
         }
         if let Some(set) = &pack.absorb_set {
             fighter.absorb_assets =
+                Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
+        }
+        if let Some(set) = &pack.rush_burst_set {
+            fighter.rush_burst_assets =
                 Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
         }
         // EftShockMgr_Init: EftTexSet_Load32 of entry 2; the parts animate entry 1.
@@ -1117,6 +1123,7 @@ fn load_fighter(
         blast_assets: [None, None],
         absorb_assets: None,
         shock_assets: None,
+        rush_burst_assets: None,
         tech_packs: Default::default(),
         skill_text: None,
     })
@@ -1245,6 +1252,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         blast_assets: std::array::from_fn(|i| f.blast_assets[i].as_ref()),
         absorb_assets: f.absorb_assets.as_ref(),
         shock_assets: f.shock_assets.as_ref(),
+        rush_burst_assets: f.rush_burst_assets.as_ref(),
         tech_packs: std::array::from_fn(|i| f.tech_packs[i].as_ref()),
         costume: f.costume,
         chara: f.chara,
@@ -3326,6 +3334,67 @@ mod tests {
             })
             .map(|r| fx.counts(Some(r)).iter().sum::<usize>())
             .sum()
+    }
+
+    #[test]
+    fn real_rush_finish_burst_follows_its_requests() {
+        // Character 1's pack makes the burst's manager (pack bit 5, entry 7).
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, idle, 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert!(crate::btl_blast::rush_burst_set(&side_data(&battle.assets.fighters[0])).is_some());
+        let list = crate::eft::SetRef {
+            side: 0,
+            list: crate::eft_rushburst::LIST,
+        };
+        let request = |battle: &mut Battle, bit: u32| {
+            let data = side_data(&battle.assets.fighters[0]);
+            let me = &mut battle.roster.chars[0];
+            me.burst_node = 0x15;
+            me.set_fx(bit);
+            crate::btl_mgr::rush_burst_fx(me, &data, &mut battle.roster.scene.rush_bursts[0]);
+            me.clear_fx(bit);
+        };
+        // Request 0x28 starts it at the burst node; it runs its set's emitters until 0x2A, then lasts the set's
+        // end frames.
+        request(&mut battle, 0x28);
+        assert_eq!(battle.roster.scene.rush_bursts[0].count(), 1);
+        let mut objects = 0;
+        for _ in 0..20 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            objects = objects.max(
+                battle
+                    .roster
+                    .scene
+                    .fx
+                    .counts(Some(list))
+                    .iter()
+                    .sum::<usize>(),
+            );
+        }
+        assert!(objects > 0, "the burst started nothing");
+        assert_eq!(battle.roster.scene.rush_bursts[0].count(), 1);
+        request(&mut battle, 0x29);
+        request(&mut battle, 0x2A);
+        for _ in 0..300 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            if battle.roster.scene.rush_bursts[0].count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(battle.roster.scene.rush_bursts[0].count(), 0);
     }
 
     #[test]

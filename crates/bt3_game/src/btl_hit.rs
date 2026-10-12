@@ -178,6 +178,12 @@ pub(crate) fn launch_angle_b(me: &Chr, data: &SideData, env: &Env) -> f32 {
     f32::from(r.s8_at(0x16)) * PI / 180.0
 }
 
+/// `BtlAtk_GetLaunchAngleAOf`: record `id`'s +0x15 (degrees), the launch yaw; ids past the table give record 0.
+pub(crate) fn launch_angle_a_of(data: &SideData, id: usize) -> f32 {
+    let n = if id < ATTACK_COUNT { id } else { 0 };
+    f32::from(data.tables.attacks[n].s8_at(0x15)) * PI / 180.0
+}
+
 /// `BtlAtk_GetLaunchAngleA`: record +0x15 (degrees), the launch yaw.
 pub(crate) fn launch_angle_a(me: &Chr, data: &SideData, env: &Env) -> f32 {
     let (r, _) = record(me, data, env);
