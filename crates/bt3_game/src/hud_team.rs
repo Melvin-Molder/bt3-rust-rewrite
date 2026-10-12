@@ -79,6 +79,15 @@ fn bar_shift(cur: i32, max: i32) -> i32 {
 }
 
 impl TeamPart {
+    /// `HudTeam_SlideOut` / `HudTeam_SlideIn`: both panels.
+    pub(crate) fn slide(&mut self, out: bool, seconds: f32) {
+        if out {
+            self.hide.start(seconds, 0.0, 1.0);
+        } else {
+            self.hide.start(seconds, 1.0, 0.0);
+        }
+    }
+
     /// `HudTeam_Init` (then `HudTeam_Reset`).
     pub(crate) fn new(sheet: &HudSheet) -> Self {
         let mut spr = [Sprite::default(); 12];

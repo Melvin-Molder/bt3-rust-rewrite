@@ -335,8 +335,8 @@ impl Roster {
             // BtlCharApi_IsChanging: no growth during a character change or the struggle's loss.
             let changing = matches!(me.act.current, 0xEC..=0xF8 | 0x103 | 0x104);
             let grow = self.started && !env.gate.time_stopped && !changing;
-            update_fighter_stage(me, data[i], env, keep_sphere, grow);
-            update_ground(me, data[i], env);
+            update_fighter_stage(me, data[i], env, keep_sphere, grow, &mut *libc);
+            update_ground(me, data[i], env, &mut *libc);
             me.obj_to_pose();
         }
         self.snapshot(3);
@@ -1128,7 +1128,14 @@ fn update_seq_flags(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideDat
 /// half its radius, pushed out of the stage after every step (the first standing object pushing in a step is
 /// tested for breaking, `StgCol_FighterBreakObj`); when pushed, the object moves back by the correction and the
 /// contact word gets bit 0x20.
-fn update_fighter_stage(me: &mut Chr, data: &SideData, env: &Env, keep_sphere: bool, grow: bool) {
+fn update_fighter_stage(
+    me: &mut Chr,
+    data: &SideData,
+    env: &Env,
+    keep_sphere: bool,
+    grow: bool,
+    libc: &mut crate::rng::LibcRandom,
+) {
     // BtlObjBody_BeginFrame.
     me.obj.work.hit_flags = 0;
     me.obj.swap_body_sphere();
@@ -1184,7 +1191,7 @@ fn update_fighter_stage(me: &mut Chr, data: &SideData, env: &Env, keep_sphere: b
         if let Ok(zi) = usize::try_from(z) {
             let (_, mask) = env.col.push_sphere(zi, &mut sphere, env.broken());
             if mask != 0 {
-                fighter_break_obj(me, data, env, mask.trailing_zeros() as usize, delta);
+                fighter_break_obj(me, data, env, mask.trailing_zeros() as usize, delta, libc);
             }
         }
     }
@@ -1251,7 +1258,7 @@ fn mirror_flags(me: &mut Chr, opp: &Chr) {
 /// `StgGround_UpdateFighter`: the ground under the object's position, below the body sphere's centre; a standing
 /// object the probe met, when the ground found is above the model's root node (the fighter is under or inside
 /// it), is tested for breaking.
-fn update_ground(me: &mut Chr, data: &SideData, env: &Env) {
+fn update_ground(me: &mut Chr, data: &SideData, env: &Env, libc: &mut crate::rng::LibcRandom) {
     let (center, _) = me.obj.body_sphere();
     let pos = [me.obj.pos[0], center[1], me.obj.pos[2]];
     let b = ColBox::from_center_half(pos, [0.1, 1.0, 0.1]);
@@ -1263,7 +1270,7 @@ fn update_ground(me: &mut Chr, data: &SideData, env: &Env) {
     let root_y = me.obj.nodes.first().map_or(0.0, |n| n.mtx[3][1]);
     if g.obj_mask != 0 && g.y < root_y {
         let idx = g.obj_mask.trailing_zeros() as usize;
-        fighter_break_obj(me, data, env, idx, [1.0, 0.0, 1.0]);
+        fighter_break_obj(me, data, env, idx, [1.0, 0.0, 1.0], libc);
     }
 }
 
@@ -1271,7 +1278,16 @@ fn update_ground(me: &mut Chr, data: &SideData, env: &Env) {
 /// stage (`BtlCharApi_TestStageBreakA`: parameter flag 0x800 outside flag 0xA, or flag 9) and the object has type
 /// bit 0x100, or else when it is knocked about (flag 0xA, `TestStageBreakB`; not with flags 0x21 / 0x22). A
 /// break sets contact bit 0x40, with the damage bits of the object's type (0x800: 200, 0x2000: 600, 0x1000: 1000).
-fn fighter_break_obj(me: &mut Chr, data: &SideData, env: &Env, idx: usize, hit: [f32; 3]) {
+/// In story mode a fighter the pad plays that breaks an item holder finds the hidden dragon ball one `rand()` in 8
+/// (`BtlStage_DestroyObj`).
+fn fighter_break_obj(
+    me: &mut Chr,
+    data: &SideData,
+    env: &Env,
+    idx: usize,
+    hit: [f32; 3],
+    libc: &mut crate::rng::LibcRandom,
+) {
     let mut objs = env.objs();
     let kind = objs.kind(idx);
     let a = (data.tables.params.flags() & 0x800 != 0 && !me.flags.test(0xA)) || me.flags.test(9);
@@ -1281,7 +1297,16 @@ fn fighter_break_obj(me: &mut Chr, data: &SideData, env: &Env, idx: usize, hit: 
         !me.flags.test(0x21) && !me.flags.test(0x22) && me.flags.test(0xA)
     };
     if breaks {
-        objs.destroy(idx, hit, &mut env.snd());
+        let broke = objs.destroy(idx, hit, &mut env.snd());
+        // BtlCharApi_IsInputInjected: not for the computer's fighter.
+        if broke && !me.input.inject_on {
+            let mut item = env.item.lock().unwrap_or_else(|e| e.into_inner());
+            if item.rule != 0 && objs.holds_item(idx) && (libc.rand() >> 8) & 7 == 0 {
+                item.found = item.rule;
+                item.rule = 0;
+                item.new = true;
+            }
+        }
         me.obj.work.hit_flags |= 0x40;
     }
     if me.obj.work.hit_flags & 0x40 != 0 {
@@ -1563,4 +1588,72 @@ fn cam_update(
     }
     me.cam.rot =
         std::array::from_fn(|k| crate::btl_input::wrap_angle(me.cam.rot[k] + shake_rot[k]));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::btl_chr::HiddenItem;
+
+    /// Story mode's hidden item on stage 0 of the ISO in `rom/`, when it is there: a fighter the pad plays that
+    /// breaks an item holder finds it on a `rand()` draw of 0 in 8, the computer's never; the battle then plays the
+    /// jingle and marks the clock.
+    #[test]
+    fn real_player_finds_the_hidden_item_in_an_item_holder() {
+        let mut setup = crate::char_select::BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].control = 2;
+        let Some(mut battle) = crate::battle::tests::real_battle(&setup) else {
+            return;
+        };
+        let holders: Vec<usize> = {
+            let objs = battle.assets.stage_objs.lock().unwrap();
+            (0..64).filter(|&i| objs.holds_item(i)).collect()
+        };
+        assert!(holders.len() >= 2);
+        // A seed whose first draw finds it, and one whose first draw does not.
+        let draw = |seed| (crate::rng::LibcRandom::new(seed).rand() >> 8) & 7;
+        let hit = (1..1000).find(|&s| draw(s) == 0).unwrap();
+        let miss = (1..1000).find(|&s| draw(s) != 0).unwrap();
+        *battle.assets.hidden_item.lock().unwrap() = HiddenItem {
+            rule: 3,
+            ..HiddenItem::default()
+        };
+        let state = battle.seq.state_id();
+        let gate = battle.gate();
+        let mut break_with = |battle: &mut crate::battle::Battle, side: usize, idx: usize, seed| {
+            let data = crate::battle::side_data(&battle.assets.fighters[side]);
+            let env = battle.assets.env(state, gate);
+            let me = &mut battle.roster.chars[side];
+            // Knocked about (flag 0xA): any object it touches breaks.
+            me.flags.set(0xA);
+            let mut libc = crate::rng::LibcRandom::new(seed);
+            fighter_break_obj(me, &data, &env, idx, [1.0, 0.0, 1.0], &mut libc);
+        };
+        // The computer's fighter, then a miss: nothing found.
+        break_with(&mut battle, 1, holders[0], hit);
+        break_with(&mut battle, 0, holders[1], miss);
+        assert_eq!(battle.assets.hidden_item.lock().unwrap().found, 0);
+        let left = holders[2..].first().copied().unwrap_or(holders[1]);
+        break_with(&mut battle, 0, left, hit);
+        let item = *battle.assets.hidden_item.lock().unwrap();
+        assert_eq!((item.rule, item.found, item.new), (0, 3, true));
+        let mut libc = crate::rng::LibcRandom::new(1);
+        let mut random = crate::rng::GameRandom::from_key(&[1]);
+        let frame = battle.run_frame(
+            false,
+            [crate::btl_input::PadState::default(); 2],
+            0,
+            &mut libc,
+            &mut random,
+            None,
+            false,
+        );
+        assert!(
+            frame
+                .sounds
+                .contains(&crate::title::TitleSound::StreamSe(0x8D3A))
+        );
+        assert!(!battle.assets.hidden_item.lock().unwrap().new);
+    }
 }

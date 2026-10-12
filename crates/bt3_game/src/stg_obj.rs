@@ -303,16 +303,16 @@ impl StageObjs {
     }
 
     /// `BtlStage_DestroyObj`: breaks object `i` and the objects under it, with the break sound (stage sound 8 at
-    /// the part 0 of the last object broken, heard from its radius + 200 to + 1500). The hidden item of mode 1 is
-    /// not ported.
+    /// the part 0 of the last object broken, heard from its radius + 200 to + 1500). Whether it broke (the hidden
+    /// item of mode 1 is the caller's, `fighter_break_obj`).
     pub(crate) fn destroy(
         &mut self,
         i: usize,
         hit_pos: [f32; 3],
         snd: &mut crate::btl_snd::CharSound,
-    ) {
+    ) -> bool {
         let mut info = None;
-        self.break_obj(i, hit_pos, &mut info);
+        let broke = self.break_obj(i, hit_pos, &mut info);
         if let Some((pos, r)) = info {
             snd.request(
                 pos,
@@ -323,6 +323,12 @@ impl StageObjs {
                 8,
             );
         }
+        broke
+    }
+
+    /// `StgObj_GetItemPos`'s test: an object of type bit 0x20000000 may hold mode 1's hidden item.
+    pub(crate) fn holds_item(&self, i: usize) -> bool {
+        self.objs.get(i).is_some_and(|o| o.kind & 0x2000_0000 != 0)
     }
 
     /// `BtlStage_BreakObj`: the broken model instead of the whole one, the pieces start falling, the cameras near

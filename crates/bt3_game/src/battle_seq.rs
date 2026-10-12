@@ -951,9 +951,7 @@ impl Battle {
         if self.assets.mode == 1 && self.script_event().is_some_and(|e| e.cmd4b1) {
             self.seq.skip = false;
             self.seq.step = 99;
-            self.hud.show_gauges(false);
-            self.hud.show_timer(false);
-            self.hud.show_combo(false);
+            self.hide_win_talk_hud();
             return;
         }
         let winner = self.seq.winner_side();
@@ -981,9 +979,19 @@ impl Battle {
         }
         self.seq.step = 0;
         self.seq.timer.start(10.0, 0.0, 1.0);
+        self.hide_win_talk_hud();
+    }
+
+    /// `BtlSeqWinTalk_Enter`'s HUD: the gauges, clock, combo counter and prompts hidden, and in mode 1 the notice
+    /// part too.
+    fn hide_win_talk_hud(&mut self) {
         self.hud.show_gauges(false);
         self.hud.show_timer(false);
         self.hud.show_combo(false);
+        self.hud.show_prompt(false);
+        if self.assets.mode == 1 {
+            self.hud.show_notice_part(false);
+        }
     }
 
     /// `BtlSeqWinTalk_PreUpdate`: the pose, its camera and the line; then a 1.5 s hold.

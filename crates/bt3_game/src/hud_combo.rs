@@ -88,6 +88,15 @@ pub(crate) struct ComboPart {
 }
 
 impl ComboPart {
+    /// `HudCombo_SlideOut` / `HudCombo_SlideIn`.
+    pub(crate) fn slide(&mut self, out: bool, seconds: f32) {
+        if out {
+            self.hide.start(seconds, 0.0, 1.0);
+        } else {
+            self.hide.start(seconds, 1.0, 0.0);
+        }
+    }
+
     /// `HudCombo_Init` (and the off states of `HudCombo_Reset`).
     pub(crate) fn new(sheet: HudSheet) -> Self {
         let mut spr = [Sprite::default(); 12];

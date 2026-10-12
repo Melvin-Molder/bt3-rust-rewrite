@@ -458,6 +458,15 @@ impl GaugePart {
         self.shake[side][2] = (count, amp);
     }
 
+    /// `HudGauge_SlideOut` / `HudGauge_SlideIn`: both panels.
+    pub(crate) fn slide_all(&mut self, out: bool, seconds: f32) {
+        if out {
+            self.slide_all.start(seconds, 0.0, 1.0);
+        } else {
+            self.slide_all.start(seconds, 1.0, 0.0);
+        }
+    }
+
     /// `HudGauge_SetSwitching`: the side's panel slides away (0.3 s) while it switches members, and back with
     /// its shown health and ki reset.
     pub(crate) fn set_switching(&mut self, side: usize, switching: bool) {
@@ -1123,6 +1132,8 @@ pub(crate) struct TimerPart {
     slide: Ramp,
     /// `isClock`: a clock (digits coloured by the time left), else a count.
     is_clock: bool,
+    /// `mark` (`HudTimer_ShowMark`): the dragon ball found in a story battle, under the clock (sprite 5).
+    pub(crate) mark: bool,
     /// `BATTLE_FLAG_PAUSE`: the slide and the pulse stand still.
     pub(crate) paused: bool,
 }
@@ -1155,7 +1166,17 @@ impl TimerPart {
             pulse: Ramp::default(),
             slide: Ramp::default(),
             is_clock: false,
+            mark: false,
             paused: false,
+        }
+    }
+
+    /// `HudTimer_SlideOut` / `HudTimer_SlideIn`.
+    pub(crate) fn slide(&mut self, out: bool, seconds: f32) {
+        if out {
+            self.slide.start(seconds, 0.0, 1.0);
+        } else {
+            self.slide.start(seconds, 1.0, 0.0);
         }
     }
 
@@ -1282,7 +1303,7 @@ impl TimerPart {
         for i in 1..4 {
             self.spr[i].move_by(-2, 4);
         }
-        self.spr[5].show(false);
+        self.spr[5].show(self.mark);
     }
 }
 

@@ -347,6 +347,8 @@ struct Game {
     pending_script: Option<btl_script::BtlScript>,
     /// `gProgress->prevMode` when the ending movie started: 6 the saga select, 9 an outro.
     ending_from: i32,
+    /// `BattleResult.dragonBallFound` of the story battle: 1 + the dragon ball, 0 none.
+    story_ball: i32,
     movie_texture: Option<usize>,
     soundtrack: Option<Decoding>,
     soundtrack_source: Option<Handle<AudioSource>>,
@@ -714,6 +716,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             story_battle: false,
             pending_script: None,
             ending_from: 6,
+            story_ball: 0,
             movie_texture,
             soundtrack,
             soundtrack_source: None,
@@ -1809,6 +1812,12 @@ fn run_frames(
                     });
                 battle.stream_stat = battle_streams;
                 let winner = battle.seq.winner;
+                game.story_ball = battle
+                    .assets
+                    .hidden_item
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .found;
                 let frame = battle.run_frame(
                     start,
                     pads,
@@ -1927,13 +1936,14 @@ fn leave_battle(
     game.hud_clamp_from = usize::MAX;
     if std::mem::take(&mut game.story_battle) {
         // Progress_Main after a story battle: an abort's reason 8 goes to the main menu, 0x800 to the saga select;
-        // else Hist_Main mode 8, the result (won with winner bit 1; the dragon balls are not ported).
+        // else Hist_Main mode 8, the result (won with winner bit 1, and the dragon ball found).
         if winner & 8 != 0 && reason & 8 != 0 {
             start_main_menu(game, commands, audio);
         } else if winner & 8 != 0 && reason & 0x800 != 0 {
             start_hist_select(game, commands);
         } else {
-            start_hist_result(game, winner & 1 != 0, 0);
+            let ball = game.story_ball;
+            start_hist_result(game, winner & 1 != 0, ball);
         }
     } else if reason & 0x1000 != 0 {
         // Progress_Main: "Save Replay Data" goes to the replay list in its save mode.
@@ -2104,6 +2114,15 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     if let Some(script) = game.pending_script.take() {
         battle.script = Some(Box::new(script));
         battle.story_difficulty = game.hist.level;
+        // BattleSetup_FinishEx in mode 1: rule.dragonBall, 1 + the first dragon ball the save lacks (0: all seven).
+        let flags = game.save.unlock_flags();
+        let rule = (0..7).find(|i| flags & 1 << i == 0).map_or(0, |i| i + 1);
+        battle
+            .assets
+            .hidden_item
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .rule = rule;
     }
     battle.vu0 = game.vu0_random;
     battle.chara_bits = game.save.chara_bits;

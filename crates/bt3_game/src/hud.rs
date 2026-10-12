@@ -1388,6 +1388,32 @@ impl Hud {
     }
 
     /// `Hud_ShowGauges`.
+    /// `Hud_SlideOut` (`out`) / `Hud_SlideIn`: the gauges, team panel, timer, prompts and combo counter off the
+    /// screen or back over `seconds`.
+    pub(crate) fn slide(&mut self, out: bool, seconds: f32) {
+        self.gauge.slide_all(out, seconds);
+        self.team.slide(out, seconds);
+        self.timer.slide(out, seconds);
+        self.prompt.slide(out, seconds);
+        self.combo.slide(out, seconds);
+    }
+
+    /// `HudPrompt_ShowCue` / `HudPrompt_HideCue` with `HudPrompt_SetCueDim`.
+    pub(crate) fn set_cue(&mut self, shown: Option<bool>) {
+        match shown {
+            Some(can_act) => {
+                self.prompt.show_cue();
+                self.prompt.set_cue_dim(can_act);
+            }
+            None => self.prompt.hide_cue(),
+        }
+    }
+
+    /// `HudTimer_ShowMark`.
+    pub(crate) fn show_timer_mark(&mut self) {
+        self.timer.mark = true;
+    }
+
     pub(crate) fn show_gauges(&mut self, on: bool) {
         if on {
             self.flags |= SHOW_GAUGES;
@@ -1399,6 +1425,24 @@ impl Hud {
     #[cfg(test)]
     pub(crate) fn combo(&self) -> &crate::hud_combo::ComboPart {
         &self.combo
+    }
+
+    /// `Hud_ShowPrompt`.
+    pub(crate) fn show_prompt(&mut self, on: bool) {
+        if on {
+            self.flags |= SHOW_PROMPT;
+        } else {
+            self.flags &= !SHOW_PROMPT;
+        }
+    }
+
+    /// `Hud_ShowNotice`: the notice part (not `HudNotice_Show`, which announces).
+    pub(crate) fn show_notice_part(&mut self, on: bool) {
+        if on {
+            self.flags |= SHOW_NOTICE;
+        } else {
+            self.flags &= !SHOW_NOTICE;
+        }
     }
 
     /// `Hud_ShowCombo`.

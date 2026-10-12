@@ -2,10 +2,11 @@
 //! icon of the font's icon sheet or the part's own animated picture, a glow dropping onto it) and the command row
 //! (node 26: up to four icons side by side with their glows, and enlarged copies when the command is accepted).
 //! `Hud_PreUpdate` asks for them per side from the fighter's flags and technique; outside split screen only side
-//! 0's are updated and drawn.
+//! 0's are updated and drawn. Between them the cue (node 25, side 0 only): the pad's icon on a pulsing base, which
+//! the story script shows while one of its events waits to start.
 //!
-//! Not ported: the cue (node 25), which only the story mode's script shows, and the technique names above the
-//! command row, which only the prompts of pad status 1 ask for (a PS2 pad reports status 0).
+//! Not ported: the technique names above the command row, which only the prompts of pad status 1 ask for (a PS2
+//! pad reports status 0).
 
 use crate::battle_seq::Ramp;
 use crate::hud::{HudBlend, HudPrim, HudSheet, Sprite, Xf, fan, sprite_polygon};
@@ -17,6 +18,8 @@ pub(crate) const BOOT_FILE: u32 = 5;
 const OWN_DEFS: u32 = 0x2C_6268;
 const OWN_DEFS16: u32 = 0x2C_6328;
 const FONT_DEFS: u32 = 0x2C_6838;
+/// `gHudPromptCueDefs`: the cue's icon by pad type (4).
+const CUE_DEFS: u32 = 0x2C_63F8;
 /// The font table entries the button table can name (up to 70).
 const FONT_DEF_COUNT: usize = 0x50;
 
@@ -52,6 +55,7 @@ pub(crate) struct PromptDefs {
     pub own: Vec<IconDef>,
     pub own16: Vec<IconDef>,
     pub font: Vec<IconDef>,
+    pub cue: Vec<IconDef>,
 }
 
 impl PromptDefs {
@@ -66,6 +70,7 @@ impl PromptDefs {
         Ok(Self {
             own: table(OWN_DEFS, 16)?,
             own16: table(OWN_DEFS16, 17)?,
+            cue: table(CUE_DEFS, 4)?,
             font: table(FONT_DEFS, FONT_DEF_COUNT)?,
         })
     }
@@ -140,10 +145,11 @@ impl Default for SidePrompt {
     }
 }
 
-/// Sprites: 0 base, 1 icon, 2 second picture, 3 glow (node 24); 6..9 the row's icons, 10..13 their glows, 14..17 /
-/// 18..21 the enlarged copies (node 26).
+/// Sprites: 0 base, 1 icon, 2 second picture, 3 glow (node 24); 4 base, 5 icon (node 25); 6..9 the row's icons,
+/// 10..13 their glows, 14..17 / 18..21 the enlarged copies (node 26).
 const SPR_COUNT: usize = 22;
 const BUTTON_NODE: [i32; 2] = [64, 384];
+const CUE_NODE: [i32; 2] = [256, 384];
 const COMMAND_NODE: [i32; 2] = [60, 400];
 /// `HudPrompt_UpdateButton`'s icon table: row = group, column = button.
 const BUTTON_ICONS: [i32; 16] = [
@@ -168,8 +174,14 @@ pub(crate) struct PromptPart {
     btn_icon: [Icon; 2],
     btn_flip: [bool; 2],
     btn_kind: [i32; 2],
-    /// 0 on screen .. 1 away (`HudPrompt_SlideOut` / `SlideIn` are not called by what is ported).
+    /// 0 on screen .. 1 away (`HudPrompt_SlideOut` / `SlideIn`).
     slide: Ramp,
+    /// `cueState`: 0 start, 1 fading in, 2 shown, 3 fading out, 4 / -1 off.
+    cue_state: i32,
+    cue_ramp: Ramp,
+    cue_pulse: Ramp,
+    /// `cueDim`: the fighter cannot act; half alpha, no pulse.
+    cue_dim: bool,
     cmd_on: [bool; 2],
     cmd_state: [i32; 2],
     row: [[Icon; 4]; 2],
@@ -210,6 +222,10 @@ impl PromptPart {
             btn_flip: [false; 2],
             btn_kind: [0; 2],
             slide: Ramp::default(),
+            cue_state: -1,
+            cue_ramp: Ramp::default(),
+            cue_pulse: Ramp::default(),
+            cue_dim: false,
             cmd_on: [false; 2],
             cmd_state: [-1; 2],
             row: [[Icon::default(); 4]; 2],
@@ -736,6 +752,7 @@ impl PromptPart {
             (self.slide.value * 224.0) as i32,
         ];
         self.update_button();
+        self.update_cue();
         self.update_command();
         let at =
             |node: [i32; 2]| Xf::translate((root[0] + node[0]) as f32, (root[1] + node[1]) as f32);
@@ -743,6 +760,13 @@ impl PromptPart {
         let button = if side != 0 { button.mirrored() } else { button };
         for i in 0..4 {
             self.push(out, i, &button);
+        }
+        // HudPrompt_DrawCue: side 0 only.
+        if side == 0 {
+            let cue = at(CUE_NODE);
+            for i in 4..6 {
+                self.push(out, i, &cue);
+            }
         }
         let command = at(COMMAND_NODE);
         for i in 0..4 {
@@ -757,7 +781,7 @@ impl PromptPart {
         if spr.hidden {
             return;
         }
-        let icon_sheet = matches!(i, 6..=9 | 14..=17) || (i == 1 && self.from_icons[1]);
+        let icon_sheet = matches!(i, 5..=9 | 14..=17) || (i == 1 && self.from_icons[1]);
         let sheet = if icon_sheet { &self.icons } else { &self.sheet };
         let mut poly = sprite_polygon(spr, xf, sheet);
         // HudSprite_SetMirror: u0 and u1 change places.
@@ -775,6 +799,108 @@ impl PromptPart {
             rgba: spr.rgba,
             blend: HudBlend::Alpha,
         });
+    }
+
+    /// `HudPrompt_ShowCue`: restarts the cue unless it is coming in or shown.
+    pub(crate) fn show_cue(&mut self) {
+        if !(0..3).contains(&self.cue_state) {
+            self.cue_state = 0;
+        }
+    }
+
+    /// `HudPrompt_HideCue`: the 0.28 s fade out if it is coming in or shown.
+    pub(crate) fn hide_cue(&mut self) {
+        if (0..3).contains(&self.cue_state) {
+            self.cue_ramp.start(0.28, 1.0, 0.0);
+            self.cue_state = 3;
+        }
+    }
+
+    /// `HudPrompt_SetCueDim`.
+    pub(crate) fn set_cue_dim(&mut self, can_act: bool) {
+        self.cue_dim = !can_act;
+    }
+
+    /// `HudPrompt_SlideOut` / `HudPrompt_SlideIn`.
+    pub(crate) fn slide(&mut self, out: bool, seconds: f32) {
+        if out {
+            self.slide.start(seconds, 0.0, 1.0);
+        } else {
+            self.slide.start(seconds, 1.0, 0.0);
+        }
+    }
+
+    /// `HudPrompt_UpdateCue` (side 0): the icon of the pad's type (status 0 here) on base texture 8, fading in over
+    /// 0.28 s, shown, fading out; the base pulses between 1.44 and 1.92 times its size every 0.1 s, or with `cue_dim`
+    /// stays at 1.2 with half the alpha.
+    fn update_cue(&mut self) {
+        if self.side != 0 {
+            return;
+        }
+        let paused = self.paused;
+        let def = self.defs.cue.first().copied().unwrap_or_default();
+        let w = i32::from(def.width + 1).min(i32::from(def.cell));
+        let cell = i32::from(def.cell);
+        let icon = &mut self.spr[5];
+        icon.init_tex_sub(&self.icons, usize::from(def.tex), 0);
+        icon.set_rect(0, w, 0, cell);
+        icon.set_uv(0, w, 0, cell);
+        icon.center();
+        icon.show(true);
+        let base = &mut self.spr[4];
+        base.init_tex_sub(&self.sheet, 8, 0);
+        base.center();
+        base.show(true);
+        let mut alpha = 1.0;
+        if self.cue_state == 0 {
+            self.cue_ramp.start(0.28, 0.0, 1.0);
+            self.cue_pulse.start(0.1, 1.0, 0.0);
+            self.cue_state = 1;
+        }
+        match self.cue_state {
+            1 => {
+                if Self::step(paused, &mut self.cue_ramp) {
+                    self.cue_state = 2;
+                }
+                alpha = self.cue_ramp.value;
+            }
+            2 => {}
+            3 => {
+                if Self::step(paused, &mut self.cue_ramp) {
+                    self.cue_state = 4;
+                }
+                alpha = self.cue_ramp.value;
+            }
+            _ => {
+                self.spr[4].show(false);
+                self.spr[5].show(false);
+                self.cue_state = 4;
+            }
+        }
+        if Self::step(paused, &mut self.cue_pulse) {
+            if self.cue_pulse.value == 1.0 {
+                self.cue_pulse.start(0.1, 1.0, 0.0);
+            } else if self.cue_pulse.value == 0.0 {
+                self.cue_pulse.start(0.1, 0.0, 1.0);
+            }
+        }
+        let s = if self.cue_dim {
+            1.2
+        } else {
+            (self.cue_pulse.value * 0.4 + 1.2) * 1.2
+        };
+        if self.cue_dim {
+            alpha *= 0.5;
+        }
+        let a = (alpha * 128.0) as u8;
+        let base = &mut self.spr[4];
+        base.scale(s, s);
+        base.set_color(0x80, 0x80, 0x80, a);
+        base.move_by(1, -2);
+        let icon = &mut self.spr[5];
+        icon.scale(1.2, 1.2);
+        icon.move_by(2, 0);
+        icon.set_color(0x80, 0x80, 0x80, a);
     }
 
     pub(crate) fn set_defs(&mut self, defs: PromptDefs) {
@@ -824,6 +950,7 @@ mod tests {
                 .collect(),
             own16: (0..17).map(|i| def(4 + i % 4, 16, 1, 1, [0; 6])).collect(),
             font,
+            cue: vec![def(24, 20, 0, 0, [0; 6]); 4],
         }
     }
 
@@ -834,6 +961,40 @@ mod tests {
             views: Vec::new(),
         };
         PromptPart::new(sheet(0), sheet(100), defs())
+    }
+
+    #[test]
+    fn cue_fades_in_pulses_dims_and_fades_out() {
+        let mut p = part();
+        let mut out = Vec::new();
+        // Off until shown.
+        p.run(0, &mut out);
+        assert!(p.spr[4].hidden && p.spr[5].hidden);
+        p.show_cue();
+        // The fighter cannot act: dim.
+        p.set_cue_dim(false);
+        p.run(0, &mut out);
+        assert_eq!(p.cue_state, 1);
+        assert!(!p.spr[4].hidden && !p.spr[5].hidden);
+        // 0.28 s in; then shown, dim: half alpha.
+        for _ in 0..9 {
+            p.run(0, &mut out);
+        }
+        assert_eq!(p.cue_state, 2);
+        assert_eq!(p.spr[4].rgba[3], 64);
+        p.set_cue_dim(true);
+        p.run(0, &mut out);
+        assert_eq!(p.spr[4].rgba[3], 128);
+        // Side 1's pass leaves it alone.
+        p.hide_cue();
+        p.run(1, &mut out);
+        assert_eq!(p.cue_state, 3);
+        for _ in 0..10 {
+            p.run(0, &mut out);
+        }
+        p.run(0, &mut out);
+        assert_eq!(p.cue_state, 4);
+        assert!(p.spr[4].hidden);
     }
 
     #[test]

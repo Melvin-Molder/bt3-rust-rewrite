@@ -511,6 +511,16 @@ impl<'a> SideData<'a> {
 }
 
 /// What the whole battle shares with the fighters.
+/// Story mode's hidden item: `rule.dragonBall` (1 + the dragon ball the battle hides, 0 none) and
+/// `BattleResult.dragonBallFound`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HiddenItem {
+    pub rule: i32,
+    pub found: i32,
+    /// Found this frame: the battle plays the jingle and shows the mark on the clock.
+    pub new: bool,
+}
+
 pub(crate) struct Env<'a> {
     pub common: &'a CommonTables,
     /// `gBtlStatCurve`: {value at 80, at 0, at -20} per row.
@@ -521,6 +531,8 @@ pub(crate) struct Env<'a> {
     pub stage_objs: &'a std::sync::Mutex<crate::stg_obj::StageObjs>,
     /// The fighters' sound requests (`gBtlChars->snd`).
     pub snd: &'a std::sync::Mutex<crate::btl_snd::CharSound>,
+    /// Story mode's hidden item.
+    pub item: &'a std::sync::Mutex<HiddenItem>,
     /// `Battle_GetMode`.
     pub mode: i32,
     /// `BtlChar_IsStage4Or27`.

@@ -16,8 +16,7 @@
 //! The commands place and move the fighters (their scripted actions 4..10), fix and move the demo camera, fade the
 //! screen, play the music, sound effects and voiced lines with their text and mouth movement, change health,
 //! gauges and items, force transformations, fusions, member switches and techniques, and end the battle with a
-//! result. The HUD's slide out / in of an interrupt and its event cue (`HudPrompt_ShowCue`), command 1701 (a
-//! button wait) and command 8's stage change (3) are not ported; no story script uses the last two.
+//! result. Command 1701 (a button wait) and command 8's stage change (3) are not ported; no story script uses them.
 
 use std::sync::Arc;
 
@@ -1103,10 +1102,11 @@ impl Battle {
         }
     }
 
-    /// `BtlEvent_BeginInterrupt`: event 0x4C asked for, the fighters held (the HUD's slide out is not ported).
+    /// `BtlEvent_BeginInterrupt`: event 0x4C asked for, the fighters held, the HUD slid out over a second.
     fn begin_interrupt(&mut self) {
         self.events.interrupt = true;
         self.seq.demo_flag = true;
+        self.hud.slide(true, 1.0);
     }
 
     /// Whether the story script runs an event action (`BtlScript_IsEventRunning`).
@@ -1200,6 +1200,7 @@ impl Battle {
             self.update_lines(&mut s);
             self.update_requests(&mut s, sounds);
             self.start_pending(&mut s, sounds);
+            self.update_cue(&s);
         }
         self.script = Some(s);
         let shown = self.script_text_shown();
@@ -1325,6 +1326,25 @@ impl Battle {
         if ok {
             s.start_event(action, sounds);
         }
+    }
+
+    /// `BtlScript_UpdateHud`: while an event of side 0 is pending and nobody is down, the cue, dim while the fighter
+    /// cannot act; otherwise it goes.
+    fn update_cue(&mut self, s: &BtlScript) {
+        let pending = s
+            .pending
+            .and_then(|p| match s.requests.get(p).map(|r| r.req) {
+                Some(Req::Event(action)) => {
+                    Some(s.event_of(action).map(|e| s.events[e]).unwrap_or_default())
+                }
+                _ => None,
+            });
+        let dead = self.roster.chars.iter().any(Chr::is_dead);
+        let cue = match pending {
+            Some(info) if !dead && info.side == 0 => Some(self.roster.chars[0].can_act()),
+            _ => None,
+        };
+        self.hud.set_cue(cue);
     }
 
     /// `BtlScript_UpdateView` (`BtlGame_Draw`, every frame): the kept shake, the camera move, the text.
@@ -1738,14 +1758,18 @@ impl GscCommands for ScriptHost<'_> {
                 true
             }
             // Command 6 "scene end": the fighters back to the fight (aura off, charge off, no shake) under the same
-            // condition (`BtlEvent_EndInterrupt`'s HUD slide in is not ported).
+            // condition; an event with a camera also ends the interrupt (`BtlEvent_EndInterrupt`: the HUD back).
             6 => {
-                if begin && self.s.current_event().is_none_or(|e| e.cmd4b1) {
+                let ev = self.s.current_event();
+                if begin && ev.is_none_or(|e| e.cmd4b1) {
                     for side in 0..2 {
                         self.b.set_aura(side, false);
                         self.b.chr(side).flags.clear(0x101);
                     }
                     self.b.demo.add_shake(0.0);
+                    if ev.is_some() {
+                        self.b.hud.slide(false, 1.0);
+                    }
                 }
                 true
             }

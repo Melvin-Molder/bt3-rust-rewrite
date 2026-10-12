@@ -199,6 +199,8 @@ pub struct BattleAssets {
     stage_model: StageModel,
     /// The stage's destructible objects (`gBtlStage->objs`).
     pub(crate) stage_objs: std::sync::Mutex<crate::stg_obj::StageObjs>,
+    /// Story mode's hidden item (`rule.dragonBall`, `BattleResult.dragonBallFound`).
+    pub(crate) hidden_item: std::sync::Mutex<crate::btl_chr::HiddenItem>,
     /// The fighters' sound requests and handles (`gBtlChars->snd`).
     pub(crate) snd: std::sync::Mutex<crate::btl_snd::CharSound>,
     /// Sample banks to load (`Snd_LoadBank` / `Snd_ReloadBank` by mask; `None` unloads), taken by the game.
@@ -557,6 +559,7 @@ pub fn load(
             anim_chara: s.chara,
             anim1_chara: s.chara,
         }),
+        hidden_item: Default::default(),
         stage_objs: std::sync::Mutex::new(
             crate::stg_obj::StageObjs::new(&stage.objects, &stage_model).with_anims(anims),
         ),
@@ -1949,6 +1952,7 @@ impl BattleAssets {
             stage: &self.stage,
             col: &self.collision,
             stage_objs: &self.stage_objs,
+            item: &self.hidden_item,
             snd: &self.snd,
             mode: self.mode,
             stage_4_or_27: matches!(self.stage_id, 4 | 27),
@@ -3148,6 +3152,20 @@ impl Battle {
             false
         });
         self.replay = replay;
+        // BtlStage_DestroyObj's find of story mode's hidden item: StreamSe_PlayDefault(0, 0x8D3A) and
+        // HudTimer_ShowMark.
+        let found = std::mem::take(
+            &mut self
+                .assets
+                .hidden_item
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .new,
+        );
+        if found {
+            input.sounds.push(TitleSound::StreamSe(0x8D3A));
+            self.hud.show_timer_mark();
+        }
         // The delayed sounds' plays of the scene update.
         if !self.roster.scene.se_out.is_empty() {
             let mut snd = self.assets.snd.lock().unwrap_or_else(|e| e.into_inner());
@@ -4527,7 +4545,7 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::battle_seq::SeqState;
 
@@ -4773,7 +4791,7 @@ mod tests {
     }
 
     /// The battle of a setup read from the ISO, `None` without it.
-    fn real_battle(setup: &BattleSetup) -> Option<Battle> {
+    pub(crate) fn real_battle(setup: &BattleSetup) -> Option<Battle> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
         let mut image = bt3_data::Iso9660::open(&path).ok()?;
