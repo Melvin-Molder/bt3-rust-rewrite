@@ -337,7 +337,8 @@ impl Roster {
             crate::chr_cam::start_cut(me, opp, data[i], data[i ^ 1], env);
             cam_update_input(me, opp, data[i]);
             me.obj.calc_matrices(&data[i].obj);
-            // BtlFx_UpdateAll: only the technique shots and the ki blasts it starts are ported.
+            // BtlFx_UpdateAll, in its order: the aura, then the technique shots and the ki blasts it starts.
+            crate::btl_fx::update_aura(me, data[i], env, &mut self.scene.auras);
             self.scene
                 .request_technique(me, opp, data[i], env.gate.time_stopped);
             self.scene.fire(
@@ -351,7 +352,15 @@ impl Roster {
             );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             crate::btl_fx::update_all(me, data[i], env, &mut self.scene.impacts);
-            crate::btl_fx::power_up_look(me, data[i], env, &mut self.scene.glows, libc);
+            let scene = &mut self.scene;
+            crate::btl_fx::power_up_look(
+                me,
+                data[i],
+                env,
+                &mut scene.glows,
+                &mut scene.auras,
+                libc,
+            );
             self.scene.spawn_held_disc(me, data[i]);
             // BtlFx_UpdateChargeFx: the charge aura while request 7 holds, its burst on request 8.
             if let Some(set) = crate::btl_blast::charge_set(data[i]) {

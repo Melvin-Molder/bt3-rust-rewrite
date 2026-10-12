@@ -58,6 +58,77 @@ pub(crate) fn action_fx_kind(me: &Chr) -> i32 {
     }
 }
 
+/// What the aura reads of a fighter.
+pub(crate) fn aura_chr<'a>(
+    me: &Chr,
+    data: &SideData,
+    node_pos: &'a dyn Fn(u32) -> V3,
+) -> crate::eft_aura::AuraChr<'a> {
+    crate::eft_aura::AuraChr {
+        side: me.player,
+        height: data.height(),
+        aura_type: aura_type(me, data),
+        dir: me.pose.dir,
+        vel: me.pose.vel,
+        speed: me.pose.speed,
+        fall_speed: me.pose.fall_speed,
+        fx_kind: action_fx_kind(me),
+        node_pos,
+    }
+}
+
+/// `BtlFx_UpdateAura`: the aura's level is the ki ratio when at least half full (none with parameter flag 0x10
+/// and no aura colour ability; full with object flag 0x40000 or request 0x13; request 0x14 kills it); with a level
+/// it is asked for every frame, else stopped. Without parameter flag 0x10, request 7's start and end burst it and
+/// end the burst, request 8 its peak.
+pub(crate) fn update_aura(
+    me: &Chr,
+    data: &SideData,
+    env: &Env,
+    auras: &mut crate::eft_aura::Auras,
+) {
+    let Some(cfg) = env.aura else {
+        return;
+    };
+    let node_pos = |n| me.obj.node_pos(n);
+    let c = aura_chr(me, data, &node_pos);
+    let g = &me.gauge;
+    let mut level = if g.ki_max > 0 {
+        let l = g.ki as f32 / g.ki_max as f32;
+        if l < 0.5 { 0.0 } else { l }
+    } else {
+        0.0
+    };
+    let flag10 = data.tables.params.flags() & 0x10 != 0;
+    if flag10 && !has_any_listed_ability(me) {
+        level = 0.0;
+    }
+    if me.obj.flags & 0x4_0000 != 0 || me.test_fx(0x13) {
+        level = 1.0;
+    }
+    if me.test_fx(0x14) {
+        level = 0.0;
+        auras.command(cfg, &c, 7);
+    }
+    if level > 0.0 {
+        auras.command(cfg, &c, 0);
+        auras.set_level(me.player, level);
+    } else {
+        auras.command(cfg, &c, 1);
+    }
+    if !flag10 {
+        if me.fx_new(7) {
+            auras.command(cfg, &c, 2);
+        }
+        if me.fx_ended(7) {
+            auras.command(cfg, &c, 3);
+        }
+        if me.test_fx(8) {
+            auras.command(cfg, &c, 4);
+        }
+    }
+}
+
 /// What the power-up glow reads of a fighter.
 pub(crate) fn glow_chr<'a>(
     me: &Chr,
@@ -85,26 +156,39 @@ pub(crate) fn power_up_look(
     data: &SideData,
     env: &Env,
     glows: &mut crate::eft_glow::Glows,
+    auras: &mut crate::eft_aura::Auras,
     libc: &mut crate::rng::LibcRandom,
 ) {
     if data.tables.params.flags() & 0x10 != 0 && !has_any_listed_ability(me) {
         return;
     }
+    // The aura fades out while the glow runs (5 in, 6 out).
+    let mut aura_cmds = [None, None];
     let cmd = if me.test_fx(5) {
         me.obj.set_color_mode(6, false);
+        aura_cmds[0] = Some(5);
         [Some(2), None]
     } else {
         let mut cmds = [None, None];
         if me.fx_new(4) {
             me.obj.set_color_mode(6, true);
+            aura_cmds[0] = Some(6);
             cmds[0] = Some(0);
         }
         if me.fx_ended(4) {
             me.obj.set_color_mode(6, false);
+            aura_cmds[1] = Some(5);
             cmds[1] = Some(1);
         }
         cmds
     };
+    if let Some(cfg) = env.aura {
+        let node_pos = |n| me.obj.node_pos(n);
+        let c = aura_chr(me, data, &node_pos);
+        for a in aura_cmds.into_iter().flatten() {
+            auras.command(cfg, &c, a);
+        }
+    }
     let Some(cfg) = env.glow else {
         return;
     };

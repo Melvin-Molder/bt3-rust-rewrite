@@ -131,6 +131,9 @@ pub struct BattleAssets {
     pub(crate) impact_sets: Vec<crate::eft_impact::ImpactSet>,
     /// `EftTransformMgr_Init`: the transformation effect's eight sets (empty when one does not load).
     pub(crate) transform_sets: Vec<crate::eft_impact::ImpactSet>,
+    /// `EftAuraMgr_Init`: the aura's settings and flame textures.
+    pub(crate) aura_cfg: Option<crate::eft_aura::AuraCfg>,
+    pub(crate) aura_textures: crate::eft_aura::AuraTextures,
     /// `EftGlowMgr_Init`: the power-up glow's settings and textures.
     pub(crate) glow_cfg: Option<crate::eft_glow::GlowCfg>,
     pub(crate) glow_textures: crate::eft_glow::GlowTextures,
@@ -382,6 +385,8 @@ pub fn load(
         spdline_texture: None,
         impact_sets: Vec::new(),
         transform_sets: Vec::new(),
+        aura_cfg: None,
+        aura_textures: crate::eft_aura::AuraTextures::default(),
         glow_cfg: None,
         glow_textures: crate::eft_glow::GlowTextures::default(),
         stage_sun: None,
@@ -504,6 +509,35 @@ pub fn load(
     }
     if impact_sets.len() == crate::eft_impact::SET_ENTRIES.len() {
         assets.impact_sets = impact_sets;
+    }
+    // EftAuraMgr_Init: the settings (common entry 1); entry 3's image 0 under the palettes of its first nine entries
+    // (the aura types), its image 8 under palettes 8..13 (types 8..10, two each).
+    assets.aura_cfg =
+        bt3_data::eft_pack::common_entry(&common_fx, 1).and_then(crate::eft_aura::AuraCfg::parse);
+    if let Some(entry) = bt3_data::eft_pack::common_entry(&common_fx, 3)
+        && let Ok(res) = TextureResource::parse(entry)
+    {
+        let mut push = |t: Option<RgbaTexture>| {
+            t.map(|t| {
+                assets.effect_textures.push(t);
+                assets.effect_textures.len() - 1
+            })
+        };
+        if let Some(img) = res.entries.first() {
+            for clut in res.entries.iter().take(9) {
+                let t = bt3_data::gs::decode_sprite_texture_with_clut(img, clut).ok();
+                assets.aura_textures.plain.push(push(t));
+            }
+        }
+        if let Some(img) = res.entries.get(8) {
+            for k in 8..14 {
+                let t = res
+                    .entries
+                    .get(k)
+                    .and_then(|clut| bt3_data::gs::decode_sprite_texture_with_clut(img, clut).ok());
+                assets.aura_textures.paired.push(push(t));
+            }
+        }
     }
     // EftGlowMgr_Init: the settings (common entry 7); entry 9's image under each palette of its first nine
     // entries (the aura types), its image 8 under palettes 8 and 9 (the textured variant), entry 8's first.
@@ -1357,6 +1391,7 @@ impl BattleAssets {
             impact: &self.impact_sets,
             transform: &self.transform_sets,
             glow: self.glow_cfg.as_ref(),
+            aura: self.aura_cfg.as_ref(),
             change_allowed: self.change_allowed,
             team: self.team,
             team_count: self.team_count,
@@ -2543,8 +2578,41 @@ impl Battle {
                 self.seq.paused,
                 &mut *libc,
             );
-            // Layer 3: the glow (not of a hidden fighter; at 0.3 in its own view with object flag bit 21), the speed
+            // Layer 3: the aura (not of a hidden fighter, in a technique or a rush sequence, or with a glow), the
+            // glow (not of a hidden fighter; both at 0.3 in its own view with object flag bit 21), the speed
             // lines, the vanish lines, then the particle modules.
+            if let Some(cfg) = &self.assets.aura_cfg {
+                let chars = &self.roster.chars;
+                let data = [0, 1].map(|s| side_data(&self.assets.fighters[s]));
+                let node_pos = [0, 1].map(|s| move |n: u32| chars[s].obj.node_pos(n));
+                let ac = std::array::from_fn(|s| {
+                    crate::btl_fx::aura_chr(&chars[s], &data[s], &node_pos[s])
+                });
+                let glows = &self.roster.scene.glows;
+                let stage_flag = matches!(self.assets.stage_id, 3 | 15 | 16 | 24 | 26 | 30 | 32);
+                self.roster.scene.auras.draw(
+                    cfg,
+                    &self.assets.aura_textures,
+                    &mut ot,
+                    &ctx,
+                    &ac,
+                    |chr| {
+                        let c = &chars[chr];
+                        if c.obj.flags & 2 == 0
+                            || crate::btl_act::is_technique_id(c.act.current)
+                            || crate::btl_tech_fx::in_rush_sequence(c)
+                            || glows.is_active(chr)
+                        {
+                            None
+                        } else if (demo || chr == 0) && c.obj.flags & 0x20_0000 != 0 {
+                            Some(0.3)
+                        } else {
+                            Some(1.0)
+                        }
+                    },
+                    stage_flag,
+                );
+            }
             if let Some(cfg) = &self.assets.glow_cfg {
                 let chars = &self.roster.chars;
                 self.roster.scene.glows.draw(
@@ -7215,6 +7283,64 @@ mod tests {
         let (log, _, _) = run_transform(&mut battle, 0, 420);
         assert!(log.iter().any(|l| l.1 == 0xEF), "{log:x?}");
         assert_eq!(log.last().map(|l| (l.1, l.2)), Some((0xB, 106)), "{log:x?}");
+    }
+
+    #[test]
+    fn real_full_ki_raises_the_aura_and_empty_ki_ends_it() {
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, idle, 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert!(battle.assets.aura_cfg.is_some());
+        assert!(
+            battle
+                .assets
+                .aura_textures
+                .plain
+                .iter()
+                .take(8)
+                .all(Option::is_some)
+        );
+        // Ki at least half full: the aura's flames rise from the ten parts, its sparks drift, it draws.
+        let (mut flames, mut sparks, mut drawn) = (0, 0, 0);
+        for _ in 0..60 {
+            let g = &mut battle.roster.chars[0].gauge;
+            g.ki = g.ki_max;
+            let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            let (f, s, _) = battle.roster.scene.auras.state(0);
+            flames = flames.max(f);
+            sparks = sparks.max(s);
+            let aura_tex: Vec<_> = battle.assets.aura_textures.plain.iter().flatten().collect();
+            drawn = drawn.max(
+                frame
+                    .effects
+                    .iter()
+                    .filter(|t| t.texture.is_some_and(|x| aura_tex.contains(&&x)))
+                    .count(),
+            );
+        }
+        assert!(
+            flames >= 10 && sparks >= 12 && drawn > 0,
+            "{flames} {sparks} {drawn}"
+        );
+        assert!(battle.roster.scene.auras.is_visible(0));
+        // P2 keeps none.
+        assert_eq!(battle.roster.scene.auras.state(1), (0, 0, false));
+        // Without the ki the aura fades out and frees its particles.
+        for _ in 0..200 {
+            battle.roster.chars[0].gauge.ki = 0;
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        assert_eq!(battle.roster.scene.auras.state(0), (0, 0, false));
     }
 
     #[test]

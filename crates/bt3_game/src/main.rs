@@ -31,6 +31,7 @@ mod draw;
 mod duel_menu;
 mod eft;
 mod eft_absorb;
+mod eft_aura;
 mod eft_bill;
 mod eft_bound;
 mod eft_bubble;

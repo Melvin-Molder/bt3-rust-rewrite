@@ -325,6 +325,8 @@ pub(crate) struct Scene {
     pub spdlines: crate::eft_spdline::SpdLines,
     /// The vanish lines (`gEftShotFx`, layer 3; kept through a reset).
     pub shotfx: crate::eft_shotfx::ShotFx,
+    /// The aura (`gEftAuraPool`, layer 3).
+    pub auras: crate::eft_aura::Auras,
     /// The power-up glow (`gEftGlow`, layer 3).
     pub glows: crate::eft_glow::Glows,
     /// The impacts (`gEftImpactList`, layer 3).
@@ -1173,11 +1175,20 @@ impl Scene {
                 self.absorbs[side].update(&mut self.fx, &c, &ctx, w.paused, w.libc, w.vu0);
             }
         }
-        // Layer 3 (`gEftLayer3Classes`): the ground dust (BtlScene_IsTimeStopped: paused), the glow, the speed lines, the
+        // Layer 3 (`gEftLayer3Classes`): the ground dust (BtlScene_IsTimeStopped: paused), the aura, the glow, the
+        // speed lines, the
         // vanish lines, the struggle, the discs, the impacts, the blast objects, then the particle modules.
         let dust_chars = std::array::from_fn(|i| crate::btl_mgr::dust_chr(&w.chars[i], w.data[i]));
         self.gdust
             .update(w.paused, Some(&dust_chars), w.libc, w.vu0);
+        if let Some(cfg) = w.env.aura {
+            let chars = &*w.chars;
+            let node_pos = [0, 1].map(|s| move |n: u32| chars[s].obj.node_pos(n));
+            let ac = std::array::from_fn(|s| {
+                crate::btl_fx::aura_chr(&chars[s], w.data[s], &node_pos[s])
+            });
+            self.auras.update(cfg, &ac, w.paused, w.libc);
+        }
         if let Some(cfg) = w.env.glow {
             let chars = &*w.chars;
             let node_pos = [0, 1].map(|s| move |n: u32| chars[s].obj.node_pos(n));
