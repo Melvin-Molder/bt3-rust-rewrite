@@ -54,6 +54,9 @@ pub struct StageResource {
     /// `StgDataA.lightColors` (+0x78 / +0x7C, `BtlStage_GetLightColors`): the first record's two colours (the
     /// fighters' dust takes them).
     pub light_colors: Option<[u8; 8]>,
+    /// The same record's bytes 8..12: the objects' light colour (`BtlObj_UpdateAll`'s `BtlObjLight_SetColor`),
+    /// which the ground shadows are drawn in.
+    pub shadow_color: Option<[u8; 4]>,
     /// `StgDataA.tint` (+0x80 / +0x84, `BtlStage_GetList80`): the two colours of the stage tint's slot 0 (the
     /// darkening of request 0x12), RGBA each.
     pub tint: Option<[u8; 8]>,
@@ -403,18 +406,22 @@ impl StageResource {
                 color_b: [b(0x1B), b(0x1C), b(0x1D), b(0x1E)],
             })
         };
-        let light_colors = if read_count(bytes, data_offset + 0x78, "stage light colours")? == 0 {
-            None
-        } else {
-            let o = resolve_relative(
-                bytes,
-                data_offset,
-                read_u32(bytes, data_offset + 0x7C)?,
-                8,
-                "stage light colours",
-            )?;
-            Some(bytes[o..o + 8].try_into().unwrap())
-        };
+        let (light_colors, shadow_color) =
+            if read_count(bytes, data_offset + 0x78, "stage light colours")? == 0 {
+                (None, None)
+            } else {
+                let o = resolve_relative(
+                    bytes,
+                    data_offset,
+                    read_u32(bytes, data_offset + 0x7C)?,
+                    12,
+                    "stage light colours",
+                )?;
+                (
+                    Some(bytes[o..o + 8].try_into().unwrap()),
+                    Some(bytes[o + 8..o + 12].try_into().unwrap()),
+                )
+            };
         let tint = if read_count(bytes, data_offset + 0x80, "stage tint")? == 0 {
             None
         } else {
@@ -475,6 +482,7 @@ impl StageResource {
             weather,
             surf,
             light_colors,
+            shadow_color,
             tint,
             wind,
         })

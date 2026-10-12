@@ -525,6 +525,52 @@ impl Obj {
         self.flags = (self.flags & !0xFF_0000) | color;
     }
 
+    /// `BtlObj_UpdateBounds`: the world box around the bounding boxes of the shown parts (each part's box about
+    /// its centre, turned with its node).
+    pub(crate) fn bounds(&self, data: &ObjData) -> bt3_data::stage_col::ColBox {
+        let mut b = bt3_data::stage_col::ColBox {
+            min: [f32::MAX; 3],
+            max: [-f32::MAX; 3],
+        };
+        let model_flags = data.model.header.flags;
+        for part in &data.model.parts {
+            if !part.enabled {
+                continue;
+            }
+            let Some(node) = self.node(u32::from(part.node)) else {
+                continue;
+            };
+            if !crate::battle::node_shown(model_flags, self.flags, part.node) {
+                continue;
+            }
+            let rel: [f32; 4] = std::array::from_fn(|k| {
+                if k < 3 {
+                    part.center[k] - part.offset_a[k]
+                } else {
+                    1.0
+                }
+            });
+            let mut m = node.mtx;
+            m[3] = apply(&node.mtx, rel);
+            let e = part.extent;
+            for i in 0..8 {
+                let sx = if i & 1 == 0 { 1.0 } else { -1.0 };
+                let sy = if i & 2 == 0 { 1.0 } else { -1.0 };
+                let sz = if i & 4 == 0 { 1.0 } else { -1.0 };
+                let p = apply(&m, [e[0] * sx, e[1] * sy, e[2] * sz, 1.0]);
+                for k in 0..3 {
+                    if p[k] < b.min[k] {
+                        b.min[k] = p[k];
+                    }
+                    if b.max[k] < p[k] {
+                        b.max[k] = p[k];
+                    }
+                }
+            }
+        }
+        b
+    }
+
     /// `BtlCharApi_GetNodePos`: node `id`'s world position (the object's position without the node).
     pub(crate) fn node_pos(&self, id: u32) -> [f32; 3] {
         self.node(id)

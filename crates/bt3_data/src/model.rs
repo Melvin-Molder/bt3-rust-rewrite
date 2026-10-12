@@ -69,6 +69,8 @@ pub struct ModelPart {
     pub offset_b: [f32; 4],
     /// Translation from the parent node in the rest pose (`BobjBone.rest`).
     pub rest: [f32; 4],
+    /// `BtlObjBound.center`: the centre of the part's bounding box (less `offset_a`, in the node's frame).
+    pub center: [f32; 4],
     /// `BObjBound.extent`; w is the part's size factor (`BtlCharApi_GetNodeBoundSize`).
     pub extent: [f32; 4],
     pub batches: Vec<Batch>,
@@ -133,6 +135,7 @@ impl CharaModel {
                 offset_a: vec4(0x10),
                 offset_b: vec4(0x20),
                 rest: vec4(0x30),
+                center: vec4(0x40),
                 extent: vec4(0x50),
                 batches,
             });

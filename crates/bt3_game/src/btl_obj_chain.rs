@@ -722,6 +722,7 @@ mod tests {
             offset_a: [0.0; 4],
             offset_b: [0.0; 4],
             rest: [0.0; 4],
+            center: [0.0; 4],
             extent: [0.0; 4],
             batches: Vec::new(),
         }

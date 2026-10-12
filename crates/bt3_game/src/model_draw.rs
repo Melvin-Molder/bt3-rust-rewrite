@@ -42,6 +42,8 @@ const HUD_SORT: f32 = 100.0;
 const EFFECT_SORT: f32 = 0.0;
 /// `StgFx_DrawPre`'s rectangles: after the stage, before the fighters.
 const UNDER_SORT: f32 = -200.0;
+/// `BtlObjDraw_DrawShadows`: after the fighters, before the sorted pass.
+const SHADOW_SORT: f32 = -50.0;
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct GsModelMaterial {
@@ -264,7 +266,8 @@ pub struct GsEffectMaterial {
     blend: EffectBlend,
     zwrite: bool,
     order: u16,
-    under: bool,
+    /// 0: under the fighters, 1: the shadows, 2: the sorted pass.
+    layer: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -292,7 +295,11 @@ impl Material2d for GsEffectMaterial {
     }
 
     fn depth_bias(&self) -> f32 {
-        let base = if self.under { UNDER_SORT } else { EFFECT_SORT };
+        let base = match self.layer {
+            0 => UNDER_SORT,
+            1 => SHADOW_SORT,
+            _ => EFFECT_SORT,
+        };
         base + f32::from(self.order) * 0.001
     }
 
@@ -346,7 +353,7 @@ pub struct EffectTextures {
     images: Vec<[Handle<Image>; 2]>,
     blank: Option<Handle<Image>>,
     materials:
-        HashMap<(Option<usize>, bool, EffectBlend, bool, u8, u16, bool), Handle<GsEffectMaterial>>,
+        HashMap<(Option<usize>, bool, EffectBlend, bool, u8, u16, u8), Handle<GsEffectMaterial>>,
 }
 
 #[derive(Component)]
@@ -374,10 +381,12 @@ pub fn sync_effects(
         *textures = EffectTextures::default();
     }
     while textures.images.len() < game.effect_textures.len() {
-        let texture = &game.effect_textures[textures.images.len()];
-        // TEX1 0x60 bilinear.
-        let clamped = images.add(model_image(texture, ImageAddressMode::ClampToEdge));
-        let wrapped = images.add(model_image(texture, ImageAddressMode::Repeat));
+        let i = textures.images.len();
+        let texture = &game.effect_textures[i];
+        // TEX1 0x60 bilinear, or point sampled.
+        let point = game.effect_point.contains(&i);
+        let clamped = images.add(effect_image(texture, ImageAddressMode::ClampToEdge, point));
+        let wrapped = images.add(effect_image(texture, ImageAddressMode::Repeat, point));
         textures.images.push([clamped, wrapped]);
     }
     // Textures whose texels changed: written again in place, so the materials keep them.
@@ -386,12 +395,13 @@ pub fn sync_effects(
         else {
             continue;
         };
+        let point = game.effect_point.contains(&i);
         for (handle, mode) in pair
             .iter()
             .zip([ImageAddressMode::ClampToEdge, ImageAddressMode::Repeat])
         {
             if let Some(mut image) = images.get_mut(handle) {
-                *image = model_image(texture, mode);
+                *image = effect_image(texture, mode, point);
             }
         }
     }
@@ -415,15 +425,17 @@ pub fn sync_effects(
         bool,
         u8,
         Vec<&'a EffectTri>,
-        bool,
+        u8,
     );
-    // The rectangles under the fighters first (their own sort range), then the sorted pass.
+    // The rectangles under the fighters first, then the shadows (each in its own sort range), then the sorted
+    // pass.
     let mut batches: Vec<Batch> = Vec::new();
     let tris = game
         .under_effects
         .iter()
-        .map(|t| (t, true))
-        .chain(game.effects.iter().map(|t| (t, false)));
+        .map(|t| (t, 0))
+        .chain(game.shadow_effects.iter().map(|t| (t, 1)))
+        .chain(game.effects.iter().map(|t| (t, 2)));
     for (tri, under) in tris {
         match batches.last_mut() {
             Some((t, c, b, z, a, list, u))
@@ -454,7 +466,7 @@ pub fn sync_effects(
                         blend: EffectBlend,
                         zwrite: bool,
                         alpha_ref: u8,
-                        under: bool,
+                        layer: u8,
                         textures: &mut EffectTextures| {
         let key = (
             texture,
@@ -463,7 +475,7 @@ pub fn sync_effects(
             zwrite,
             alpha_ref,
             index as u16,
-            under,
+            layer,
         );
         if let Some(handle) = textures.materials.get(&key) {
             return handle.clone();
@@ -491,7 +503,7 @@ pub fn sync_effects(
             blend,
             zwrite,
             order: index as u16,
-            under,
+            layer,
         });
         textures.materials.insert(key, handle.clone());
         handle
@@ -1176,6 +1188,19 @@ pub fn sync_models(
             Transform::default(),
         ));
     }
+}
+
+/// An effect texture as `model_image` makes it, or point sampled (TEX1 0).
+fn effect_image(texture: &RgbaTexture, address: ImageAddressMode, point: bool) -> Image {
+    let mut image = model_image(texture, address);
+    if point {
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: address,
+            address_mode_v: address,
+            ..ImageSamplerDescriptor::nearest()
+        });
+    }
+    image
 }
 
 /// Raw GS colours (not sRGB-decoded): the shader does the GS arithmetic on them. Bilinear (TEX1 0x60).

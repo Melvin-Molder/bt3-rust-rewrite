@@ -71,6 +71,15 @@ impl ColMesh {
         b: &ColBox,
         cb: &mut dyn FnMut(&ColPoly, [[f32; 3]; 3]) -> bool,
     ) -> bool {
+        self.walk_leaves(b, &mut |_, poly, v| cb(poly, v))
+    }
+
+    /// `ColMesh_WalkBox` with the leaf node too (whose box a callback may test).
+    pub fn walk_leaves(
+        &self,
+        b: &ColBox,
+        cb: &mut dyn FnMut(&ColNode, &ColPoly, [[f32; 3]; 3]) -> bool,
+    ) -> bool {
         if self.nodes.is_empty() {
             return false;
         }
@@ -83,7 +92,7 @@ impl ColMesh {
         &self,
         idx: i32,
         b: &ColBox,
-        cb: &mut dyn FnMut(&ColPoly, [[f32; 3]; 3]) -> bool,
+        cb: &mut dyn FnMut(&ColNode, &ColPoly, [[f32; 3]; 3]) -> bool,
         hit: &mut bool,
     ) {
         let Some(node) = usize::try_from(idx).ok().and_then(|i| self.nodes.get(i)) else {
@@ -104,7 +113,7 @@ impl ColMesh {
                 let v = poly
                     .vtx
                     .map(|i| self.vertices.get(i as usize).copied().unwrap_or([0.0; 3]));
-                *hit |= cb(poly, v);
+                *hit |= cb(node, poly, v);
             }
             return;
         }
@@ -303,17 +312,29 @@ impl StageCollision {
         objects_only: bool,
         cb: &mut dyn FnMut(&ColPoly, [[f32; 3]; 3]) -> bool,
     ) -> (bool, u64) {
+        self.query_zone_leaves(zone, b, broken, objects_only, &mut |_, poly, v| cb(poly, v))
+    }
+
+    /// `StgCol_QueryZone` with the leaf nodes.
+    pub fn query_zone_leaves(
+        &self,
+        zone: usize,
+        b: &ColBox,
+        broken: u64,
+        objects_only: bool,
+        cb: &mut dyn FnMut(&ColNode, &ColPoly, [[f32; 3]; 3]) -> bool,
+    ) -> (bool, u64) {
         let Some(z) = self.zones.get(zone) else {
             return (false, 0);
         };
-        let mut hit = !objects_only && z.mesh.walk_box(b, cb);
+        let mut hit = !objects_only && z.mesh.walk_leaves(b, cb);
         let mut mask = 0u64;
         for rec in z
             .recs
             .iter()
             .filter(|r| rec_in_force(r, broken, objects_only))
         {
-            if rec.mesh.walk_box(b, cb) {
+            if rec.mesh.walk_leaves(b, cb) {
                 hit = true;
                 if !rec.broken && rec.obj < 64 {
                     mask |= 1 << rec.obj;
@@ -368,6 +389,114 @@ impl StageCollision {
         });
         out.obj_mask = mask;
         out
+    }
+}
+
+/// A triangle under an object's shadow (`StgColTri`): its corners and plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadowTri {
+    pub v: [[f32; 3]; 3],
+    pub nrm: [f32; 4],
+}
+
+/// `STGCOL_POLY_FLAT_ONLY`: a shadow is dropped on it unless it faces straight up.
+pub const POLY_FLAT_ONLY: u32 = 0x0100_0000;
+/// `STGCOL_POLY_NO_SHADOW`: skipped by the shadow query.
+pub const POLY_NO_SHADOW: u32 = 0x0200_0000;
+
+impl StageCollision {
+    /// `StgShadow_Collect`: up to `max` solid, upward triangles under `b` (stretched 50 down) of the zone near
+    /// `zone`, in the query's order, and the shadow's strength: 1 while the highest ground under the box's centre
+    /// (`StgShadow_ProbeTri` over a thin column) is at most 20 below the box's bottom, fading to 0 at 50 (no
+    /// triangles then).
+    pub fn shadow_collect(
+        &self,
+        zone: i32,
+        b: &ColBox,
+        max: usize,
+        broken: u64,
+    ) -> (Vec<ShadowTri>, f32) {
+        // StgShadow_InitCtx.
+        let center = [
+            (b.max[0] + b.min[0]) * 0.5,
+            (b.max[1] + b.min[1]) * 0.5,
+            (b.max[2] + b.min[2]) * 0.5,
+        ];
+        let mut half = [
+            (b.max[0] - b.min[0]) * 0.5,
+            (b.max[1] - b.min[1]) * 0.5,
+            (b.max[2] - b.min[2]) * 0.5,
+        ];
+        half[1] = (half[1] * 2.0 + 50.0) * 0.5;
+        let center = [center[0], b.min[1] + half[1], center[2]];
+        let search = ColBox::from_center_half(center, half);
+        let probe = ColBox::from_center_half(center, [0.1, half[1], 0.1]);
+        let pt = [center[0], probe.min[1], center[2]];
+        let mut ground_y = probe.max[1];
+        let bottom_y = b.max[1];
+        let zone = self.find_zone_near(zone, pt);
+        let mut tris = Vec::new();
+        self.query_zone_leaves(zone, &search, broken, false, &mut |node, poly, v| {
+            // StgShadow_Cb.
+            if poly.flags & (POLY_NO_SOLID | POLY_NO_SHADOW | 0x40 | 0x20) != 0 {
+                return false;
+            }
+            if !(poly.nrm[1] < 0.0) {
+                return false;
+            }
+            let node_box = ColBox {
+                min: node.min,
+                max: node.max,
+            };
+            if probe.overlaps(&node_box) {
+                shadow_probe_tri(pt, &v, poly.nrm, &mut ground_y);
+            }
+            // StgShadow_AddTri.
+            if tris.len() >= max {
+                return false;
+            }
+            if poly.flags & POLY_FLAT_ONLY != 0 && poly.nrm[1] >= -0.999 {
+                return false;
+            }
+            tris.push(ShadowTri { v, nrm: poly.nrm });
+            true
+        });
+        // StgShadow_Finish.
+        let alpha = shadow_alpha(ground_y - bottom_y);
+        if alpha <= 0.0 {
+            tris.clear();
+        }
+        (tris, alpha)
+    }
+}
+
+/// `StgShadow_ProbeTri`: when the point lies over the triangle (x, z), lowers `y` to its plane's height there.
+fn shadow_probe_tri(pt: [f32; 3], v: &[[f32; 3]; 3], nrm: [f32; 4], y: &mut f32) {
+    let (px, pz) = (pt[0], pt[2]);
+    let (x0, z0) = (v[0][0], v[0][2]);
+    let (x1, z1) = (v[1][0], v[1][2]);
+    let (x2, z2) = (v[2][0], v[2][2]);
+    if (x2 - x0) * (pz - z0) - (z2 - z0) * (px - x0) <= 0.001
+        && (x1 - x2) * (pz - z2) - (z1 - z2) * (px - x2) <= 0.001
+        && (x0 - x1) * (pz - z1) - (z0 - z1) * (px - x1) <= 0.001
+    {
+        let h = (nrm[3] - nrm[0] * px - nrm[2] * pz) / nrm[1];
+        if h < *y {
+            *y = h;
+        }
+    }
+}
+
+/// `StgShadow_CalcAlpha`: 1 up to 20 above the ground, falling to 0 at 50.
+pub fn shadow_alpha(height: f32) -> f32 {
+    if height <= 0.0 {
+        1.0
+    } else if height >= 50.0 {
+        0.0
+    } else if height > 20.0 {
+        1.0 - (height - 20.0) / 30.0
+    } else {
+        1.0
     }
 }
 

@@ -146,6 +146,8 @@ pub struct BattleAssets {
     /// `gEftSpdLine->tex[0]` / `gEftShotFx->tex[0]`: the speed and vanish lines' texture (common effect entry 0x237)
     /// among the effect textures.
     pub(crate) spdline_texture: Option<usize>,
+    /// The two fighters' shadow pages among the effect textures (`ObjShadow` page 0x150, drawn every frame).
+    pub(crate) shadow_pages: [usize; 2],
     /// Stage pack entry 0x12's textures among the effect textures, on a stage that has the entry.
     pub(crate) stage_pack12: Option<Vec<usize>>,
     /// Stage pack entry 0xE's textures (the storm's) among the effect textures.
@@ -411,6 +413,7 @@ pub fn load(
         ray_texture: None,
         dust_textures: Vec::new(),
         spdline_texture: None,
+        shadow_pages: [0; 2],
         impact_sets: Vec::new(),
         transform_sets: Vec::new(),
         aura_cfg: None,
@@ -523,6 +526,15 @@ pub fn load(
         assets
             .effect_textures
             .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+    }
+    // The shadow pages, written by every frame's draw.
+    for page in &mut assets.shadow_pages {
+        *page = assets.effect_textures.len();
+        assets.effect_textures.push(RgbaTexture {
+            width: crate::obj_shadow::PAGE as u32,
+            height: crate::obj_shadow::PAGE as u32,
+            pixels: vec![0; crate::obj_shadow::PAGE * crate::obj_shadow::PAGE * 4],
+        });
     }
     // EftImpactMgr_Init: EftEmit_LoadSet of the common entries.
     let mut impact_sets = Vec::new();
@@ -1385,8 +1397,10 @@ pub struct BattleFrame {
     /// `StgFx_DrawPost`: the frame redrawn through the work buffers after the effects, before the HUD (the
     /// radial blur, the shock waves).
     pub post: Vec<crate::post::PostOp>,
-    /// Effect textures whose texels changed this frame (the reflecting surface's lit palettes).
+    /// Effect textures whose texels changed this frame (the reflecting surface's lit palettes, the shadow pages).
     pub texture_updates: Vec<(usize, RgbaTexture)>,
+    /// `BtlObjDraw_DrawShadows`: the fighters' ground shadows, after the fighters.
+    pub shadows: Vec<EffectTri>,
 }
 
 /// The battle as far as it is ported.
@@ -1405,6 +1419,8 @@ pub struct Battle {
     pub(crate) fade: Fade,
     /// Node 0's world matrix of each fighter from the last pose (`DemoCam_SetBase` reads it before the new pose).
     roots: [Mtx; 2],
+    /// `obj->shadow`: the fighters' ground shadows as the last update collected them.
+    pub(crate) shadows: [crate::obj_shadow::Shadow; 2],
     started: bool,
     /// `gBtlAi`.
     ai: AiMgr,
@@ -1763,6 +1779,7 @@ impl Battle {
             hud,
             fade: Fade::start_in(1.0),
             roots,
+            shadows: Default::default(),
             started: false,
             ai,
             menu,
@@ -2556,10 +2573,29 @@ impl Battle {
         // BtlObj_UpdateAll (not while paused): per fighter the face (blink and mouth), the colour flash and the
         // mode-2 fade step.
         if !paused {
-            for c in &mut self.roster.chars {
+            let broken = self
+                .assets
+                .stage_objs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .broken_mask();
+            for (side, c) in self.roster.chars.iter_mut().enumerate() {
                 c.obj.update_face(&mut *input.libc);
                 let fading = c.obj.flags & 0x4_0000 != 0;
                 c.obj.flash.step(fading);
+                // ObjShadow_Update.
+                if crate::obj_shadow::enabled(c.obj.flags, self.loading) {
+                    let data = side_data(&self.assets.fighters[side]);
+                    self.shadows[side] = crate::obj_shadow::update(
+                        &c.obj.bounds(&data.obj),
+                        data.obj.model.header.size[0],
+                        self.assets.screen_mode == 1,
+                        c.obj.area,
+                        self.light_dir,
+                        &self.assets.collision,
+                        broken,
+                    );
+                }
             }
         }
         self.amb_cam = Some(view.eye());
@@ -2704,8 +2740,48 @@ impl Battle {
             })
             .collect();
         batches.sort_by_key(|batch| (batch.textures, batch.look));
-        // BtlScene_Draw(1), then Ot_Draw.
+        // BtlObjDraw_DrawShadows: per fighter shown with flags 2 and 0x10 and its shadow flag, the page of its
+        // silhouette and the ground triangles textured with it.
+        let mut shadows = Vec::new();
         let mut texture_updates = Vec::new();
+        for side in 0..2 {
+            let obj = &self.roster.chars[side].obj;
+            let model = &self.assets.fighters[side].model;
+            let shadow = &self.shadows[side];
+            if !crate::obj_shadow::enabled(obj.flags, self.loading)
+                || obj.flags & 0x12 != 0x12
+                || shadow.tris.is_empty()
+                || model_look(obj, model.header.flags, self.light_dir, &view).is_none()
+            {
+                continue;
+            }
+            let cams = crate::obj_shadow::page_cams(obj.pos, model.header.size[0]);
+            let mut tris = Vec::new();
+            crate::obj_shadow::model_tris(
+                model,
+                &obj.nodes,
+                |n| node_shown(model.header.flags, obj.flags, n),
+                |t| tris.push(t),
+            );
+            let page = self.assets.shadow_pages[side];
+            texture_updates.push((
+                page,
+                RgbaTexture {
+                    width: crate::obj_shadow::PAGE as u32,
+                    height: crate::obj_shadow::PAGE as u32,
+                    pixels: crate::obj_shadow::render_page(&cams, obj.pos, shadow.light, tris),
+                },
+            ));
+            let color = self
+                .assets
+                .stage
+                .shadow_color
+                .map_or(crate::obj_shadow::DEFAULT_COLOR, |c| c.map(f32::from));
+            shadows.extend(crate::obj_shadow::ground_tris(
+                shadow, &cams, color, &view, page,
+            ));
+        }
+        // BtlScene_Draw(1), then Ot_Draw.
         let effects = {
             let ctx = DrawCtx::new(view.world2screen, view.world2view);
             let mut ot = OrderTable::new();
@@ -2932,6 +3008,7 @@ impl Battle {
             under,
             post,
             texture_updates,
+            shadows,
         }
     }
 }
@@ -6614,7 +6691,14 @@ mod tests {
                 None,
                 false,
             );
-            let updated: Vec<usize> = frame.texture_updates.iter().map(|u| u.0).collect();
+            // (The shadow pages are written every frame too.)
+            let pages = battle.assets.shadow_pages;
+            let updated: Vec<usize> = frame
+                .texture_updates
+                .iter()
+                .map(|u| u.0)
+                .filter(|i| !pages.contains(i))
+                .collect();
             assert_eq!(updated, out);
             lit += frame
                 .effects
@@ -8809,6 +8893,69 @@ mod tests {
             most = most.max((angle(rot(&battle)) - rest).abs());
         }
         assert!(most > 0.01, "{most}");
+    }
+
+    #[test]
+    fn real_fighters_cast_ground_shadows() {
+        let Some(mut battle) = fight_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        let mut frame = None;
+        for _ in 0..5 {
+            frame = Some(battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false));
+        }
+        let frame = frame.unwrap();
+        let pages = battle.assets.shadow_pages;
+        // Standing on the ground: the triangles under each fighter at full strength, thrown along the light's half
+        // vector; drawn in the stage's light colour with the fighter's page.
+        let color = battle.assets.stage.shadow_color.unwrap();
+        for side in 0..2 {
+            let sh = &battle.shadows[side];
+            assert!(!sh.tris.is_empty() && sh.alpha == 1.0);
+            assert_eq!(sh.light, crate::obj_shadow::light_half(battle.light_dir));
+            let tris: Vec<_> = frame
+                .shadows
+                .iter()
+                .filter(|t| t.texture == Some(pages[side]))
+                .collect();
+            assert!(!tris.is_empty());
+            assert!(
+                tris.iter()
+                    .all(|t| t.vertices.iter().all(|v| v.rgba == color))
+            );
+            // The page: the silhouette inside the border.
+            let (_, page) = frame
+                .texture_updates
+                .iter()
+                .find(|u| u.0 == pages[side])
+                .unwrap();
+            let px = |x: usize, y: usize| page.pixels[(y * 256 + x) * 4 + 3];
+            let shown = page.pixels.chunks_exact(4).filter(|p| p[3] != 0).count();
+            assert!((1000..20000).contains(&shown), "{shown}");
+            assert!(
+                (0..256)
+                    .all(|i| px(i, 0) == 0 && px(0, i) == 0 && px(i, 255) == 0 && px(255, i) == 0)
+            );
+        }
+        // The strength fades from 20 above the ground to nothing at 50.
+        let obj = &battle.roster.chars[0].obj;
+        let b = obj.bounds(&side_data(&battle.assets.fighters[0]).obj);
+        let raised = |dy: f32| bt3_data::stage_col::ColBox {
+            min: [b.min[0], b.min[1] - dy, b.min[2]],
+            max: [b.max[0], b.max[1] - dy, b.max[2]],
+        };
+        let col = &battle.assets.collision;
+        let (tris, alpha) = col.shadow_collect(obj.area, &raised(35.0), 0x80, 0);
+        assert!(!tris.is_empty() && (alpha - 0.5).abs() < 0.05, "{alpha}");
+        let (tris, alpha) = col.shadow_collect(obj.area, &raised(60.0), 0x80, 0);
+        assert!(tris.is_empty() && alpha == 0.0);
+        // Without the shadow flag nothing is drawn.
+        battle.roster.chars[0].obj.flags &= !0x1000_0000;
+        let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert!(frame.shadows.iter().all(|t| t.texture == Some(pages[1])));
     }
 
     #[test]

@@ -80,6 +80,7 @@ mod mcflow;
 mod menu_res;
 mod model_draw;
 mod movie;
+mod obj_shadow;
 mod post;
 mod post_draw;
 mod rng;
@@ -242,6 +243,10 @@ struct Game {
     effects: Vec<eft::EffectTri>,
     /// What `StgFx_DrawPre` draws between the stage and the fighters (the back tints).
     under_effects: Vec<eft::EffectTri>,
+    /// The fighters' ground shadows, after the fighters.
+    shadow_effects: Vec<eft::EffectTri>,
+    /// Effect textures sampled point by point (TEX1 0: the shadow pages).
+    effect_point: Vec<usize>,
     /// `StgFx_DrawPost`'s redraws of the frame (the radial blur).
     post_ops: Vec<post::PostOp>,
     /// The effect textures whose texels changed this frame (the draw writes them again).
@@ -452,6 +457,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             effect_textures: Vec::new(),
             effects: Vec::new(),
             under_effects: Vec::new(),
+            shadow_effects: Vec::new(),
+            effect_point: Vec::new(),
             post_ops: Vec::new(),
             effect_updates: Vec::new(),
             hud_textures: Vec::new(),
@@ -1093,6 +1100,7 @@ fn run_frames(
                 game.stage_batches = frame.stage;
                 game.effects = frame.effects;
                 game.under_effects = frame.under;
+                game.shadow_effects = frame.shadows;
                 game.post_ops = frame.post;
                 game.effect_updates.clear();
                 for (i, t) in frame.texture_updates {
@@ -1154,6 +1162,7 @@ fn leave_battle(
     game.stage_batches.clear();
     game.effects.clear();
     game.under_effects.clear();
+    game.shadow_effects.clear();
     game.post_ops.clear();
     game.hud_prims.clear();
     game.hud_layer = None;
@@ -1208,6 +1217,7 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
     game.stage_batches.clear();
     game.effects.clear();
     game.under_effects.clear();
+    game.shadow_effects.clear();
     game.post_ops.clear();
     game.hud_prims.clear();
     game.hud_layer = None;
@@ -1244,6 +1254,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     game.stage_textures = assets.stage_textures.clone();
     game.stage_rev = assets.stage_rev;
     game.effect_textures = assets.effect_textures.clone();
+    game.effect_point = assets.shadow_pages.to_vec();
     game.hud_textures = assets.hud_textures.clone();
     game.hud_clamp_from = assets.menu_sheet.base;
     let mut battle = battle::Battle::new(assets);

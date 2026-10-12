@@ -265,6 +265,41 @@ fn draw_strip(
     }
 }
 
+/// Program 6's vertex loop (the ground shadows): separate triangles (position, RGBA, S / T / 1) sent as one strip
+/// whose joining triangles are not drawn, so each triangle is drawn whole, clipped into a fan, or dropped when it
+/// lies outside one plane, as program 4 draws a strip's.
+pub(crate) fn draw_triangles(
+    tris: &[[([f32; 3], [f32; 4], [f32; 3]); 3]],
+    view: &View,
+) -> Vec<StageScreenVertex> {
+    let mut out = Vec::new();
+    for tri in tris {
+        let v = tri.map(|(p, rgba, stq)| {
+            let pos = [p[0], p[1], p[2], 1.0];
+            let s = apply(&view.world2screen, pos);
+            let c = apply(&view.world2clip, pos);
+            let q = 1.0 / s[3];
+            let rgba = rgba.map(f32::trunc);
+            let screen = StageScreenVertex {
+                position: [
+                    (s[0] * q * 16.0).trunc() / 16.0 - OFFSET_X,
+                    (s[1] * q * 16.0).trunc() / 16.0 - OFFSET_Y,
+                    (s[2] * q).trunc(),
+                ],
+                stq: stq.map(|t| t * q),
+                rgba,
+            };
+            (ClipVertex { clip: c, rgba, stq }, screen, clip_flags(c))
+        });
+        if v.iter().all(|v| v.2 == 0) {
+            out.extend(v.map(|v| v.1));
+        } else if v[0].2 & v[1].2 & v[2].2 == 0 {
+            clip_triangle([v[0].0, v[1].0, v[2].0], view, &mut out);
+        }
+    }
+    out
+}
+
 /// The VU `clip` flags of a vertex: bit per plane x+, x-, y+, y-, z+, z- (outside |w|).
 fn clip_flags(c: [f32; 4]) -> u32 {
     let w = c[3].abs();
