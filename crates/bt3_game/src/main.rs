@@ -1123,9 +1123,11 @@ fn into_screen(quads: Vec<loading::Quad>) -> Vec<ScreenQuad> {
     quads.into_iter().map(ScreenQuad::from).collect()
 }
 
+/// Stops a player. Its entity may be gone already: one-shot players (`PlaybackSettings::DESPAWN`) despawn themselves
+/// when their sound ends.
 fn stop_player(player: &mut Option<Player>, commands: &mut Commands) {
     if let Some(player) = player.take() {
-        commands.entity(player.entity).despawn();
+        commands.entity(player.entity).try_despawn();
     }
 }
 

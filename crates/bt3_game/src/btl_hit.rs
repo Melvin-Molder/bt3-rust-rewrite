@@ -431,7 +431,8 @@ fn hit_no(me: &Chr) -> i32 {
     }
 }
 
-/// `BtlHit_GetVoiceKind`.
+/// `BtlHit_GetVoiceKind`: the voice a hit reaction plays (`BtlChar_PlayVoice`; the hit voices are not ported yet).
+#[allow(dead_code)]
 pub(crate) fn voice_kind(reaction: i32) -> i32 {
     match reaction {
         5..=10 | 29 | 30 | 35 | 36 | 42 | 47 | 48 => 1,

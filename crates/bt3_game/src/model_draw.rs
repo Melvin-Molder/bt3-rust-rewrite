@@ -424,6 +424,15 @@ pub fn sync_effects(
     }
 }
 
+/// Bevy's mesh allocator skips a mesh without vertices but still copies its data, logging a "use-after-free" error
+/// each frame; an empty batch is given one degenerate triangle (three equal points, nothing drawn) instead.
+fn non_empty<T: Copy + Default>(mut v: Vec<T>) -> Vec<T> {
+    if v.is_empty() {
+        v = vec![T::default(); 3];
+    }
+    v
+}
+
 fn write_effect_mesh(mesh: &mut Mesh, tris: &[&EffectTri]) {
     let vertices = || tris.iter().flat_map(|t| t.vertices.iter());
     let positions: Vec<[f32; 3]> = vertices().map(|v| screen_position(v.position)).collect();
@@ -431,6 +440,7 @@ fn write_effect_mesh(mesh: &mut Mesh, tris: &[&EffectTri]) {
         .map(|v| [v.stq[0], v.stq[1], v.stq[2], 0.0])
         .collect();
     let colors: Vec<[f32; 4]> = vertices().map(|v| v.rgba.map(f32::from)).collect();
+    let (positions, stq, colors) = (non_empty(positions), non_empty(stq), non_empty(colors));
     let count = positions.len() as u32;
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, stq);
@@ -687,6 +697,7 @@ fn write_stage_mesh(mesh: &mut Mesh, batch: &StageBatch) {
         .map(|v| [v.stq[0], v.stq[1], v.stq[2], 0.0])
         .collect();
     let colors: Vec<[f32; 4]> = batch.vertices.iter().map(|v| v.rgba).collect();
+    let (positions, stq, colors) = (non_empty(positions), non_empty(stq), non_empty(colors));
     let count = positions.len() as u32;
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, stq);
@@ -919,6 +930,7 @@ fn write_hud_mesh(mesh: &mut Mesh, prim: &HudPrim) {
         .map(|v| [v.mask_uv[0], v.mask_uv[1], 0.0, 0.0])
         .collect();
     let color = prim.rgba.map(f32::from);
+    let (positions, uvs, masks) = (non_empty(positions), non_empty(uvs), non_empty(masks));
     let count = positions.len() as u32;
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -1049,6 +1061,7 @@ fn write_batch_mesh(mesh: &mut Mesh, batch: &ModelBatch) {
         .iter()
         .map(|v| [v.uq, 0.0, v.stq[2], 1.0])
         .collect();
+    let (positions, uvs, colors) = (non_empty(positions), non_empty(uvs), non_empty(colors));
     let count = positions.len() as u32;
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);

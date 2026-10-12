@@ -751,14 +751,6 @@ impl Input {
         }
     }
 
-    /// `BtlInput_TestFrameBit`: whether action input `bit` was queried this frame with `want`.
-    pub(crate) fn test_frame_bit(&self, bit: u32, set: bool) -> bool {
-        let byte = (bit >> 3) as usize;
-        self.frame_bits
-            .get(usize::from(set) + byte * 2)
-            .is_some_and(|b| b & (1 << (bit & 7)) != 0)
-    }
-
     /// `BtlInput_TestAction`: records the query, tests action input `id`, and gives the result when `want`, its
     /// negation otherwise. `facing_rel_cam` is `BtlAct_GetFacingRelCam` (heading minus the camera yaw).
     pub(crate) fn test_action(
@@ -1022,7 +1014,8 @@ mod tests {
             frame(&mut input, 0);
             assert_eq!(input.test_action(&mut flags, 0.0, 2, true), n == 3);
         }
-        assert!(input.test_frame_bit(2, true) && !input.test_frame_bit(2, false));
+        // BtlInput_SetFrameBit: the query is recorded in the "wanted true" byte of bit 2.
+        assert!(input.frame_bits[1] & 4 != 0 && input.frame_bits[0] & 4 == 0);
     }
 
     #[test]

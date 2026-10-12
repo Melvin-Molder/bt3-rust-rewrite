@@ -103,15 +103,21 @@ pub(crate) struct Arg {
     /// `kind` / `level` of the request: `BtlKiBlast_GetCurrentKind`, 0..12.
     pub kind: i32,
     pub kind_type: i8,
+    /// `unk1B`: ki blast record byte 3 (the hit record's `unk4`; not read yet).
+    #[allow(dead_code)]
     pub unk1b: u8,
     pub life: i32,
     pub speed: f32,
     pub turn: f32,
     pub radius: f32,
+    /// `unk2C`: ki blast record +0x2C (not read yet).
+    #[allow(dead_code)]
     pub unk2c: f32,
     /// `size`: 0..3, the record's clash level.
     pub level: i32,
     pub can_hit: bool,
+    /// `unk3C`: bit 0x20 of the ki blast record's flags (not read yet).
+    #[allow(dead_code)]
     pub unk3c: i32,
     /// `unk41`: the motion's fire events (`BtlObjAnim_QueryEvent(obj, 4, 0, 3)`), the hit-time damage divisor.
     pub hits: i32,
