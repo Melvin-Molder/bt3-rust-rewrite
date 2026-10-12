@@ -323,6 +323,8 @@ pub(crate) struct Scene {
     pub spdlines: crate::eft_spdline::SpdLines,
     /// The vanish lines (`gEftShotFx`, layer 3; kept through a reset).
     pub shotfx: crate::eft_shotfx::ShotFx,
+    /// The impacts (`gEftImpactList`, layer 3).
+    pub impacts: crate::eft_impact::Impacts,
     /// The stage effects of layer 0.
     pub stage: crate::stage_fx::StageFx,
 }
@@ -1031,10 +1033,7 @@ impl Scene {
                 }
             }
         }
-        // The ground dust (BtlScene_IsTimeStopped: paused); the stage effects of layer 0 in their table's order.
-        let dust_chars = std::array::from_fn(|i| crate::btl_mgr::dust_chr(&w.chars[i], w.data[i]));
-        self.gdust
-            .update(w.paused, Some(&dust_chars), w.libc, w.vu0);
+        // Layer 0: the stage effects in their table's order.
         self.stage.update(w.chars, w.data, w.paused, w.libc, w.vu0);
         // Layer 1: the technique effects.
         self.tech.update(
@@ -1086,7 +1085,11 @@ impl Scene {
                 }
             }
         }
-        // Layer 3: the speed lines, the vanish lines, the struggle, the discs, the blast objects, then the particle modules.
+        // Layer 3 (`gEftLayer3Classes`): the ground dust (BtlScene_IsTimeStopped: paused), the speed lines, the
+        // vanish lines, the struggle, the discs, the impacts, the blast objects, then the particle modules.
+        let dust_chars = std::array::from_fn(|i| crate::btl_mgr::dust_chr(&w.chars[i], w.data[i]));
+        self.gdust
+            .update(w.paused, Some(&dust_chars), w.libc, w.vu0);
         let spd = std::array::from_fn(|i| crate::eft_spdline::SpdChr {
             height: w.data[i].height(),
             moved: w.chars[i].pose.moved,
@@ -1112,10 +1115,34 @@ impl Scene {
         }
         self.tech
             .update_discs(w, &mut self.fx, &mut self.records, HIT_MAX);
+        // EftImpact_Update: what EftEmit_Spawn reads of each fighter, taken first.
+        let scale = [0, 1].map(|s| w.data[s].height() / 19.35);
+        let flags = [0, 1].map(|s| w.data[s].tables.params.chara_flags());
+        let node3 = [0, 1].map(|s| w.chars[s].obj.node_pos(3));
+        let impact_sets = w.env.impact;
+        self.impacts.update(
+            &mut self.fx,
+            impact_sets,
+            w.paused,
+            |chr, k, s| crate::eft::SpawnCtx {
+                chr,
+                set: &s.set,
+                assets: &s.assets,
+                set_ref: SetRef {
+                    side: chr,
+                    list: crate::eft_impact::FIRST_LIST + k,
+                },
+                char_scale: [scale[chr], scale[chr ^ 1]],
+                opp_chara_flags: flags[chr ^ 1],
+                opp_node3: node3[chr ^ 1],
+            },
+            w.libc,
+            w.vu0,
+        );
         self.tech
             .update_shots(w, &mut self.fx, &mut self.records, HIT_MAX);
         let fxw = FxWorld {
-            sets: std::array::from_fn(|s| w.data[s].fx_sets()),
+            sets: std::array::from_fn(|s| world_sets(w.data[s].fx_sets(), impact_sets)),
             any_frozen: stopped,
             stopped: [0, 1].map(|s| crate::btl_tech_fx::stopped(w, s)),
             // The update does not draw.
@@ -1134,8 +1161,7 @@ impl Scene {
             self.stage_pass(w.env, w.data, w.frame);
             self.fighter_pass(w);
         }
-        // BtlScene_PostUpdate: EftHit_UpdateResults, then layer 1's and layer 2's post-updates; the impacts are not
-        // ported.
+        // BtlScene_PostUpdate: EftHit_UpdateResults, then layer 1's, layer 2's and layer 3's post-updates.
         self.update_results();
         self.tech.post_update(w, &mut self.fx);
         for side in 0..2 {
@@ -1155,6 +1181,8 @@ impl Scene {
             }
         }
         self.tech.discs.post_update(w, &mut self.fx);
+        self.impacts
+            .post_update(&mut self.fx, impact_sets, w.paused);
         self.tech.post_update_shots(w, &mut self.fx);
         self.update_records(w);
         for (i, chr) in w.chars.iter_mut().enumerate() {
@@ -1941,6 +1969,17 @@ pub(crate) fn spawn_ctx<'s>(
         opp_chara_flags: w.data[opp].tables.params.chara_flags(),
         opp_node3: w.chars[opp].obj.node_pos(3),
     }
+}
+
+/// A side's emitter sets with the impacts' common sets after them.
+pub(crate) fn world_sets<'a>(
+    mut own: [Option<&'a SetAssets>; crate::eft::SET_LISTS],
+    common: &'a [crate::eft_impact::ImpactSet],
+) -> [Option<&'a SetAssets>; crate::eft::SET_LISTS] {
+    for (k, s) in common.iter().enumerate() {
+        own[crate::eft_impact::FIRST_LIST + k] = Some(&s.assets);
+    }
+    own
 }
 
 /// `EftKiBlast_EndTrail`: the ribbon emitters (group 17) restart.

@@ -314,8 +314,8 @@ fn hit_sound_line(level: i32, frame: u32) -> i32 {
 /// the fighter taking the blow (the attacker's opponent, or itself in a motion with flag 0x10; not when the other
 /// has flag 0x13B or the speaker is frozen); event 2's swing sound of the attack (not with flag 0x91, nor with
 /// 0x60 unless 0x5C); the object's sound events at its node 3. A shown weapon outside a rush sequence turns the
-/// impact sounds into 0x4D / 0x36; a visible fighter's camera shakes (5 for 0.1 s, 10 for 0.2 s). The impacts'
-/// effects are not drawn.
+/// impact sounds into 0x4D / 0x36; a visible fighter's camera shakes (5 for 0.1 s, 10 for 0.2 s). The sparks are
+/// `btl_fx::update_all`.
 pub(crate) fn fx_event_sounds(me: &mut Chr, opp: &mut Chr, data: &SideData, env: &Env, frame: u32) {
     let mut impact = None;
     if me.anim_test_attr(0x100) {
@@ -350,7 +350,7 @@ pub(crate) fn fx_event_sounds(me: &mut Chr, opp: &mut Chr, data: &SideData, env:
         }
     }
     // BtlFxObj_HandleFlagEvents: events 0x20 / 0x40 and bits 43 / 44 show and hide the weapons (object flags 0x20,
-    // 0x40); bit 42's effect is not ported.
+    // 0x40); bit 42's vanish lines start in `btl_mgr::movement_fx`.
     for (mask, set, bit) in [
         (0x20, true, 0x20),
         (0x40, false, 0x20),
@@ -410,7 +410,7 @@ pub(crate) fn has_weapon_out(me: &Chr, data: &SideData) -> bool {
 /// The sounds of `BtlFx_UpdateAfterHits` (`BtlChar_SpawnHitFx`, `BtlFx_SpawnFlashReq20`): a landed blow (effect
 /// bit 0x1B) by the attack's hit sound level (0x4D / 0x36 when a shown weapon strikes, unless attack flag
 /// 0x2000), a guarded one (0x1C) 4 / 5 or 0xC / 0xD, 0x21 and 0x22's 0x24, 0x24's 0x42, a guarding fighter's
-/// (0x20) 0x46. The hit effects themselves are not drawn.
+/// (0x20) 0x46. The sparks are `btl_fx::after_hits`.
 pub(crate) fn after_hit_sounds(me: &Chr, data: &SideData, env: &Env, frame: u32) {
     let odd = (frame % 2) as i32;
     let mut sound = -1;

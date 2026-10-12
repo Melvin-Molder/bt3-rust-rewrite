@@ -109,6 +109,16 @@ fn mathf_wrap(mut a: f32) -> f32 {
     a
 }
 
+/// `Mathf_Sin`: `sinf` of the wrapped angle.
+pub(crate) fn mathf_sin(angle: f32) -> f32 {
+    mathf_wrap(angle).sin()
+}
+
+/// `Mathf_Cos`: `Mathf_Sin(angle + pi / 2)`.
+pub(crate) fn mathf_cos(angle: f32) -> f32 {
+    mathf_sin(angle + PI_F / 2.0)
+}
+
 /// `Mathf_SinFast`: the VU0 polynomial x + c3 x^3 + c2 x^5 + c1 x^7 + c0 x^9 of the wrapped angle, summed in
 /// that order.
 pub(crate) fn sin_fast(c: &[f32; 4], angle: f32) -> f32 {

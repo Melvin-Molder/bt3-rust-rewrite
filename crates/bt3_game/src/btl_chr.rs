@@ -396,7 +396,8 @@ impl<'a> SideData<'a> {
         std::array::from_fn(|l| match l {
             0 | 1 => self.blast_assets[l],
             2..=4 => self.tech_packs[l].and_then(|p| p.assets.as_ref()),
-            _ => self.tech_packs[l - 5].and_then(|p| p.assets.as_ref()),
+            5 | 6 => self.tech_packs[l - 5].and_then(|p| p.assets.as_ref()),
+            _ => None,
         })
     }
 
@@ -452,6 +453,8 @@ pub(crate) struct Env<'a> {
     pub gate: InputGate,
     /// The executable's tables of the technique effects.
     pub fx: &'a crate::btl_tech_volley::FxTables,
+    /// The impacts' emitter sets of the common effect pack.
+    pub impact: &'a [crate::eft_impact::ImpactSet],
     /// `BattleSide_GetChangeAllowed` by player.
     pub change_allowed: [i32; 2],
     /// `BattleSide.members` (character, costume) by player, `memberCount` of them, and `switchEnabled`.

@@ -126,6 +126,9 @@ pub struct BattleAssets {
     pub(crate) ray_texture: Option<usize>,
     /// `gEftGndDust->tex`: the ground dust's texture set (common effect entry 0xB) among the effect textures.
     pub(crate) dust_textures: Vec<usize>,
+    /// `EftImpactMgr_Init`: the impacts' fourteen emitter sets of the common effect pack (empty when one does not
+    /// load).
+    pub(crate) impact_sets: Vec<crate::eft_impact::ImpactSet>,
     /// `gEftSpdLine->tex[0]` / `gEftShotFx->tex[0]`: the speed and vanish lines' texture (common effect entry 0x237)
     /// among the effect textures.
     pub(crate) spdline_texture: Option<usize>,
@@ -360,6 +363,7 @@ pub fn load(
         ray_texture: None,
         dust_textures: Vec::new(),
         spdline_texture: None,
+        impact_sets: Vec::new(),
         stage_pack12: None,
         stage_pack14: None,
         stage_pack11: None,
@@ -463,6 +467,22 @@ pub fn load(
         assets
             .effect_textures
             .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+    }
+    // EftImpactMgr_Init: EftEmit_LoadSet of the common entries.
+    let mut impact_sets = Vec::new();
+    for &e in &crate::eft_impact::SET_ENTRIES {
+        let Ok(set) = bt3_data::eft_pack::EmitSet::parse(&common_fx, e) else {
+            break;
+        };
+        let assets_of =
+            crate::eft::SetAssets::load(&set, &mut assets.effect_textures).map_err(error)?;
+        impact_sets.push(crate::eft_impact::ImpactSet {
+            set,
+            assets: assets_of,
+        });
+    }
+    if impact_sets.len() == crate::eft_impact::SET_ENTRIES.len() {
+        assets.impact_sets = impact_sets;
     }
     assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
     assets.stage_pack14 = pack14.map(|t| assets.push_effect_textures(t));
@@ -1216,6 +1236,7 @@ impl BattleAssets {
             seq_state,
             gate,
             fx: &self.fx_tables,
+            impact: &self.impact_sets,
             change_allowed: self.change_allowed,
             team: self.team,
             team_count: self.team_count,
@@ -2360,12 +2381,10 @@ impl Battle {
             let mut ot = OrderTable::new();
             let fxw = FxWorld {
                 sets: std::array::from_fn(|s| {
-                    let f = &self.assets.fighters[s];
-                    std::array::from_fn(|l| match l {
-                        0 | 1 => f.blast_assets[l].as_ref(),
-                        2..=4 => f.tech_packs[l].as_ref().and_then(|p| p.assets.as_ref()),
-                        _ => f.tech_packs[l - 5].as_ref().and_then(|p| p.assets.as_ref()),
-                    })
+                    crate::btl_blast::world_sets(
+                        side_data(&self.assets.fighters[s]).fx_sets(),
+                        &self.assets.impact_sets,
+                    )
                 }),
                 any_frozen: self.roster.chars.iter().any(|c| c.is_frozen()),
                 // Drawing does not test it.
@@ -3262,6 +3281,68 @@ mod tests {
         assert!((1340..=1360).contains(&frames), "{frames}");
     }
 
+    /// The particle objects the impacts' common sets started.
+    fn impact_objects(fx: &crate::eft::Modules) -> usize {
+        (0..2)
+            .flat_map(|side| {
+                (0..crate::eft_impact::SET_ENTRIES.len()).map(move |k| crate::eft::SetRef {
+                    side,
+                    list: crate::eft_impact::FIRST_LIST + k,
+                })
+            })
+            .map(|r| fx.counts(Some(r)).iter().sum::<usize>())
+            .sum()
+    }
+
+    #[test]
+    fn real_clash_flash_sparks_twice_and_shakes_the_cameras() {
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..10 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        // The fourteen emitter sets of the common pack load.
+        assert_eq!(battle.assets.impact_sets.len(), 14);
+        let data = [
+            side_data(&battle.assets.fighters[0]),
+            side_data(&battle.assets.fighters[1]),
+        ];
+        let env = battle.assets.env(0, Default::default());
+        let roster = &mut battle.roster;
+        roster.chars[0].set_fx(0x2D);
+        let at = crate::btl_fx::after_hits(
+            &roster.chars[0],
+            &roster.chars[1],
+            &data[0],
+            &data[1],
+            &env,
+            &mut roster.scene.impacts,
+        );
+        // Kinds 6 and 0xD halfway between the fighters; the big flash shakes the cameras there.
+        assert_eq!(roster.scene.impacts.ids(0), [6, 0xD]);
+        let (a, b) = (
+            roster.chars[0].obj.node_pos(3),
+            roster.chars[1].obj.node_pos(3),
+        );
+        let mid = at.expect("no shake");
+        assert!((0..3).all(|k| (mid[k] - (a[k] + b[k]) * 0.5).abs() < 1e-3));
+        // A light impact event's spark is kind 0 or 0xF; request 0x2B's 0xD.
+        roster.chars[1].set_fx(0x2B);
+        crate::btl_fx::update_all(&roster.chars[1], &data[1], &env, &mut roster.scene.impacts);
+        assert_eq!(roster.scene.impacts.ids(0), [6, 0xD, 0xD]);
+        // They run their sets' emitters: particle objects appear, then the impacts end.
+        battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert!(impact_objects(&battle.roster.scene.fx) > 0);
+        for _ in 0..300 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        assert!(battle.roster.scene.impacts.ids(0).is_empty());
+    }
+
     #[test]
     fn real_speed_line_requests_raise_trails_and_the_screen_rays() {
         let Some(mut battle) = real_battle(&BattleSetup::default()) else {
@@ -3373,10 +3454,13 @@ mod tests {
         let mut min_gap = start_gap;
         let mut dust = 0;
         let (mut trails, mut streaks, mut speed_rays, mut vanish) = (0, 0, 0, 0);
+        let (mut sparks, mut spark_objects) = (std::collections::BTreeSet::new(), 0);
         for _ in 0..5400 {
             battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
             dust = dust.max(battle.roster.scene.gdust.fighter_parts());
             vanish = vanish.max(battle.roster.scene.shotfx.count());
+            sparks.extend(battle.roster.scene.impacts.ids(0));
+            spark_objects = spark_objects.max(impact_objects(&battle.roster.scene.fx));
             let (t, s) = battle.roster.scene.spdlines.counts();
             trails = trails.max(t);
             streaks = streaks.max(s);
@@ -3405,6 +3489,11 @@ mod tests {
         assert!(trails > 0 && streaks > 0, "{trails} {streaks} {speed_rays}");
         // The CPU's vanishes draw their lines.
         assert!(vanish > 0);
+        // Its blows raise hit sparks (the common pack's emitter sets), which start particle objects.
+        assert!(
+            !sparks.is_empty() && spark_objects > 0,
+            "{sparks:?} {spark_objects}"
+        );
         assert!(min_gap < start_gap - 10.0, "the CPU did not close in");
         assert!(
             battle.roster.chars[0].gauge.health < health,

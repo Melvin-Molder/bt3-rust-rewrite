@@ -72,6 +72,8 @@
 !/crates/bt3_game/src/eft.rs
 !/crates/bt3_game/src/eft_bill.rs
 !/crates/bt3_game/src/eft_gdust.rs
+!/crates/bt3_game/src/eft_impact.rs
+!/crates/bt3_game/src/btl_fx.rs
 !/crates/bt3_game/src/eft_geyser.rs
 !/crates/bt3_game/src/eft_water.rs
 !/crates/bt3_game/src/eft_weather.rs

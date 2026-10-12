@@ -17,33 +17,20 @@ const TRAILS: usize = 30;
 const STREAKS: usize = 40;
 
 const TWO_PI: f32 = 6.283_185_3;
-const PI_F: f32 = 3.141_592_7;
 
 /// `EFT_RANDF`: libc `rand()` scaled to 0..1.
 fn randf(libc: &mut LibcRandom) -> f32 {
     libc.rand() as f32 / 2_147_483_647.0
 }
 
-/// `Mathf_WrapAngle(angle, pi)`: raised by 2 pi while under 2 pi, then lowered into (-pi, pi].
-fn wrap(mut a: f32) -> f32 {
-    let range = PI_F + PI_F;
-    while a < range {
-        a += range;
-    }
-    while PI_F < a {
-        a -= range;
-    }
-    a
-}
-
 /// `Mathf_Sin`.
 fn sin(a: f32) -> f32 {
-    wrap(a).sin()
+    crate::btl_tech_volley::mathf_sin(a)
 }
 
 /// `Mathf_Cos`.
 fn cos(a: f32) -> f32 {
-    sin(a + PI_F / 2.0)
+    crate::btl_tech_volley::mathf_cos(a)
 }
 
 /// `Vec3_Length`.

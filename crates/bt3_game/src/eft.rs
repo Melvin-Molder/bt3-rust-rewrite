@@ -1000,8 +1000,9 @@ pub(crate) struct SetRef {
     pub list: usize,
 }
 
-/// `FxWorld::sets`' entries per side.
-pub(crate) const SET_LISTS: usize = 7;
+/// `FxWorld::sets`' entries per side: the side's own seven, then the impacts' common sets.
+pub(crate) const SET_LISTS: usize =
+    crate::eft_impact::FIRST_LIST + crate::eft_impact::SET_ENTRIES.len();
 
 /// The `SetRef::list` of technique slot `slot` (0..4).
 pub(crate) fn tech_list(slot: i32) -> usize {
@@ -1014,9 +1015,15 @@ pub(crate) fn tech_list(slot: i32) -> usize {
 
 impl SetRef {
     /// The kind of `BtlScene_IsEffectStopped` its objects are given (`EftEmit_Spawn`'s `srcKind`): 0 for the ki
-    /// blasts' sets (`EftKiBlast_SpawnParts`), 1 for the techniques' (`EftEmit_SpawnOwn`).
+    /// blasts' sets (`EftKiBlast_SpawnParts`), 1 for the techniques' (`EftEmit_SpawnOwn`), 2 for the impacts'.
     fn stop_kind(self) -> u8 {
-        if self.list < 2 { 0 } else { 1 }
+        if self.list < 2 {
+            0
+        } else if self.list < crate::eft_impact::FIRST_LIST {
+            1
+        } else {
+            2
+        }
     }
 }
 
@@ -1467,11 +1474,12 @@ pub(crate) struct FxWorld<'a> {
 
 impl FxWorld<'_> {
     /// `BtlScene_IsEffectStopped(chr, kind)` of an object of the set `set`: kind 0 any fighter stopped, kind 1 its
-    /// own.
+    /// own, kind 2 the pause.
     fn effect_stopped(&self, set: SetRef, chr: usize) -> bool {
         match set.stop_kind() {
             0 => self.any_frozen,
-            _ => self.stopped[chr],
+            1 => self.stopped[chr],
+            _ => self.paused,
         }
     }
 }
@@ -2134,6 +2142,17 @@ impl Nodes {
         self.flags |= 1 << (slot * 2);
         self.fixed |= 1 << (slot * 2);
         self.n[slot][0].1 = node;
+    }
+
+    /// `EftEmit_SetNode` with a position (node < 0).
+    pub(crate) fn set_pos(&mut self, slot: usize, pos: V3) {
+        self.flags |= 1 << (slot * 2);
+        self.n[slot][0].0 = pos;
+    }
+
+    /// `EftEmit_SetNodePos`.
+    pub(crate) fn set_slot_pos(&mut self, slot: usize, pos: V3) {
+        self.n[slot][0].0 = pos;
     }
 
     /// `EftEmit_RefreshFixedNodes`.

@@ -350,6 +350,7 @@ impl Roster {
                 self.frame,
             );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
+            crate::btl_fx::update_all(me, data[i], env, &mut self.scene.impacts);
             self.scene.spawn_held_disc(me, data[i]);
             movement_fx(me, opp, data[i], &mut self.scene, libc);
             ground_fx(me, data[i], env, &mut self.scene.gdust, libc, vu0);
@@ -378,10 +379,19 @@ impl Roster {
                 chr.status.target = -1;
             }
         }
-        for (i, chr) in self.chars.iter_mut().enumerate() {
-            if !chr.is_frozen() {
-                chr.flags.set_stage(10);
-                crate::btl_snd::after_hit_sounds(chr, data[i], env, frame);
+        for i in 0..2 {
+            let (me, opp) = split(&mut self.chars, i);
+            if me.is_frozen() {
+                continue;
+            }
+            me.flags.set_stage(10);
+            crate::btl_snd::after_hit_sounds(me, data[i], env, frame);
+            let impacts = &mut self.scene.impacts;
+            if let Some(pos) =
+                crate::btl_fx::after_hits(me, opp, data[i], data[i ^ 1], env, impacts)
+            {
+                let [a, b] = &mut self.chars;
+                crate::chr_cam::shake_cams_near([a, b], pos, 200.0, 1500.0, 6.0, 0.2);
             }
         }
         let powers = self.scene.struggle.as_ref().map(|s| s.powers());
@@ -563,6 +573,7 @@ impl Roster {
             }
             me.obj_to_pose();
             cam_update(me, opp, data[i], data[i ^ 1], env, libc);
+            crate::btl_fx::post_scene(me, data[i], env, &mut self.scene.impacts);
             let g = &mut me.gauge;
             if g.health < 10000 {
                 g.low_health = true;
