@@ -149,6 +149,7 @@
 !/crates/bt3_game/src/gs_depth_clut.wgsl
 !/crates/bt3_game/src/stg_depth.rs
 !/crates/bt3_game/src/stg_haze.rs
+!/crates/bt3_game/src/stg_pan_blur.rs
 !/crates/bt3_game/src/battle_seq.rs
 !/crates/bt3_game/src/btl_flags.rs
 !/crates/bt3_game/src/btl_act.rs

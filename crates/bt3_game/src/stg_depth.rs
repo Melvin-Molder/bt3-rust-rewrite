@@ -199,6 +199,66 @@ impl DepthTints {
     }
 }
 
+/// The depth fog filter (`StgFog_*`, src/battle/stg_ambient.c), on stages whose fog record (section +0x50) has bit
+/// 0 (feature 3): the depth byte through its CLUT (black, alpha curve * 128; with `clear_last` the sky's byte 0xFF
+/// clear) into the frame's alpha, the frame copied at half size into a work buffer and stretched back over itself
+/// blended by that alpha: a blur that grows with depth.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Fog {
+    on: bool,
+    mask: Box<[u8; 256]>,
+}
+
+impl Fog {
+    /// `StgFog_SetParams` (`StgFx_Reset`): the record's three keys and its bit 1 (clear the sky), or keys (0, 0)
+    /// (222, 23) (255, 255) with the sky clear.
+    pub(crate) fn new(param: Option<&[u8; 10]>) -> Self {
+        let (on, clear_last, keys) = match param {
+            None => (false, true, [[0.0, 0.0], [222.0, 23.0], [255.0, 255.0]]),
+            Some(p) => {
+                let flags = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+                let k = |i: usize| [f32::from(p[4 + i * 2]), f32::from(p[5 + i * 2])];
+                (flags & 1 != 0, flags & 2 != 0, [k(0), k(1), k(2)])
+            }
+        };
+        let table = Curve { keys }.build();
+        let mut mask: [u8; 256] = std::array::from_fn(|i| (table[i] * 128.0) as u32 as u8);
+        if clear_last {
+            mask[0xFF] = 0;
+        }
+        Self {
+            on,
+            mask: Box::new(mask),
+        }
+    }
+
+    /// `StgFog_Draw` when the stage turns it on: the half-size copy and the stretch back, masked.
+    pub(crate) fn draw(&self) -> Vec<crate::post::PostOp> {
+        use crate::post::{PostBuf, PostOp};
+        if !self.on {
+            return Vec::new();
+        }
+        let copy = PostOp::sprite(
+            PostBuf::Frame,
+            PostBuf::Work(0),
+            false,
+            [0.0, 0.0, 256.0, 224.0],
+            [0.0, 0.0, 512.0, 448.0],
+            [0x80; 4],
+        );
+        let mut back = PostOp::sprite(
+            PostBuf::Work(0),
+            PostBuf::Frame,
+            true,
+            [0.0, 0.0, 512.0, 448.0],
+            [0.5, 0.5, 256.5, 224.5],
+            [0x80; 4],
+        );
+        back.mask = Some(self.mask.clone());
+        vec![copy, back]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +304,20 @@ mod tests {
         let tints = DepthTints::new(&[p]);
         assert!(tints.draw(false).is_some_and(|d| d.additive));
         assert!(tints.draw(true).is_none());
+    }
+
+    #[test]
+    fn the_fog_blurs_by_its_curve_and_spares_the_sky() {
+        // Stage 0's record: on, keys (0, 0) (0x97, 0x27) (0xFF, 0xFF), the sky clear.
+        let p = [3, 0, 0, 0, 0, 0, 0x97, 0x27, 0xFF, 0xFF];
+        let fog = Fog::new(Some(&p));
+        let ops = fog.draw();
+        assert_eq!(ops.len(), 2);
+        let mask = ops[1].mask.as_ref().unwrap();
+        assert_eq!(mask[0], 0);
+        assert_eq!(mask[0x97], (0x27 as f32 / 255.0 * 128.0) as u8);
+        assert_eq!(mask[0xFF], 0);
+        assert_eq!(mask[0xFE], 127);
+        assert!(Fog::new(None).draw().is_empty());
     }
 }

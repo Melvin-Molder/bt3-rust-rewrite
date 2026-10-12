@@ -113,6 +113,7 @@ mod stg_blur;
 mod stg_depth;
 mod stg_haze;
 mod stg_obj;
+mod stg_pan_blur;
 mod stg_rigid;
 mod stg_scroll;
 mod stg_tint;
@@ -403,6 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut skip_to_menu = false;
     let mut skip_to_battle = false;
     let mut battle_stage = 0;
+    let mut seed = None;
     let mut battle_mode = (0, 0);
     let mut memcard_dir = PathBuf::from("memcard");
     let mut battle_split = false;
@@ -431,6 +433,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("--stage requires a stage of 0 to 34")?;
             skip_to_title = true;
             skip_to_battle = true;
+        } else if argument == "--seed" {
+            // The hardware timer's value Rand_Init seeds from, for runs that repeat.
+            seed = Some(
+                arguments
+                    .next()
+                    .and_then(|value| value.to_string_lossy().parse::<u32>().ok())
+                    .ok_or("--seed requires a number")?,
+            );
         } else if argument == "--shot-at" {
             shot_at = arguments
                 .next()
@@ -473,7 +483,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Rand_Init seeds from the hardware timer, so the original's picks also differ on every boot.
-    let timer = SystemTime::now().duration_since(UNIX_EPOCH)?.subsec_nanos();
+    let timer = match seed {
+        Some(seed) => seed,
+        None => SystemTime::now().duration_since(UNIX_EPOCH)?.subsec_nanos(),
+    };
     let (game_random, libc_random) = rng::init_from_timer(timer);
     let mut image = Iso9660::open(&image_path)?;
     // Save_Init's defaults need the item table (common file 4); McFlow_Init's icons are common file base + 0x1D.

@@ -1800,6 +1800,10 @@ pub struct Battle {
     pub(crate) depth_tints: crate::stg_depth::DepthTints,
     /// `gStgHaze`: the stage's depth haze.
     pub(crate) haze: crate::stg_haze::Haze,
+    /// `gStgFog`: the stage's depth fog filter.
+    pub(crate) fog: crate::stg_depth::Fog,
+    /// `gStgPanBlur`: the pan blur of each view.
+    pub(crate) pan_blur: crate::stg_pan_blur::PanBlur,
     pub(crate) hud: Hud,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
     pub(crate) fade: Fade,
@@ -2142,6 +2146,7 @@ impl Battle {
         water_wobble.load_stage_color(assets.stage.water_color);
         let depth_tints = crate::stg_depth::DepthTints::new(&assets.stage.depth_tints);
         let haze = crate::stg_haze::Haze::new(assets.stage.haze.as_ref());
+        let fog = crate::stg_depth::Fog::new(assets.stage.fog.as_ref());
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -2191,6 +2196,8 @@ impl Battle {
             water_wobble,
             depth_tints,
             haze,
+            fog,
+            pan_blur: crate::stg_pan_blur::PanBlur::default(),
             hud,
             fade: Fade::start_in(1.0),
             roots,
@@ -2425,6 +2432,7 @@ impl Battle {
                             self.depth_tints =
                                 crate::stg_depth::DepthTints::new(&self.assets.stage.depth_tints);
                             self.haze = crate::stg_haze::Haze::new(self.assets.stage.haze.as_ref());
+                            self.fog = crate::stg_depth::Fog::new(self.assets.stage.fog.as_ref());
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -2881,6 +2889,7 @@ impl Battle {
             .load_stage_color(self.assets.stage.water_color);
         self.depth_tints = crate::stg_depth::DepthTints::new(&self.assets.stage.depth_tints);
         self.haze = crate::stg_haze::Haze::new(self.assets.stage.haze.as_ref());
+        self.fog = crate::stg_depth::Fog::new(self.assets.stage.fog.as_ref());
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         // BtlChar_ResetAll's BtlReplay_Rewind / BtlReplay_ResetViewer.
         self.replay.rewind();
@@ -3314,10 +3323,23 @@ impl Battle {
                     .is_some_and(|level| level < views[0].0.eye()[1]);
             self.depth_tints.draw(under_water)
         };
-        // The rest of StgFx_DrawPre, as post ops before the fighters: StgHaze_DrawAll on stages with feature 9
-        // (split screen's two views, else the view shown: view 0 under the demo camera), each view's strength by
-        // its fighter camera's height.
+        // The rest of StgFx_DrawPre, as post ops before the fighters: StgFog_Draw on stages with feature 3,
+        // StgPanBlur_Draw on stages with flag 8 (each view following its fighter camera), StgHaze_DrawAll on stages
+        // with feature 9 (split screen's two views, else the view shown: view 0 under the demo camera), each view's
+        // strength by its fighter camera's height.
         let mut pre = Vec::new();
+        if !self.loading {
+            pre.extend(self.fog.draw());
+            if self.assets.stage.stage_flags & 8 != 0 {
+                let cams = [0, 1].map(|s| {
+                    let cam = self.roster.chars[s].cam;
+                    view_matrix(cam.pos, cam.rot)
+                });
+                let split = views.len() == 2;
+                let paused = self.seq.paused;
+                pre.extend(self.pan_blur.draw(split, paused, [&cams[0], &cams[1]]));
+            }
+        }
         if !self.loading && self.haze.is_on() {
             let top = self.assets.stage.bounds.top;
             let split = views.len() == 2;
@@ -7930,6 +7952,35 @@ mod tests {
     }
 
     #[test]
+    fn real_stage_3_hazes_its_view() {
+        // Stage 3's haze record has bit 0: the view's half-height copy and the jittered strips back, masked.
+        let mut setup = BattleSetup::default();
+        setup.stage = 3;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(2);
+        let mut random = GameRandom::from_key(&[2]);
+        let f = battle.run_frame(
+            false,
+            [PadState::default(); 2],
+            0,
+            &mut libc,
+            &mut random,
+            None,
+            false,
+        );
+        let haze: Vec<_> = f
+            .pre
+            .iter()
+            .filter(|o| o.source == crate::post::PostBuf::Wide)
+            .collect();
+        assert_eq!(haze.len(), 1);
+        assert!(haze[0].mask.is_some() && !haze[0].tris.is_empty());
+    }
+
+    #[test]
     fn real_stages_tint_their_depth() {
         // Stage 0's air tint (section +0x40, flags 3) is added by its curve from byte 0x14 on, the sky (byte 0xFF)
         // at full strength; stage 16's tints are off.
@@ -7952,6 +8003,16 @@ mod tests {
                 false,
             );
             assert_eq!(f.depth_tint.is_some(), on, "{stage}");
+            // StgFx_DrawPre's ops: stage 0's fog (section +0x50 bit 0) blurs by its masked copy, stage 16's is
+            // off (flags 2); no haze on either.
+            assert_eq!(
+                f.pre
+                    .iter()
+                    .any(|o| o.mask.is_some() && o.source == crate::post::PostBuf::Work(0)),
+                on,
+                "{stage}"
+            );
+            assert!(!f.pre.iter().any(|o| o.source == crate::post::PostBuf::Wide));
             if let Some(d) = f.depth_tint {
                 assert!(d.additive);
                 assert_eq!(d.clut[0], [0, 0, 0, 0x80]);
