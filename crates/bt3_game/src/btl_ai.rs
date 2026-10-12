@@ -367,7 +367,7 @@ impl AiMgr {
         b[1] -= c.data[1].height() * 0.5;
         self.dist = length(sub(a, b));
         self.sight = 0;
-        if let Some(hit) = c.env.col.trace_segment(a, b) {
+        if let Some(hit) = c.env.col.trace_segment(a, b, c.env.broken()) {
             self.sight |= SIGHT_BLOCKED;
             if hit.obj != -1 {
                 self.sight |= SIGHT_BLOCKED_ID;
@@ -2060,7 +2060,12 @@ impl Ai<'_, '_, '_, '_> {
         if rad < length(self.w.mv.target) {
             self.w.mv.target = add(pos, scale3(dir, rad - length(pos)));
         }
-        if let Some(hit) = self.c.env.col.trace_segment(pos, self.w.mv.target) {
+        if let Some(hit) = self
+            .c
+            .env
+            .col
+            .trace_segment(pos, self.w.mv.target, self.c.env.broken())
+        {
             self.w.seq.flags |= ACT_BLOCKED;
             if hit.obj != -1 {
                 self.w.seq.flags |= ACT_BLOCKED_ID;
@@ -2074,7 +2079,13 @@ impl Ai<'_, '_, '_, '_> {
         }
         self.w.seq.flags &= !ACT_BLOCKED_AHEAD;
         ahead[1] = pos[1];
-        if self.c.env.col.trace_segment(pos, ahead).is_some() {
+        if self
+            .c
+            .env
+            .col
+            .trace_segment(pos, ahead, self.c.env.broken())
+            .is_some()
+        {
             self.w.seq.flags |= ACT_BLOCKED_AHEAD;
         }
     }
@@ -2122,7 +2133,7 @@ impl Ai<'_, '_, '_, '_> {
                     .c
                     .env
                     .col
-                    .trace_segment(pos, p3(&self.w.mv.path[n - 2]))
+                    .trace_segment(pos, p3(&self.w.mv.path[n - 2]), self.c.env.broken())
                     .is_none();
             if skip || self.move_is_near(p3(&self.w.mv.path[n - 1]), true) {
                 self.w.mv.path.pop();

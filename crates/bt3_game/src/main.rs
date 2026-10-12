@@ -57,6 +57,7 @@ mod save;
 mod se;
 mod sound;
 mod stage_draw;
+mod stg_obj;
 mod title;
 mod windows;
 

@@ -178,6 +178,28 @@ pub(crate) fn is_cut_active(me: &Chr) -> bool {
     me.cut.timer > 0 || me.cut.flags & F_HOLD != 0 || me.flags.test(0xDB)
 }
 
+/// `BtlCharApi_ShakeCamsNear`: every fighter camera (not frozen) whose eye is within `far` of `pos`, the strength
+/// and time scaled by closeness (full at `near`).
+pub(crate) fn shake_cams_near(
+    chars: [&mut Chr; 2],
+    pos: [f32; 3],
+    near: f32,
+    far: f32,
+    strength: f32,
+    time: f32,
+) {
+    for chr in chars {
+        if chr.is_frozen() {
+            continue;
+        }
+        let dist = length(sub(chr.cam.eye, pos));
+        if dist < far {
+            let rate = (1.0 - (dist - near) / (far - near)).clamp(0.0, 1.0);
+            add_shake(chr, strength * rate, time * rate);
+        }
+    }
+}
+
 /// `ChrCam_AddShake` (while the side's shake option is on).
 pub(crate) fn add_shake(me: &mut Chr, strength: f32, time: f32) {
     if me.cam.shake_on {

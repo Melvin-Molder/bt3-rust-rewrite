@@ -7034,16 +7034,8 @@ impl Ctx<'_, '_> {
     /// `BtlCharApi_ShakeCamsNear`: every fighter camera (not frozen) whose eye is within `far` of `pos`, the
     /// strength and time scaled by closeness (full at `near`).
     fn shake_cams_near(&mut self, pos: [f32; 3], near: f32, far: f32, strength: f32, time: f32) {
-        for chr in [&mut *self.me, &mut *self.opp] {
-            if chr.is_frozen() {
-                continue;
-            }
-            let dist = length(sub(chr.cam.eye, pos));
-            if dist < far {
-                let rate = (1.0 - (dist - near) / (far - near)).clamp(0.0, 1.0);
-                crate::chr_cam::add_shake(chr, strength * rate, time * rate);
-            }
-        }
+        let chars = [&mut *self.me, &mut *self.opp];
+        crate::chr_cam::shake_cams_near(chars, pos, near, far, strength, time);
     }
 
     /// `BtlSuper_RequestCut`: the technique's camera cut, 0 / 1 / 2 of the character's table by class.

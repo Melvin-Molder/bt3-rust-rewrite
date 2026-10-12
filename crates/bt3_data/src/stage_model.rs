@@ -2,7 +2,7 @@
 //! `BtlStage_Relocate` lays it out and `StgModel_Cull` / `StgModel_Draw` read it. Every offset in the object is
 //! in words from its start; its texture file counts its offsets from there too.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io;
 
 use crate::model::walk_vif;
@@ -47,14 +47,40 @@ pub struct StageMaterial {
     pub cur: u16,
 }
 
+/// `StgPart`: a group of meshes (by visibility byte) with its runtime flag bit 0 (drawn by the culling tree), its
+/// bounding sphere and its transform node (byte offset, 0 for none).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StagePart {
+    pub vis: Vec<u16>,
+    pub on: bool,
+    pub radius: f32,
+    pub center: [f32; 3],
+    pub node: usize,
+}
+
+/// `StgObj` of the model: a destructible object's parts (0, 2, 4 the whole model, 1, 3, 5 the broken one; indices
+/// into `parts`), its debris pieces and the length of their animation (`animEnd`, 0x94 frames when 0).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StageObject {
+    pub parts: [Option<usize>; 6],
+    pub pieces: Vec<usize>,
+    pub anim_end: i32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StageModel {
     pub groups: Vec<Vec<StageMaterial>>,
-    /// Per visibility byte: whether a part that holds the mesh can be drawn after `BtlStage_Reset` (the
-    /// never-culled list, or a part of the culling tree with flag bit 0).
+    /// Per visibility byte: whether a part that holds the mesh can be drawn (the never-culled list, or a part of
+    /// the culling tree with flag bit 0); `refresh_drawable` rebuilds it from the parts' flags.
     pub drawable: Vec<bool>,
     /// Byte offset of the texture file header from the stage object (`texOfs`).
     pub texture_header: usize,
+    pub parts: Vec<StagePart>,
+    pub objects: Vec<StageObject>,
+    /// The meshes of the never-culled list.
+    always: Vec<u16>,
+    /// The parts of the culling tree.
+    tree: Vec<usize>,
 }
 
 impl StageModel {
@@ -112,12 +138,132 @@ impl StageModel {
             }
             groups.push(materials);
         }
-        let drawable = drawable_meshes(&r)?;
-        Ok(Self {
+        let mut parts = Vec::new();
+        let mut index = HashMap::new();
+        let mut part_at = |part: usize| -> io::Result<usize> {
+            if let Some(&i) = index.get(&part) {
+                return Ok(i);
+            }
+            let list = r.ptr(part + 4)?;
+            let vis = (0..usize::from(r.u16(part)?))
+                .map(|j| r.u16(r.ptr(list + j * 4)?))
+                .collect::<io::Result<_>>()?;
+            parts.push(StagePart {
+                vis,
+                on: r.u16(part + 2)? & 1 != 0,
+                radius: r.f32(part + 0xC)?,
+                center: [
+                    r.f32(part + 0x10)?,
+                    r.f32(part + 0x14)?,
+                    r.f32(part + 0x18)?,
+                ],
+                node: r.ptr(part + 8)?,
+            });
+            index.insert(part, parts.len() - 1);
+            Ok(parts.len() - 1)
+        };
+        let mut always = Vec::new();
+        if r.u32(0x20)? != 0 {
+            let list = r.ptr(0x24)?;
+            let items = r.ptr(list + 4)?;
+            for i in 0..r.u32(list)? as usize {
+                let part = items + i * 0x20;
+                let list = r.ptr(part + 4)?;
+                for j in 0..usize::from(r.u16(part)?) {
+                    always.push(r.u16(r.ptr(list + j * 4)?)?);
+                }
+            }
+        }
+        let mut tree = Vec::new();
+        let mut cells = vec![r.ptr(0x50)?];
+        while let Some(cell) = cells.pop() {
+            let list = r.ptr(cell + 0x3C)?;
+            for i in 0..r.u32(cell + 0x38)? as usize {
+                let entry = r.u32(list + i * 4)?;
+                if entry != 0 && entry != u32::MAX {
+                    let p = part_at(entry as usize * 4)?;
+                    if !tree.contains(&p) {
+                        tree.push(p);
+                    }
+                }
+            }
+            for c in 0..8 {
+                let child = r.u32(cell + 4 + c * 4)?;
+                if child != 0 {
+                    cells.push(child as usize * 4);
+                }
+            }
+        }
+        let objs = r.ptr(0x48)?;
+        let objects = (0..r.u32(0x44)? as usize)
+            .map(|i| {
+                let o = objs + i * 0x50;
+                let mut obj = StageObject {
+                    anim_end: r.u32(o + 0x2C)? as i32,
+                    ..StageObject::default()
+                };
+                for k in 0..6 {
+                    let part = r.ptr(o + 0xC + k * 4)?;
+                    if part != 0 {
+                        obj.parts[k] = Some(part_at(part)?);
+                    }
+                }
+                let pieces = r.ptr(o + 0x28)?;
+                for j in 0..r.u32(o + 0x24)? as usize {
+                    let piece = r.ptr(pieces + j * 4)?;
+                    obj.pieces.push(part_at(piece)?);
+                }
+                Ok(obj)
+            })
+            .collect::<io::Result<_>>()?;
+        let mut model = Self {
             groups,
-            drawable,
+            drawable: vec![false; r.u32(0x28)? as usize],
             texture_header: r.ptr(0x54)?,
-        })
+            parts,
+            objects,
+            always,
+            tree,
+        };
+        for i in 0..model.objects.len() {
+            model.set_broken(i, false);
+        }
+        model.refresh_drawable();
+        Ok(model)
+    }
+
+    /// `BtlStage_BreakObj` / `BtlStage_ResetObjs`' part flags: a broken object draws its broken model (parts 1, 3,
+    /// 5), a whole one its whole model (0, 2, 4).
+    pub fn set_broken(&mut self, obj: usize, broken: bool) {
+        let Some(o) = self.objects.get(obj) else {
+            return;
+        };
+        for (k, part) in o.parts.iter().enumerate() {
+            if let Some(&p) = part.as_ref() {
+                self.parts[p].on = (k % 2 == 1) == broken;
+            }
+        }
+    }
+
+    /// What `StgModel_Cull` can reach: the never-culled list whatever the flags, and the parts of the culling tree
+    /// with flag bit 0. Debris is only drawn while it falls.
+    pub fn refresh_drawable(&mut self) {
+        self.drawable.fill(false);
+        let mut mark = |vis: u16| {
+            if let Some(slot) = self.drawable.get_mut(usize::from(vis)) {
+                *slot = true;
+            }
+        };
+        for &vis in &self.always {
+            mark(vis);
+        }
+        for &p in &self.tree {
+            if self.parts[p].on {
+                for &vis in &self.parts[p].vis {
+                    mark(vis);
+                }
+            }
+        }
     }
 }
 
@@ -152,65 +298,6 @@ fn parse_chain(chain: &[u8]) -> io::Result<Vec<Vec<StageVertex>>> {
     Ok(strips)
 }
 
-/// `BtlStage_ResetObjs(0)` then what `StgModel_Cull` can reach: every object's whole-model parts (0, 2, 4) get
-/// flag bit 0 and its broken-model parts (1, 3, 5) lose it; the culling tree draws the parts with the bit, the
-/// first never-culled list is drawn whatever the flags. Debris is only drawn while it falls.
-fn drawable_meshes(r: &Reader) -> io::Result<Vec<bool>> {
-    let mut flagged = HashSet::new();
-    let mut cleared = HashSet::new();
-    let objs = r.ptr(0x48)?;
-    for i in 0..r.u32(0x44)? as usize {
-        for k in 0..6 {
-            let part = r.u32(objs + i * 0x50 + 0xC + k * 4)? as usize * 4;
-            if part != 0 {
-                if k % 2 == 0 {
-                    flagged.insert(part);
-                } else {
-                    cleared.insert(part);
-                }
-            }
-        }
-    }
-    let has_flag = |part: usize| -> io::Result<bool> {
-        Ok(flagged.contains(&part) || (!cleared.contains(&part) && r.u16(part + 2)? & 1 != 0))
-    };
-    let mut drawable = vec![false; r.u32(0x28)? as usize];
-    let mut mark = |part: usize| -> io::Result<()> {
-        let list = r.ptr(part + 4)?;
-        for j in 0..usize::from(r.u16(part)?) {
-            let vis = usize::from(r.u16(r.ptr(list + j * 4)?)?);
-            if let Some(slot) = drawable.get_mut(vis) {
-                *slot = true;
-            }
-        }
-        Ok(())
-    };
-    if r.u32(0x20)? != 0 {
-        let always = r.ptr(0x24)?;
-        let items = r.ptr(always + 4)?;
-        for i in 0..r.u32(always)? as usize {
-            mark(items + i * 0x20)?;
-        }
-    }
-    let mut cells = vec![r.ptr(0x50)?];
-    while let Some(cell) = cells.pop() {
-        let list = r.u32(cell + 0x3C)? as usize * 4;
-        for i in 0..r.u32(cell + 0x38)? as usize {
-            let entry = r.u32(list + i * 4)?;
-            if entry != 0 && entry != u32::MAX && has_flag(entry as usize * 4)? {
-                mark(entry as usize * 4)?;
-            }
-        }
-        for c in 0..8 {
-            let child = r.u32(cell + 4 + c * 4)?;
-            if child != 0 {
-                cells.push(child as usize * 4);
-            }
-        }
-    }
-    Ok(drawable)
-}
-
 struct Reader<'a>(&'a [u8]);
 
 impl Reader<'_> {
@@ -230,6 +317,10 @@ impl Reader<'_> {
             .get(o..o + 4)
             .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
             .ok_or_else(|| invalid_data("stage object is truncated"))
+    }
+
+    fn f32(&self, o: usize) -> io::Result<f32> {
+        Ok(f32::from_bits(self.u32(o)?))
     }
 
     /// A word offset turned into a byte offset.
@@ -267,6 +358,23 @@ mod tests {
             let model = StageModel::parse(object)
                 .unwrap_or_else(|e| panic!("stage file {file_id:#X}: {e}"));
             assert!(model.drawable.iter().any(|&d| d), "stage file {file_id:#X}");
+            // The model's objects have definitions in the stage data (which may list more); breaking them swaps
+            // meshes in or out.
+            let data = crate::stage::StageResource::parse(&file).unwrap();
+            assert!(
+                model.objects.len() <= data.object_count,
+                "stage file {file_id:#X}"
+            );
+            let mut broken = model.clone();
+            for i in 0..broken.objects.len() {
+                broken.set_broken(i, true);
+            }
+            broken.refresh_drawable();
+            assert_eq!(
+                broken.drawable != model.drawable,
+                !model.objects.is_empty(),
+                "stage file {file_id:#X}"
+            );
             let textures = TextureResource::parse_at(object, model.texture_header).unwrap();
             for (i, entry) in textures.entries.iter().enumerate() {
                 decode_sprite_texture(entry)

@@ -145,6 +145,19 @@ pub struct Ground {
     pub y: f32,
     pub nrm: [f32; 4],
     pub flags: u32,
+    /// The standing objects whose meshes the probe met (`gStgGroundResult.objMask`).
+    pub obj_mask: u64,
+}
+
+/// `StgColRec` filtering of `StgCol_QueryZone`: a whole object's mesh while it stands, its remains once it is
+/// broken (`broken` is the mask of the broken objects), the remains never in the objects-only mode.
+fn rec_in_force(rec: &ColRec, broken: u64, objects_only: bool) -> bool {
+    let is_broken = rec.obj < 64 && broken >> rec.obj & 1 != 0;
+    if rec.broken {
+        is_broken && !objects_only
+    } else {
+        !is_broken
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -277,31 +290,53 @@ impl StageCollision {
         self.find_zone(p).unwrap_or(0)
     }
 
-    /// `StgCol_QueryZone` with every object whole (`BtlStage_Reset`; nothing breaks yet): the zone's static mesh
-    /// and the whole objects' meshes, in that order.
+    /// `StgCol_QueryZone`: the zone's static mesh (not in the objects-only mode, `StgCol_SetModeObjects`), then
+    /// the object meshes in force (`broken`: the mask of the broken objects). Whether a callback reported a hit,
+    /// and the mask of the standing objects whose meshes did.
     pub fn query_zone(
         &self,
         zone: usize,
         b: &ColBox,
+        broken: u64,
+        objects_only: bool,
         cb: &mut dyn FnMut(&ColPoly, [[f32; 3]; 3]) -> bool,
-    ) -> bool {
+    ) -> (bool, u64) {
         let Some(z) = self.zones.get(zone) else {
-            return false;
+            return (false, 0);
         };
-        let mut hit = z.mesh.walk_box(b, cb);
-        for rec in z.recs.iter().filter(|r| !r.broken) {
-            hit |= rec.mesh.walk_box(b, cb);
+        let mut hit = !objects_only && z.mesh.walk_box(b, cb);
+        let mut mask = 0u64;
+        for rec in z
+            .recs
+            .iter()
+            .filter(|r| rec_in_force(r, broken, objects_only))
+        {
+            if rec.mesh.walk_box(b, cb) {
+                hit = true;
+                if !rec.broken && rec.obj < 64 {
+                    mask |= 1 << rec.obj;
+                }
+            }
         }
-        hit
+        (hit, mask)
     }
 
     /// `StgGround_Probe`: of the solid upward triangles under (x, z) in the zone near `zone`, the nearest one below
     /// `min_y` (the smallest plane height greater than `min_y`). `b` is the search box, stretched 8000 down.
-    pub fn ground_probe(&self, zone: i32, b: &ColBox, x: f32, z: f32, min_y: f32) -> Ground {
+    pub fn ground_probe(
+        &self,
+        zone: i32,
+        b: &ColBox,
+        x: f32,
+        z: f32,
+        min_y: f32,
+        broken: u64,
+    ) -> Ground {
         let mut out = Ground {
             y: f32::MAX,
             nrm: [0.0; 4],
             flags: 0,
+            obj_mask: 0,
         };
         // StgGround_ExtendBoxDown keeps the top.
         let half_y = ((b.max[1] - b.min[1]) * 0.5 * 2.0 + 8000.0) * 0.5;
@@ -322,13 +357,14 @@ impl StageCollision {
             (b.max[2] + b.min[2]) * 0.5,
         ];
         let zone = self.find_zone_near(zone, box_center);
-        self.query_zone(zone, &search, &mut |poly, v| {
+        let (_, mask) = self.query_zone(zone, &search, broken, false, &mut |poly, v| {
             // StgGround_Cb: solid, facing up (+Y is down).
             if poly.flags & POLY_NO_SOLID != 0 || !(poly.nrm[1] < 0.0) {
                 return false;
             }
             ground_test_tri(&mut out, x, z, &v, poly, min_y)
         });
+        out.obj_mask = mask;
         out
     }
 }
@@ -521,8 +557,8 @@ impl StageCollision {
         b
     }
 
-    /// `StgCol_TraceSegment`: does the stage block the segment a -> b? Every object counts as standing.
-    pub fn trace_segment(&self, a: [f32; 3], b: [f32; 3]) -> Option<SegHit> {
+    /// `StgCol_TraceSegment`: does the stage block the segment a -> b (`broken`: the mask of the broken objects)?
+    pub fn trace_segment(&self, a: [f32; 3], b: [f32; 3], broken: u64) -> Option<SegHit> {
         if self.zones.is_empty() {
             return None;
         }
@@ -550,7 +586,7 @@ impl StageCollision {
             pos: [0.0; 3],
             obj: -1,
         };
-        self.trace_zone(from, from, to, &mut ctx, &mut marks);
+        self.trace_zone(from, from, to, &mut ctx, &mut marks, broken);
         ctx.hit.then_some(SegHit {
             pos: ctx.pos,
             obj: ctx.obj,
@@ -559,7 +595,15 @@ impl StageCollision {
 
     /// `StgCol_TraceZone`: the zone when the segment passes through it; without a hit every neighbour that
     /// contains the point where the segment left this one. The first zone with a hit ends the walk.
-    fn trace_zone(&self, cur: usize, from: usize, to: usize, ctx: &mut SegCtx, marks: &mut [bool]) {
+    fn trace_zone(
+        &self,
+        cur: usize,
+        from: usize,
+        to: usize,
+        ctx: &mut SegCtx,
+        marks: &mut [bool],
+        broken: u64,
+    ) {
         if cur >= marks.len() || marks[cur] {
             return;
         }
@@ -593,7 +637,7 @@ impl StageCollision {
             }
         }
         let (a, end) = (ctx.a, ctx.b);
-        let (hit, obj_mask) = self.query_zone_objects(cur, &b, &mut |poly, v| {
+        let (hit, obj_mask) = self.query_zone(cur, &b, broken, false, &mut |poly, v| {
             // StgCol_SegCb: the nearest solid triangle.
             if poly.flags & POLY_NO_SOLID != 0 {
                 return false;
@@ -618,34 +662,10 @@ impl StageCollision {
                     continue;
                 };
                 if n < self.zones.len() && contains_point(&self.zone_box(n), entry) {
-                    self.trace_zone(n, from, to, ctx, marks);
+                    self.trace_zone(n, from, to, ctx, marks, broken);
                 }
             }
         }
-    }
-
-    /// `StgCol_QueryZone` in mode 0 with every object standing: whether a callback reported a hit, and the mask
-    /// of the objects whose whole meshes did.
-    fn query_zone_objects(
-        &self,
-        zone: usize,
-        b: &ColBox,
-        cb: &mut dyn FnMut(&ColPoly, [[f32; 3]; 3]) -> bool,
-    ) -> (bool, u64) {
-        let Some(z) = self.zones.get(zone) else {
-            return (false, 0);
-        };
-        let mut hit = z.mesh.walk_box(b, cb);
-        let mut mask = 0u64;
-        for rec in z.recs.iter().filter(|r| !r.broken) {
-            if rec.mesh.walk_box(b, cb) {
-                hit = true;
-                if rec.obj < 64 {
-                    mask |= 1 << rec.obj;
-                }
-            }
-        }
-        (hit, mask)
     }
 }
 
@@ -1060,18 +1080,19 @@ impl ColMesh {
 }
 
 impl StageCollision {
-    /// `StgCol_QueryZone` (mode 0, every object standing) with `StgCol_PushCb`: the zone's static mesh, then the
-    /// whole objects' meshes. Returns whether anything pushed, and the mask of the objects that did.
-    pub fn push_sphere(&self, zone: usize, sphere: &mut PushSphere) -> (bool, u64) {
+    /// `StgCol_QueryZone` (mode 0) with `StgCol_PushCb`: the zone's static mesh, then the object meshes in force
+    /// (`broken`: the mask of the broken objects). Returns whether anything pushed, and the mask of the standing
+    /// objects that did.
+    pub fn push_sphere(&self, zone: usize, sphere: &mut PushSphere, broken: u64) -> (bool, u64) {
         let Some(z) = self.zones.get(zone) else {
             return (false, 0);
         };
         let mut hit = !z.mesh.nodes.is_empty() && z.mesh.push_walk(0, sphere);
         let mut mask = 0u64;
-        for rec in z.recs.iter().filter(|r| !r.broken) {
+        for rec in z.recs.iter().filter(|r| rec_in_force(r, broken, false)) {
             if !rec.mesh.nodes.is_empty() && rec.mesh.push_walk(0, sphere) {
                 hit = true;
-                if rec.obj < 64 {
+                if !rec.broken && rec.obj < 64 {
                     mask |= 1 << rec.obj;
                 }
             }
@@ -1113,9 +1134,36 @@ mod tests {
             }],
         };
         let b = ColBox::from_center_half([-5.0, -3.0, -5.0], [0.1, 1.0, 0.1]);
-        assert_eq!(col.ground_probe(0, &b, -5.0, -5.0, -3.0).y, 5.0);
+        assert_eq!(col.ground_probe(0, &b, -5.0, -5.0, -3.0, 0).y, 5.0);
         // Below the floor, or outside the triangle: nothing.
-        assert_eq!(col.ground_probe(0, &b, -5.0, -5.0, 6.0).y, f32::MAX);
-        assert_eq!(col.ground_probe(0, &b, 5.0, 5.0, -3.0).y, f32::MAX);
+        assert_eq!(col.ground_probe(0, &b, -5.0, -5.0, 6.0, 0).y, f32::MAX);
+        assert_eq!(col.ground_probe(0, &b, 5.0, 5.0, -3.0, 0).y, f32::MAX);
+    }
+
+    #[test]
+    fn a_broken_object_swaps_its_mesh_for_its_remains() {
+        let rec = |broken, y| ColRec {
+            broken,
+            obj: 3,
+            mesh: flat_mesh(y),
+        };
+        let col = StageCollision {
+            zones: vec![ColZone {
+                center: [0.0; 3],
+                half: [50.0, 0.0, 50.0],
+                near: Vec::new(),
+                mesh: ColMesh {
+                    nodes: Vec::new(),
+                    polys: Vec::new(),
+                    vertices: Vec::new(),
+                },
+                recs: vec![rec(false, 5.0), rec(true, 8.0)],
+            }],
+        };
+        let b = ColBox::from_center_half([-5.0, -3.0, -5.0], [0.1, 1.0, 0.1]);
+        let whole = col.ground_probe(0, &b, -5.0, -5.0, -3.0, 0);
+        assert_eq!((whole.y, whole.obj_mask), (5.0, 1 << 3));
+        let remains = col.ground_probe(0, &b, -5.0, -5.0, -3.0, 1 << 3);
+        assert_eq!((remains.y, remains.obj_mask), (8.0, 0));
     }
 }

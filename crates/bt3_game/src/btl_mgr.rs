@@ -304,7 +304,7 @@ impl Roster {
             let changing = matches!(me.act.current, 0xEC..=0xF8 | 0x103 | 0x104);
             let grow = self.started && !env.gate.time_stopped && !changing;
             update_fighter_stage(me, data[i], env, keep_sphere, grow);
-            update_ground(me, env);
+            update_ground(me, data[i], env);
             me.obj_to_pose();
         }
         self.snapshot(3);
@@ -313,7 +313,7 @@ impl Roster {
                 continue;
             }
             me.flags.set_stage(9);
-            coll_update_ground(me, data[i].height(), env);
+            coll_update_ground(me, data[i], env);
             me.pose_to_obj(false);
             me.obj.calc_matrices(&data[i].obj);
         }
@@ -513,6 +513,13 @@ impl Roster {
 
     /// `BtlChars_PostScene`: the fighter camera, the low-health state.
     pub(crate) fn post_scene(&mut self, data: [&SideData; 2], env: &Env, libc: &mut LibcRandom) {
+        // The shakes the stage objects broken this frame asked for (`BtlStage_BreakObj` shakes at once; the
+        // cameras only read them here).
+        let shakes = std::mem::take(&mut env.objs().shakes);
+        for s in shakes {
+            let [a, b] = &mut self.chars;
+            crate::chr_cam::shake_cams_near([a, b], s.pos, s.near, s.far, s.strength, s.time);
+        }
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
             if me.is_frozen() {
@@ -643,8 +650,9 @@ fn update_seq_flags(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideDat
 }
 
 /// `StgCol_UpdateFighter`: the body sphere swept from last frame's position to this frame's in steps of at most
-/// half its radius, pushed out of the stage after every step; when pushed, the object moves back by the
-/// correction and the contact word gets bit 0x20. No object breaks yet (`StgCol_FighterBreakObj`).
+/// half its radius, pushed out of the stage after every step (the first standing object pushing in a step is
+/// tested for breaking, `StgCol_FighterBreakObj`); when pushed, the object moves back by the correction and the
+/// contact word gets bit 0x20.
 fn update_fighter_stage(me: &mut Chr, data: &SideData, env: &Env, keep_sphere: bool, grow: bool) {
     // BtlObjBody_BeginFrame.
     me.obj.work.hit_flags = 0;
@@ -699,7 +707,10 @@ fn update_fighter_stage(me: &mut Chr, data: &SideData, env: &Env, keep_sphere: b
             z = env.col.find_zone_near(z, sphere.center) as i32;
         }
         if let Ok(zi) = usize::try_from(z) {
-            env.col.push_sphere(zi, &mut sphere);
+            let (_, mask) = env.col.push_sphere(zi, &mut sphere, env.broken());
+            if mask != 0 {
+                fighter_break_obj(me, data, env, mask.trailing_zeros() as usize, delta);
+            }
         }
     }
     if sphere.hit {
@@ -762,20 +773,54 @@ fn mirror_flags(me: &mut Chr, opp: &Chr) {
     }
 }
 
-/// `StgGround_UpdateFighter`: the ground under the object's position, below the body sphere's centre.
-fn update_ground(me: &mut Chr, env: &Env) {
+/// `StgGround_UpdateFighter`: the ground under the object's position, below the body sphere's centre; a standing
+/// object the probe met, when the ground found is above the model's root node (the fighter is under or inside
+/// it), is tested for breaking.
+fn update_ground(me: &mut Chr, data: &SideData, env: &Env) {
     let (center, _) = me.obj.body_sphere();
     let pos = [me.obj.pos[0], center[1], me.obj.pos[2]];
     let b = ColBox::from_center_half(pos, [0.1, 1.0, 0.1]);
     let g = env
         .col
-        .ground_probe(me.obj.area, &b, pos[0], pos[2], center[1]);
+        .ground_probe(me.obj.area, &b, pos[0], pos[2], center[1], env.broken());
     me.obj.work.ground_pos = [me.obj.pos[0], g.y, me.obj.pos[2]];
     me.obj.work.ground = Some(g);
+    let root_y = me.obj.nodes.first().map_or(0.0, |n| n.mtx[3][1]);
+    if g.obj_mask != 0 && g.y < root_y {
+        let idx = g.obj_mask.trailing_zeros() as usize;
+        fighter_break_obj(me, data, env, idx, [1.0, 0.0, 1.0]);
+    }
+}
+
+/// `StgCol_FighterBreakObj`: a standing stage object the fighter touched breaks when the fighter can break the
+/// stage (`BtlCharApi_TestStageBreakA`: parameter flag 0x800 outside flag 0xA, or flag 9) and the object has type
+/// bit 0x100, or else when it is knocked about (flag 0xA, `TestStageBreakB`; not with flags 0x21 / 0x22). A
+/// break sets contact bit 0x40, with the damage bits of the object's type (0x800: 200, 0x2000: 600, 0x1000: 1000).
+fn fighter_break_obj(me: &mut Chr, data: &SideData, env: &Env, idx: usize, hit: [f32; 3]) {
+    let mut objs = env.objs();
+    let kind = objs.kind(idx);
+    let a = (data.tables.params.flags() & 0x800 != 0 && !me.flags.test(0xA)) || me.flags.test(9);
+    let breaks = if a {
+        kind & 0x100 != 0
+    } else {
+        !me.flags.test(0x21) && !me.flags.test(0x22) && me.flags.test(0xA)
+    };
+    if breaks {
+        objs.destroy(idx, hit);
+        me.obj.work.hit_flags |= 0x40;
+    }
+    if me.obj.work.hit_flags & 0x40 != 0 {
+        for (bit, flag) in [(0x800, 0x80), (0x2000, 0x100), (0x1000, 0x200)] {
+            if kind & bit != 0 {
+                me.obj.work.hit_flags |= flag;
+            }
+        }
+    }
 }
 
 /// `BtlColl_UpdateGround`: the pose takes the ground found; on it (or landing on it) flag 0xF, else not.
-fn coll_update_ground(me: &mut Chr, height: f32, env: &Env) {
+fn coll_update_ground(me: &mut Chr, data: &SideData, env: &Env) {
+    let height = data.height();
     let vel = me.snap_delta(0, 1);
     if let Some(g) = me.obj.work.ground
         && g.y <= 100_000.0
@@ -810,8 +855,16 @@ fn coll_update_ground(me: &mut Chr, height: f32, env: &Env) {
     }
     let hit = me.obj.work.hit_flags;
     if hit & 0x40 != 0 {
+        // A stage object broken this frame: knocked about (flag 0xA), the fighter takes its damage.
         me.flags.set(0x20);
         me.flags.clear(0xF);
+        if me.flags.test(0xA) {
+            for (bit, amount) in [(0x80, 200), (0x100, 600), (0x200, 1000)] {
+                if hit & bit != 0 {
+                    me.damage(env, data, amount, 0);
+                }
+            }
+        }
     } else if landed {
         me.flags.set_held(0xF);
     } else {

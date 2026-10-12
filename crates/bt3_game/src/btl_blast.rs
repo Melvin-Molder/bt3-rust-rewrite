@@ -14,8 +14,8 @@
 //! The ki blasts of types 4 / 5 are discs (`btl_tech_disc`), those of types 2 / 3 thrown objects and bombs
 //! (`btl_ki_obj`).
 //!
-//! Not ported: the struggle's spark; breaking stage objects (a blast stops at every object, a rush technique's record meets none); the
-//! particles, impact effects, sounds, voices, camera shake, pad vibration and battle events; abilities.
+//! Not ported: the struggle's spark; the particles, impact effects, sounds, voices, camera shake, pad vibration and
+//! battle events.
 
 use std::f32::consts::PI;
 
@@ -1282,7 +1282,9 @@ impl Scene {
     /// `EftDet_StagePass` with `EftDet_TestStage`: the swept volume (a sphere of the radius times the record's
     /// scale, at least 0.08, from last frame's centre or the tail to the head) against the zone's triangles; the
     /// nearest contact stops the record (task flag 4) unless it is a technique that goes through
-    /// (`EftHit_IsStoppedByHit`). A rush technique's record meets only stage objects, which are not ported.
+    /// (`EftHit_IsStoppedByHit`); a technique's stop shakes the cameras near it. A rush technique's record meets
+    /// only the standing stage objects (its sphere not scaled). A standing object the walk met takes damage (1 from
+    /// a ki blast, 999999 from a technique); when that breaks it, the record goes on as if nothing was hit.
     fn stage_pass(&mut self, env: &Env) {
         for i in 0..self.records.len() {
             if !self.can_hit(i, 0) {
@@ -1296,11 +1298,13 @@ impl Scene {
                     t.def.sub == 9
                 }
             });
-            if objects_only {
-                continue;
-            }
             let s = &mut self.records[i].shape;
-            let r = (s.a.radius * s.scale).max(0.08);
+            let r = if s.kind == 0 && objects_only {
+                s.a.radius
+            } else {
+                s.a.radius * s.scale
+            }
+            .max(0.08);
             let sweep = Sweep::new(s.b.pos, s.a.pos, r);
             let bounds = capsule_bounds(s.b.pos, s.a.pos, r);
             let mut best = if s.kind == 0 {
@@ -1309,8 +1313,12 @@ impl Scene {
                 sweep.length + 0.001
             };
             let mut found = None;
-            env.col
-                .query_zone(s.zone, &bounds, &mut |poly: &ColPoly, v: [[f32; 3]; 3]| {
+            let (_, mask) = env.col.query_zone(
+                s.zone,
+                &bounds,
+                env.broken(),
+                objects_only,
+                &mut |poly: &ColPoly, v: [[f32; 3]; 3]| {
                     if poly.flags & POLY_NO_SOLID != 0 {
                         return false;
                     }
@@ -1328,13 +1336,21 @@ impl Scene {
                         }
                         _ => false,
                     }
-                });
-            // Stage objects do not break yet: a blast stops at them as at the static mesh.
+                },
+            );
             let Some((hit, contact, nrm)) = found else {
                 continue;
             };
             s.hit_pos = hit;
             s.contact = contact;
+            if mask != 0 {
+                let idx = mask.trailing_zeros() as usize;
+                let mut objs = env.objs();
+                if objs.damage(idx, if tech.is_none() { 1 } else { 999_999 }) {
+                    objs.destroy(idx, sub(s.a.pos, s.b.pos));
+                    continue;
+                }
+            }
             s.hit_flags |= D_STAGE;
             let from = if s.kind == 0 { s.b.pos } else { s.a_start };
             s.stage_dist = length(sub(from, hit));

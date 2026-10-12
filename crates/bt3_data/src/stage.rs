@@ -5,6 +5,7 @@ const STAGE_DATA_SIZE: usize = 0xA8;
 const BOUNDS_SIZE: usize = 0x0C;
 const ENV_SIZE: usize = 0x10;
 const PLACEMENT_SIZE: usize = 0x20;
+const OBJECT_DEF_SIZE: usize = 0x40;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StageResource {
@@ -15,6 +16,8 @@ pub struct StageResource {
     pub stage_flags: u32,
     pub water_level: Option<f32>,
     pub object_count: usize,
+    /// `StgDataA.objDefs` (+0x08 / +0x0C): the destructible objects' definitions.
+    pub objects: Vec<StageObjectDef>,
     pub zone_count: usize,
     pub bounds: StageBounds,
     pub starting_placements: Vec<StagePlacement>,
@@ -38,6 +41,17 @@ pub struct StagePath {
     pub end: i32,
     pub first: i32,
     pub points: Vec<[f32; 12]>,
+}
+
+/// `StgObjDef`: a destructible object's hit points, `STG_OBJ_*` type bits, model animation, parent (whose breaking
+/// also breaks it) and position (y and z negated as `BtlStage_BindData` does).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageObjectDef {
+    pub hp: i32,
+    pub kind: i32,
+    pub anim: i32,
+    pub parent: i32,
+    pub position: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,6 +88,25 @@ impl StageResource {
             bottom: read_f32(bytes, bounds_offset + 8)?,
         };
         let object_count = read_count(bytes, data_offset + 8, "stage object")?;
+        let objects_offset = resolve_relative(
+            bytes,
+            data_offset,
+            read_u32(bytes, data_offset + 0xC)?,
+            object_count * OBJECT_DEF_SIZE,
+            "stage objects",
+        )?;
+        let objects = (0..object_count)
+            .map(|i| {
+                let o = objects_offset + i * OBJECT_DEF_SIZE;
+                Ok(StageObjectDef {
+                    hp: read_i32(bytes, o)?,
+                    kind: read_i32(bytes, o + 4)?,
+                    anim: read_i32(bytes, o + 8)?,
+                    parent: read_i32(bytes, o + 0xC)?,
+                    position: read_game_position(bytes, o + 0x20)?,
+                })
+            })
+            .collect::<io::Result<_>>()?;
         let environment_count = read_count(bytes, data_offset + 0x10, "stage environment")?;
         let environment_offset = resolve_relative(
             bytes,
@@ -122,6 +155,7 @@ impl StageResource {
             stage_flags,
             water_level,
             object_count,
+            objects,
             zone_count,
             bounds,
             starting_placements,
@@ -277,7 +311,7 @@ mod tests {
 
     #[test]
     fn parses_stage_metadata_and_applies_game_coordinate_signs() {
-        let mut bytes = vec![0; 0x240];
+        let mut bytes = vec![0; 0x400];
         put_u32(&mut bytes, 4, 0x80);
         put_u32(&mut bytes, 8, 0x100);
         put_i32(&mut bytes, 0x80 + 0x38, 4);
@@ -286,6 +320,10 @@ mod tests {
         put_f32(&mut bytes, 0x154, -400.0);
         put_f32(&mut bytes, 0x158, 600.0);
         put_i32(&mut bytes, 0x100 + 8, 7);
+        put_u32(&mut bytes, 0x100 + 0xC, 0x140);
+        put_i32(&mut bytes, 0x240 + 0x40, 30);
+        put_i32(&mut bytes, 0x240 + 0x4C, 0);
+        put_f32(&mut bytes, 0x240 + 0x64, 15.0);
         put_i32(&mut bytes, 0x100 + 0x10, 1);
         put_u32(&mut bytes, 0x100 + 0x14, 0xA8);
         put_i32(&mut bytes, 0x100 + 0x28, 2);
@@ -315,6 +353,8 @@ mod tests {
         assert_eq!(stage.flags, 2);
         assert_eq!(stage.water_level, Some(32.0));
         assert_eq!(stage.object_count, 7);
+        assert_eq!(stage.objects[1].hp, 30);
+        assert_eq!(stage.objects[1].position, [0.0, -15.0, 0.0]);
         assert_eq!(stage.zone_count, 4);
         assert_eq!(stage.bounds.radius, 1200.0);
         assert_eq!(stage.bounds.top, -400.0);

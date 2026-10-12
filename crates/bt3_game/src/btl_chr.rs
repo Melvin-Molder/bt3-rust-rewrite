@@ -434,6 +434,8 @@ pub(crate) struct Env<'a> {
     pub stat_curve: &'a [[f32; 3]; 13],
     pub stage: &'a StageResource,
     pub col: &'a StageCollision,
+    /// The stage's destructible objects.
+    pub stage_objs: &'a std::sync::Mutex<crate::stg_obj::StageObjs>,
     /// `Battle_GetMode`.
     pub mode: i32,
     /// `BtlChar_IsStage4Or27`.
@@ -477,6 +479,16 @@ impl Env<'_> {
         } else {
             (min - base) * (level as f32 / -20.0) + base
         }
+    }
+
+    /// The stage's destructible objects.
+    pub(crate) fn objs(&self) -> std::sync::MutexGuard<'_, crate::stg_obj::StageObjs> {
+        self.stage_objs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The broken stage objects, as the collision queries take them.
+    pub(crate) fn broken(&self) -> u64 {
+        self.objs().broken_mask()
     }
 
     /// `BtlStage_GetInnerRadius`.
@@ -2773,7 +2785,7 @@ pub(crate) fn calc_approach_point(
     let scale = data.height();
     let opp_scale = opp_data.height();
     tgt[1] += data.height() * 0.5 - opp_data.height() * 0.5;
-    if let Some(hit) = env.col.trace_segment(at, tgt) {
+    if let Some(hit) = env.col.trace_segment(at, tgt, env.broken()) {
         let e = sub(tgt, hit.pos);
         let len3 = length(e);
         let len_xz = e[0].hypot(e[2]);
@@ -3354,7 +3366,9 @@ pub(crate) fn stage_place(env: &Env) -> ([f32; 3], [f32; 3], i32) {
     let pos = [p[0], -700.0, p[2]];
     let zone = env.col.find_zone_near(-1, pos) as i32;
     let b = bt3_data::stage_col::ColBox::from_center_half(pos, [1.0; 3]);
-    let g = env.col.ground_probe(zone, &b, pos[0], pos[2], b.min[1]);
+    let g = env
+        .col
+        .ground_probe(zone, &b, pos[0], pos[2], b.min[1], env.broken());
     ([pos[0], g.y, pos[2]], [0.0, yaw, 0.0], zone)
 }
 

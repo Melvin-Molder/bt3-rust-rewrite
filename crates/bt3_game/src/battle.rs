@@ -122,6 +122,8 @@ pub struct BattleAssets {
     pub(crate) start: [SideLoad; 2],
     stage: StageResource,
     stage_model: StageModel,
+    /// The stage's destructible objects (`gBtlStage->objs`).
+    pub(crate) stage_objs: std::sync::Mutex<crate::stg_obj::StageObjs>,
     stage_id: i32,
     pub(crate) stage_cuts: Vec<Option<CamAnim>>,
     /// `Battle_GetMode`.
@@ -312,6 +314,10 @@ pub fn load(
             anim_chara: s.chara,
             anim1_chara: s.chara,
         }),
+        stage_objs: std::sync::Mutex::new(crate::stg_obj::StageObjs::new(
+            &stage.objects,
+            &stage_model,
+        )),
         stage,
         stage_model,
         stage_id: setup.stage,
@@ -888,6 +894,7 @@ impl BattleAssets {
             stat_curve: &self.stat_curve,
             stage: &self.stage,
             col: &self.collision,
+            stage_objs: &self.stage_objs,
             mode: self.mode,
             stage_4_or_27: matches!(self.stage_id, 4 | 27),
             seq_state,
@@ -1181,6 +1188,9 @@ impl Battle {
         sounds.push(TitleSound::VoiceStop);
         sounds.push(TitleSound::Bgm(BGM_FIRST + self.assets.bgm.max(0) as u32));
         self.xfade = ScrXfade::default();
+        // BtlStage_Reset: every stage object whole again.
+        let objs = self.assets.stage_objs.get_mut();
+        objs.unwrap_or_else(|e| e.into_inner()).reset(false);
         if let Some(menu) = &mut self.menu {
             menu.reset();
         }
@@ -1374,9 +1384,14 @@ impl Battle {
             roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
             if !paused {
                 roster.post_scene(data, env, &mut *input.libc);
+                // BtlStage_Update: BtlStage_UpdateObjs (not while paused).
+                env.objs().update();
             }
             false
         });
+        let objs = self.assets.stage_objs.get_mut();
+        objs.unwrap_or_else(|e| e.into_inner())
+            .sync_model(&mut self.assets.stage_model);
         self.poll_changes();
         self.vu0 = vu0;
         if !paused {
@@ -2770,7 +2785,7 @@ mod tests {
             let col = &b.assets.collision;
             let zone = col.find_zone_near(-1, p) as i32;
             let probe = ColBox::from_center_half([p[0], -5000.0, p[2]], [0.1, 1.0, 0.1]);
-            col.ground_probe(zone, &probe, p[0], p[2], -5000.0).y
+            col.ground_probe(zone, &probe, p[0], p[2], -5000.0, 0).y
         };
         let mut worst = f32::MIN;
         let mut run = |battle: &mut Battle, held: u32, frames: usize, worst: &mut f32| {
@@ -4260,6 +4275,73 @@ mod tests {
             battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
         }
         Some(battle)
+    }
+
+    #[test]
+    fn real_knocked_fighter_breaks_a_stage_object() {
+        // On the first stage with a destructible object, side 1 knocked about (flag 0xA) is driven into the
+        // object's first part: the body sphere pushed out of its mesh breaks it (StgCol_FighterBreakObj), the
+        // model draws its broken parts and the collision takes its remains; a rematch puts it back.
+        for stage in 0..0x27 {
+            let mut setup = BattleSetup::default();
+            setup.stage = stage;
+            setup.sides[1].pad = 1;
+            let Some(mut battle) = fight_battle(&setup) else {
+                return;
+            };
+            let m = &battle.assets.stage_model;
+            let Some((obj, center, radius)) = m.objects.iter().enumerate().find_map(|(i, o)| {
+                let p = &m.parts[o.parts[0]?];
+                Some((i, p.center, p.radius))
+            }) else {
+                continue;
+            };
+            let whole = m.drawable.clone();
+            let mut libc = LibcRandom::new(1);
+            let mut random = GameRandom::from_key(&[1]);
+            let start = [center[0] + radius * 3.0 + 100.0, center[1], center[2]];
+            for f in 0..40 {
+                let t = (f as f32 / 20.0).min(1.0);
+                let data = side_data(&battle.assets.fighters[1]);
+                let c = &mut battle.roster.chars[1];
+                c.flags.set_held(0xA);
+                c.pose.pos = std::array::from_fn(|k| start[k] + (center[k] - start[k]) * t);
+                c.pose_to_obj(false);
+                c.obj.calc_matrices(&data.obj);
+                battle.run_frame(
+                    false,
+                    [PadState::default(); 2],
+                    0,
+                    &mut libc,
+                    &mut random,
+                    None,
+                    false,
+                );
+                if battle.assets.stage_objs.lock().unwrap().is_broken(obj) {
+                    break;
+                }
+            }
+            assert!(
+                battle.assets.stage_objs.lock().unwrap().is_broken(obj),
+                "stage {stage}: object {obj} at {center:?} r {radius}"
+            );
+            assert_ne!(battle.assets.stage_model.drawable, whole, "stage {stage}");
+            let mut sounds = Vec::new();
+            battle.restart(&mut sounds);
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            assert_eq!(battle.assets.stage_objs.lock().unwrap().broken_mask(), 0);
+            assert_eq!(battle.assets.stage_model.drawable, whole, "stage {stage}");
+            return;
+        }
+        panic!("no stage has a destructible object");
     }
 
     #[test]

@@ -166,10 +166,19 @@ impl Sweep {
         }
     }
 
-    /// `EftSweep_AddMark`: a free mark for ten frames (its position only places the impact effect).
-    fn add_mark(&mut self) {
-        if let Some(m) = self.marks.iter_mut().find(|m| m.is_none()) {
-            *m = Some(10.0);
+    /// `EftSweep_AddMark`: a free mark for ten frames (its position only places the impact effect); a standing
+    /// stage object the trace hit breaks, away from the beam's origin (the mark lies on the line from the hit to
+    /// the origin, so the direction is the hit's).
+    fn add_mark(&mut self, w: &World, hit: bt3_data::stage_col::SegHit) {
+        let Some(m) = self.marks.iter_mut().find(|m| m.is_none()) else {
+            return;
+        };
+        *m = Some(10.0);
+        if let Ok(obj) = usize::try_from(hit.obj) {
+            let d = sub(hit.pos, self.pos);
+            let len = length(d);
+            let dir = if len > 0.0 { scale3(d, 1.0 / len) } else { d };
+            w.env.objs().destroy(obj, dir);
         }
     }
 
@@ -233,8 +242,8 @@ impl Sweep {
                     self.prev = self.cur;
                     self.pos = self.nodes.pos(1);
                     self.step(w);
-                    if w.env.col.trace_segment(self.pos, self.cur).is_some() {
-                        self.add_mark();
+                    if let Some(hit) = w.env.col.trace_segment(self.pos, self.cur, w.env.broken()) {
+                        self.add_mark(w, hit);
                     }
                     if test(EV_END) {
                         self.flags |= S_STOP_SEEN | S_ENDING;

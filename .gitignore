@@ -82,6 +82,7 @@
 !/crates/bt3_game/src/gs_model.wgsl
 !/crates/bt3_game/src/gs_effect.wgsl
 !/crates/bt3_game/src/stage_draw.rs
+!/crates/bt3_game/src/stg_obj.rs
 !/crates/bt3_game/src/gs_stage.wgsl
 !/crates/bt3_game/src/battle_seq.rs
 !/crates/bt3_game/src/btl_flags.rs
