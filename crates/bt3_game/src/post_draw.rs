@@ -24,11 +24,11 @@ use crate::post::{PostBuf, PostOp};
 
 const GS_POST_SHADER: Handle<Shader> = uuid_handle!("5e2a9c41-7b3d-4f8a-9e16-c2d84a0f7b35");
 /// The render layers of each chain's cameras (one each) and how many there are: a blur of three passes takes five.
-const POST_LAYER_BASE: [usize; 2] = [13, 4];
-const POST_CAMERAS: usize = 8;
+const POST_LAYER_BASE: [usize; 2] = [42, 30];
+const POST_CAMERAS: usize = 12;
 /// The camera orders of the chains: the pre chain after the stage camera (0), the post chain after the fighters'
 /// camera (`model_draw::FIGHTER_ORDER`).
-const POST_ORDER_BASE: [isize; 2] = [1, 10];
+const POST_ORDER_BASE: [isize; 2] = [1, 21];
 
 /// One op's triangles: the source buffer, copied or blended (ALPHA 0x44), in the order of its group.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -193,7 +193,12 @@ pub fn sync_post(
     mut cache: ResMut<PostMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GsPostMaterial>>,
-    mut cameras: Query<(&mut PostCamera, &mut Camera, &mut RenderTarget)>,
+    mut cameras: Query<(
+        &mut PostCamera,
+        &mut Camera,
+        &mut RenderTarget,
+        &mut Projection,
+    )>,
     slots: Query<(Entity, &Mesh2d), With<PostSlot>>,
     plane: Res<crate::model_draw::DepthPlane>,
     mut images: ResMut<Assets<Image>>,
@@ -211,7 +216,7 @@ pub fn sync_post(
         PostBuf::Wide => work.1.clone(),
     };
     let chains = [groups(&game.pre_ops), groups(&game.post_ops)];
-    for (mut cam, mut camera, mut target) in &mut cameras {
+    for (mut cam, mut camera, mut target, mut projection) in &mut cameras {
         match chains[cam.0].get(cam.1) {
             Some(g) => {
                 camera.is_active = true;
@@ -219,6 +224,9 @@ pub fn sync_post(
                 if cam.2 != Some(want.id()) {
                     cam.2 = Some(want.id());
                     *target = RenderTarget::from(want);
+                    // `camera_system` sizes the projection again only on a changed projection (or image asset):
+                    // a camera moved from a work buffer to the frame would keep the work buffer's size.
+                    projection.set_changed();
                 }
             }
             None => camera.is_active = false,
