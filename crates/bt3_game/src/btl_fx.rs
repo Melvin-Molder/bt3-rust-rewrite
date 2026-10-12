@@ -129,6 +129,20 @@ pub(crate) fn update_aura(
     }
 }
 
+/// `BtlFx_UpdateObjFlag80`: with parameter flag 0x200000, ability 0x79 shows model part 4 (object flag 0x80, the
+/// geometry on node 0x6F); without either it is cleared, but only while the object is drawn (flag 2).
+pub(crate) fn update_obj_flag80(me: &mut Chr, data: &SideData) {
+    let on = data.tables.params.flags() & 0x20_0000 != 0 && me.has_ability(0x79);
+    let flags = &mut me.obj.flags;
+    if on {
+        if *flags & 0x82 != 0x82 {
+            *flags |= 0x80;
+        }
+    } else if *flags & 0x82 == 0x82 {
+        *flags &= !0x80;
+    }
+}
+
 /// What the power-up glow reads of a fighter.
 pub(crate) fn glow_chr<'a>(
     me: &Chr,

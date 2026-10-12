@@ -2537,8 +2537,9 @@ impl Battle {
                 .iter()
                 .zip(&model.batch_textures)
                 .zip(nodes);
+            let obj_flags = self.roster.chars[side].obj.flags;
             for ((part, textures), node) in parts {
-                if part.enabled && node_shown(model.model.header.flags, part.node) {
+                if part.enabled && node_shown(model.model.header.flags, obj_flags, part.node) {
                     draw_part(
                         part,
                         textures,
@@ -2758,20 +2759,54 @@ impl Battle {
     }
 }
 
-/// `BtlObj_IsNodeShown` with all of the object's part flags clear (`visible && partN` never holds): the
-/// alternative parts that need a flag stay hidden.
-fn node_shown(model_flags: u32, node: u16) -> bool {
+/// `BtlObj_IsNodeShown`: whether the geometry on `node` is drawn, by the model's part layout class and the
+/// object's part flags (each only with the visible flag 2): 0x20 / 0x40 (parts 2 / 3, the weapons) swap the arm
+/// and hand nodes for their alternatives, 0x80 (part 4) shows node 0x6F, 0x100 hides layout A's arm nodes and
+/// alternatives, 0x40000000 hides node 0x76.
+pub(crate) fn node_shown(model_flags: u32, obj_flags: u32, node: u16) -> bool {
     const PARTS_A: u32 = 0x1_0000;
     const PARTS_B: u32 = 0x2_0000;
     const PARTS_C: u32 = 0x4_0000;
+    let on = |bit: u32| obj_flags & 2 != 0 && obj_flags & bit != 0;
+    let (part2, part3, part4) = (on(0x20), on(0x40), on(0x80));
     if model_flags & PARTS_A != 0 {
-        !matches!(node, 0x42 | 0x43)
+        if on(0x100) {
+            !matches!(node, 0x23..=0x2C | 0x40..=0x43)
+        } else {
+            match node {
+                0x15..=0x1E => !part3,
+                0x23..=0x2C => !part2,
+                0x42 => part2,
+                0x43 => part3,
+                _ => true,
+            }
+        }
     } else if model_flags & PARTS_B != 0 {
-        node != 0x40
+        match node {
+            0x23..=0x2C => !part2,
+            0x40 => part2,
+            _ => true,
+        }
     } else if model_flags & PARTS_C != 0 {
-        !matches!(node, 0x40 | 0x41)
+        match node {
+            0x23..=0x2C => !part3,
+            0x15..=0x1E => !part2,
+            0x40 => part2,
+            0x41 => part3,
+            0x42 => !part2,
+            0x43 => !part3,
+            _ => true,
+        }
     } else {
-        !matches!(node, 0x40 | 0x41 | 0x6F)
+        match node {
+            0x40 => part2,
+            0x41 => part3,
+            0x42 => !part2,
+            0x43 => !part3,
+            0x6F => part4,
+            0x76 => !on(0x4000_0000),
+            _ => true,
+        }
     }
 }
 
@@ -8185,5 +8220,80 @@ mod tests {
             bolts >= 3 && flashes >= 3 && drawn > 0,
             "{bolts} {flashes} {drawn}"
         );
+    }
+
+    #[test]
+    fn the_part_flags_pick_the_alternative_nodes() {
+        // The default layout: node 0x6F needs part 4 (0x80), 0x40 / 0x42 swap with part 2 (0x20), node 0x76 hides
+        // with 0x40000000; nothing counts without the visible flag 2.
+        assert!(!node_shown(0, 0x16, 0x6F));
+        assert!(node_shown(0, 0x96, 0x6F));
+        assert!(!node_shown(0, 0x80, 0x6F));
+        assert!(!node_shown(0, 0x16, 0x40) && node_shown(0, 0x16, 0x42));
+        assert!(node_shown(0, 0x36, 0x40) && !node_shown(0, 0x36, 0x42));
+        assert!(node_shown(0, 0x16, 0x76) && !node_shown(0, 0x4000_0016, 0x76));
+        // Layout A: part 3 hides the left arm, 0x100 every arm alternative; layout C swaps the arms the other way.
+        assert!(!node_shown(0x1_0000, 0x56, 0x15) && node_shown(0x1_0000, 0x56, 0x43));
+        assert!(!node_shown(0x1_0000, 0x116, 0x41) && !node_shown(0x1_0000, 0x116, 0x23));
+        assert!(node_shown(0x1_0000, 0x116, 0x15));
+        assert!(!node_shown(0x4_0000, 0x36, 0x15) && node_shown(0x4_0000, 0x36, 0x23));
+        assert!(!node_shown(0x2_0000, 0x16, 0x40) && node_shown(0x2_0000, 0x36, 0x40));
+    }
+
+    #[test]
+    fn real_ability_0x79_shows_the_part_on_node_0x6f() {
+        // Character 0 has parameter flag 0x200000 and one part on node 0x6F, which only ability 0x79 shows.
+        let setup = BattleSetup::default();
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        assert_ne!(
+            battle.assets.fighters[0].tables.params.flags() & 0x20_0000,
+            0
+        );
+        let count = |f: &BattleFrame| f.models.iter().map(|b| b.vertices.len()).sum::<usize>();
+        let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert_eq!(battle.roster.chars[0].obj.flags & 0x80, 0);
+        let without = count(&frame);
+        // The ability bit (0x79: word 3, bit 25) on the active member.
+        let me = &mut battle.roster.chars[0];
+        let m = me.active;
+        me.members[m].items.ability[3] |= 1 << (0x79 & 0x1F);
+        let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert_ne!(battle.roster.chars[0].obj.flags & 0x80, 0);
+        assert!(count(&frame) > without, "{} {without}", count(&frame));
+        let me = &mut battle.roster.chars[0];
+        me.members[m].items.ability[3] &= !(1 << (0x79 & 0x1F));
+        battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert_eq!(battle.roster.chars[0].obj.flags & 0x80, 0);
+    }
+
+    #[test]
+    fn real_colour_presets_follow_the_model_table() {
+        // Character 0's model uses table 0, character 2's (model flag 0x1000000) table 1, whose row 4 is darker.
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 2;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let row = |f: &FighterModel| i32::from(f.tables.params.u8_at(3) as i8);
+        let [a, b] = &mut battle.roster.chars;
+        let row0 = row(&battle.assets.fighters[0]);
+        let mut want = crate::btl_obj::Obj::new(&side_data(&battle.assets.fighters[0]).obj, 0.0);
+        want.set_color_preset(row0, Some(0));
+        assert_eq!(a.obj.preset, want.preset);
+        assert_eq!(a.obj.preset[3..], [40.0, 65.0]);
+        a.obj.set_color_preset(4, None);
+        b.obj.set_color_preset(4, None);
+        assert_eq!(a.obj.preset, [63.0, 255.0, 63.0, 40.0, 65.0]);
+        assert_eq!(b.obj.preset, [0.0, 171.0, 0.0, 40.0, 65.0]);
+        // Out of the table: unchanged; a set past 1 is table 0.
+        b.obj.set_color_preset(11, None);
+        assert_eq!(b.obj.preset[1], 171.0);
+        b.obj.set_color_preset(4, Some(2));
+        assert_eq!(b.obj.preset[1], 255.0);
     }
 }

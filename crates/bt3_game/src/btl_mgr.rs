@@ -361,6 +361,7 @@ impl Roster {
                 &mut scene.auras,
                 libc,
             );
+            crate::btl_fx::update_obj_flag80(me, data[i]);
             self.scene.spawn_held_disc(me, data[i]);
             // BtlFx_UpdateChargeFx: the charge aura while request 7 holds, its burst on request 8.
             if let Some(set) = crate::btl_blast::charge_set(data[i]) {

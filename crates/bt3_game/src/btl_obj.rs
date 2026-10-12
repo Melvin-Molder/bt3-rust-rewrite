@@ -249,6 +249,11 @@ pub(crate) struct Obj {
     pub flags: u32,
     /// `state.modeBits`: the colour mode requests (`BtlObj_SetColorMode`; 3 the black silhouette). Kept, not drawn.
     pub color_modes: u32,
+    /// `state.preset`: the colour preset row (`BtlObj_SetColorPreset`: the tint colour and two alphas the colour
+    /// modes blend with). Kept, not drawn.
+    pub preset: [f32; 5],
+    /// The model's flag 0x1000000: its own preset table (1) and default colour mode.
+    color_a: bool,
     /// `area`: the zone the object is in.
     pub area: i32,
     pub body: Body,
@@ -295,6 +300,8 @@ impl Obj {
             // BtlObj_InitFlags for a fighter (type 0): visible (2) among others.
             flags: 0x1200_0016,
             color_modes: 0,
+            preset: [0.0; 5],
+            color_a: data.model.header.flags & 0x100_0000 != 0,
             area: -1,
             // BtlObjBody_Init: curRadius 4.1, then BtlObjBody_Reset (index 1, prev 0, cur 1).
             body: Body {
@@ -343,6 +350,48 @@ impl Obj {
             p[1] - n.prev_pos[1],
             p[2] - n.prev_pos[2],
         ]
+    }
+
+    /// `BtlObj_SetColorPreset`: row `row` of preset table `set` (`None`: the model's own; 2 and up: table 0). A
+    /// row outside the eleven leaves the preset as it is.
+    pub(crate) fn set_color_preset(&mut self, row: i32, set: Option<i32>) {
+        const TABLE: [[[f32; 3]; 11]; 2] = [
+            [
+                [63.0, 63.0, 255.0],
+                [255.0, 63.0, 255.0],
+                [142.0, 142.0, 25.0],
+                [255.0, 63.0, 63.0],
+                [63.0, 255.0, 63.0],
+                [63.0, 100.0, 255.0],
+                [255.0, 63.0, 63.0],
+                [128.0, 63.0, 255.0],
+                [142.0, 255.0, 25.0],
+                [142.0, 255.0, 25.0],
+                [142.0, 255.0, 25.0],
+            ],
+            [
+                [63.0, 63.0, 255.0],
+                [255.0, 63.0, 255.0],
+                [142.0, 142.0, 25.0],
+                [255.0, 63.0, 63.0],
+                [0.0, 171.0, 0.0],
+                [63.0, 100.0, 255.0],
+                [255.0, 63.0, 63.0],
+                [128.0, 63.0, 255.0],
+                [142.0, 142.0, 32.0],
+                [142.0, 142.0, 32.0],
+                [142.0, 142.0, 32.0],
+            ],
+        ];
+        let set = match set {
+            None => usize::from(self.color_a),
+            Some(s) if (0..2).contains(&s) => s as usize,
+            Some(_) => 0,
+        };
+        if let Some(c) = usize::try_from(row).ok().and_then(|r| TABLE[set].get(r)) {
+            // Every row has the same two alphas.
+            self.preset = [c[0], c[1], c[2], 40.0, 65.0];
+        }
     }
 
     /// `BtlObj_SetColorMode`: a requester's bit on or off; bit 7 clears them all.

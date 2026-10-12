@@ -745,7 +745,9 @@ const SNAP_LAST: usize = 6;
 impl Chr {
     /// `BtlChar_ResetAll` for one fighter: a zeroed fighter, `BtlChar_BindObject` and `BtlChar_Reset`.
     pub(crate) fn new(player: usize, data: &SideData, env: &Env, cpu: bool) -> Self {
-        let obj = Obj::new(&data.obj, data.tables.params.radius());
+        let mut obj = Obj::new(&data.obj, data.tables.params.radius());
+        // BtlObj_InitFlags: the parameter's preset row (+3) in the model's table.
+        obj.set_color_preset(i32::from(data.tables.params.u8_at(3) as i8), None);
         let mut chr = Self {
             player,
             flags: Flags::default(),
@@ -1622,7 +1624,9 @@ impl Chr {
     /// ratio (parameter form flags 1 / 2: + 5000 / + 10000 health, 4: full ki).
     pub(crate) fn on_model_loaded(&mut self, data: &SideData, opp: &SideData, env: &Env) {
         let radius = data.tables.params.radius();
-        let old = std::mem::replace(&mut self.obj, Obj::new(&data.obj, radius));
+        let mut obj = Obj::new(&data.obj, radius);
+        obj.set_color_preset(i32::from(data.tables.params.u8_at(3) as i8), None);
+        let old = std::mem::replace(&mut self.obj, obj);
         self.obj.pos = old.pos;
         self.obj.rot = old.rot;
         self.obj.scale = old.scale;
@@ -1769,7 +1773,10 @@ impl Chr {
             g.health = g.health.clamp(1, g.health_max);
             g.blast = g.blast.clamp(0, g.blast_max);
         }
-        // The damaged look of the variant (object flag 0x40000000); the aura's colour preset is not ported.
+        // The colour preset of the aura kind (the aura colour abilities), the damaged look of the variant (object
+        // flag 0x40000000).
+        let kind = crate::btl_fx::aura_kind(self, data);
+        self.obj.set_color_preset(kind, None);
         if self.gauge.variant != 0 {
             self.obj.flags |= 0x4000_0000;
         } else {
