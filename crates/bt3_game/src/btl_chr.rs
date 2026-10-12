@@ -943,6 +943,29 @@ impl Chr {
         }
     }
 
+    /// The team panel's view of the side (`Hud_PreUpdate`): flags 0xE4 / 0xE5, the members alive, the switch
+    /// gauge and target (`BtlSide_GetSwitchTarget*`: none with fewer than two alive), and whether it switches.
+    pub(crate) fn hud_team(&mut self) -> crate::hud_team::SideTeam {
+        let alive = self.count_alive() as i32;
+        let (target, hp, hp_max) = if alive < 2 {
+            (-1, 0, 0)
+        } else {
+            let t = self.switch_target();
+            let g = self.member_gauge(t);
+            (t as i32, g.health, g.health_max)
+        };
+        crate::hud_team::SideTeam {
+            flip_next: self.flags.test(0xE4),
+            flip_prev: self.flags.test(0xE5),
+            alive,
+            gauge: self.switch_gauge,
+            hp,
+            hp_max,
+            target,
+            switching: matches!(self.act.current, 0xF3..=0xF8),
+        }
+    }
+
     /// `BtlCtrl_IsPoseReached`: motions 0x181 / 0x183, or 0x184 played to its end.
     pub(crate) fn pose_reached(&self) -> bool {
         match self.anim.cur {

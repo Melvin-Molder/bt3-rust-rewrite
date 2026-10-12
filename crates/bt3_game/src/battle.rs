@@ -201,6 +201,22 @@ pub(crate) struct FighterModel {
     pub(crate) skill_text: Option<Vec<u16>>,
 }
 
+/// `BTL_FILE_CHARA_DATA`: a member's 0x1000-byte block, file 8 + character * 2 + side.
+const MEMBER_FILE: u32 = 8;
+
+/// The team panel's face of a member (`HudTeam_DrawFaceA`: texture 0 of the member's block).
+fn member_face(
+    read: &mut dyn FnMut(u32) -> Result<Vec<u8>, String>,
+    chara: i32,
+    side: usize,
+) -> Option<bt3_data::gs::RgbaTexture> {
+    let id = MEMBER_FILE + u32::try_from(chara).ok()? * 2 + side as u32;
+    let file = read(id).ok()?;
+    let res = TextureResource::parse(&file).ok()?;
+    let entry = res.entries.first()?;
+    decode_sprite_texture_raw(entry, entry).ok()
+}
+
 /// Reads what the battle draws so far. `read` returns a file of the AFS archives by id.
 pub fn load(
     read: &mut dyn FnMut(u32) -> Result<Vec<u8>, String>,
@@ -318,6 +334,13 @@ pub fn load(
         menu_sheet,
         menu_texts,
     };
+    // BtlLoad: every member's block (BattleMember.data).
+    for side in 0..2 {
+        for m in 0..assets.team_count[side] {
+            let chara = assets.team[side][m].0;
+            assets.hud_cpu.members[side][m] = member_face(read, chara, side);
+        }
+    }
     // EftRayMgr_Init: EftTexSet_Load32 of common effect entry 10; the bursts draw its first texture.
     let common_fx = read(COMMON_EFFECT_FILE)?;
     if let Some(entry) =
@@ -905,7 +928,12 @@ impl Battle {
             AiMgr::new(&mut ctx, assets.cpu_level, assets.ai_type)
         };
         let roots = std::array::from_fn(|side| roster.chars[side].obj.mtx);
-        let hud = Hud::new(&assets.hud_sheets, assets.hud_cpu.clone(), assets.announcer);
+        let hud = Hud::new(
+            &assets.hud_sheets,
+            assets.hud_cpu.clone(),
+            assets.announcer,
+            assets.mode,
+        );
         // PauseMenu_Init; BtlGame_Reset closes both trees.
         let menu = assets.menus.clone().map(|(pause, result)| {
             let mut menu = PauseMenu::new(pause, result);
@@ -1043,9 +1071,17 @@ impl Battle {
             side_data(&self.assets.fighters[1]),
         ];
         let env = self.assets.env(self.seq.state_id(), self.gate());
+        let switching = matches!(self.roster.chars[side].act.current, 0xF3..=0xF8);
         self.roster.chars[side].on_model_loaded(&data[side], &data[side ^ 1], &env);
         if model_only {
             return;
+        }
+        // A change that is not a member switch reloads the active member's block for its new character.
+        if !switching && let Some(read) = self.loader.as_mut() {
+            let chara = self.assets.fighters[side].chara;
+            let face = member_face(&mut **read, chara, side);
+            let active = self.roster.chars[side].active;
+            self.hud.set_member_face(side, active, face);
         }
         let mut unused = GameRandom::from_key(&[0]);
         let mut no_blasts = Vec::new();
@@ -1109,6 +1145,7 @@ impl Battle {
             &self.assets.hud_sheets,
             self.assets.hud_cpu.clone(),
             self.assets.announcer,
+            self.assets.mode,
         );
         self.seq = Seq::new(self.assets.mode, self.assets.time_limit);
         self.demo = DemoCam::default();
@@ -1217,7 +1254,12 @@ impl Battle {
             self.roster.chars[0].hud_gauge(),
             self.roster.chars[1].hud_gauge(),
         ];
-        self.hud.pre_update(self.seq.time_left(), &sides);
+        let teams = [
+            self.roster.chars[0].hud_team(),
+            self.roster.chars[1].hud_team(),
+        ];
+        self.hud
+            .pre_update(self.seq.time_left(), &sides, &teams, self.seq.paused);
         self.seq_pre_update(&mut input);
         // BATTLE_FLAG_PAUSE as the sequence left it last frame.
         let paused = self.seq.paused;
@@ -4055,6 +4097,27 @@ mod tests {
     }
 
     #[test]
+    fn real_team_panel() {
+        // Side 0 has two members in reserve: its team panel (frame, face of the switch target, plate) is drawn at
+        // the top left; side 1 fights alone and has none (its mirrored corner stays empty).
+        let Some(mut battle) = team_battle(0, &[(2, 0), (3, 0)]) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        assert!(battle.assets.hud_cpu.members[0][1].is_some());
+        let frame = battle.hud.draw(&mut libc, true);
+        let layer = frame.layer.expect("the HUD layer");
+        let covered = |x0: usize, x1: usize| {
+            (66..86)
+                .flat_map(|y| (x0..x1).map(move |x| (y * 512 + x) * 4 + 3))
+                .filter(|&i| layer[i] != 0)
+                .count()
+        };
+        assert!(covered(26, 120) > 500, "{}", covered(26, 120));
+        assert_eq!(covered(392, 486), 0);
+    }
+
+    #[test]
     fn real_team_member_switches() {
         use crate::btl_input::pad::{L3, R3, SQUARE, UP};
         let mut libc = LibcRandom::new(1);
@@ -4293,6 +4356,38 @@ mod tests {
         );
         // The opponent was ahead; now the fighter is on its other side.
         assert!(crate::btl_chr::dot(d0, d1) < 0.0, "{d0:?} {d1:?}");
+    }
+
+    #[test]
+    fn real_ki_exhaustion() {
+        // A fighter whose ki ran out (flag 0xBE) stands in 0xEA, recovering ki, until it has the parameter's
+        // amount back; then neutral.
+        let Some(mut battle) = transform_battle(1, false) else {
+            return;
+        };
+        battle.roster.chars[1].gauge.ki = 0;
+        battle.roster.chars[1].flags.set_held(0xBE);
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut acts = Vec::new();
+        for _ in 0..600 {
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            let a = battle.roster.chars[1].act.current;
+            if acts.last() != Some(&a) {
+                acts.push(a);
+            }
+        }
+        assert_eq!(acts[..2], [0xEA, 0xB], "{acts:x?}");
+        assert!(!battle.roster.chars[1].flags.test(0xBE));
+        assert!(battle.roster.chars[1].gauge.ki > 0);
     }
 
     #[test]

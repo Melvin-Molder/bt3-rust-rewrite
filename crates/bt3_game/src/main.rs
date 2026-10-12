@@ -42,6 +42,7 @@ mod font;
 mod hud;
 mod hud_gauge;
 mod hud_gs;
+mod hud_team;
 mod loading;
 mod logo;
 mod main_menu;

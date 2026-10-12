@@ -124,7 +124,7 @@ pub(crate) struct Ctx<'a, 'd> {
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xEB..=0xFC | 0xFD..=0x102
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xFC | 0xFD..=0x102
         | 0x103 | 0x104 | 0x105..=0x13B)
 }
 
@@ -868,6 +868,7 @@ impl Ctx<'_, '_> {
             0xCF..=0xD1 => self.pushed_back(phase),
             0xD2 => self.knocked_out(phase),
             0xD3 => self.stun(phase),
+            0xEA => self.ki_exhausted(phase),
             0xD8 => self.lie_down(phase),
             0xD9 => self.fall(phase),
             0xDA..=0xDE => self.down(phase),
@@ -11318,6 +11319,22 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// Action 0xEA (`BtlAct_ActionEA`): motion 0xD4 looping while the ki is exhausted (flag 0xBE), then 0xB.
+    fn ki_exhausted(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xD4, 0.15);
+        }
+        if phase == RUN {
+            self.me.anim_advance_loop(0);
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.reaction_flags();
+        }
+        if phase == DECIDE && !self.flag(0xBE) {
+            self.request(0xB);
+        }
+    }
+
     /// Action 0xD3: motion 0xB7 looping until the stun countdown runs out.
     fn stun(&mut self, phase: u32) {
         if phase == ENTER {
@@ -11776,11 +11793,11 @@ mod tests {
     fn the_slice_s_actions_are_ported_and_others_are_not() {
         for id in [
             0xB, 0xD, 0xF, 0x38, 0x44, 0x60, 0x7B, 0xAE, 0xB1, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB,
-            0xE1, 0xEC, 0xF0, 0xF1, 0xF6, 0xFD, 0x100, 0x102,
+            0xE1, 0xEA, 0xEC, 0xF0, 0xF1, 0xF6, 0xFD, 0x100, 0x102,
         ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [0xEA, 0x13C] {
+        for id in [4, 0xA, 0x13C] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

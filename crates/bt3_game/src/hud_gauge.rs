@@ -2,8 +2,8 @@
 //! powered-up timer, status icons, face) and timer part (src/battle/hud_timer.c), drawn through the GS emulation
 //! of hud_gs.rs. One tree of nodes serves both players: side 1 is the same tree drawn mirrored (x' = 511 - x).
 //!
-//! Not ported yet: the status icons' change animation (`HudGauge_UpdateStatIcons` states 0..5: nothing changes
-//! the modifiers yet), the member-switch slide and the face tint (object flag 0x40000).
+//! Not ported yet: the status icons' change animation (`HudGauge_UpdateStatIcons` states 0..5) and the face tint
+//! (object flag 0x40000).
 
 use std::collections::HashMap;
 
@@ -19,11 +19,13 @@ const KI_BAR: i32 = 20000;
 const POWER_BAR: i32 = 6000;
 const BLAST_STOCK: i32 = 100000;
 
-/// The textures the CPU draws with: sheet 0 by (entry, palette offset), and each side's face.
+/// The textures the CPU draws with: sheet 0 by (entry, palette offset), each side's face, and each member's face
+/// for the team panel (`BattleMember.data`: texture 0 of file 8 + character * 2 + side).
 #[derive(Clone, Default)]
 pub(crate) struct HudTextures {
     pub(crate) sheet0: HashMap<(i16, u16), RgbaTexture>,
     pub(crate) faces: [Option<RgbaTexture>; 2],
+    pub(crate) members: [[Option<RgbaTexture>; 5]; 2],
 }
 
 /// What `Hud_PreUpdate` reads of a side (`BtlSide_*`).
@@ -39,10 +41,10 @@ pub(crate) struct SideGauge {
 }
 
 /// Draws sprites of one part: the node origin, the mirror of side 1, the textures.
-struct Painter<'a> {
-    layer: &'a mut GsLayer,
-    textures: &'a HudTextures,
-    mirror: bool,
+pub(crate) struct Painter<'a> {
+    pub(crate) layer: &'a mut GsLayer,
+    pub(crate) textures: &'a HudTextures,
+    pub(crate) mirror: bool,
 }
 
 impl Painter<'_> {
@@ -56,21 +58,33 @@ impl Painter<'_> {
     }
 
     /// `HudSprite_DrawAt` (or `HudSprite_Draw`) through context `ctx`.
-    fn draw(&mut self, spr: &Sprite, origin: [i32; 2], ctx: usize, face: Option<usize>) {
-        if spr.hidden {
-            return;
-        }
+    pub(crate) fn draw(&mut self, spr: &Sprite, origin: [i32; 2], ctx: usize, face: Option<usize>) {
+        let textures = self.textures;
         let texture = if spr.tex < 0 {
             None
         } else if let Some(side) = face {
-            self.textures.faces[side].as_ref()
+            textures.faces[side].as_ref()
         } else {
-            self.textures
+            textures
                 .sheet0
                 .get(&(spr.tex, spr.sub))
-                .or_else(|| self.textures.sheet0.get(&(spr.tex, 0)))
+                .or_else(|| textures.sheet0.get(&(spr.tex, 0)))
         };
         if spr.tex >= 0 && texture.is_none() {
+            return;
+        }
+        self.draw_texture(spr, origin, ctx, texture);
+    }
+
+    /// `HudSprite_DrawAt` of a sprite with its texture given.
+    pub(crate) fn draw_texture(
+        &mut self,
+        spr: &Sprite,
+        origin: [i32; 2],
+        ctx: usize,
+        texture: Option<&RgbaTexture>,
+    ) {
+        if spr.hidden {
             return;
         }
         let (x, y) = self.corners(spr, origin);
@@ -90,21 +104,21 @@ impl Painter<'_> {
     }
 
     /// `HudSprite_DrawAlphaClear`.
-    fn alpha_clear(&mut self, spr: &Sprite, origin: [i32; 2]) {
+    pub(crate) fn alpha_clear(&mut self, spr: &Sprite, origin: [i32; 2]) {
         let (x, y) = self.corners(spr, origin);
         self.layer.alpha_clear(x, y);
     }
 
     /// `HudGauge_GsBeginMask`: context 2 writes only alpha (FBA) where the texel's alpha is not 0; context 1
     /// draws where the alpha's top bit is clear.
-    fn begin_mask(&mut self) {
+    pub(crate) fn begin_mask(&mut self) {
         self.layer.ctx[0].test = 0x34000;
         self.layer.ctx[1].fbmsk = 0xFF_FFFF;
         self.layer.ctx[1].fba = true;
         self.layer.ctx[1].test = 0x3000F;
     }
 
-    fn end_mask(&mut self) {
+    pub(crate) fn end_mask(&mut self) {
         self.layer.ctx[0].test = 0x30000;
         self.layer.ctx[1].fbmsk = 0;
         self.layer.ctx[1].fba = false;
@@ -170,6 +184,7 @@ pub(crate) struct GaugePart {
     ki_reserve_pulse: [Ramp; 2],
     powered_up: [bool; 2],
     dead: [bool; 2],
+    switching: [bool; 2],
 }
 
 impl GaugePart {
@@ -368,6 +383,7 @@ impl GaugePart {
             ki_reserve_pulse: [Ramp::default(); 2],
             powered_up: [false; 2],
             dead: [false; 2],
+            switching: [false; 2],
         }
     }
 
@@ -391,6 +407,21 @@ impl GaugePart {
         self.max_power[side] = g.max_power;
         self.powered_up[side] = g.powered_up;
         self.dead[side] = g.dead;
+    }
+
+    /// `HudGauge_SetSwitching`: the side's panel slides away (0.3 s) while it switches members, and back with
+    /// its shown health and ki reset.
+    pub(crate) fn set_switching(&mut self, side: usize, switching: bool) {
+        if self.switching[side] != switching {
+            if switching {
+                self.slide[side].start(0.3, 0.0, 1.0);
+            } else {
+                self.slide[side].start(0.3, 1.0, 0.0);
+                self.hp_shown[side] = 0;
+                self.ki_shown[side] = 0;
+            }
+        }
+        self.switching[side] = switching;
     }
 
     /// `HudGauge_SelectSide`, `HudNode_Update` and `HudNode_Draw` of the tree for one side.
@@ -1100,17 +1131,24 @@ impl TimerPart {
     }
 }
 
-/// `Hud_Draw` for the gauges and the timer: `HudGfx_SetEnv`, then per side `HudGfx_ClearAlpha` and the gauge
-/// tree, then the clock. With `shown` false the parts update but nothing is drawn.
+/// `Hud_Draw` for the team panel, the gauges and the timer: `HudGfx_SetEnv`, then the team panel of each side
+/// (`team`: outside story mode), per side `HudGfx_ClearAlpha` and the gauge tree, then the clock. With `shown`
+/// false the parts update but nothing is drawn.
 pub(crate) fn draw_gauges(
     layer: &mut GsLayer,
     shown: bool,
+    team: Option<&mut crate::hud_team::TeamPart>,
     gauge: Option<&mut GaugePart>,
     timer: Option<&mut TimerPart>,
     textures: &HudTextures,
     libc: &mut LibcRandom,
 ) {
     layer.begin(shown);
+    if let Some(team) = team {
+        for side in 0..2 {
+            team.run(side, layer, textures);
+        }
+    }
     if let Some(gauge) = gauge {
         for side in 0..2 {
             layer.clear_alpha();

@@ -96,5 +96,6 @@
 !/crates/bt3_game/src/btl_obj.rs
 !/crates/bt3_game/src/hud.rs
 !/crates/bt3_game/src/hud_gauge.rs
+!/crates/bt3_game/src/hud_team.rs
 !/crates/bt3_game/src/hud_gs.rs
 !/crates/bt3_game/src/gs_hud.wgsl

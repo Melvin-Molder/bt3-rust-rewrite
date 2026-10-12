@@ -1,6 +1,6 @@
 //! The battle HUD (src/battle/hud.c, hud_sprite.c, hud_notice_1.c, hud_notice_2.c): the manager's visibility
-//! bits, the gauges and timer (hud_gauge.rs) and the notice part, the READY / FIGHT announcements with the
-//! announcer's lines. The team panel, combo counter, prompts and caption are not ported yet.
+//! bits, the team panel (hud_team.rs), the gauges and timer (hud_gauge.rs) and the notice part, the READY / FIGHT
+//! announcements with the announcer's lines. The combo counter, prompts and caption are not ported yet.
 //!
 //! The notices lean on the GS destination alpha: a band written only into the alpha plane lets the word through
 //! where it covers (TEST_2 0x3C000: DATE with DATM 1), and the FIGHT streak is added in proportion to the alpha
@@ -637,6 +637,9 @@ impl NoticePart {
 /// `gHud` with the parts ported so far.
 pub(crate) struct Hud {
     flags: u32,
+    team: crate::hud_team::TeamPart,
+    /// `Battle_GetMode() != 1`: story mode draws no team panel.
+    team_shown: bool,
     gauge: GaugePart,
     timer: TimerPart,
     notice: NoticePart,
@@ -658,11 +661,30 @@ impl Hud {
         self.textures.faces[side] = face;
     }
 
+    /// A member's team-panel face after its character changed (`BattleMember.data` reloaded).
+    pub(crate) fn set_member_face(
+        &mut self,
+        side: usize,
+        member: usize,
+        face: Option<bt3_data::gs::RgbaTexture>,
+    ) {
+        if let Some(f) = self.textures.members[side].get_mut(member) {
+            *f = face;
+        }
+    }
+
     /// `Hud_Init` then `Hud_Reset` (everything hidden).
-    pub(crate) fn new(sheets: &[HudSheet], textures: HudTextures, announcer: i32) -> Self {
+    pub(crate) fn new(
+        sheets: &[HudSheet],
+        textures: HudTextures,
+        announcer: i32,
+        mode: i32,
+    ) -> Self {
         let sheet0 = sheets.first().cloned().unwrap_or_default();
         Self {
             flags: 0,
+            team: crate::hud_team::TeamPart::new(&sheet0),
+            team_shown: mode != 1,
             timer: TimerPart::new(&sheet0),
             gauge: GaugePart::new(sheet0),
             notice: NoticePart::new(sheets.get(NOTICE_SHEET).cloned().unwrap_or_default()),
@@ -672,17 +694,31 @@ impl Hud {
         }
     }
 
-    /// `Hud_PreUpdate` for what is simulated so far: the clock and each side's gauges.
-    pub(crate) fn pre_update(&mut self, time_left: i32, sides: &[SideGauge; 2]) {
+    /// `Hud_PreUpdate` for what is simulated so far: the clock, each side's gauges and, when not `paused`, its
+    /// team panel and switch slide.
+    pub(crate) fn pre_update(
+        &mut self,
+        time_left: i32,
+        sides: &[SideGauge; 2],
+        teams: &[crate::hud_team::SideTeam; 2],
+        paused: bool,
+    ) {
         self.timer.set_time(time_left);
         for (side, gauge) in sides.iter().enumerate() {
             self.gauge.set_side(side, gauge);
+        }
+        if !paused {
+            for (side, team) in teams.iter().enumerate() {
+                self.team.set_side(side, team);
+                self.gauge.set_switching(side, team.switching);
+            }
         }
     }
 
     /// `BATTLE_FLAG_PAUSE` as the parts read it while they update.
     pub(crate) fn set_paused(&mut self, paused: bool) {
         self.gauge.paused = paused;
+        self.team.paused = paused;
         self.timer.paused = paused;
     }
 
@@ -723,8 +759,8 @@ impl Hud {
         }
     }
 
-    /// `Hud_Draw`: each part that is switched on updates, then draws: the gauges of both sides, the clock, the
-    /// notice. (The team panel stays hidden without reserve members.) A frame that is not `shown` runs the
+    /// `Hud_Draw`: each part that is switched on updates, then draws: the team panels (outside story mode) and the
+    /// gauges of both sides, the clock, the notice. A frame that is not `shown` runs the
     /// updates and draws nothing.
     pub(crate) fn draw(&mut self, libc: &mut LibcRandom, shown: bool) -> HudFrame {
         let mut layer = None;
@@ -732,6 +768,7 @@ impl Hud {
             draw_gauges(
                 &mut self.layer,
                 shown,
+                (self.flags & SHOW_GAUGES != 0 && self.team_shown).then_some(&mut self.team),
                 (self.flags & SHOW_GAUGES != 0).then_some(&mut self.gauge),
                 (self.flags & SHOW_TIMER != 0).then_some(&mut self.timer),
                 &self.textures,
@@ -772,7 +809,12 @@ mod tests {
 
     #[test]
     fn ready_reveals_the_word_through_the_turning_band() {
-        let mut hud = Hud::new(&[HudSheet::default(), sheet()], HudTextures::default(), 2);
+        let mut hud = Hud::new(
+            &[HudSheet::default(), sheet()],
+            HudTextures::default(),
+            2,
+            0,
+        );
         let mut libc = LibcRandom::new(1);
         let mut sounds = Vec::new();
         assert!(hud.draw(&mut libc, true).prims.is_empty());
@@ -805,7 +847,12 @@ mod tests {
 
     #[test]
     fn fight_streak_is_weighted_by_the_word() {
-        let mut hud = Hud::new(&[HudSheet::default(), sheet()], HudTextures::default(), 0);
+        let mut hud = Hud::new(
+            &[HudSheet::default(), sheet()],
+            HudTextures::default(),
+            0,
+            0,
+        );
         let mut libc = LibcRandom::new(1);
         let mut sounds = Vec::new();
         hud.show_all(true);

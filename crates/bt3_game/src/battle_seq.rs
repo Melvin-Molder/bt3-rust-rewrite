@@ -34,6 +34,11 @@ impl Ramp {
         self.step = (to - from) / self.frames;
     }
 
+    /// `Ramp_Stop`: `step` reports "ended" without changing the value.
+    pub(crate) fn stop(&mut self) {
+        self.running = false;
+    }
+
     /// `value == target`.
     pub(crate) fn at_target(&self) -> bool {
         self.value == self.target
