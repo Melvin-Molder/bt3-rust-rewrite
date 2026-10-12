@@ -226,7 +226,12 @@ impl Roster {
     }
 
     /// `BtlChars_UpdateMain`: the simulation proper, seven passes over the roster.
-    pub(crate) fn update_main(&mut self, data: [&SideData; 2], env: &Env) {
+    pub(crate) fn update_main(
+        &mut self,
+        data: [&SideData; 2],
+        env: &Env,
+        libc: &mut crate::rng::LibcRandom,
+    ) {
         let frame = self.frame;
         let blasts = &self.scene.records;
         let clash = &self.clash.c;
@@ -343,6 +348,7 @@ impl Roster {
             );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             self.scene.spawn_held_disc(me, data[i]);
+            water_fx(me, data[i], env, self.scene.water.as_mut(), libc);
             me.obj.build_volumes(&data[i].obj);
         }
         self.update_queued_damage(data, env);
@@ -587,6 +593,42 @@ impl Roster {
     }
 }
 
+/// `BtlFx_UpdateWaterFx`: when flag 0x11 (in the water) changes, not while flag 0x24 holds the fighter, a splash
+/// on the surface below it sized by its vertical speed and sound 0x3A going in / 0x3B coming out; effect bit 0x19
+/// (the wake) while it moves faster than 6.48 with flag 0x12 (at the surface). `EftBubble_StartBurst` is not
+/// ported.
+fn water_fx(
+    me: &mut Chr,
+    data: &SideData,
+    env: &Env,
+    mut water: Option<&mut crate::eft_water::Water>,
+    libc: &mut crate::rng::LibcRandom,
+) {
+    if me.flags.test(0x11) != me.flags.test_prev(0x11)
+        && !me.flags.test(0x24)
+        && let Some(level) = env.stage.water_level
+    {
+        if let Some(w) = water.as_deref_mut() {
+            let at = [me.pose.pos[0], level, me.pose.pos[2]];
+            let kind = crate::eft_water::SPLASH_CHAR;
+            w.add_splash_for(data.height(), at, kind, me.pose.vel[1], libc);
+        }
+        let id = if me.flags.test(0x11) { 0x3A } else { 0x3B };
+        me.play_common(&mut env.snd(), id);
+    }
+    if me.flags.test(0x12) && crate::btl_chr::length(me.pose.vel) > 6.481_480_6 {
+        me.set_fx(0x19);
+    }
+    if let Some(w) = water {
+        if me.fx_new(0x19) {
+            w.set_wake(me.player, true);
+        }
+        if me.fx_ended(0x19) {
+            w.set_wake(me.player, false);
+        }
+    }
+}
+
 fn split(chars: &mut [Chr; 2], i: usize) -> (&mut Chr, &mut Chr) {
     let (lo, hi) = chars.split_at_mut(1);
     if i == 0 {
@@ -616,6 +658,7 @@ fn begin_frame(chr: &mut Chr, data: &SideData, env: &Env) {
     chr.combo.changed = false;
     chr.act_bits = 0;
     chr.frames_left_override = -1;
+    chr.prev_fx_bits = chr.fx_bits;
     chr.fx_bits = [0; 0x10];
     // The dashes and vanishes in a row: the parameter's +0x70 / +0x72 in the powered-up mode, else 1; + 2 / 1
     // with ability 1 / 0 (dashes) and 3 / 2 (vanishes).

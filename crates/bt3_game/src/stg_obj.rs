@@ -2,9 +2,11 @@
 //! name the broken one as parent), the shakes a break gives the cameras near it, and their pieces' fall: a piece
 //! with keys follows them, a piece with one key is a rigid body thrown away from the hit (`stg_rigid`).
 //!
-//! Not ported: the pieces' dust and splashes (`EftGndDust_SpawnDebris`, `EftWater_AddSplashAt`, which also draw
-//! random numbers), the break sound, the pads' rumble, the hidden item of mode 1 and the way-point graph's object
-//! flags (nothing reads them).
+//! A break plays its sound; the falling pieces raise dust (`EftGndDust_SpawnDebris`) and, of an object of type
+//! 0x80, splash where they fall through y = 0 (`EftWater_AddSplashAt`).
+//!
+//! Not ported: the pads' rumble, the hidden item of mode 1 and the way-point graph's object flags (nothing reads
+//! them).
 
 use bt3_data::stage::StageObjectDef;
 use bt3_data::stage_model::{StageModel, StageNode};
@@ -15,6 +17,8 @@ use crate::stg_rigid::StgRigid;
 /// `STG_OBJ_BROKEN` / `STG_OBJ_FALLING`.
 const BROKEN: u32 = 1;
 const FALLING: u32 = 2;
+/// `STG_OBJ_SPLASH`: the pieces splash where they fall through y = 0.
+const SPLASH: i32 = 0x80;
 
 /// `STG_OBJ_SHAKE_S` / `M` / `L`.
 const SHAKE_S: i32 = 0x10;
@@ -334,6 +338,7 @@ impl StageObjs {
         vu0: &mut Vu0Random,
         libc: &mut LibcRandom,
         dust: &mut crate::eft_gdust::GndDust,
+        mut water: Option<&mut crate::eft_water::Water>,
     ) {
         for i in 0..self.objs.len() {
             let o = &mut self.objs[i];
@@ -368,6 +373,7 @@ impl StageObjs {
             for k in 0..self.objs[i].pieces.len() {
                 let p = self.objs[i].pieces[k];
                 let mut pos = [0.0; 3];
+                let prev = self.node_mtx[p.node][3];
                 if self.nodes[p.node].is_rigid() {
                     if first {
                         pos = animate(&self.nodes[p.node], 0.0).map_or([0.0; 3], |m| {
@@ -396,6 +402,17 @@ impl StageObjs {
                     && let Some(bright) = dust_bright
                 {
                     dust.spawn_debris(pos, bright, vu0);
+                }
+                if first {
+                    continue;
+                }
+                let now = self.node_mtx[p.node][3];
+                if self.objs[i].kind & SPLASH != 0
+                    && prev[1] < 0.0
+                    && 0.0 < now[1]
+                    && let Some(w) = water.as_deref_mut()
+                {
+                    w.add_splash_at([prev[0], prev[1], prev[2]], 3.0, libc);
                 }
             }
         }
@@ -504,10 +521,55 @@ mod tests {
                 &mut vu0,
                 &mut libc,
                 &mut crate::eft_gdust::GndDust::default(),
+                None,
             );
         }
         assert!(s.objs.iter().all(|o| o.state & FALLING == 0));
         s.reset(false);
         assert_eq!(s.broken_mask(), 0);
+    }
+
+    #[test]
+    fn a_piece_falling_through_the_water_line_splashes_once() {
+        use bt3_data::stage_model::StageKey;
+        let key = |frame, y| StageKey {
+            pos: [5.0, y, 7.0],
+            frame,
+            rot: [0.0; 3],
+        };
+        let node = StageNode {
+            mtx: crate::battle::IDENTITY,
+            keys: vec![key(0, -19.0), key(40, 21.0)],
+            end_frame: 40,
+        };
+        let piece = Piece {
+            index: 0,
+            part: 0,
+            node: 0,
+            radius: 1.0,
+        };
+        let mut s = StageObjs {
+            objs: vec![StgObj {
+                state: FALLING,
+                kind: SPLASH,
+                pieces: vec![piece],
+                ..StgObj::default()
+            }],
+            nodes: vec![node],
+            node_mtx: vec![crate::battle::IDENTITY],
+            node_body: vec![-1],
+            ..StageObjs::default()
+        };
+        let mut water = crate::eft_water::Water::new(30.0, 0, [0.0; 4], vec![0; 5]);
+        let (mut vu0, mut libc) = (Vu0Random::default(), LibcRandom::new(1));
+        let mut dust = crate::eft_gdust::GndDust::default();
+        let mut splashes = Vec::new();
+        for _ in 0..30 {
+            s.update(1000.0, &mut vu0, &mut libc, &mut dust, Some(&mut water));
+            splashes.push(water.groups().0);
+        }
+        // y goes from -19 by 1 a frame, two frames an update: from -1 to 1 on the tenth.
+        assert_eq!(splashes.iter().position(|&n| n == 1), Some(9));
+        assert_eq!(splashes.last(), Some(&1));
     }
 }

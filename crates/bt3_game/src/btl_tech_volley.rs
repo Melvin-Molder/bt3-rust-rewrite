@@ -108,7 +108,7 @@ fn mathf_wrap(mut a: f32) -> f32 {
 
 /// `Mathf_SinFast`: the VU0 polynomial x + c3 x^3 + c2 x^5 + c1 x^7 + c0 x^9 of the wrapped angle, summed in
 /// that order.
-fn sin_fast(c: &[f32; 4], angle: f32) -> f32 {
+pub(crate) fn sin_fast(c: &[f32; 4], angle: f32) -> f32 {
     let x = mathf_wrap(angle);
     let x2 = x * x;
     let mut t = c.map(|k| k * x * x2);
@@ -126,12 +126,12 @@ fn sin_fast(c: &[f32; 4], angle: f32) -> f32 {
 }
 
 /// `Mathf_CosFast`.
-fn cos_fast(c: &[f32; 4], angle: f32) -> f32 {
+pub(crate) fn cos_fast(c: &[f32; 4], angle: f32) -> f32 {
     sin_fast(c, angle + PI_F / 2.0)
 }
 
 /// `EftMath_WrapAngle`: whole turns removed by their count.
-fn eft_wrap(a: f32) -> f32 {
+pub(crate) fn eft_wrap(a: f32) -> f32 {
     const TWO_PI: f32 = 6.283_185_3;
     if a >= PI_F {
         let n = (((a - PI_F) / TWO_PI) as i32).abs();

@@ -391,6 +391,7 @@ fn draw_quad_2d(
                     blend: blend_eq,
                     clamp: false,
                     zwrite: false,
+                    alpha_ref: 0,
                     vertices: [v[k], v[k + 1], v[k + 2]],
                 },
             );

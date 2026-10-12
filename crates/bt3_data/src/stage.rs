@@ -36,6 +36,9 @@ pub struct StageResource {
     pub paths: Vec<StagePath>,
     /// `StgDataA.dust` (+0x68 / +0x6C, `BtlStage_GetList68`): the stage's dust look, `None` without a record.
     pub dust: Option<StageDust>,
+    /// Bit 0 of the first water record (`StgDataA` +0x90 / +0x94, `BtlStage_GetList90`): with stage pack entry
+    /// 0x12 the stage has the water effects (`EftStage_HasKind(7)`).
+    pub water_fx: bool,
 }
 
 /// `EftGndDustStage`: the colours, speed and size of the debris' dust puffs when `enabled`.
@@ -189,6 +192,17 @@ impl StageResource {
             })
         };
 
+        let water_fx = read_count(bytes, data_offset + 0x90, "stage water")? != 0 && {
+            let o = resolve_relative(
+                bytes,
+                data_offset,
+                read_u32(bytes, data_offset + 0x94)?,
+                4,
+                "stage water",
+            )?;
+            read_u32(bytes, o)? & 1 != 0
+        };
+
         Ok(Self {
             stage_id,
             flags,
@@ -205,6 +219,7 @@ impl StageResource {
             light_dir,
             paths,
             dust,
+            water_fx,
         })
     }
 }
@@ -388,12 +403,17 @@ mod tests {
         put_f32(&mut bytes, 0x210, 100.0);
         put_f32(&mut bytes, 0x214, -110.0);
         put_f32(&mut bytes, 0x218, 120.0);
+        // One water record whose first word has bit 0.
+        put_i32(&mut bytes, 0x100 + 0x90, 1);
+        put_u32(&mut bytes, 0x100 + 0x94, 0x280);
+        put_u32(&mut bytes, 0x380, 3);
 
         let stage = StageResource::parse(&bytes).unwrap();
 
         assert_eq!(stage.stage_id, 0);
         assert_eq!(stage.flags, 2);
         assert_eq!(stage.water_level, Some(32.0));
+        assert!(stage.water_fx);
         assert_eq!(stage.object_count, 7);
         assert_eq!(stage.objects[1].hp, 30);
         assert_eq!(stage.objects[1].position, [0.0, -15.0, 0.0]);

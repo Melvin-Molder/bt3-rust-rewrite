@@ -707,8 +707,10 @@ pub(crate) struct Chr {
     pub first_hit: bool,
     /// Battle event 0x59: this fighter lost health.
     pub took_damage: bool,
-    /// Effect / sound request bits of this frame (`fxBits`, fighter + 0x1262); nothing draws them yet.
+    /// Effect / sound request bits of this frame (`fxBits`, fighter + 0x1262) and of the frame before
+    /// (`prevFxBits`, + 0x126B).
     pub fx_bits: [u8; 0x10],
+    pub prev_fx_bits: [u8; 0x10],
     /// `voice` (+0x1370): per voice kind the line played last and the frames until it may play again.
     pub voice_last: [i32; crate::btl_snd::VOICE_KINDS],
     pub voice_timer: [i32; crate::btl_snd::VOICE_KINDS],
@@ -861,6 +863,7 @@ impl Chr {
             first_hit: false,
             took_damage: false,
             fx_bits: [0; 0x10],
+            prev_fx_bits: [0; 0x10],
             voice_last: [0; crate::btl_snd::VOICE_KINDS],
             voice_timer: [0; crate::btl_snd::VOICE_KINDS],
         };
@@ -1154,9 +1157,17 @@ impl Chr {
 
     /// `BtlChar_TestFxBit`.
     pub(crate) fn test_fx(&self, bit: u32) -> bool {
-        self.fx_bits
-            .get((bit >> 3) as usize)
-            .is_some_and(|b| b & (1 << (bit & 7)) != 0)
+        test_bit(&self.fx_bits, bit)
+    }
+
+    /// `BtlChar_IsFxBitNew`: set now, not a frame ago.
+    pub(crate) fn fx_new(&self, bit: u32) -> bool {
+        self.test_fx(bit) && !test_bit(&self.prev_fx_bits, bit)
+    }
+
+    /// `BtlChar_IsFxBitEnded`: set a frame ago, not now.
+    pub(crate) fn fx_ended(&self, bit: u32) -> bool {
+        !self.test_fx(bit) && test_bit(&self.prev_fx_bits, bit)
     }
 
     /// `BtlChar_SetFxBit`.
@@ -3415,6 +3426,12 @@ pub(crate) fn stage_place(env: &Env) -> ([f32; 3], [f32; 3], i32) {
 
 pub(crate) fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+/// A bit of a request bit array (`BtlChar_TestFxBit` / `TestPrevFxBit`).
+fn test_bit(bits: &[u8], bit: u32) -> bool {
+    bits.get((bit >> 3) as usize)
+        .is_some_and(|b| b & (1 << (bit & 7)) != 0)
 }
 
 pub(crate) fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {

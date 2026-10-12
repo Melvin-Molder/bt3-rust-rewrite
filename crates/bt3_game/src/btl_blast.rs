@@ -319,6 +319,8 @@ pub(crate) struct Scene {
     deferred: Vec<Deferred>,
     /// The ground dust (`gEftGndDust`).
     pub gdust: crate::eft_gdust::GndDust,
+    /// The water effects (`gEftDust`), on a stage with them.
+    pub water: Option<crate::eft_water::Water>,
 }
 
 /// A generator draw made outside the scene update.
@@ -673,6 +675,20 @@ pub(crate) fn blast_limit_b(data: &SideData) -> i32 {
 }
 
 /// The class of a kind (`BtlMove_CanFireBlast`): 0 for 0, 4, 8, else 1.
+/// The fighters as the water reads them (`BtlCharApi_*`).
+pub(crate) fn water_chars(
+    chars: &[Chr; 2],
+    data: [&SideData; 2],
+) -> [crate::eft_water::WaterChr; 2] {
+    std::array::from_fn(|i| crate::eft_water::WaterChr {
+        pos: chars[i].pose.pos,
+        dir: chars[i].pose.dir,
+        speed: chars[i].pose.speed,
+        height: data[i].height(),
+        in_technique: crate::btl_act::is_technique_id(chars[i].act.current),
+    })
+}
+
 fn kind_class(kind: i32) -> usize {
     usize::from(!matches!(kind, 0 | 4 | 8))
 }
@@ -1011,8 +1027,11 @@ impl Scene {
                 }
             }
         }
-        // The ground dust (BtlScene_IsTimeStopped: paused).
+        // The ground dust (BtlScene_IsTimeStopped: paused), the water.
         self.gdust.update(w.paused);
+        if let Some(water) = &mut self.water {
+            water.update(&water_chars(w.chars, w.data), w.paused, w.libc);
+        }
         // Layer 1: the technique effects.
         self.tech.update(
             w,
@@ -1111,6 +1130,7 @@ impl Scene {
         }
         self.tech.discs.post_update(w, &mut self.fx);
         self.tech.post_update_shots(w, &mut self.fx);
+        self.update_records(w);
         for (i, chr) in w.chars.iter_mut().enumerate() {
             chr.live_blasts = [0; 2];
             for rec in self
@@ -1122,6 +1142,45 @@ impl Scene {
             }
         }
         self.tech.draw(w);
+    }
+
+    /// `BtlScene_UpdateRecords`: `EftWater_UpdateBlast` on every record (`EftBubble_OnBlastRecord` does nothing).
+    fn update_records(&mut self, w: &mut World) {
+        if self.water.is_none() {
+            return;
+        }
+        for i in 0..self.records.len() {
+            let (flags, pos) = self.rec_tag(i).map_or((0, [0.0; 3]), |t| (t.flags, t.pos));
+            let r = &self.records[i];
+            let rec = crate::eft_water::WaterRec {
+                owner: r.owner,
+                technique: r.tech.is_some(),
+                def_sub: r.tech.map_or(0, |t| t.def.sub),
+                def_id: r.tech.map_or(0, |t| t.def.id),
+                pos: r.pos,
+                prev: r.prev,
+                no_water: r.flags & H_KIND9 != 0,
+                task_flags: flags,
+                task_pos: pos,
+                // The shape's third word: the definition's or the blast's speed.
+                speed: r.tech.map_or(r.atk.speed, |t| t.def.speed),
+                radius_a: r.shape.a.radius,
+            };
+            let height = w.data.get(r.owner).map_or(10.0, |d| d.height());
+            let Some(water) = &mut self.water else {
+                return;
+            };
+            let (set, sound) = water.update_blast(&rec, height, w.paused, w.libc);
+            if set != 0
+                && let Some(t) = self.rec_tag(i)
+            {
+                t.flags |= set;
+            }
+            if let Some((at, id)) = sound {
+                // BtlCharApi_PlaySoundAt: no owner, the common bank.
+                w.env.snd().request(at, -1, 0, 200.0, 1500.0, id);
+            }
+        }
     }
 
     /// The tag of a record's task: a ki blast or a technique item.

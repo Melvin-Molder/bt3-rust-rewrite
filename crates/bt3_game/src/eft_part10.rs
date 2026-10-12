@@ -1274,6 +1274,7 @@ pub(crate) fn billboard(
                 blend,
                 clamp: false,
                 zwrite: false,
+                alpha_ref: 0,
                 vertices: [vert(i), vert(i + 1), vert(i + 2)],
             },
         );

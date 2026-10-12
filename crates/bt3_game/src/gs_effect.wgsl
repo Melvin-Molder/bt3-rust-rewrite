@@ -5,7 +5,8 @@
 // The vertex carries (s, t, q) in its tangent; the GS divides S and T by Q per pixel.
 // params.x: textured; params.y: 1 for ALPHA 0x49 (Cd * As + Cd), where the blend multiplies the destination by
 // what this outputs, so the output is As itself; params.z: 1 for ALPHA 0x48 / 0x42 (Cd +/- Cs * As), where the
-// colour is multiplied by As here, as the GS does, alpha above 0x80 included.
+// colour is multiplied by As here, as the GS does, alpha above 0x80 included. params.w: the alpha test's AREF (TEST
+// ATST GREATER; 0 none): a pixel whose alpha (x 128) is not above it is dropped.
 
 #import bevy_sprite::{
     mesh2d_vertex_output::VertexOutput,
@@ -38,6 +39,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let texel = textureSample(effect_texture, effect_sampler, stq.xy / stq.z);
         rgb = min(texel.rgb * in.color.rgb / 128.0, vec3<f32>(1.0));
         alpha = texel.a * in.color.a / 128.0;
+    }
+    if params.w > 0.0 && alpha * 128.0 <= params.w {
+        discard;
     }
     if params.y > 0.5 {
         color = vec4<f32>(vec3<f32>(alpha), 0.0);

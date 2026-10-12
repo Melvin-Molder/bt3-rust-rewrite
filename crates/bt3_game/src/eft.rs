@@ -239,6 +239,9 @@ pub struct EffectTri {
     pub clamp: bool,
     /// ZBUF without ZMSK: the triangle writes its depth (the transition's model).
     pub zwrite: bool,
+    /// TEST with ATST GREATER and this AREF around the triangle (0: no alpha test): a pixel is drawn when its
+    /// alpha is above it (the water's dissolving sprays).
+    pub alpha_ref: u8,
     pub vertices: [EffectVertex; 3],
 }
 
@@ -312,6 +315,11 @@ impl DrawCtx {
         }
     }
 
+    /// `EftGfx_GetClipPlanes`.
+    pub(crate) fn planes(&self) -> [V4; 5] {
+        self.planes
+    }
+
     /// `Vu0Cur_ProjectPoint` with the world-to-screen matrix: GS x, y and the integer z.
     pub(crate) fn project(&self, p: V3) -> (f32, f32, i32) {
         let v = apply(&self.world2screen, point(p));
@@ -339,7 +347,7 @@ fn clip_lerp(a: &ClipVtx, b: &ClipVtx, t: f32) -> ClipVtx {
 }
 
 /// `ClipPoly_ClipPlane`: Sutherland-Hodgman against one plane (outside when the distance is below 0).
-fn clip_plane(poly: &mut Vec<ClipVtx>, plane: V4) {
+pub(crate) fn clip_plane(poly: &mut Vec<ClipVtx>, plane: V4) {
     let n = poly.len();
     if n == 0 {
         return;
@@ -456,6 +464,7 @@ pub(crate) fn queue_tri_clip(ot: &mut OrderTable, ctx: &DrawCtx, tri: [ClipVtx; 
                 blend,
                 clamp: prim.clamp,
                 zwrite: false,
+                alpha_ref: 0,
                 vertices: [a.0, b.0, c.0],
             },
         );
@@ -538,6 +547,7 @@ pub(crate) fn draw_sprite(
                 blend,
                 clamp: false,
                 zwrite: false,
+                alpha_ref: 0,
                 vertices: [vert(k), vert(k + 1), vert(k + 2)],
             },
         );
@@ -655,6 +665,7 @@ fn queue_strip_at(
                 blend,
                 clamp: false,
                 zwrite: false,
+                alpha_ref: 0,
                 vertices: [vert(k), vert(k + 1), vert(k + 2)],
             },
         );
@@ -3349,6 +3360,7 @@ mod tests {
             blend: b,
             clamp: false,
             zwrite: false,
+            alpha_ref: 0,
             vertices: [EffectVertex {
                 position: [0.0; 3],
                 stq: [0.0; 3],

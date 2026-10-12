@@ -308,7 +308,7 @@ pub struct EffectTextures {
     /// Each texture clamped (CLAMP 5) and wrapping (the sorted pass's CLAMP 0).
     images: Vec<[Handle<Image>; 2]>,
     blank: Option<Handle<Image>>,
-    materials: HashMap<(Option<usize>, bool, EffectBlend, bool, u16), Handle<GsEffectMaterial>>,
+    materials: HashMap<(Option<usize>, bool, EffectBlend, bool, u8, u16), Handle<GsEffectMaterial>>,
 }
 
 #[derive(Component)]
@@ -355,16 +355,34 @@ pub fn sync_effects(
             ))
         })
         .clone();
-    type Batch<'a> = (Option<usize>, bool, EffectBlend, bool, Vec<&'a EffectTri>);
+    type Batch<'a> = (
+        Option<usize>,
+        bool,
+        EffectBlend,
+        bool,
+        u8,
+        Vec<&'a EffectTri>,
+    );
     let mut batches: Vec<Batch> = Vec::new();
     for tri in &game.effects {
         match batches.last_mut() {
-            Some((t, c, b, z, list))
-                if *t == tri.texture && *c == tri.clamp && *b == tri.blend && *z == tri.zwrite =>
+            Some((t, c, b, z, a, list))
+                if *t == tri.texture
+                    && *c == tri.clamp
+                    && *b == tri.blend
+                    && *z == tri.zwrite
+                    && *a == tri.alpha_ref =>
             {
                 list.push(tri)
             }
-            _ => batches.push((tri.texture, tri.clamp, tri.blend, tri.zwrite, vec![tri])),
+            _ => batches.push((
+                tri.texture,
+                tri.clamp,
+                tri.blend,
+                tri.zwrite,
+                tri.alpha_ref,
+                vec![tri],
+            )),
         }
     }
     let mut material = |index: usize,
@@ -372,8 +390,9 @@ pub fn sync_effects(
                         clamp: bool,
                         blend: EffectBlend,
                         zwrite: bool,
+                        alpha_ref: u8,
                         textures: &mut EffectTextures| {
-        let key = (texture, clamp, blend, zwrite, index as u16);
+        let key = (texture, clamp, blend, zwrite, alpha_ref, index as u16);
         if let Some(handle) = textures.materials.get(&key) {
             return handle.clone();
         }
@@ -395,7 +414,7 @@ pub fn sync_effects(
                 } else {
                     0.0
                 },
-                0.0,
+                f32::from(alpha_ref),
             ),
             blend,
             zwrite,
@@ -407,20 +426,29 @@ pub fn sync_effects(
     let mut existing = 0;
     for (slot, mesh, mut handle, mut visibility) in &mut slots {
         existing = existing.max(slot.0 + 1);
-        let Some((texture, clamp, blend, zwrite, tris)) = batches.get(slot.0) else {
+        let Some((texture, clamp, blend, zwrite, alpha_ref, tris)) = batches.get(slot.0) else {
             *visibility = Visibility::Hidden;
             continue;
         };
         if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
             write_effect_mesh(&mut mesh, tris);
         }
-        let wanted = material(slot.0, *texture, *clamp, *blend, *zwrite, &mut textures);
+        let wanted = material(
+            slot.0,
+            *texture,
+            *clamp,
+            *blend,
+            *zwrite,
+            *alpha_ref,
+            &mut textures,
+        );
         if handle.0 != wanted {
             handle.0 = wanted;
         }
         *visibility = Visibility::Visible;
     }
-    for (index, (texture, clamp, blend, zwrite, tris)) in batches.iter().enumerate().skip(existing)
+    for (index, (texture, clamp, blend, zwrite, alpha_ref, tris)) in
+        batches.iter().enumerate().skip(existing)
     {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -436,6 +464,7 @@ pub fn sync_effects(
                 *clamp,
                 *blend,
                 *zwrite,
+                *alpha_ref,
                 &mut textures,
             )),
             Transform::default(),

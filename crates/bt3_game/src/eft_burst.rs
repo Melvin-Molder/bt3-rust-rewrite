@@ -429,6 +429,7 @@ fn tri_of(
         blend,
         clamp: false,
         zwrite,
+        alpha_ref: 0,
         vertices: v,
     }
 }

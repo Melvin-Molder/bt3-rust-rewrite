@@ -126,6 +126,8 @@ pub struct BattleAssets {
     pub(crate) ray_texture: Option<usize>,
     /// `gEftGndDust->tex`: the ground dust's texture set (common effect entry 0xB) among the effect textures.
     pub(crate) dust_textures: Vec<usize>,
+    /// The water effects' textures (stage pack entry 0x12) among the effect textures, on a stage with them.
+    pub(crate) water_textures: Option<Vec<usize>>,
     pub(crate) fighters: Vec<FighterModel>,
     /// The light ramp the shading rows are looked up through, and common file 2 (`BtlLoad_StepChara` reloads a
     /// side with them).
@@ -274,6 +276,7 @@ pub fn load(
         cuts: stage_cuts,
         collision,
         nav,
+        water_textures,
     } = load_stage(read, setup.stage)?;
     // BtlLoad_StepInitial: the common, stage and both sides' sample banks.
     let mut snd = crate::btl_snd::CharSound::default();
@@ -337,6 +340,7 @@ pub fn load(
         effect_textures: Vec::new(),
         ray_texture: None,
         dust_textures: Vec::new(),
+        water_textures: None,
         fighters: Vec::new(),
         ramp: Vec::new(),
         common_file: Vec::new(),
@@ -424,6 +428,7 @@ pub fn load(
                 .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
         }
     }
+    assets.water_textures = water_textures.map(|t| assets.push_effect_textures(t));
     for (index, side) in setup.sides.into_iter().enumerate() {
         let load = SideLoad {
             chara: side.chara,
@@ -740,6 +745,9 @@ pub(crate) struct LoadedStage {
     cuts: Vec<Option<CamAnim>>,
     collision: StageCollision,
     nav: StageNav,
+    /// `EftWater_Init`'s `EftTexSet_Load32` of stage pack entry 0x12, on a stage with the water effects
+    /// (`EftStage_HasKind(7)`).
+    water_textures: Option<Vec<RgbaTexture>>,
 }
 
 /// Reads stage `stage_id`'s file (`BTL_FILE_STAGE + stage`).
@@ -769,11 +777,33 @@ fn load_stage(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
+    let entry_size = |n: usize| {
+        let word = |k: usize| {
+            stage_file
+                .get(k * 4..k * 4 + 4)
+                .map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
+        };
+        word(n + 1).wrapping_sub(word(n))
+    };
+    let water_textures = if stage.water_fx && entry_size(0x12) > 0 {
+        let res = TextureResource::parse(pack_section(&stage_file, 0x12).map_err(error)?)
+            .map_err(error)?;
+        Some(
+            res.entries
+                .iter()
+                .map(decode_sprite_texture)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(error)?,
+        )
+    } else {
+        None
+    };
     Ok(LoadedStage {
         stage,
         model,
         textures,
         cuts,
+        water_textures,
         collision: StageCollision::parse(&stage_file).map_err(error)?,
         nav: StageNav::parse(&stage_file).map_err(error)?,
     })
@@ -1045,6 +1075,26 @@ impl BattleAssets {
         self.bank_requests.push((mask, data));
     }
 
+    /// Appends decoded textures to the effect textures; their indices.
+    fn push_effect_textures(&mut self, t: Vec<RgbaTexture>) -> Vec<usize> {
+        let first = self.effect_textures.len();
+        self.effect_textures.extend(t);
+        (first..self.effect_textures.len()).collect()
+    }
+
+    /// `EftWater_Init`: the water task of stage effect kind 7, on a stage with its textures.
+    pub(crate) fn new_water(&self) -> Option<crate::eft_water::Water> {
+        let textures = self.water_textures.clone()?;
+        let mut w = crate::eft_water::Water::new(
+            self.stage.water_level.unwrap_or(0.0),
+            self.stage_id,
+            self.fx_tables.sin_coef,
+            textures,
+        );
+        w.split = self.screen_mode == 1;
+        Some(w)
+    }
+
     /// `BtlLoad_EndStageSwap`'s stage half (`StgModel_InitStage`, `StgNav_Rebind`): the stage's resources, its
     /// objects whole, its textures to upload again.
     fn install_stage(&mut self, s: LoadedStage, stage_id: i32) {
@@ -1056,6 +1106,7 @@ impl BattleAssets {
         self.stage_cuts = s.cuts;
         self.collision = s.collision;
         self.nav = s.nav;
+        self.water_textures = s.water_textures.map(|t| self.push_effect_textures(t));
         self.stage_id = stage_id;
         self.stage_rev += 1;
     }
@@ -1083,6 +1134,7 @@ impl Battle {
         };
         let mut roster = roster;
         roster.scene.gdust = crate::eft_gdust::GndDust::new(assets.stage.dust.as_ref());
+        roster.scene.water = assets.new_water();
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -1255,6 +1307,9 @@ impl Battle {
                 // BtlLoad_BeginStageSwap: EftStage_ResetAll (BtlScene_Reset(0): the dust puffs end), BtlStage_Term
                 // (StgAmb_Stop).
                 self.roster.scene.gdust.reset();
+                if let Some(w) = &mut self.roster.scene.water {
+                    w.reset();
+                }
                 self.amb.stop();
                 let id = if self.assets.stage_id == 3 {
                     TRANSITION_FILE_3
@@ -1331,6 +1386,8 @@ impl Battle {
                         if let Some(loaded) = job.loaded.take() {
                             let stage = self.assets.stage_id;
                             self.assets.install_stage(loaded, stage);
+                            // EftStage_CreateKinds: the new stage's effects.
+                            self.roster.scene.water = self.assets.new_water();
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -1576,6 +1633,7 @@ impl Battle {
             match load_stage(read, start) {
                 Ok(loaded) => {
                     self.assets.install_stage(loaded, start);
+                    self.roster.scene.water = self.assets.new_water();
                     self.assets
                         .reload_bank(read, 8, SND_STAGE_FILE + start.max(0) as u32);
                     self.light_dir =
@@ -1644,6 +1702,7 @@ impl Battle {
         };
         // The scene's dust manager keeps the starting stage's template.
         self.roster.scene.gdust = crate::eft_gdust::GndDust::new(self.assets.stage.dust.as_ref());
+        self.roster.scene.water = self.assets.new_water();
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         self.fade = Fade::start_in(1.0);
         self.started = false;
@@ -1783,7 +1842,7 @@ impl Battle {
             if !paused && !loading {
                 roster.sample_input(&pads, data, env);
                 roster.update_input(data, env);
-                roster.update_main(data, env);
+                roster.update_main(data, env, &mut *input.libc);
             }
             roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
             if !paused && !loading {
@@ -1808,6 +1867,7 @@ impl Battle {
                     &mut vu0,
                     &mut *input.libc,
                     &mut roster.scene.gdust,
+                    roster.scene.water.as_mut(),
                 );
                 false
             });
@@ -2006,6 +2066,10 @@ impl Battle {
             };
             // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else side 0's view.
             let demo = self.demo.is_active();
+            // Layer 0's stage effects, then the others.
+            if let Some(w) = &self.roster.scene.water {
+                w.draw(&mut ot, &ctx);
+            }
             self.roster
                 .scene
                 .fx
@@ -4936,6 +5000,59 @@ mod tests {
         battle.restart(&mut sounds);
         assert_eq!(battle.assets.stage_id, from);
         assert_eq!(battle.assets.stage.stage_id, from);
+    }
+
+    #[test]
+    fn real_water_stages_splash_and_draw_their_water() {
+        // The stages whose files have the water effects (stage pack entry 0x12 and the water record's bit 0).
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let read = battle.loader.as_mut().unwrap();
+        let water: Vec<(i32, usize)> = (0..0x27)
+            .filter_map(|s| {
+                let w = load_stage(read, s).ok()?.water_textures?;
+                Some((s, w.len()))
+            })
+            .collect();
+        assert!(!water.is_empty());
+        // EftWater draws five textures of the set.
+        assert!(water.iter().all(|&(_, n)| n >= 5), "{water:?}");
+        let stage = water[0].0;
+        let mut setup = BattleSetup::default();
+        setup.stage = stage;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let textures = battle.assets.water_textures.clone().unwrap();
+        let level = battle.assets.stage.water_level.unwrap_or(0.0);
+        let mut libc = LibcRandom::new(2);
+        let mut random = GameRandom::from_key(&[2]);
+        // A splash between the fighters, on the surface.
+        let mid: [f32; 3] = std::array::from_fn(|k| {
+            (battle.roster.chars[0].pose.pos[k] + battle.roster.chars[1].pose.pos[k]) * 0.5
+        });
+        let w = battle.roster.scene.water.as_mut().unwrap();
+        w.add_splash_at([mid[0], level, mid[2]], 3.0, &mut libc);
+        let mut drawn = 0;
+        for _ in 0..20 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            drawn += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture.is_some_and(|i| textures.contains(&i)))
+                .count();
+        }
+        assert!(drawn > 20, "stage {stage}: {drawn}");
     }
 
     #[test]

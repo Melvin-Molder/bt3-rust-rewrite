@@ -40,6 +40,7 @@ mod eft_quad;
 mod eft_ray;
 mod eft_rays;
 mod eft_ribbon;
+mod eft_water;
 mod fade;
 mod flash;
 mod font;
