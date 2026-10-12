@@ -1,7 +1,8 @@
 //! The battle HUD (src/battle/hud.c, hud_sprite.c, hud_notice_1.c, hud_notice_2.c): the manager's visibility
 //! bits, the team panel (hud_team.rs), the gauges and timer (hud_gauge.rs), the combo part (hud_combo.rs) and the
-//! notice part, the READY / FIGHT announcements with the announcer's lines. The prompts and caption are not ported
-//! yet.
+//! notice part: the READY / FIGHT announcements, the finishes (K.O., the other K.O., the two spinning words of time
+//! up and the like), the winner's and the result's lower banners, with the announcer's lines. The prompts and
+//! caption are not ported yet.
 //!
 //! The notices lean on the GS destination alpha: a band written only into the alpha plane lets the word through
 //! where it covers (TEST_2 0x3C000: DATE with DATM 1), and the FIGHT streak is added in proportion to the alpha
@@ -295,10 +296,24 @@ pub(crate) fn fan(poly: &[HudVertex]) -> Vec<HudVertex> {
         .collect()
 }
 
+/// `HudNotice_Show`'s announcements by id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Notice {
+    /// 0, 1.
     Ready,
     Fight,
+    /// 2: K.O.
+    Ko,
+    /// 3 and 8: a word on a band (texture 3, rows 64..128 / 0..64).
+    BandA,
+    BandB,
+    /// 4, 5: a spinning word (texture 4, rows 0..64 / 64..128).
+    SpinA,
+    SpinB,
+    /// 6: the word zooming in with its after-images (texture 5).
+    Trail,
+    /// 7: the lower banner (texture 6).
+    Banner,
 }
 
 /// `gHudNotice`.
@@ -307,9 +322,12 @@ struct NoticePart {
     sheet: HudSheet,
     spr: [Sprite; 16],
     kind: Option<Notice>,
-    /// Node 1 (the announcement) and node 2's rotation (the band of READY).
+    /// Node 1 (the announcement) with its rotation (the spins) and node 2's rotation (the band of READY).
     pos: [i32; 2],
+    rot: f32,
     band_rot: f32,
+    /// The after-images' ramp values of the last frames (K.O., the trail).
+    trail: [f32; 8],
     state: i32,
     streak: i32,
     ramp_a: Ramp,
@@ -336,7 +354,9 @@ impl NoticePart {
             spr,
             kind: None,
             pos: [256, 224],
+            rot: 0.0,
             band_rot: 0.0,
+            trail: [0.0; 8],
             state: -1,
             streak: 0,
             ramp_a: Ramp::default(),
@@ -352,7 +372,11 @@ impl NoticePart {
         }
         self.spr[SPR_WORD].show(false);
         self.state = 0;
-        self.pos = [256, 224];
+        self.rot = 0.0;
+        self.pos = match kind {
+            Notice::Trail | Notice::Banner => [256, 352],
+            _ => [256, 224],
+        };
         self.kind = Some(kind);
     }
 
@@ -360,7 +384,456 @@ impl NoticePart {
         match self.kind {
             Some(Notice::Ready) => self.update_ready(),
             Some(Notice::Fight) => self.update_fight(libc),
+            Some(Notice::Ko) => self.update_ko(libc),
+            Some(Notice::BandA) => self.update_band(64),
+            Some(Notice::BandB) => self.update_band(0),
+            Some(Notice::SpinA) => self.update_spin(0),
+            Some(Notice::SpinB) => self.update_spin(64),
+            Some(Notice::Trail) => self.update_trail(libc),
+            Some(Notice::Banner) => self.update_banner(),
             None => {}
+        }
+    }
+
+    /// The streak of the finishes (texture 7, three frames of 42 rows): sliding in from the left, shaking by
+    /// up to 16 (libc `rand()`), sliding out to the right in the fading colour; hidden otherwise.
+    fn streak(&mut self, stage: Option<u8>, value: f32, color: [u8; 3], libc: &mut LibcRandom) {
+        let Some(stage) = stage else {
+            self.spr[SPR_STREAK].show(false);
+            return;
+        };
+        let frame = self.streak;
+        let streak = &mut self.spr[SPR_STREAK];
+        streak.show(true);
+        streak.init_tex(&self.sheet, 7);
+        streak.set_rect(0, 512, 0, 42);
+        streak.set_uv(0, 512, frame * 42, frame * 42 + 42);
+        streak.center();
+        let width = f32::from(streak.uv[1] - streak.uv[0]);
+        match stage {
+            0 => streak.move_by((-((1.0 - value) * width)) as i32, 0),
+            1 => streak.move_by(libc.int_range(-16, 16), 0),
+            _ => streak.move_by(((1.0 - value) * width) as i32, 0),
+        }
+        if stage == 2 {
+            let [r, g, b] = color.map(|c| (value * f32::from(c)) as u8);
+            streak.set_color(r, g, b, 0x80);
+        } else {
+            streak.set_color(color[0], color[1], color[2], 0x80);
+        }
+        self.streak = (self.streak + 1) % 3;
+    }
+
+    /// `HudNotice_UpdateKo`: the word pops (scale 1 + 0.4 sin(pi v), v 0 -> 0.5 in 0.15 s and on to 1 in 0.4 s,
+    /// alpha min(128, 256 v)) with three after-images of the last frames' scales (alpha at most 48, hidden once
+    /// caught up); then 0.2 / 0.55 / 0.4 s while the streak crosses in red, 0.2 s, and the band closes.
+    fn update_ko(&mut self, libc: &mut LibcRandom) {
+        use crate::btl_tech_volley::mathf_sin;
+        if self.state == 0 {
+            let word = &mut self.spr[SPR_WORD];
+            word.show(true);
+            word.init_tex(&self.sheet, 2);
+            word.center();
+            let band = &mut self.spr[SPR_BAND];
+            band.show(true);
+            band.init_plain([0x80; 4]);
+            band.set_rect(0, 512, 0, 448);
+            band.center();
+            self.trail[..4].fill(0.0);
+            self.ramp_b.start(0.15, 0.0, 0.5);
+            self.state = 1;
+        }
+        match self.state {
+            1 | 2 => {
+                let s = mathf_sin(self.ramp_b.value * 3.141_592_7);
+                self.trail.copy_within(0..3, 1);
+                self.trail[0] = s;
+                let alpha = |max: f32, v: f32| (v * 256.0).clamp(0.0, max) as u8;
+                let v = self.ramp_b.value;
+                let word = &mut self.spr[SPR_WORD];
+                word.show(true);
+                word.init_tex(&self.sheet, 2);
+                word.center();
+                word.scale(s * 0.4 + 1.0, s * 0.4 + 1.0);
+                word.set_color(0x80, 0x80, 0x80, alpha(128.0, v));
+                for i in 0..3 {
+                    let s = self.trail[i + 1];
+                    let part = &mut self.spr[SPR_PART + 1 + i];
+                    part.show(s != self.trail[0]);
+                    part.init_tex(&self.sheet, 2);
+                    part.center();
+                    part.scale(s * 0.4 + 1.0, s * 0.4 + 1.0);
+                    part.set_color(0x80, 0x80, 0x80, alpha(48.0, v));
+                }
+                let done = self.ramp_b.step();
+                if self.state == 1 {
+                    if done {
+                        self.ramp_b.start(0.4, 0.5, 1.0);
+                        self.state = 2;
+                    }
+                } else if done && self.spr[SPR_PART + 3].hidden {
+                    self.ramp_b.start(0.2, 0.0, 1.0);
+                    self.state = 3;
+                }
+            }
+            3 => {
+                if self.ramp_b.step() {
+                    self.ramp_b.start(0.55, 0.0, 1.0);
+                    self.state = 4;
+                }
+            }
+            4 => {
+                if self.ramp_b.step() {
+                    self.ramp_b.start(0.4, 1.0, 0.0);
+                    self.state = 5;
+                }
+            }
+            5 => {
+                if self.ramp_b.step() {
+                    self.ramp_b.start(0.2, 1.0, 0.0);
+                    self.state = 6;
+                }
+            }
+            6 => {
+                if self.ramp_b.step() {
+                    self.state = 7;
+                }
+                let band = &mut self.spr[SPR_BAND];
+                band.set_rect(0, 512, 0, (self.ramp_b.value * 64.0) as i32);
+                band.center();
+            }
+            7 => {
+                self.spr[SPR_WORD].show(false);
+                self.spr[SPR_PART].show(false);
+                self.spr[SPR_STREAK].show(false);
+                return;
+            }
+            _ => {}
+        }
+        let stage = match self.state {
+            3 => Some(0),
+            4 => Some(1),
+            5 => Some(2),
+            _ => None,
+        };
+        self.streak(stage, self.ramp_b.value, [0xFF, 0x60, 0x60], libc);
+    }
+
+    /// `HudNotice_UpdateBandA` / `UpdateBandB` (texture 3 from row `v0`, 512 x 64): a 4-pixel line slides in from
+    /// the left (0.24 s) and opens to 64 (0.24 s); after 0.25 s a copy of the word swells and fades over it (0.64
+    /// s, cubic); the band closes to the line (0.24 s) and slides out to the right (0.24 s). The 0.6 s wait between
+    /// starts the other ramp, so it takes no time.
+    fn update_band(&mut self, v0: i32) {
+        let set_word = |spr: &mut Sprite, sheet: &HudSheet| {
+            spr.init_tex(sheet, 3);
+            spr.set_rect(-256, 256, -32, 32);
+            spr.set_uv(0, 512, v0, v0 + 64);
+        };
+        let open = |spr: &mut Sprite, v: f32| {
+            spr.init_plain([0x80; 4]);
+            spr.set_rect(0, 512, 0, (v * 60.0 + 4.0) as i32);
+            spr.center();
+        };
+        if self.state == 0 {
+            self.spr[SPR_WORD].show(true);
+            set_word(&mut self.spr[SPR_WORD], &self.sheet);
+            self.spr[SPR_PART].show(false);
+            set_word(&mut self.spr[SPR_PART], &self.sheet);
+            self.ramp_a.start(0.24, 0.0, 1.0);
+            self.state = 1;
+        }
+        match self.state {
+            1 => {
+                let done = self.ramp_a.step();
+                let v = 1.0 - self.ramp_a.value;
+                let band = &mut self.spr[SPR_BAND];
+                band.show(true);
+                band.init_plain([0x80; 4]);
+                band.set_rect(0, 512, 0, 4);
+                band.center();
+                band.move_by((v * -512.0) as i32, 0);
+                if done {
+                    self.ramp_a.start(0.24, 0.0, 1.0);
+                    self.state = 2;
+                }
+            }
+            2 => {
+                let done = self.ramp_a.step();
+                open(&mut self.spr[SPR_BAND], self.ramp_a.value);
+                if done {
+                    self.ramp_a.start(0.25, 0.0, 1.0);
+                    self.state = 3;
+                }
+            }
+            3 => {
+                if self.ramp_a.step() {
+                    self.ramp_a.start(0.64, 1.0, 0.0);
+                    self.state = 4;
+                }
+            }
+            4 => {
+                let done = self.ramp_a.step();
+                let t = self.ramp_a.value.powf(3.0);
+                let copy = &mut self.spr[SPR_PART];
+                copy.show(true);
+                set_word(copy, &self.sheet);
+                copy.set_color(0x80, 0x80, 0x80, (t * 128.0) as u8);
+                copy.scale(1.0 - t + 1.0, 1.0 - t + 1.0);
+                if done {
+                    self.ramp_b.start(0.6, 1.0, 0.0);
+                    self.state = 5;
+                }
+            }
+            5 => {
+                if self.ramp_a.step() {
+                    self.ramp_a.start(0.24, 1.0, 0.0);
+                    self.state = 6;
+                }
+            }
+            6 => {
+                let done = self.ramp_a.step();
+                open(&mut self.spr[SPR_BAND], self.ramp_a.value);
+                if done {
+                    self.ramp_a.start(0.24, 0.0, 1.0);
+                    self.state = 7;
+                }
+            }
+            7 => {
+                let done = self.ramp_a.step();
+                let band = &mut self.spr[SPR_BAND];
+                band.set_rect(0, 512, 0, 4);
+                band.center();
+                band.move_by((self.ramp_a.value * 512.0) as i32, 0);
+                if done {
+                    self.state = 8;
+                }
+            }
+            8 => {
+                for i in [SPR_WORD, SPR_BAND, SPR_PART] {
+                    self.spr[i].show(false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `HudNotice_UpdateSpinA` / `UpdateSpinB` (texture 4 from row `v0`): the word shrinks from double size and
+    /// fades in while the node turns one and a half turns (0.83 s, cubic); it stands 1 s, then swells to double
+    /// size and fades out (0.23 s).
+    fn update_spin(&mut self, v0: i32) {
+        let set_word = |spr: &mut Sprite, sheet: &HudSheet| {
+            spr.init_tex(sheet, 4);
+            spr.set_rect(-256, 256, -32, 32);
+            spr.set_uv(0, 512, v0, v0 + 64);
+        };
+        let mut rot = 0.0;
+        if self.state == 0 {
+            self.spr[SPR_WORD].show(true);
+            set_word(&mut self.spr[SPR_WORD], &self.sheet);
+            self.ramp_a.start(0.83, 1.0, 0.0);
+            self.state = 1;
+        }
+        match self.state {
+            1 => {
+                let done = self.ramp_a.step();
+                let t = self.ramp_a.value.powf(3.0);
+                rot = t * 1.5 * 6.283_185_3;
+                while rot > 3.141_592_7 {
+                    rot -= 6.283_185_3;
+                }
+                let word = &mut self.spr[SPR_WORD];
+                set_word(word, &self.sheet);
+                word.set_color(0x80, 0x80, 0x80, ((1.0 - t) * 128.0) as u8);
+                word.scale(t + 1.0, t + 1.0);
+                if done {
+                    self.ramp_a.start(1.0, 0.0, 1.0);
+                    rot = 0.0;
+                    self.state = 2;
+                }
+            }
+            2 => {
+                if self.ramp_a.step() {
+                    self.ramp_a.start(0.23, 1.0, 0.0);
+                    self.state = 3;
+                }
+            }
+            3 => {
+                let done = self.ramp_a.step();
+                let t = self.ramp_a.value.powf(3.0);
+                let word = &mut self.spr[SPR_WORD];
+                set_word(word, &self.sheet);
+                word.set_color(0x80, 0x80, 0x80, (t * 128.0) as u8);
+                word.scale(2.0 - t, 2.0 - t);
+                if done {
+                    word.rgba[3] = 0;
+                    self.state = 4;
+                }
+            }
+            4 => {
+                self.spr[SPR_WORD].show(false);
+                self.spr[SPR_STREAK].show(false);
+                return;
+            }
+            _ => {}
+        }
+        self.rot = rot;
+    }
+
+    /// `HudNotice_UpdateTrail` (texture 5): eight copies of the word zoom in one frame behind each other (v 1 ->
+    /// 0 in 0.93 s; scale 2 - (1 - v)^3, alpha 128 (1 - v)^3), each hidden once it has caught up; then the word
+    /// itself, 0.35 / 0.8 / 0.35 s while the streak crosses, 0.3 s, and it swells by 0.3 and fades (0.3 s).
+    fn update_trail(&mut self, libc: &mut LibcRandom) {
+        if self.state == 0 {
+            let word = &mut self.spr[SPR_WORD];
+            word.show(false);
+            word.init_tex(&self.sheet, 5);
+            word.center();
+            self.spr[SPR_STREAK].show(false);
+            self.trail = [1.0; 8];
+            for i in 0..8 {
+                let part = &mut self.spr[SPR_PART + i];
+                part.show(false);
+                part.init_tex(&self.sheet, 5);
+                part.center();
+            }
+            self.ramp_a.start(0.93, 1.0, 0.0);
+            self.state = 1;
+        }
+        match self.state {
+            1 => {
+                self.trail.copy_within(0..7, 1);
+                let done = self.ramp_a.step();
+                self.trail[0] = self.ramp_a.value;
+                for i in 0..8 {
+                    let on = i == 0 || self.trail[0] != self.trail[i - 1];
+                    let k = 1.0 - (1.0 - self.trail[i]).powf(3.0);
+                    let part = &mut self.spr[SPR_PART + i];
+                    part.show(on);
+                    part.init_tex(&self.sheet, 5);
+                    part.center();
+                    part.scale(k + 1.0, k + 1.0);
+                    part.set_color(0x80, 0x80, 0x80, ((1.0 - k) * 128.0) as u8);
+                }
+                if done && self.trail[0] == self.trail[7] {
+                    self.ramp_a.start(0.35, 0.0, 1.0);
+                    for part in &mut self.spr[SPR_PART..SPR_PART + 8] {
+                        part.show(false);
+                    }
+                    self.spr[SPR_WORD].show(true);
+                    self.state = 2;
+                }
+            }
+            2 => {
+                if self.ramp_a.step() {
+                    self.ramp_a.start(0.8, 1.0, 0.0);
+                    self.state = 3;
+                }
+            }
+            3 => {
+                if self.ramp_a.step() {
+                    self.ramp_a.start(0.35, 1.0, 0.0);
+                    self.state = 4;
+                }
+            }
+            4 | 5 => {
+                if self.ramp_a.step() {
+                    self.ramp_a.start(0.3, 1.0, 0.0);
+                    self.state += 1;
+                }
+            }
+            6 => {
+                let done = self.ramp_a.step();
+                let word = &mut self.spr[SPR_WORD];
+                word.show(true);
+                word.init_tex(&self.sheet, 5);
+                word.center();
+                if done {
+                    word.rgba[3] = 0;
+                    self.state = 7;
+                } else {
+                    let t = self.ramp_a.value.powf(3.0);
+                    word.rgba[3] = (t * 128.0) as u8;
+                    let k = (1.0 - t) * 0.3 + 1.0;
+                    word.scale(k, k);
+                }
+            }
+            7 => {
+                self.spr[SPR_WORD].show(false);
+                self.spr[SPR_STREAK].show(false);
+                for part in &mut self.spr[SPR_PART..SPR_PART + 8] {
+                    part.show(false);
+                }
+                return;
+            }
+            _ => {}
+        }
+        let stage = match self.state {
+            2 => Some(0),
+            3 => Some(1),
+            4 => Some(2),
+            _ => None,
+        };
+        self.streak(stage, self.ramp_a.value, [0xC0, 0x70, 0x60], libc);
+    }
+
+    /// `HudNotice_UpdateBanner` (texture 6): drops in from 100 above while fading in (0.4 s, sine), bounces 10
+    /// (0.36 s), holds 1.73 s, then fades and shrinks to half (0.4 s, cubic).
+    fn update_banner(&mut self) {
+        use crate::btl_tech_volley::mathf_sin;
+        if self.state == 0 {
+            let spr = &mut self.spr[SPR_WORD];
+            spr.show(true);
+            spr.init_tex(&self.sheet, 6);
+            spr.center();
+            self.spr[SPR_STREAK].show(false);
+            self.ramp_a.start(0.4, 1.0, 0.0);
+            self.state = 1;
+        }
+        match self.state {
+            1 | 2 => {
+                let done = self.ramp_a.step();
+                let t = if self.state == 1 {
+                    mathf_sin(self.ramp_a.value * 1.570_796_3)
+                } else {
+                    mathf_sin(self.ramp_a.value * 3.141_592_6) * 0.1
+                };
+                let spr = &mut self.spr[SPR_WORD];
+                spr.init_tex(&self.sheet, 6);
+                spr.center();
+                spr.move_by(0, (t * -100.0) as i32);
+                spr.set_color(0x80, 0x80, 0x80, ((1.0 - t) * 128.0) as u32 as u8);
+                if done {
+                    if self.state == 1 {
+                        self.ramp_a.start(0.36, 0.0, 1.0);
+                    } else {
+                        self.ramp_a.start(1.73, 1.0, 0.0);
+                    }
+                    self.state += 1;
+                }
+            }
+            3 => {
+                if self.ramp_a.step() {
+                    self.ramp_a.start(0.4, 1.0, 0.0);
+                    self.state = 4;
+                }
+            }
+            4 => {
+                let done = self.ramp_a.step();
+                let spr = &mut self.spr[SPR_WORD];
+                if done {
+                    spr.rgba[3] = 0;
+                    self.state = 5;
+                } else {
+                    let t = self.ramp_a.value.powf(3.0);
+                    spr.rgba[3] = (t * 128.0) as u32 as u8;
+                    spr.scale(t * 0.5 + 0.5, t * 0.5 + 0.5);
+                }
+            }
+            5 => {
+                self.spr[SPR_WORD].show(false);
+                self.spr[SPR_STREAK].show(false);
+            }
+            _ => {}
         }
     }
 
@@ -578,20 +1051,35 @@ impl NoticePart {
         }
     }
 
-    /// `HudNotice_DrawReady` / `HudNotice_DrawFight`.
+    /// The announcements' draw callbacks: READY, FIGHT, K.O. and the bands draw the word through the band's
+    /// alpha; the spins, the trail and the banner draw it plainly. Then the fragments, after-images or copy, and for
+    /// FIGHT, K.O. and the trail the streak added in proportion to the word's alpha.
     fn draw(&self, out: &mut Vec<HudPrim>) {
         let Some(kind) = self.kind else {
             return;
         };
-        let node = Xf::translate(self.pos[0] as f32, self.pos[1] as f32);
+        let node =
+            Xf::rotate(self.rot).then(&Xf::translate(self.pos[0] as f32, self.pos[1] as f32));
         let band_xf = match kind {
             Notice::Ready => Xf::rotate(self.band_rot).then(&node),
-            Notice::Fight => node,
+            _ => node,
         };
         let word = &self.spr[SPR_WORD];
         let band = &self.spr[SPR_BAND];
-        // The word through the band's alpha.
-        if !word.hidden && !band.hidden {
+        let masked = matches!(
+            kind,
+            Notice::Ready | Notice::Fight | Notice::Ko | Notice::BandA | Notice::BandB
+        );
+        if !masked {
+            if !word.hidden {
+                out.push(self.prim(
+                    word,
+                    sprite_polygon(word, &node, &self.sheet),
+                    HudBlend::Alpha,
+                ));
+            }
+        } else if !word.hidden && !band.hidden {
+            // The word through the band's alpha.
             let mask: Vec<[f32; 2]> = sprite_polygon(band, &band_xf, &self.sheet)
                 .iter()
                 .map(|v| v.pos)
@@ -610,9 +1098,10 @@ impl NoticePart {
                 ));
             }
         }
-        // FIGHT: the word writes only its alpha, then the streak is added in proportion to it.
+        // The word writes only its alpha, then the streak is added in proportion to it.
         let streak = &self.spr[SPR_STREAK];
-        if kind == Notice::Fight && !streak.hidden && !word.hidden && word.tex >= 0 {
+        let streaked = matches!(kind, Notice::Fight | Notice::Ko | Notice::Trail);
+        if streaked && !streak.hidden && !word.hidden && word.tex >= 0 {
             let w = sprite_polygon(word, &node, &self.sheet);
             let (span_x, span_y) = (w[1].pos[0] - w[0].pos[0], w[2].pos[1] - w[0].pos[1]);
             let mut poly = sprite_polygon(streak, &node, &self.sheet);
@@ -750,14 +1239,22 @@ impl Hud {
         self.flags = if on { SHOW_ALL } else { 0 };
     }
 
-    /// `HudNotice_Show`: READY (0) and FIGHT (1) are drawn; the finish announcements 2..5 only play their
-    /// announcer line (on streamed-SE player 0) so far, and 6 / 7 (win / lose) have none.
+    /// `HudNotice_Show`: announcement `id` and, for 0..5, the announcer's line (on streamed-SE player 0). Id 8
+    /// (the tutorial's, which picks its line by `Rand_Range(2)`) starts without one.
     pub(crate) fn show_notice(&mut self, id: u32, sounds: &mut Vec<TitleSound>) {
-        match id {
-            0 => self.notice.show(Notice::Ready),
-            1 => self.notice.show(Notice::Fight),
-            _ => self.notice.kind = None,
-        }
+        let kind = match id {
+            0 => Notice::Ready,
+            1 => Notice::Fight,
+            2 => Notice::Ko,
+            3 => Notice::BandA,
+            4 => Notice::SpinA,
+            5 => Notice::SpinB,
+            6 => Notice::Trail,
+            7 => Notice::Banner,
+            8 => Notice::BandB,
+            _ => return,
+        };
+        self.notice.show(kind);
         if id <= 5 {
             let line = ANNOUNCER_BASE + self.announcer.max(0) as u32 * ANNOUNCER_LINES + id;
             sounds.push(TitleSound::StreamSe(line));
@@ -937,6 +1434,103 @@ mod tests {
         // at its last step it is 0 high and nothing shows.
         assert_eq!(streaks, 32);
         assert_eq!(frames, 51);
+    }
+
+    /// Runs announcement `id` until it draws nothing (at most 200 frames): every frame's sprites.
+    fn run_notice(id: u32) -> (Vec<Vec<HudPrim>>, Vec<TitleSound>) {
+        let mut hud = Hud::new(
+            &[HudSheet::default(), sheet()],
+            HudTextures::default(),
+            0,
+            0,
+        );
+        let mut libc = LibcRandom::new(1);
+        let mut sounds = Vec::new();
+        hud.show_all(true);
+        hud.show_notice(id, &mut sounds);
+        let mut frames = Vec::new();
+        for _ in 0..200 {
+            let prims = hud.draw(&mut libc, true).prims;
+            if prims.is_empty() {
+                break;
+            }
+            frames.push(prims);
+        }
+        (frames, sounds)
+    }
+
+    fn of_tex(prims: &[HudPrim], tex: usize) -> usize {
+        prims.iter().filter(|p| p.texture == Some(10 + tex)).count()
+    }
+
+    #[test]
+    fn ko_pops_with_after_images_and_a_red_streak() {
+        let (frames, sounds) = run_notice(2);
+        assert_eq!(sounds, [TitleSound::StreamSe(0x10B6C + 2)]);
+        // The after-images trail the pop, then catch up.
+        assert!(frames.iter().any(|f| of_tex(f, 2) == 4));
+        let streaks: Vec<&HudPrim> = frames
+            .iter()
+            .filter_map(|f| {
+                f.iter()
+                    .find(|p| matches!(p.blend, HudBlend::AddMasked(12)))
+            })
+            .collect();
+        // 0.2 + 0.55 + 0.4 s of streak, red while it comes in and shakes.
+        assert_eq!(streaks.len(), 35);
+        assert_eq!(streaks[0].rgba, [0xFF, 0x60, 0x60, 0x80]);
+        assert!(frames.len() < 70, "{}", frames.len());
+    }
+
+    #[test]
+    fn spins_turn_the_word_into_place() {
+        for (id, tex) in [(4, 4), (5, 4)] {
+            let (frames, sounds) = run_notice(id);
+            assert_eq!(sounds, [TitleSound::StreamSe(0x10B6C + id)]);
+            // Turning at first (the word's top edge is not level), level once in place.
+            let tilt = |f: &Vec<HudPrim>| {
+                let v = &f[0].vertices;
+                (v[0].pos[1] - v[1].pos[1]).abs()
+            };
+            assert!(tilt(&frames[2]) > 1.0);
+            assert_eq!(tilt(&frames[30]), 0.0);
+            assert!(frames.iter().all(|f| of_tex(f, tex) == 1));
+            // 25 + 30 + 7 frames (0.83, 1 and 0.23 s); its last frame has alpha 0.
+            assert_eq!(frames.len(), 62);
+        }
+    }
+
+    #[test]
+    fn bands_and_banners_come_and_go() {
+        let (frames, sounds) = run_notice(3);
+        assert_eq!(sounds, [TitleSound::StreamSe(0x10B6C + 3)]);
+        // The copy swells over the word at some point.
+        assert!(frames.iter().any(|f| of_tex(f, 3) == 2));
+        assert!((60..90).contains(&frames.len()), "{}", frames.len());
+        let (frames, sounds) = run_notice(7);
+        assert!(sounds.is_empty());
+        // The banner drops in from above its place at y 352.
+        let top = |f: &Vec<HudPrim>| {
+            f[0].vertices
+                .iter()
+                .map(|v| v.pos[1])
+                .fold(f32::MAX, f32::min)
+        };
+        assert!(top(&frames[0]) < top(&frames[20]));
+        assert!(frames.iter().all(|f| of_tex(f, 6) == 1));
+        assert_eq!(frames.len(), 87);
+    }
+
+    #[test]
+    fn trail_zooms_its_copies_in() {
+        let (frames, sounds) = run_notice(6);
+        assert!(sounds.is_empty());
+        assert!(frames.iter().any(|f| of_tex(f, 5) >= 4));
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.iter().any(|p| matches!(p.blend, HudBlend::AddMasked(15))))
+        );
     }
 
     #[test]
