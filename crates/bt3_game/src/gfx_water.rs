@@ -113,6 +113,7 @@ impl Wobble {
             source: PostBuf::Frame,
             target: PostBuf::Wide,
             blend: false,
+            mask: None,
             tris: Vec::new(),
         };
         for k in 0..n {
@@ -138,6 +139,7 @@ impl Wobble {
             source: PostBuf::Wide,
             target: PostBuf::Frame,
             blend: false,
+            mask: None,
             tris: Vec::new(),
         };
         for row in 0..5 {

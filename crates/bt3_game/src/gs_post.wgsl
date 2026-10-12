@@ -14,6 +14,11 @@
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var post_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var post_sampler: sampler;
+// A masked op (params.x 1) is blended by the alpha its mask gives the depth byte at the target pixel (the frame's
+// alpha after a depth CLUT pass), 0x80 = 1.0.
+@group(#{MATERIAL_BIND_GROUP}) @binding(2) var plane: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var mask: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> params: vec4<f32>;
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let low = c / 12.92;
@@ -44,7 +49,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let bottom = mix(texel(p + vec2<i32>(0, 1), size), texel(p + vec2<i32>(1, 1), size), f.x);
     let raw = mix(top, bottom, f.y);
     let rgb = min(raw * in.color.rgb / 128.0, vec3<f32>(1.0));
-    color = vec4<f32>(srgb_to_linear(rgb), min(in.color.a / 128.0, 1.0));
+    var alpha = in.color.a / 128.0;
+    if params.x > 0.5 {
+        let byte = textureLoad(plane, vec2<i32>(in.position.xy), 0).r;
+        alpha = textureLoad(mask, vec2<i32>(i32(round(byte * 255.0)), 0), 0).a * 255.0 / 128.0;
+    }
+    color = vec4<f32>(srgb_to_linear(rgb), min(alpha, 1.0));
 #endif
 #ifdef TONEMAP_IN_SHADER
     color = tonemapping::tone_mapping(color, view.color_grading);

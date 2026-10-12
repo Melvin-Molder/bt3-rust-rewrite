@@ -111,6 +111,7 @@ mod stage_fx;
 mod stg_amb;
 mod stg_blur;
 mod stg_depth;
+mod stg_haze;
 mod stg_obj;
 mod stg_rigid;
 mod stg_scroll;
@@ -378,6 +379,8 @@ struct Game {
     skip_to_menu: bool,
     /// `--battle`: start straight at `Battle_Main` with characters 0 and 1 on stage 0.
     skip_to_battle: bool,
+    /// `--stage`: the quick battle's stage.
+    battle_stage: i32,
     /// `--mode N` (`--course C` for survival): the battle mode `--battle` starts in.
     battle_mode: (i32, usize),
     /// `--split`: `--battle` is 2P versus in split screen.
@@ -399,6 +402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut skip_to_title = false;
     let mut skip_to_menu = false;
     let mut skip_to_battle = false;
+    let mut battle_stage = 0;
     let mut battle_mode = (0, 0);
     let mut memcard_dir = PathBuf::from("memcard");
     let mut battle_split = false;
@@ -419,6 +423,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shot = Some(PathBuf::from(
                 arguments.next().ok_or("--shot requires a file")?,
             ));
+        } else if argument == "--stage" {
+            battle_stage = arguments
+                .next()
+                .and_then(|value| value.to_string_lossy().parse::<i32>().ok())
+                .filter(|value| (0..0x23).contains(value))
+                .ok_or("--stage requires a stage of 0 to 34")?;
+            skip_to_title = true;
+            skip_to_battle = true;
         } else if argument == "--shot-at" {
             shot_at = arguments
                 .next()
@@ -668,6 +680,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_to_title,
             skip_to_menu,
             skip_to_battle,
+            battle_stage,
             battle_mode,
             battle_split,
             se: effects,
@@ -1681,6 +1694,7 @@ fn quick_battle_setup(game: &mut Game) -> Result<BattleSetup, Box<dyn std::error
     }
     let mut setup = BattleSetup {
         mode,
+        stage: game.battle_stage,
         ..BattleSetup::default()
     };
     setup.sides[1].chara = 1;

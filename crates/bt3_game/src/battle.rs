@@ -1798,6 +1798,8 @@ pub struct Battle {
     pub(crate) water_wobble: crate::gfx_water::Wobble,
     /// `gStgDepthTint`: the stage's depth tints in the air and under water.
     pub(crate) depth_tints: crate::stg_depth::DepthTints,
+    /// `gStgHaze`: the stage's depth haze.
+    pub(crate) haze: crate::stg_haze::Haze,
     pub(crate) hud: Hud,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
     pub(crate) fade: Fade,
@@ -2139,6 +2141,7 @@ impl Battle {
         let mut water_wobble = crate::gfx_water::Wobble::default();
         water_wobble.load_stage_color(assets.stage.water_color);
         let depth_tints = crate::stg_depth::DepthTints::new(&assets.stage.depth_tints);
+        let haze = crate::stg_haze::Haze::new(assets.stage.haze.as_ref());
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -2187,6 +2190,7 @@ impl Battle {
             xfade: ScrXfade::default(),
             water_wobble,
             depth_tints,
+            haze,
             hud,
             fade: Fade::start_in(1.0),
             roots,
@@ -2420,6 +2424,7 @@ impl Battle {
                                 .load_stage_color(self.assets.stage.water_color);
                             self.depth_tints =
                                 crate::stg_depth::DepthTints::new(&self.assets.stage.depth_tints);
+                            self.haze = crate::stg_haze::Haze::new(self.assets.stage.haze.as_ref());
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -2875,6 +2880,7 @@ impl Battle {
         self.water_wobble
             .load_stage_color(self.assets.stage.water_color);
         self.depth_tints = crate::stg_depth::DepthTints::new(&self.assets.stage.depth_tints);
+        self.haze = crate::stg_haze::Haze::new(self.assets.stage.haze.as_ref());
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         // BtlChar_ResetAll's BtlReplay_Rewind / BtlReplay_ResetViewer.
         self.replay.rewind();
@@ -3308,6 +3314,24 @@ impl Battle {
                     .is_some_and(|level| level < views[0].0.eye()[1]);
             self.depth_tints.draw(under_water)
         };
+        // The rest of StgFx_DrawPre, as post ops before the fighters: StgHaze_DrawAll on stages with feature 9
+        // (split screen's two views, else the view shown: view 0 under the demo camera), each view's strength by
+        // its fighter camera's height.
+        let mut pre = Vec::new();
+        if !self.loading && self.haze.is_on() {
+            let top = self.assets.stage.bounds.top;
+            let split = views.len() == 2;
+            let drawn: Vec<usize> = if split {
+                vec![0, 1]
+            } else {
+                vec![if demo_on { 0 } else { view_side }]
+            };
+            for v in drawn {
+                let cam_y = self.roster.chars[v].cam.pos[1];
+                let paused = self.seq.paused;
+                pre.extend(self.haze.draw_view(split, v, cam_y, top, paused, libc));
+            }
+        }
         // StgFx_DrawPost's ScrWarp_Update: the shock waves step (not while paused), each new one placed by its
         // view's camera in split screen's two views; they draw with the post pass.
         if !self.seq.paused {
@@ -3429,7 +3453,7 @@ impl Battle {
             effects,
             under,
             depth_tint,
-            pre: Vec::new(),
+            pre,
             post,
             texture_updates,
             shadows,

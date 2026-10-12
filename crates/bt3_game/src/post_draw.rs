@@ -37,6 +37,13 @@ pub struct GsPostMaterial {
     #[texture(0)]
     #[sampler(1)]
     texture: Handle<Image>,
+    /// The depth byte's plane and the op's mask (alpha by byte value), with x of `params` 1 when masked.
+    #[texture(2)]
+    plane: Handle<Image>,
+    #[texture(3)]
+    mask: Handle<Image>,
+    #[uniform(4)]
+    params: Vec4,
     blend: bool,
     order: u16,
 }
@@ -102,9 +109,13 @@ impl Material2d for GsPostMaterial {
 #[derive(Resource)]
 pub struct WorkBuffers([Handle<Image>; 2], Handle<Image>);
 
-/// The materials made so far, by source image, blend and order.
+/// The materials made so far, by source image, blend, order and mask image; the mask images (one per masked op
+/// of the frame, by its rank).
 #[derive(Resource, Default)]
-pub struct PostMaterials(HashMap<(AssetId<Image>, bool, u16), Handle<GsPostMaterial>>);
+pub struct PostMaterials(
+    HashMap<(AssetId<Image>, bool, u16, Option<AssetId<Image>>), Handle<GsPostMaterial>>,
+    Vec<Handle<Image>>,
+);
 
 /// A post camera: its chain, its place in the chain and the image it draws into.
 #[derive(Component)]
@@ -184,6 +195,8 @@ pub fn sync_post(
     mut materials: ResMut<Assets<GsPostMaterial>>,
     mut cameras: Query<(&mut PostCamera, &mut Camera, &mut RenderTarget)>,
     slots: Query<(Entity, &Mesh2d), With<PostSlot>>,
+    plane: Res<crate::model_draw::DepthPlane>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     if !game.is_changed() {
         return;
@@ -211,18 +224,44 @@ pub fn sync_post(
             None => camera.is_active = false,
         }
     }
+    let mut masks = 0;
     for (chain, groups) in chains.iter().enumerate() {
         for (n, group) in groups.iter().enumerate().take(POST_CAMERAS) {
             for (k, op) in group.iter().enumerate() {
                 let texture = image(op.source);
-                let key = (texture.id(), op.blend, k as u16);
+                // A masked op's alphas go into the frame's next mask image (created the first time).
+                let mask = op.mask.as_ref().map(|alphas| {
+                    if cache.1.len() <= masks {
+                        cache.1.push(images.add(mask_image()));
+                    }
+                    let handle = cache.1[masks].clone();
+                    masks += 1;
+                    if let Some(mut image) = images.get_mut(&handle) {
+                        image.data = Some(alphas.iter().flat_map(|&a| [0, 0, 0, a]).collect());
+                    }
+                    handle
+                });
+                let key = (
+                    texture.id(),
+                    op.blend,
+                    k as u16,
+                    mask.as_ref().map(Handle::id),
+                );
                 let material = cache
                     .0
                     .entry(key)
                     .or_insert_with(|| {
                         materials.add(GsPostMaterial {
                             texture,
-                            blend: op.blend,
+                            plane: plane.image(),
+                            mask: mask.clone().unwrap_or_else(|| plane.image()),
+                            params: Vec4::new(
+                                if mask.is_some() { 1.0 } else { 0.0 },
+                                0.0,
+                                0.0,
+                                0.0,
+                            ),
+                            blend: op.blend || mask.is_some(),
                             order: k as u16,
                         })
                     })
@@ -237,6 +276,21 @@ pub fn sync_post(
             }
         }
     }
+}
+
+/// A 256 x 1 table of alphas by byte value.
+fn mask_image() -> Image {
+    Image::new_fill(
+        bevy::render::render_resource::Extent3d {
+            width: 256,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    )
 }
 
 /// The op's triangles in its target camera's space (pixels, y up, centred), texels normalised by the source.
@@ -279,6 +333,7 @@ mod tests {
             source: s,
             target: t,
             blend: false,
+            mask: None,
             tris: Vec::new(),
         };
         let ops = [

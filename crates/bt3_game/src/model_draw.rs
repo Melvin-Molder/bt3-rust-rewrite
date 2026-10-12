@@ -306,10 +306,18 @@ impl Material2d for GsDepthClutMaterial {
 /// The depth byte camera's materials, and the depth tint's CLUT and materials (blended, added).
 #[derive(Resource)]
 pub struct DepthPlane {
+    image: Handle<Image>,
     clut: Handle<Image>,
     tint: [Handle<GsDepthClutMaterial>; 2],
     materials: HashMap<(usize, usize, usize, bool), Handle<GsDepthMaterial>>,
     rev: u32,
+}
+
+impl DepthPlane {
+    /// The depth byte's image.
+    pub fn image(&self) -> Handle<Image> {
+        self.image.clone()
+    }
 }
 
 /// The depth tint's full-screen quad.
@@ -369,6 +377,7 @@ fn spawn_depth_plane(
         Visibility::Hidden,
     ));
     commands.insert_resource(DepthPlane {
+        image,
         clut,
         tint,
         materials: HashMap::new(),

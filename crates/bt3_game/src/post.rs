@@ -42,6 +42,10 @@ pub struct PostOp {
     pub source: PostBuf,
     pub target: PostBuf,
     pub blend: bool,
+    /// Blended by the destination's alpha (ALPHA 0x54, `(Cs - Cd) * Ad + Cd`) as a pass over the depth buffer's
+    /// spare byte left it in the frame (`GfxPost_DrawDepthClut` under the frame mask): the alpha of each byte value
+    /// (0x80 = 1.0), read at each target pixel.
+    pub mask: Option<Box<[u8; 256]>>,
     pub tris: Vec<[PostVertex; 3]>,
 }
 
@@ -65,6 +69,7 @@ impl PostOp {
             source,
             target,
             blend,
+            mask: None,
             tris: vec![[c[0], c[1], c[2]], [c[1], c[2], c[3]]],
         }
     }
