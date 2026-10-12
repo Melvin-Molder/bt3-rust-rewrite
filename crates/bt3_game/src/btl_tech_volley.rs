@@ -799,6 +799,35 @@ impl Shots {
         }
     }
 
+    /// `EftBlastObj_SetNoHit`: it publishes no record.
+    pub(crate) fn set_no_hit(&mut self, id: Option<u32>, on: bool) {
+        if let Some(s) = self.get(id) {
+            if on {
+                s.flags |= B_NO_HIT;
+            } else {
+                s.flags &= !B_NO_HIT;
+            }
+        }
+    }
+
+    /// `EftBlastObj_SetFrozen`: it does not move.
+    pub(crate) fn set_frozen(&mut self, id: Option<u32>, on: bool) {
+        if let Some(s) = self.get(id) {
+            if on {
+                s.flags |= B_FROZEN;
+            } else {
+                s.flags &= !B_FROZEN;
+            }
+        }
+    }
+
+    /// `EftBlastObj_Stop`: no more records; it dies on the update after the next.
+    pub(crate) fn stop(&mut self, id: Option<u32>) {
+        if let Some(s) = self.get(id) {
+            s.flags |= B_STOP;
+        }
+    }
+
     /// `EftBlastObj_SetPrevPos`.
     pub(crate) fn set_prev(&mut self, id: Option<u32>, pos: [f32; 3]) {
         if let Some(s) = self.get(id) {

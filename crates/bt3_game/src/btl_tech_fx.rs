@@ -11,7 +11,7 @@
 //! The prop shot of type 6 (`EftPropShot_*`) is the same item as the beam with its differences; the volley of
 //! type 1 is in `btl_tech_volley`.
 //!
-//! The sweep of type 3 and the follow of type 7 are in `btl_tech_sweep`, the rush shot of type 9 in
+//! The shots of type 2 are in `btl_tech_shots`, the sweep of type 3 and the follow of type 7 in `btl_tech_sweep`, the rush shot of type 9 in
 //! `btl_tech_rush` with the thrown object of type 8, the ring shot of type 4 in `btl_tech_ring`, the multi of type 5
 //! (its pieces are discs) in `btl_tech_disc`.
 //!
@@ -20,8 +20,7 @@
 //! events), keeps them alive in its post-update (`EftEmit_UpdateAlive`, a fighter hit marking the phase 6 ones,
 //! `EftEmit_MarkKind6`) and kills them when the scene resets its fighter (`EftEmit_KillAll`).
 //!
-//! Not ported: the skills' shots (slots 0, 1); the items of effect type 2 (their timeline runs, so
-//! flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); the prop shots' models, stage blur, flash and
+//! Not ported: the skills' shots (slots 0, 1); the prop shots' models, stage blur, flash and
 //! sound; abilities; the battle events.
 
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -39,6 +38,7 @@ use crate::btl_obj::mask_to_node;
 use crate::btl_tech_disc::{Discs, Multi};
 use crate::btl_tech_ring::Ring;
 use crate::btl_tech_rush::{ObjTech, RushShot};
+use crate::btl_tech_shots::ShotTech;
 use crate::btl_tech_sweep::{Follow, Sweep};
 use crate::btl_tech_volley::{Shots, Volley, scene_rand_f};
 use crate::eft::{EmitState, Modules, Nodes, SetAssets, spawn};
@@ -116,6 +116,10 @@ pub(crate) struct TechDef {
     /// The technique's first flag word (1: hit records; 2: does not move; 4: nodes from the table; 0x20: keeps
     /// moving after the END / one hit at a time; 0x100 / 0x10000 / 0x200000 / 0x2000 and others).
     pub flags: u32,
+    /// `shotLife`: frames an effect type 2 blast object lives.
+    pub shot_life: f32,
+    /// `shotSpeed`: effect type 2's target point speed.
+    pub item_speed: f32,
 }
 
 impl TechDef {
@@ -142,6 +146,8 @@ impl TechDef {
             speed: t.shot_speed(slot) * 10.0 * kmh(1.0),
             homing: t.shot_turn(slot) * 3.141_592_7 / 180.0 * (1.0 / 30.0),
             flags: t.flags_a(slot),
+            shot_life: t.shot_life(slot),
+            item_speed: t.item_speed(slot),
         }
     }
 
@@ -252,6 +258,7 @@ pub(crate) struct TechFx {
     follows: [[Vec<Follow>; 5]; 2],
     rush_shots: [[Vec<RushShot>; 5]; 2],
     obj_techs: [[Vec<ObjTech>; 5]; 2],
+    shot_techs: [[Vec<ShotTech>; 5]; 2],
     multis: [[Vec<Multi>; 5]; 2],
     rings: [[Vec<Ring>; 5]; 2],
     /// The discs: ki blasts of types 4 / 5 and the multis' pieces (layer 3).
@@ -275,6 +282,7 @@ impl Default for TechFx {
             follows: Default::default(),
             rush_shots: Default::default(),
             obj_techs: Default::default(),
+            shot_techs: Default::default(),
             multis: Default::default(),
             rings: Default::default(),
             discs: Discs::default(),
@@ -379,7 +387,7 @@ fn slot_flags(data: &SideData, slot: i32) -> u32 {
 
 /// `EftShot_GetAttrKind`: the node of an event: 0x11 without a current slot or with two attributes, 0x36 for a
 /// definition with flag 0x2000, else the event argument's node (0 without one).
-fn attr_kind(chr: &Chr, data: &SideData, cur_slot: i32, bits: u32) -> i32 {
+pub(crate) fn attr_kind(chr: &Chr, data: &SideData, cur_slot: i32, bits: u32) -> i32 {
     if cur_slot < 0 || has_two_attrs(chr, bits) {
         return 0x11;
     }
@@ -570,7 +578,25 @@ pub(crate) fn drive_parts(
     dir: [f32; 3],
     scale: f32,
     skip: impl Fn(&EmitSet, u8, usize) -> bool,
+    flags_of: impl FnMut(&mut EmitState, &EmitSet, u8, usize) -> u32,
+) {
+    drive_parts_at(fx, w, src, state, nodes, scale, skip, flags_of, |_, _| {
+        (pos, dir)
+    });
+}
+
+/// `drive_parts` with each emitter driven where `place` puts it (by its index in the set).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drive_parts_at(
+    fx: &mut Modules,
+    w: &mut World,
+    src: &TechSrc,
+    state: &mut EmitState,
+    nodes: &EmitNodes,
+    scale: f32,
+    skip: impl Fn(&EmitSet, u8, usize) -> bool,
     mut flags_of: impl FnMut(&mut EmitState, &EmitSet, u8, usize) -> u32,
+    place: impl Fn(&EmitSet, usize) -> ([f32; 3], [f32; 3]),
 ) {
     let side = src.side;
     let Some((set, assets)) = slot_set(w.data[side], src.slot) else {
@@ -591,6 +617,7 @@ pub(crate) fn drive_parts(
             }
             let f = flags_of(state, set, kind, g.first + sub);
             if f != 0 {
+                let (pos, dir) = place(set, g.first + sub);
                 spawn(
                     fx, state, &nodes, &ctx, pos, dir, kind, sub, f, scale, w.libc, w.vu0,
                 );
@@ -1024,6 +1051,12 @@ impl Timeline {
 }
 
 impl TechFx {
+    /// A fighter's live blast objects, for tests.
+    #[cfg(test)]
+    pub(crate) fn shots_of(&self, side: usize) -> usize {
+        self.shots.of(side).len()
+    }
+
     /// `EftTechEvt_GetEvents`.
     #[cfg(test)]
     pub(crate) fn events(&self, side: usize) -> u32 {
@@ -1097,6 +1130,12 @@ impl TechFx {
                 if items.len() < ITEMS {
                     *next_id += 1;
                     items.push(Sweep::new(*next_id, src, me, opp, data, set));
+                }
+            }
+            2 => {
+                let items = &mut self.shot_techs[side][slot as usize];
+                if items.len() < ITEMS {
+                    items.push(ShotTech::new(src, data, set.head));
                 }
             }
             8 => {
@@ -1401,6 +1440,26 @@ impl TechFx {
                     }
                 }
                 let mut k = 0;
+                while k < self.shot_techs[side][slot].len() {
+                    let s = &mut self.shot_techs[side][slot][k];
+                    s.update(
+                        w,
+                        fx,
+                        &mut self.shots,
+                        next_id,
+                        self.events[side],
+                        self.events[side ^ 1],
+                        self.cur_slot[side],
+                    );
+                    if s.dead() {
+                        // EftShotTech_Term.
+                        w.chars[side].flags.set_held(0xA8);
+                        self.shot_techs[side][slot].remove(k);
+                    } else {
+                        k += 1;
+                    }
+                }
+                let mut k = 0;
                 while k < self.volleys[side][slot].len() {
                     let v = &mut self.volleys[side][slot][k];
                     v.update(
@@ -1472,6 +1531,12 @@ impl TechFx {
                 if o.src().def.kind != 0 {
                     held.set_held(0xA8);
                 }
+            }
+            // EftShotTech_Reset: the task dies without killing its emitters' objects (`EftEmit_TermState` does
+            // nothing).
+            if !self.shot_techs[side][slot].is_empty() {
+                self.shot_techs[side][slot].clear();
+                held.set_held(0xA8);
             }
             for mut r in self.rings[side][slot].drain(..) {
                 r.kill_parts(fx);
@@ -1598,6 +1663,9 @@ impl TechFx {
                 }
                 for r in &mut self.rush_shots[side][slot] {
                     r.post_update(w, fx);
+                }
+                for s in &mut self.shot_techs[side][slot] {
+                    s.post_update(w, fx, &self.shots);
                 }
                 let mut stop = false;
                 for o in &mut self.obj_techs[side][slot] {

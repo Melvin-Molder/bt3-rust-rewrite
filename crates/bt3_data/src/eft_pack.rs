@@ -39,8 +39,19 @@ pub struct SetHead {
     pub width_step: f32,
     /// Frames the end animation of a shot runs.
     pub end_frames: u8,
-    /// 4: the second width animation is used.
+    /// 1: effect type 2 moves its target point (by `move_kind`); 4: the second width animation is used.
     pub flags: u8,
+    /// `unk22`: how effect type 2 moves its target point: 0 straight, 1 in front of the opponent, 2 past it.
+    pub move_kind: u8,
+    /// `unk25`: how effect type 2 aims (`EftShotTech_CalcDir`): 0 at the opponent's node 3, 1 node 0x2E to 3, 2
+    /// the aim, 3 node 0x22 to 0x23, 4 node 0x14 to 0x15, 5 node 0x36's -z.
+    pub dir_kind: u8,
+    /// `unk26`: effect type 2's options: 1 the phase 4 emitters and shots at node 0x36, 2 onto the opponent, 4
+    /// started by event 0x10, 8 waits for event 0x10, 0x10 the shots placed on the target point, 0x20 it fires
+    /// shots, 0x40 aimed again once the rush connects.
+    pub options: u8,
+    /// `unk28`: the distance in front of the opponent of move kind 1.
+    pub gap: f32,
     /// Bit per phase the set has emitters for.
     pub phase_mask: u8,
     /// The second width animation (flag 4): b0 -> b1 -> b2 over `width_b_time` seconds (`EftEmit_UpdateWidth2`).
@@ -199,6 +210,10 @@ impl EmitSet {
             width_step: f32_at(h, 0x1C),
             end_frames: h[0x20],
             flags: h[0x21],
+            move_kind: h[0x22],
+            dir_kind: h[0x25],
+            options: h[0x26],
+            gap: f32_at(h, 0x28),
             phase_mask: h[0x27],
             width_b: [f32_at(h, 0x2C), f32_at(h, 0x30), f32_at(h, 0x34)],
             width_b_time: f32_at(h, 0x38),

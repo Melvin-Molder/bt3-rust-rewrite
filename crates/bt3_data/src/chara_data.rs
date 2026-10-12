@@ -379,6 +379,14 @@ impl TechTable<'_> {
     pub fn shot_scale(&self, slot: i32) -> f32 {
         self.f32_of(0x6C, slot)
     }
+    /// `shotLife` (+0x30): frames a blast object of effect type 2 lives before it is stopped.
+    pub fn shot_life(&self, slot: i32) -> f32 {
+        self.f32_of(0x30, slot)
+    }
+    /// `unk214` (`EftShotParam.shotSpeed`): the speed of effect type 2's target point (raw, per frame).
+    pub fn item_speed(&self, slot: i32) -> f32 {
+        self.f32_of(0x214, slot)
+    }
     /// The struggle power (+0x3C, `EftShotParam.power`).
     pub fn power(&self, slot: i32) -> f32 {
         self.f32_of(0x3C, slot)

@@ -3523,7 +3523,7 @@ mod tests {
         slot: i32,
         frames: usize,
         near: bool,
-    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 2])> {
+    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3])> {
         use crate::btl_input::pad::{DOWN, L2, START, TRIANGLE, UP};
         let mut setup = BattleSetup::default();
         setup.sides[0].chara = chara;
@@ -3552,8 +3552,15 @@ mod tests {
                 break;
             }
         }
-        for _ in 0..150 {
+        if slot == 4 {
+            // A blast stock for the powered-up mode an ultimate needs.
+            battle.roster.chars[0].gauge.blast = 100_000;
+        }
+        for i in 0..600 {
             frame(&mut battle, L2);
+            if i >= 150 && (slot != 4 || battle.roster.chars[0].flags.test(6)) {
+                break;
+            }
         }
         for _ in 0..5 {
             frame(&mut battle, 0);
@@ -3577,7 +3584,7 @@ mod tests {
         };
         let health = battle.roster.chars[1].gauge.health;
         let mut log: Vec<(usize, i32, i32)> = Vec::new();
-        let mut parts = [0usize; 2];
+        let mut parts = [0usize; 3];
         for i in 0..frames {
             let p1 = match i {
                 2..4 => L2,
@@ -3588,7 +3595,8 @@ mod tests {
             let r = &battle.roster;
             let (a, b) = (r.chars[0].act.current, r.chars[1].act.current);
             let live: usize = r.scene.fx.counts(None).iter().sum();
-            parts = [parts[0].max(live), live];
+            let shots = r.scene.tech.shots_of(0);
+            parts = [parts[0].max(live), live, parts[2].max(shots)];
             if log.last().map(|l| (l.1, l.2)) != Some((a, b)) {
                 log.push((i, a, b));
             }
@@ -3600,6 +3608,38 @@ mod tests {
             table,
             parts,
         ))
+    }
+
+    #[test]
+    fn real_rush_technique_shots() {
+        // The rush techniques' effect of type 2 (EftShotTech) drives its emitters through the dash and the
+        // sequence and leaves none behind: Vegeta's and Goku's slot 3, character 52's (whose point moves past the
+        // opponent), and the Ultimate Blasts of characters 85 and 157 (powered up: 0x105, then the dash 0x11D and
+        // the sequence 0x12F / 0x13B), whose sets fire blast objects, and 13's (in front of the opponent).
+        for (chara, slot, shots) in [
+            (1, 3, false),
+            (0, 3, false),
+            (52, 3, false),
+            (85, 4, true),
+            (157, 4, true),
+            (13, 4, false),
+        ] {
+            let Some((log, dmg, table, parts)) = run_technique(chara, slot, 600, false) else {
+                return;
+            };
+            let seq = if slot == 4 {
+                (0x12F, 0x13B)
+            } else {
+                (0x12E, 0x13A)
+            };
+            assert!(log.iter().any(|l| (l.1, l.2) == seq), "{chara}: {log:x?}");
+            if slot == 4 {
+                assert!(log.iter().any(|l| l.1 == 0x105), "{chara}: {log:x?}");
+            }
+            assert!(dmg >= table, "{chara}: {dmg} {table}");
+            assert!(parts[0] > 0 && parts[1] == 0, "{chara}: {parts:?}");
+            assert_eq!(parts[2] > 0, shots, "{chara}: {parts:?}");
+        }
     }
 
     #[test]
@@ -3659,7 +3699,7 @@ mod tests {
             (0, 3, false, 0x11F),
             (133, 3, true, 0x122),
         ] {
-            let Some((log, dmg, table, _)) = run_technique(chara, slot, 700, near) else {
+            let Some((log, dmg, table, parts)) = run_technique(chara, slot, 700, near) else {
                 return;
             };
             assert!(has(&log, dash, None), "{chara}: {log:x?}");
