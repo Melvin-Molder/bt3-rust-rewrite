@@ -115,6 +115,12 @@ pub struct BattleAssets {
     /// `gEftRay->tex[0]`: the ray bursts' texture among the effect textures.
     pub(crate) ray_texture: Option<usize>,
     pub(crate) fighters: Vec<FighterModel>,
+    /// The light ramp the shading rows are looked up through, and common file 2 (`BtlLoad_StepChara` reloads a
+    /// side with them).
+    pub(crate) ramp: Vec<u8>,
+    pub(crate) common_file: Vec<u8>,
+    /// The sides' starting characters (`BattleSide.startForm`), which a rematch loads back.
+    pub(crate) start: [SideLoad; 2],
     stage: StageResource,
     stage_model: StageModel,
     stage_id: i32,
@@ -137,6 +143,10 @@ pub struct BattleAssets {
     pub(crate) collision: StageCollision,
     /// `Battle_GetSetup()->side[n].cpu`.
     pub(crate) cpu: [bool; 2],
+    /// `BattleSide.changeAllowed`: the side may transform, fuse and switch.
+    pub(crate) change_allowed: [i32; 2],
+    /// The save's unlocked characters (`BattleSetup_InitCharaBits`).
+    pub(crate) chara_bits: [u64; 3],
     /// The CPU player's data and the executable's rule tables, the stage's way points.
     pub(crate) ai: AiData,
     pub(crate) ai_tables: AiTables,
@@ -158,6 +168,9 @@ pub struct BattleAssets {
 pub(crate) struct FighterModel {
     pub(crate) chara: i32,
     pub(crate) costume: i32,
+    /// The characters its two animation files are of (`BtlRes_Reload`'s files 8 and 9).
+    pub(crate) anim_chara: i32,
+    pub(crate) anim1_chara: i32,
     model: CharaModel,
     /// Per part, per batch: the material texture and the shading row.
     batch_textures: Vec<Vec<[usize; 2]>>,
@@ -257,6 +270,15 @@ pub fn load(
         effect_textures: Vec::new(),
         ray_texture: None,
         fighters: Vec::new(),
+        ramp: Vec::new(),
+        common_file: Vec::new(),
+        start: setup.sides.map(|s| SideLoad {
+            chara: s.chara,
+            costume: s.costume,
+            variant: 0,
+            anim_chara: s.chara,
+            anim1_chara: s.chara,
+        }),
         stage,
         stage_model,
         stage_id: setup.stage,
@@ -272,6 +294,8 @@ pub fn load(
         fx_tables: FxTables::read(elf).map_err(error)?,
         collision,
         cpu: [setup.sides[0].control == 2, setup.sides[1].control == 2],
+        change_allowed: setup.sides.map(|s| s.change_allowed),
+        chara_bits: crate::save::SaveData::default().chara_bits,
         ai,
         ai_tables,
         nav,
@@ -295,114 +319,154 @@ pub fn load(
             .effect_textures
             .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
     }
-    for side in setup.sides {
-        let file_id = CHARA_FILE + side.chara.max(0) as u32 * 10 + side.costume.max(0) as u32;
-        let file = read(file_id)?;
-        let mut fighter = load_fighter(&file, &ramp, &mut assets)
-            .map_err(|e| format!("character file 0x{file_id:X}: {e}"))?;
-        fighter.chara = side.chara;
-        fighter.costume = side.costume;
-        for (i, cut) in fighter.cam_cuts.iter_mut().enumerate() {
-            *cut = pack_section(&file, ENTRANCE_CUT_SECTION + i)
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(CamAnim::parse)
-                .transpose()
-                .map_err(error)?;
-        }
-        fighter.talk = pack_section(&file, TALK_TABLE_SECTION)
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
-        fighter.skill_text = pack_section(&file, SKILL_TEXT_SECTION).ok().map(|s| {
-            s.chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .take_while(|&c| c != 0)
-                .collect()
-        });
-        fighter.gauge = start_gauge(&common, side.chara);
-        // BtlObj_BindTables: object + 0x50 is section 1; HudGauge_DrawFace draws its texture `side`.
-        let index = assets.fighters.len();
-        assets.hud_cpu.faces[index] = pack_section(&file, FACE_SECTION)
-            .ok()
-            .and_then(|s| TextureResource::parse(s).ok())
-            .and_then(|res| {
-                let entry = res.entries.get(index)?;
-                decode_sprite_texture_raw(entry, entry).ok()
-            });
-        fighter.tables = CharaTables::parse(&file).map_err(error)?;
-        fighter.entry = assets
-            .common
-            .charas
-            .get(side.chara.max(0) as usize)
-            .copied()
-            .unwrap_or_default();
-        // BtlRes_Request: the second animation file is chara * 10 + 0x599.
-        let anim_file = read(MOTION_FILE + 1 + side.chara.max(0) as u32 * 10)?;
-        fighter.effect = EffectPack::parse(&anim_file);
-        for slot in 0..5 {
-            let Some(pack) = tech_pack(&anim_file, slot) else {
-                continue;
-            };
-            let blast = tech_blast_set(pack);
-            // The skills' effects (slots 0, 1) are not ported.
-            let assets = match &blast {
-                Some(set) if slot >= 2 => {
-                    Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?)
-                }
-                _ => None,
-            };
-            let places = bt3_data::eft_pack::tech_places(pack, setup.stage.max(0) as usize);
-            fighter.tech_packs[slot] = Some(TechPack {
-                blast,
-                assets,
-                places,
-            });
-        }
-        if let Some(pack) = &fighter.effect {
-            for (list, set) in pack.blast_sets.iter().enumerate() {
-                if let Some(set) = set {
-                    fighter.blast_assets[list] =
-                        Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
-                }
-            }
-        }
-        let motions = read(MOTION_FILE + side.chara.max(0) as u32 * 10)?;
-        let word = |n: usize| {
-            motions
-                .get(n * 4..n * 4 + 4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) & !3)
+    for (index, side) in setup.sides.into_iter().enumerate() {
+        let load = SideLoad {
+            chara: side.chara,
+            costume: side.costume,
+            variant: 0,
+            anim_chara: side.chara,
+            anim1_chara: side.chara,
         };
-        for id in 0..MOTION_COUNT {
-            // BObjFile_GetEntry: equal offsets mean the section is empty.
-            let (Some(start), Some(end)) = (word(id + 1), word(id + 2)) else {
-                fighter.motions.push(None);
-                continue;
-            };
-            if start == end {
-                fighter.motions.push(None);
-                continue;
-            }
-            let packed = pack_section(&motions, id + 1).map_err(error)?;
-            let raw = bt3_data::bpe::decode(packed).map_err(error)?;
-            // Some sections are streams that decode to nothing (motions the character never plays).
-            if raw.is_empty() {
-                fighter.motions.push(None);
-                continue;
-            }
-            let mut motion = Motion::parse(&raw).map_err(error)?;
-            // The motions an opponent borrows (BtlObjAnim_PlayFrom) are kept as decoded as well.
-            if motion_flags(&common, id) & 0x2000_0000 != 0 {
-                fighter.raw_motions.resize(id + 1, None);
-                fighter.raw_motions[id] = Some(motion.clone());
-            }
-            // BtlAnim_Play: BtlAnim_ApplyTableFlags and BtlAnim_HideModelNodes.
-            motion.apply_table_flags(motion_flags(&common, id));
-            motion.hide_model_nodes(side.chara);
-            fighter.motions.push(Some(motion));
-        }
+        let fighter = load_side(read, &ramp, &common, &mut assets, load, setup.stage, index)?;
         assets.fighters.push(fighter);
     }
+    assets.ramp = ramp;
+    assets.common_file = common;
     Ok(assets)
+}
+
+/// What a side loads (`BtlLoad_StepChara`): the model file `chara * 10 + costume` (+ 4 for the damaged variant)
+/// and its two animation files of `anim_chara` / `anim1_chara`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SideLoad {
+    pub chara: i32,
+    pub costume: i32,
+    pub variant: i32,
+    pub anim_chara: i32,
+    pub anim1_chara: i32,
+}
+
+/// A side's character: its model, textures, tables, effects and motions (the HUD face of `index` too).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn load_side(
+    read: &mut dyn FnMut(u32) -> Result<Vec<u8>, String>,
+    ramp: &[u8],
+    common: &[u8],
+    assets: &mut BattleAssets,
+    side: SideLoad,
+    stage: i32,
+    index: usize,
+) -> Result<FighterModel, String> {
+    let error = |e: std::io::Error| e.to_string();
+    let file_id = CHARA_FILE
+        + side.chara.max(0) as u32 * 10
+        + side.costume.max(0) as u32
+        + if side.variant != 0 { 4 } else { 0 };
+    let file = read(file_id)?;
+    let mut fighter = load_fighter(&file, ramp, assets)
+        .map_err(|e| format!("character file 0x{file_id:X}: {e}"))?;
+    fighter.chara = side.chara;
+    fighter.costume = side.costume;
+    fighter.anim_chara = side.anim_chara;
+    fighter.anim1_chara = side.anim1_chara;
+    for (i, cut) in fighter.cam_cuts.iter_mut().enumerate() {
+        *cut = pack_section(&file, ENTRANCE_CUT_SECTION + i)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(CamAnim::parse)
+            .transpose()
+            .map_err(error)?;
+    }
+    fighter.talk = pack_section(&file, TALK_TABLE_SECTION)
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    fighter.skill_text = pack_section(&file, SKILL_TEXT_SECTION).ok().map(|s| {
+        s.chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&c| c != 0)
+            .collect()
+    });
+    fighter.gauge = start_gauge(&common, side.chara);
+    // BtlObj_BindTables: object + 0x50 is section 1; HudGauge_DrawFace draws its texture `side`.
+    assets.hud_cpu.faces[index] = pack_section(&file, FACE_SECTION)
+        .ok()
+        .and_then(|s| TextureResource::parse(s).ok())
+        .and_then(|res| {
+            let entry = res.entries.get(index)?;
+            decode_sprite_texture_raw(entry, entry).ok()
+        });
+    fighter.tables = CharaTables::parse(&file).map_err(error)?;
+    fighter.entry = assets
+        .common
+        .charas
+        .get(side.chara.max(0) as usize)
+        .copied()
+        .unwrap_or_default();
+    // BtlRes_Request: the second animation file is chara * 10 + 0x599.
+    let anim_file = read(MOTION_FILE + 1 + side.anim1_chara.max(0) as u32 * 10)?;
+    fighter.effect = EffectPack::parse(&anim_file);
+    for slot in 0..5 {
+        let Some(pack) = tech_pack(&anim_file, slot) else {
+            continue;
+        };
+        let blast = tech_blast_set(pack);
+        // The skills' effects (slots 0, 1) are not ported.
+        let assets = match &blast {
+            Some(set) if slot >= 2 => {
+                Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?)
+            }
+            _ => None,
+        };
+        let places = bt3_data::eft_pack::tech_places(pack, stage.max(0) as usize);
+        fighter.tech_packs[slot] = Some(TechPack {
+            blast,
+            assets,
+            places,
+        });
+    }
+    if let Some(pack) = &fighter.effect {
+        for (list, set) in pack.blast_sets.iter().enumerate() {
+            if let Some(set) = set {
+                fighter.blast_assets[list] =
+                    Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
+            }
+        }
+    }
+    let motions = read(MOTION_FILE + side.anim_chara.max(0) as u32 * 10)?;
+    let word = |n: usize| {
+        motions
+            .get(n * 4..n * 4 + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) & !3)
+    };
+    for id in 0..MOTION_COUNT {
+        // BObjFile_GetEntry: equal offsets mean the section is empty.
+        let (Some(start), Some(end)) = (word(id + 1), word(id + 2)) else {
+            fighter.motions.push(None);
+            continue;
+        };
+        if start == end {
+            fighter.motions.push(None);
+            continue;
+        }
+        let packed = pack_section(&motions, id + 1).map_err(error)?;
+        let raw = bt3_data::bpe::decode(packed).map_err(error)?;
+        // Some sections are streams that decode to nothing (motions the character never plays).
+        if raw.is_empty() {
+            fighter.motions.push(None);
+            continue;
+        }
+        let mut motion = Motion::parse(&raw).map_err(error)?;
+        // The motions an opponent borrows (BtlObjAnim_PlayFrom) are kept as decoded as well.
+        if motion_flags(&common, id) & 0x2000_0000 != 0 {
+            fighter.raw_motions.resize(id + 1, None);
+            fighter.raw_motions[id] = Some(motion.clone());
+        }
+        // BtlAnim_Play: BtlAnim_ApplyTableFlags and BtlAnim_HideModelNodes.
+        motion.apply_table_flags(motion_flags(&common, id));
+        motion.hide_model_nodes(side.chara);
+        fighter.motions.push(Some(motion));
+    }
+    Ok(fighter)
 }
 
 /// Entries of the HUD file's offset table read as menu texts (`BtlMenu_GetText`).
@@ -625,6 +689,8 @@ fn load_fighter(
     Ok(FighterModel {
         chara: 0,
         costume: 0,
+        anim_chara: 0,
+        anim1_chara: 0,
         model,
         batch_textures,
         motions: Vec::new(),
@@ -705,6 +771,24 @@ pub struct Battle {
     pad_repeat: [(i32, u32); 2],
     /// The save's `charaBits` (the skill list's unlock tests); the game hands its save in.
     pub chara_bits: [u64; 3],
+    /// Reads a file of the AFS archives by id for the character changes (`BtlLoad_StepChara`); without it a
+    /// change keeps the old character.
+    pub loader: Option<Loader>,
+    /// The loader's job of the change request being served (`BtlJob`).
+    change_job: Option<ChangeJob>,
+}
+
+/// What reads the files of a character change.
+pub type Loader = Box<dyn FnMut(u32) -> Result<Vec<u8>, String> + Send + Sync>;
+
+/// `BtlLoad_StepChara` / `BtlLoad_StepObject`: 0 the files are read, 1 they are in (`BtlChange_NotifyLoaded`), 2
+/// the swap waits for the fighter (`BtlChange_IsReady`).
+struct ChangeJob {
+    side: usize,
+    object: bool,
+    load: SideLoad,
+    state: u8,
+    model: Option<FighterModel>,
 }
 
 /// What a side's files give the fighter simulation.
@@ -741,6 +825,14 @@ impl BattleAssets {
             seq_state,
             gate,
             fx: &self.fx_tables,
+            change_allowed: self.change_allowed,
+            chara_bits: std::array::from_fn(|side| {
+                // BattleSetup_FixForMode: every character in mode 1, and for the computer's side in modes 2, 3,
+                // 4, 7 and 9.
+                let all =
+                    self.mode == 1 || (matches!(self.mode, 2 | 3 | 4 | 7 | 9) && self.cpu[side]);
+                if all { [u64::MAX; 3] } else { self.chara_bits }
+            }),
         }
     }
 }
@@ -806,7 +898,137 @@ impl Battle {
             vu0: Vu0Random::default(),
             pad_repeat: [(0, 0); 2],
             chara_bits: crate::save::SaveData::default().chara_bits,
+            loader: None,
+            change_job: None,
         }
+    }
+
+    /// `BtlLoad_PollCharaRequest` / `BtlLoad_PollObjectRequest`: the started request of a side becomes the loader's
+    /// job (`BtlChange_NotifyTaken`); a character change frees the side's effects first (`BtlScene_FreeChar`).
+    fn poll_changes(&mut self) {
+        for object in [false, true] {
+            for side in 0..2 {
+                let Some(req) = self.roster.change.pending(side, object) else {
+                    continue;
+                };
+                let model_only = req.anim_chara < 0 && req.anim1_chara < 0 && req.voice_chara < 0;
+                if !object && !model_only {
+                    self.roster.scene.reset_side(&mut self.roster.chars, side);
+                }
+                let cur = &self.assets.fighters[side];
+                let load = SideLoad {
+                    chara: req.chara,
+                    costume: req.costume,
+                    variant: req.variant,
+                    // A model-only change keeps the side's animation files.
+                    anim_chara: if model_only {
+                        cur.anim_chara
+                    } else {
+                        req.anim_chara
+                    },
+                    anim1_chara: if model_only {
+                        cur.anim1_chara
+                    } else {
+                        req.anim1_chara
+                    },
+                };
+                self.change_job = Some(ChangeJob {
+                    side,
+                    object,
+                    load,
+                    state: 0,
+                    model: None,
+                });
+                self.roster.change.set_taken();
+            }
+        }
+    }
+
+    /// One step of the loader's change job (after the frame, as `Job_Run`): the files are read at once, the next
+    /// step reports them in, and the swap waits until the fighter is ready and the battle is not paused. The extra
+    /// objects (partners) are not ported: their job only reports in.
+    fn step_change_job(&mut self, paused: bool) {
+        let Some(job) = &mut self.change_job else {
+            return;
+        };
+        match job.state {
+            0 => {
+                if !job.object {
+                    let (side, load) = (job.side, job.load);
+                    let mut model = None;
+                    if let Some(read) = self.loader.as_mut() {
+                        let (ramp, common) = (
+                            std::mem::take(&mut self.assets.ramp),
+                            std::mem::take(&mut self.assets.common_file),
+                        );
+                        let stage = self.assets.stage_id;
+                        match load_side(read, &ramp, &common, &mut self.assets, load, stage, side) {
+                            Ok(m) => model = Some(m),
+                            Err(e) => {
+                                bevy::log::error!("cannot load the change of side {side}: {e}")
+                            }
+                        }
+                        self.assets.ramp = ramp;
+                        self.assets.common_file = common;
+                    }
+                    if let Some(job) = &mut self.change_job {
+                        job.model = model;
+                    }
+                }
+                if let Some(job) = &mut self.change_job {
+                    job.state = 1;
+                }
+            }
+            1 => {
+                self.roster.change.set_loaded();
+                job.state = 2;
+            }
+            _ => {
+                if !self.roster.change.is_ready(paused) {
+                    return;
+                }
+                let job = self.change_job.take().unwrap();
+                if let Some(model) = job.model {
+                    self.swap_side(job.side, model);
+                }
+            }
+        }
+    }
+
+    /// The swap of `BtlLoad_StepChara`: the side's files replaced (`BtlRes_CommitReload2`), the fighter's object
+    /// set up again (`BtlChars_OnModelLoaded`), the side's AI reset (`BtlAiMgr_ResetSide`), its face and skill
+    /// list. The voice bank is not ported.
+    fn swap_side(&mut self, side: usize, model: FighterModel) {
+        self.hud
+            .set_face(side, self.assets.hud_cpu.faces[side].clone());
+        if let Some(menu) = &mut self.menu {
+            menu.scripts[side] = model.skill_text.clone();
+        }
+        self.assets.fighters[side] = model;
+        let data = [
+            side_data(&self.assets.fighters[0]),
+            side_data(&self.assets.fighters[1]),
+        ];
+        let env = self.assets.env(self.seq.state_id(), self.gate());
+        self.roster.chars[side].on_model_loaded(&data[side], &data[side ^ 1], &env);
+        let mut unused = GameRandom::from_key(&[0]);
+        let mut no_blasts = Vec::new();
+        let mut ctx = AiCtx {
+            chars: &mut self.roster.chars,
+            data: [&data[0], &data[1]],
+            env: &env,
+            ai: &self.assets.ai,
+            tab: &self.assets.ai_tables,
+            nav: &self.assets.nav,
+            rng: &mut unused,
+            blasts: &mut no_blasts,
+        };
+        self.ai.reset_one(
+            &mut ctx,
+            side,
+            self.assets.cpu_level[side],
+            self.assets.ai_type[side],
+        );
     }
 
     /// `Battle_Restart` for a rematch: `Battle_ResetWork` (sounds stopped, the battle music again, the result
@@ -818,6 +1040,34 @@ impl Battle {
         self.xfade = ScrXfade::default();
         if let Some(menu) = &mut self.menu {
             menu.reset();
+        }
+        // BtlLoad_Reload: a side that changed character loads its starting one back (Load_RunBlocking).
+        self.change_job = None;
+        for side in 0..2 {
+            let start = self.assets.start[side];
+            let f = &self.assets.fighters[side];
+            if f.chara == start.chara && f.costume == start.costume {
+                continue;
+            }
+            let Some(read) = self.loader.as_mut() else {
+                continue;
+            };
+            let (ramp, common) = (
+                std::mem::take(&mut self.assets.ramp),
+                std::mem::take(&mut self.assets.common_file),
+            );
+            let stage = self.assets.stage_id;
+            match load_side(read, &ramp, &common, &mut self.assets, start, stage, side) {
+                Ok(model) => {
+                    if let Some(menu) = &mut self.menu {
+                        menu.scripts[side] = model.skill_text.clone();
+                    }
+                    self.assets.fighters[side] = model;
+                }
+                Err(e) => bevy::log::error!("cannot load side {side} back: {e}"),
+            }
+            self.assets.ramp = ramp;
+            self.assets.common_file = common;
         }
         self.hud = Hud::new(
             &self.assets.hud_sheets,
@@ -843,15 +1093,19 @@ impl Battle {
     }
 
     /// The fighter phases with both sides' data and the shared state.
+    /// The input gate of the sequence, with the change queue's time-stop word (`BtlChars_IsTimeStopped`).
+    fn gate(&self) -> InputGate {
+        let mut gate = self.seq.input_gate(self.assets.stage_id);
+        gate.time_stopped = self.roster.change.time_stop;
+        gate
+    }
+
     fn with_roster(&mut self, f: impl FnOnce(&mut Roster, [&SideData; 2], &Env) -> bool) -> bool {
         let data = [
             side_data(&self.assets.fighters[0]),
             side_data(&self.assets.fighters[1]),
         ];
-        let env = self.assets.env(
-            self.seq.state_id(),
-            self.seq.input_gate(self.assets.stage_id),
-        );
+        let env = self.assets.env(self.seq.state_id(), self.gate());
         f(&mut self.roster, [&data[0], &data[1]], &env)
     }
 
@@ -937,10 +1191,7 @@ impl Battle {
                 side_data(&self.assets.fighters[0]),
                 side_data(&self.assets.fighters[1]),
             ];
-            let env = self.assets.env(
-                self.seq.state_id(),
-                self.seq.input_gate(self.assets.stage_id),
-            );
+            let env = self.assets.env(self.seq.state_id(), self.gate());
             let mut ctx = AiCtx {
                 chars: &mut self.roster.chars,
                 data: [&data[0], &data[1]],
@@ -968,6 +1219,7 @@ impl Battle {
             }
             false
         });
+        self.poll_changes();
         self.vu0 = vu0;
         let cam = self.roster.chars[0].cam;
         let mut view = View::new(cam.eye, cam.rot);
@@ -977,9 +1229,12 @@ impl Battle {
                 view = demo;
             }
         }
+        // BtlChars_EndFrame: BtlChange_Update runs even while paused.
+        self.roster.change.update();
         if !paused {
             self.roster.end_frame();
         }
+        self.step_change_job(paused);
         for side in 0..2 {
             if let Some(n) = self.roster.chars[side].obj.node(0) {
                 self.roots[side] = n.mtx;
@@ -1681,7 +1936,20 @@ mod tests {
                 .read_entry(&mut image, location.index)
                 .map_err(|e| e.to_string())
         };
-        Some(Battle::new(load(&mut read, &elf, setup).unwrap()))
+        let mut battle = Battle::new(load(&mut read, &elf, setup).unwrap());
+        let mut image = bt3_data::Iso9660::open(&path).ok()?;
+        battle.loader = Some(Box::new(move |id: u32| {
+            let location = bt3_data::afs::partition_entry_for_id(id);
+            let archive = bt3_data::afs::AfsArchive::open(
+                &mut image,
+                format!("DATA/PZS3US{}.AFS", location.partition),
+            )
+            .map_err(|e| e.to_string())?;
+            archive
+                .read_entry(&mut image, location.index)
+                .map_err(|e| e.to_string())
+        }));
+        Some(battle)
     }
 
     #[test]
@@ -3608,6 +3876,134 @@ mod tests {
             table,
             parts,
         ))
+    }
+
+    /// A battle of `chara` (side 0, changes allowed when `allowed`) against an idle Goku, run into the fight.
+    fn transform_battle(chara: i32, allowed: bool) -> Option<Battle> {
+        use crate::btl_input::pad::START;
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = chara;
+        setup.sides[0].change_allowed = i32::from(allowed);
+        setup.sides[1].pad = 1;
+        let mut battle = real_battle(&setup)?;
+        battle.assets.chara_bits = [u64::MAX; 3];
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut fight = 0;
+        for i in 0..400 {
+            if battle.seq.state == SeqState::Fight {
+                fight += 1;
+                if fight > 40 {
+                    break;
+                }
+            }
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let held = if skip && i % 2 == 0 { START } else { 0 };
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
+        }
+        Some(battle)
+    }
+
+    /// R3 tapped (with `dir` held), then `frames` more: the (frame, action, side 0's character) changes, whether
+    /// time stood still in the change and the opponent's position kept.
+    fn run_transform(
+        battle: &mut Battle,
+        dir: u32,
+        frames: usize,
+    ) -> (Vec<(usize, i32, i32)>, bool, bool) {
+        use crate::btl_input::pad::R3;
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut log: Vec<(usize, i32, i32)> = Vec::new();
+        let (mut stopped, mut opp_still) = (false, true);
+        let opp = battle.roster.chars[1].pose.pos;
+        for i in 0..frames {
+            let held = match i {
+                2..4 => dir | R3,
+                4..6 => dir,
+                _ => 0,
+            };
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+            let a = battle.roster.chars[0].act.current;
+            if (0xEC..=0xF0).contains(&a) {
+                stopped |= battle.roster.change.time_stop;
+                opp_still &= battle.roster.chars[1].pose.pos == opp;
+            }
+            let entry = (a, battle.assets.fighters[0].chara);
+            if log.last().map(|l| (l.1, l.2)) != Some(entry) {
+                log.push((i, entry.0, entry.1));
+            }
+        }
+        (log, stopped, opp_still)
+    }
+
+    #[test]
+    fn real_transformations() {
+        use crate::btl_input::pad::DOWN;
+        // Character 1 taps R3: its default transformation (character 2, one stock, sequence 0: action 0xEC) loads
+        // through the change queue while time stands still and the opponent is frozen; the stock is paid when the
+        // model is in. Down + R3 takes character 2's transformation 3 back to character 1 (sequence 1: 0xED).
+        let Some(mut battle) = transform_battle(1, true) else {
+            return;
+        };
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let (log, stopped, still) = run_transform(&mut battle, 0, 120);
+        assert!(log.iter().any(|l| l.1 == 0xEC), "{log:x?}");
+        assert_eq!(log.last().map(|l| (l.1, l.2)), Some((0xB, 2)), "{log:x?}");
+        assert!(stopped && still);
+        let c = &battle.roster.chars[0];
+        assert!(c.gauge.blast < 300_000 - 90_000, "{}", c.gauge.blast);
+        let (log, _, _) = run_transform(&mut battle, DOWN, 120);
+        assert!(log.iter().any(|l| l.1 == 0xED), "{log:x?}");
+        assert_eq!(log.last().map(|l| l.2), Some(1), "{log:x?}");
+        // Without the stocks, or on a side not allowed to change, nothing happens.
+        battle.roster.chars[0].gauge.blast = 0;
+        let (log, _, _) = run_transform(&mut battle, 0, 60);
+        assert!(log.iter().all(|l| l.1 != 0xEC && l.2 == 1), "{log:x?}");
+        let mut battle = transform_battle(1, false).unwrap();
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let (log, _, _) = run_transform(&mut battle, 0, 60);
+        assert!(log.iter().all(|l| l.1 != 0xEC && l.2 == 1), "{log:x?}");
+        // Character 29 (three stocks, sequence 2: 0xEE) takes the new character's health at the same ratio;
+        // character 105 (sequence 3: 0xEF) loads its extra object first.
+        let mut battle = transform_battle(29, true).unwrap();
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let (log, _, _) = run_transform(&mut battle, 0, 400);
+        assert!(log.iter().any(|l| l.1 == 0xEE), "{log:x?}");
+        assert_eq!(log.last().map(|l| (l.1, l.2)), Some((0xB, 30)), "{log:x?}");
+        let g = battle.roster.chars[0].gauge;
+        assert_eq!(
+            g.health_max,
+            battle.assets.fighters[0].entry.health_max.max(10000)
+        );
+        assert_eq!(g.health, g.health_max);
+        // A rematch loads the starting character back (BtlLoad_Reload).
+        battle.restart(&mut Vec::new());
+        assert_eq!(battle.assets.fighters[0].chara, 29);
+        assert_eq!(
+            battle.roster.chars[0].gauge.health_max,
+            battle.assets.fighters[0].entry.health_max.max(10000)
+        );
+        let mut battle = transform_battle(105, true).unwrap();
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let (log, _, _) = run_transform(&mut battle, 0, 420);
+        assert!(log.iter().any(|l| l.1 == 0xEF), "{log:x?}");
+        assert_eq!(log.last().map(|l| (l.1, l.2)), Some((0xB, 106)), "{log:x?}");
     }
 
     #[test]

@@ -115,13 +115,16 @@ pub(crate) struct Ctx<'a, 'd> {
     pub blasts: &'a [HitRec],
     /// The clash C block (`gBtlChars->clashC`).
     pub clash: &'a ClashC,
+    /// The character change requests (`gBtlChars->change`).
+    pub change: &'a mut crate::btl_change::ChangeQueue,
 }
 
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xFA..=0xFC | 0x104 | 0x105..=0x13B)
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xEC..=0xF0 | 0xFA..=0xFC | 0x104
+        | 0x105..=0x13B)
 }
 
 impl Ctx<'_, '_> {
@@ -481,7 +484,11 @@ impl Ctx<'_, '_> {
                 return 1;
             }
         }
-        // Masks 0x400000 (switch), 0x100 (transformation), 0x200 (fusion): not ported.
+        // Mask 0x400000 (the member switch) is not ported.
+        if mask & 0x100 != 0 && self.check_transform_input() {
+            return 1;
+        }
+        // Mask 0x200 (fusion) is not ported.
         if mask & 1 != 0 && self.test(1) {
             if self.flag(0x13) {
                 if self.current() != 0xE {
@@ -864,6 +871,10 @@ impl Ctx<'_, '_> {
             0xE6 => self.recover(phase),
             0xE7 => self.wall_slam(phase),
             0xE8 | 0xE9 => self.wall_recover(phase),
+            0xEC | 0xF0 => self.transform_a(phase),
+            0xED => self.transform_b(phase),
+            0xEE => self.transform_c(phase),
+            0xEF => self.transform_d(phase),
             0x105 => self.ultimate_start(phase),
             0x106..=0x108 | 0x10C..=0x10E => self.super_beam(phase),
             0x109..=0x10B => self.super_warp_beam(phase),
@@ -8047,6 +8058,412 @@ impl Ctx<'_, '_> {
         }
     }
 
+    // ---- the transformations (btl_act_decide.c, btl_act_change.c) ---------------------------------------------
+
+    /// `BtlAct_CanTransform`: transformation `index` (0..3) of the parameter, when it names a character the side
+    /// may use (kind 3 needs the stage's moon), with the blast stocks it costs (`need_blast`) and the side allowed
+    /// to change (`need_allowed`); never while the opponent is in a technique (flag 0xAF) or the body is changed.
+    /// Ability 0x5E is not ported.
+    fn can_transform(&self, index: i32, need_blast: bool, need_allowed: bool) -> bool {
+        let Ok(i) = usize::try_from(index) else {
+            return false;
+        };
+        if i >= 4 {
+            return false;
+        }
+        if need_allowed && self.me.form.allowed == 0 {
+            return false;
+        }
+        if self.flag(0xAF) || self.me.gauge.body_changed {
+            return false;
+        }
+        let p = &self.data.tables.params;
+        let chara = p.trans_target(i);
+        if chara == 0xFF {
+            return false;
+        }
+        let bits = self.env.chara_bits[self.me.player];
+        let usable = usize::try_from(chara)
+            .ok()
+            .and_then(|c| bits.get(c / 64).map(|w| (w >> (c % 64)) & 1 != 0))
+            .unwrap_or(false);
+        if !usable {
+            return false;
+        }
+        if p.trans_kind(i) == 3 && self.env.stage.stage_flags & 0x10 == 0 {
+            return false;
+        }
+        if need_blast && self.me.gauge.blast < p.trans_cost(i) {
+            return false;
+        }
+        true
+    }
+
+    /// `BtlAct_CheckTransformInput`: R3 tapped alone (input 99) is the character's default transformation, with
+    /// left / up / right / down (100..103) transformations 0..3; a character of one transformation always takes
+    /// its default.
+    fn check_transform_input(&mut self) -> bool {
+        let def = self.data.tables.params.trans_default();
+        let mut index = -1;
+        for (input, i) in [(0x63, def), (0x64, 0), (0x65, 1), (0x66, 2), (0x67, 3)] {
+            if self.test(input) {
+                index = i;
+            }
+        }
+        if index < 0 {
+            return false;
+        }
+        if self.data.tables.params.trans_count() == 1 && def >= 0 {
+            index = def;
+        }
+        let allowed = !self.flag(0x10F);
+        if self.can_transform(index, true, allowed) {
+            return self.queue_transform(index);
+        }
+        false
+    }
+
+    /// `BtlAct_QueueTransform`: the form of transformation `index` (the member's costume, its damaged variant
+    /// unless the parameter resets it) and its action by the sequence: 0xEC..0xF0.
+    fn queue_transform(&mut self, index: i32) -> bool {
+        let i = index as usize;
+        let p = &self.data.tables.params;
+        let chara = p.trans_target(i);
+        let form = &mut self.me.form;
+        form.index = index;
+        form.chara = chara;
+        form.costume = self.data.costume;
+        form.cost = p.trans_cost(i);
+        form.partner = -1;
+        form.kind = p.trans_kind(i);
+        form.obj_id = p.trans_object(i);
+        form.obj_costume = if self.data.chara == 0x6A { 2 } else { 0 };
+        form.variant = if p.form_flags() & (0x10 << i) != 0 {
+            0
+        } else {
+            self.me.gauge.variant
+        };
+        form.anim_chara = chara;
+        form.anim1_chara = chara;
+        form.voice_chara = chara;
+        let action = match p.trans_seq(i) {
+            1 => 0xED,
+            2 => 0xEE,
+            3 => 0xEF,
+            4 => 0xF0,
+            _ => 0xEC,
+        };
+        self.set_queue(0, action);
+        true
+    }
+
+    /// `BtlChange_RequestChara` of the form.
+    fn request_form(&mut self) {
+        let f = self.me.form;
+        self.change.request_chara(
+            self.me.player,
+            f.chara,
+            f.costume,
+            f.variant,
+            f.anim_chara,
+            f.anim1_chara,
+            f.voice_chara,
+        );
+    }
+
+    /// The blast cost and `BtlChange_SetReady` once the new model is in memory (`BtlMember_SubBlast`).
+    fn change_loaded(&mut self, next: i32) {
+        self.request_anim(next, 0.0);
+        let g = &mut self.me.gauge;
+        g.blast = (g.blast - self.me.form.cost).max(0);
+        self.change.set_ready(self.me.player);
+    }
+
+    /// `BtlActChange_SetFlags`: the run frame of a change action: level 2 hit-stop (the opponent freezes), out of
+    /// reach, held against forced actions.
+    fn change_flags(&mut self) {
+        for f in [
+            0x125, 0x12A, 0x42, 0x43, 0x44, 0x45, 0x46, 0xBB, 0x3F, 0x128, 0x1B, 0x1A, 0x136,
+        ] {
+            self.set(f);
+        }
+        self.me.hold_action = true;
+    }
+
+    /// `BtlActChange_Finish` (`BtlAct_CheckStoryForced` concerns story mode only, which is not ported).
+    fn change_finish(&mut self) {
+        self.request(0xB);
+    }
+
+    /// The enter phase every transformation shares: stopped, facing as it stands, the placement saved.
+    fn change_enter(&mut self, motion: i32, sub: Option<i32>) {
+        self.play(motion, 0.0);
+        if let Some(s) = sub {
+            self.me.anim_play_sub(self.data, s);
+        }
+        self.me.pose.speed = 0.0;
+        self.me.pose.fall_speed = 0.0;
+        let yaw = self.me.pose.rot[1];
+        self.me.set_heading(yaw, 0.0);
+        self.me.save_placement();
+    }
+
+    /// Actions 0xEC (`BtlAct_TransformA`) and 0xF0 (`BtlAct_TransformE`, the long presentation): the lead-in 0x177,
+    /// the loop 0x178 until the new model is in memory (the request pushed on the second frame), the closing 0x179
+    /// put back at the saved placement (0xF5). The camera cuts, push-back, sounds, voices, shakes, vibration and
+    /// battle events are not ported.
+    fn transform_a(&mut self, phase: u32) {
+        let long = self.current() == 0xF0;
+        if phase == ENTER {
+            self.change_enter(0x177, Some(0x178));
+            self.held(0xE);
+            self.set(0x29);
+        }
+        if phase == RUN {
+            if self.me.action_frame == 1 {
+                self.me.set_fx(0);
+                self.request_form();
+            }
+            match self.anim_id() {
+                0x177 => {
+                    if self.me.anim_advance(0) {
+                        self.me.flags.set_held(anim_flag::REQ_SUB);
+                    }
+                }
+                0x178 => {
+                    self.me.anim_advance_loop(0);
+                    if self.change.is_loaded_for(self.me.player) {
+                        self.change_loaded(0x179);
+                    }
+                }
+                0x179 => {
+                    if self.me.anim_is_new() {
+                        self.change.set_done(self.me.player);
+                        self.set(0xF5);
+                        self.set(0x55);
+                        self.me.set_fx(1);
+                    }
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                        self.me.set_fx(2);
+                    }
+                    if long && self.me.anim_passed_ratio(0.75) {
+                        self.me.set_fx(0x18);
+                    }
+                }
+                _ => {}
+            }
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.brake_vertical();
+            self.change_flags();
+            if long {
+                self.me.set_fx(0x14);
+                self.me.set_fx(0x3A);
+            } else {
+                self.me.set_fx(0x10);
+                self.me.set_fx(0x14);
+            }
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.change_finish();
+        }
+        if phase == LEAVE {
+            self.set(0x37);
+        }
+    }
+
+    /// Action 0xED (`BtlAct_TransformB`): the request pushed on entering; the lead-in 0x18F, the loop 0x190 until
+    /// the new model is in memory, the closing 0x191 at the saved placement.
+    fn transform_b(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.change_enter(0x18F, Some(0x190));
+            self.held(0xE);
+            self.set(0x29);
+            self.request_form();
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0x18F => {
+                    if self.me.anim_advance(0) {
+                        self.me.flags.set_held(anim_flag::REQ_SUB);
+                    }
+                }
+                0x190 => {
+                    self.me.anim_advance_loop(0);
+                    if self.change.is_loaded_for(self.me.player) {
+                        self.change_loaded(0x191);
+                    }
+                }
+                0x191 => {
+                    if self.me.anim_is_new() {
+                        self.change.set_done(self.me.player);
+                        self.set(0xF5);
+                        self.set(0x55);
+                    }
+                    if self.me.obj.frame < 3.0 {
+                        self.me.set_fx(3);
+                    }
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.brake_vertical();
+            self.change_flags();
+            self.me.set_fx(0x14);
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.change_finish();
+        }
+        if phase == LEAVE {
+            self.set(0x37);
+        }
+    }
+
+    /// Action 0xEE (`BtlAct_TransformC`): at the stage's place (0xF4), the lead-in 0x177 held on its last frame
+    /// until the new model is in memory, then the closing 0x179, under gravity; leaving puts it back at the saved
+    /// placement.
+    fn transform_c(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.change_enter(0x177, None);
+            self.set(0xF4);
+            self.set(0xD7);
+        }
+        if phase == RUN {
+            if self.me.action_frame == 1 {
+                self.me.set_fx(0);
+                self.request_form();
+            }
+            match self.anim_id() {
+                0x177 => {
+                    if self.me.anim_advance(0) && self.change.is_loaded_for(self.me.player) {
+                        self.change_loaded(0x179);
+                    }
+                    self.me.set_fx(0x11);
+                    self.set(0x12F);
+                }
+                0x179 => {
+                    if self.me.anim_is_new() {
+                        self.change.set_done(self.me.player);
+                        self.me.set_fx(1);
+                        self.set(0xD9);
+                    }
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                        self.me.set_fx(2);
+                    }
+                }
+                _ => {}
+            }
+            self.step(6, 5, 7, 0.0, kmh(100.0));
+            self.me.apply_gravity();
+            self.change_flags();
+            self.set(0x12D);
+            self.me.set_fx(0x14);
+            match self.me.form.kind {
+                4 => self.set(0x132),
+                3 => self.set(0x133),
+                _ => {}
+            }
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.change_finish();
+        }
+        if phase == LEAVE {
+            self.set(0x37);
+            if !self.flag(0xFC) && !self.flag(0xFD) {
+                self.set(0xF5);
+                self.set(0x55);
+            }
+            self.set(0xDA);
+        }
+    }
+
+    /// Action 0xEF (`BtlAct_TransformD`): with an extra object (requested before the character): rising in the
+    /// lead-in 0x2B, the loop 0x17E for at least 61 frames and until the object is in memory, then 0x177 at the
+    /// stage's place until the character is, then the closing 0x179. The extra object itself (its model and
+    /// animation) is not ported.
+    fn transform_d(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.change_enter(0x2B, Some(0x17E));
+        }
+        if phase == RUN {
+            if self.me.action_frame == 1 {
+                let f = self.me.form;
+                self.change
+                    .request_object(self.me.player, f.obj_id, f.obj_costume, 0, 2);
+                self.request_form();
+            }
+            match self.anim_id() {
+                0x2B => {
+                    if self.me.anim_advance(0) {
+                        self.me.flags.set_held(anim_flag::REQ_SUB);
+                    }
+                    self.me.move_vertical(-kmh(800.0), kmh(100.0));
+                    self.set(0x18);
+                }
+                0x17E => {
+                    if self.me.anim_is_new() {
+                        self.set(0xF7);
+                    }
+                    self.me.anim_advance_loop(0);
+                    self.me.move_vertical(0.0, 10000.0);
+                    self.me.work[2] += 1;
+                    if self.me.work[2] > 60 && self.change.is_loaded_for(self.me.player) {
+                        self.request_anim(0x177, 0.0);
+                        self.change.set_ready(self.me.player);
+                    }
+                    self.me.set_fx(0x14);
+                }
+                0x177 => {
+                    if self.me.anim_is_new() {
+                        self.change.set_done(self.me.player);
+                        self.set(0xF4);
+                        self.set(0xD7);
+                        self.me.set_fx(0);
+                    }
+                    if self.me.anim_advance(0) && self.change.is_loaded_for(self.me.player) {
+                        self.change_loaded(0x179);
+                    }
+                    self.me.brake_vertical();
+                    self.me.set_fx(0x14);
+                    self.set(0x12F);
+                }
+                0x179 => {
+                    if self.me.anim_is_new() {
+                        self.set(0xF4);
+                        self.set(0xD9);
+                        self.me.set_fx(1);
+                    }
+                    if self.me.anim_advance(0) {
+                        self.change.set_done(self.me.player);
+                        self.me.set_fx(2);
+                        self.me.work[1] = 1;
+                    }
+                    self.me.brake_vertical();
+                }
+                _ => {}
+            }
+            self.step(6, 5, 7, 0.0, kmh(100.0));
+            self.change_flags();
+            self.set(0x12D);
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.change_finish();
+        }
+        if phase == LEAVE {
+            self.set(0x37);
+            if !self.flag(0xFC) && !self.flag(0xFD) {
+                self.set(0xF5);
+                self.set(0x55);
+            }
+            self.set(0xDA);
+            self.set(0xCD);
+        }
+    }
+
     // ---- the reactions a smash gives (btl_act_1.c) ---------------------------------------------------------------
 
     /// `BtlActB_UpdateMashRate`: each press of an action button (`ANY_FACE`) adds to the motion's step, kept in
@@ -10183,11 +10600,11 @@ mod tests {
     fn the_slice_s_actions_are_ported_and_others_are_not() {
         for id in [
             0xB, 0xD, 0xF, 0x38, 0x44, 0x60, 0x7B, 0xAE, 0xB1, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB,
-            0xE1,
+            0xE1, 0xEC, 0xF0,
         ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [0xEC, 0xFD, 0xF6] {
+        for id in [0xF1, 0xFD, 0xF6] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

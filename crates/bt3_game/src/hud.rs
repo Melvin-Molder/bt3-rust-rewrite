@@ -653,6 +653,11 @@ pub struct HudFrame {
 }
 
 impl Hud {
+    /// A side's face after its character changed (`BtlObj_BindTables`: object + 0x50 of the new model).
+    pub(crate) fn set_face(&mut self, side: usize, face: Option<bt3_data::gs::RgbaTexture>) {
+        self.textures.faces[side] = face;
+    }
+
     /// `Hud_Init` then `Hud_Reset` (everything hidden).
     pub(crate) fn new(sheets: &[HudSheet], textures: HudTextures, announcer: i32) -> Self {
         let sheet0 = sheets.first().cloned().unwrap_or_default();

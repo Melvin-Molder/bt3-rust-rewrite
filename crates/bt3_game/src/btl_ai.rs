@@ -290,6 +290,11 @@ impl AiMgr {
         mgr
     }
 
+    /// `BtlAiMgr_ResetSide` (`AiThink_ResetSide(side, 0)`), after a character change.
+    pub(crate) fn reset_one(&mut self, c: &mut Ctx, side: usize, level: i32, kind: usize) {
+        self.reset_side(c, side, level, kind);
+    }
+
     /// `AiThink_ResetSide`.
     fn reset_side(&mut self, c: &mut Ctx, side: usize, level: i32, kind: usize) {
         self.work[side] = Work::default();

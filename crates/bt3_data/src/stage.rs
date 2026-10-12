@@ -10,6 +10,9 @@ const PLACEMENT_SIZE: usize = 0x20;
 pub struct StageResource {
     pub stage_id: i32,
     pub flags: i32,
+    /// The first word of the stage data's table at +0x74 (`d->flags[0]`): 1 / 2 / 4 the stage effects, 8, 0x10
+    /// the moon (`BtlStage_HasMoon`); 0 when there is none.
+    pub stage_flags: u32,
     pub water_level: Option<f32>,
     pub object_count: usize,
     pub zone_count: usize,
@@ -93,6 +96,10 @@ impl StageResource {
         let alternate_starting_placements =
             parse_placements(bytes, data_offset, 0x30, 0x34, "alternate stage placements")?;
         let places = parse_placements(bytes, data_offset, 0x38, 0x3C, "stage places")?;
+        let stage_flags = read_u32(bytes, data_offset + 0x74)
+            .and_then(|rel| resolve_relative(bytes, data_offset, rel, 4, "stage flags"))
+            .and_then(|o| read_u32(bytes, o))
+            .unwrap_or(0);
         let light_count = read_count(bytes, data_offset + 0x18, "stage light")?;
         let light_dir = if light_count == 0 {
             None
@@ -112,6 +119,7 @@ impl StageResource {
         Ok(Self {
             stage_id,
             flags,
+            stage_flags,
             water_level,
             object_count,
             zone_count,

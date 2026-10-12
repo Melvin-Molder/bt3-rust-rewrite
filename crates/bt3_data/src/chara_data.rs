@@ -92,6 +92,39 @@ impl CharaParams {
     pub fn flags3(&self) -> u32 {
         self.s32_at(0x18) as u32
     }
+    /// `BtlParam_GetSlotId` (+0x98): transformation `i`'s character, 0xFF none.
+    pub fn trans_target(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0x98 + i))
+    }
+    /// `BtlParam_GetSlotCost` (+0x9C): its blast cost (stocks * 100000).
+    pub fn trans_cost(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0x9C + i)) * 100_000
+    }
+    /// `BtlParam_GetSlotA0` (+0xA0): its sequence 0..4 (actions 0xEC..0xF0).
+    pub fn trans_seq(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0xA0 + i))
+    }
+    /// `BtlParam_GetSlotA4` (+0xA4): its kind (3 needs the stage's moon).
+    pub fn trans_kind(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0xA4 + i))
+    }
+    /// `BtlParam_GetSlotA8` (+0xA8): the extra object of sequence 3.
+    pub fn trans_object(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0xA8 + i))
+    }
+    /// `BtlParam_GetDefaultSlot` (+0xAC, signed): the transformation of R3 without a direction.
+    pub fn trans_default(&self) -> i32 {
+        i32::from(self.u8_at(0xAC) as i8)
+    }
+    /// `BtlParam_GetFormFlags` (+0xAD): 1 / 2 + 5000 / 10000 health and 4 full ki after the change; 0x10 << i
+    /// transformation `i` resets the damaged variant.
+    pub fn form_flags(&self) -> u8 {
+        self.u8_at(0xAD)
+    }
+    /// `BtlParam_CountSlots`: the transformations that are not 0xFF.
+    pub fn trans_count(&self) -> usize {
+        (0..4).filter(|&i| self.trans_target(i) != 0xFF).count()
+    }
 }
 
 /// `BtlAtkRecord`, 0x30 bytes.

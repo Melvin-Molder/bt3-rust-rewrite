@@ -32,6 +32,8 @@ pub(crate) struct Roster {
     pub scene: Scene,
     /// The clash sequences (`clashState`, `clashB`, `clashC`).
     pub clash: Clash,
+    /// The character change requests (`change`).
+    pub change: crate::btl_change::ChangeQueue,
     cpu: [bool; 2],
 }
 
@@ -48,6 +50,7 @@ impl Roster {
             rand: 0,
             scene: Scene::default(),
             clash: Clash::default(),
+            change: Default::default(),
             cpu,
         }
     }
@@ -182,6 +185,7 @@ impl Roster {
         let frame = self.frame;
         let blasts = &self.scene.records;
         let clash = &self.clash.c;
+        let change = &mut self.change;
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
             if me.is_frozen() {
@@ -200,13 +204,17 @@ impl Roster {
                 time_stopped: env.gate.time_stopped,
                 blasts,
                 clash,
+                change: &mut *change,
             }
             .update();
             me.anim_apply_blend();
-            // Of the seven placement requests (flags 0xF3..0xFD) the rush sequences' (0xF6) and the stage path's
-            // come from ported actions.
+            // The placement requests in the original's order (0xF3, the restart's, and the warps 0xFC / 0xFD of
+            // the story's actions are not ported).
+            me.place_center(data[i], env);
             me.place_relative(data[i], env);
             place_on_path(me, data[i], env, clash);
+            me.place_center_high(data[i], env);
+            me.place_saved(data[i]);
             me.pose_to_obj(true);
             me.obj.sample_pose(&data[i].obj);
             me.obj.update_events(&data[i].obj);
@@ -249,7 +257,9 @@ impl Roster {
                 me.obj.warp_body(me.body_warp_pos);
                 keep_sphere = false;
             }
-            let grow = self.started && !env.gate.time_stopped;
+            // BtlCharApi_IsChanging: no growth during a character change or the struggle's loss.
+            let changing = matches!(me.act.current, 0xEC..=0xF8 | 0x103 | 0x104);
+            let grow = self.started && !env.gate.time_stopped && !changing;
             update_fighter_stage(me, data[i], env, keep_sphere, grow);
             update_ground(me, env);
             me.obj_to_pose();

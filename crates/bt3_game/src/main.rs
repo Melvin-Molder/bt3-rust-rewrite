@@ -4,6 +4,7 @@ mod battle_seq;
 mod btl_act;
 mod btl_ai;
 mod btl_blast;
+mod btl_change;
 mod btl_chr;
 mod btl_clash;
 mod btl_flags;
@@ -947,6 +948,17 @@ fn run_frames(
                     Some(&mut game.font),
                     shown,
                 );
+                // The textures a character change added (the draw uploads what is new).
+                let a = &battle.assets;
+                for (have, all) in [
+                    (&mut game.model_textures.0, &a.base_textures),
+                    (&mut game.model_textures.1, &a.shade_textures),
+                    (&mut game.effect_textures, &a.effect_textures),
+                ] {
+                    if have.len() < all.len() {
+                        have.extend_from_slice(&all[have.len()..]);
+                    }
+                }
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
                 game.effects = frame.effects;
@@ -1089,6 +1101,17 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     let mut battle = battle::Battle::new(assets);
     battle.vu0 = game.vu0_random;
     battle.chara_bits = game.save.chara_bits;
+    battle.assets.chara_bits = game.save.chara_bits;
+    // BtlLoad_StepChara reads the character changes from the disc.
+    let iso_path = game.iso_path.clone();
+    let mut image = None;
+    battle.loader = Some(Box::new(move |id: u32| {
+        if image.is_none() {
+            image = Some(Iso9660::open(&iso_path).map_err(|e| e.to_string())?);
+        }
+        let image = image.as_mut().unwrap();
+        read_file(image, id).map_err(|e| e.to_string())
+    }));
     game.scene = Scene::Battle(Box::new(battle));
     play_bgm(game, commands, battle::BGM_FIRST + setup.bgm.max(0) as u32);
 }

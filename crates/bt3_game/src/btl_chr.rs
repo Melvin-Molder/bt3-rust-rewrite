@@ -185,6 +185,31 @@ pub(crate) struct Throw {
     pub turn_pitch: f32,
 }
 
+/// `form` (fighter + 0x12CC): the character change being made.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Form {
+    /// The transformation index 0..3 (fusion 0..2).
+    pub index: i32,
+    /// `newChara`: the character to become, its costume and damaged variant (`new20`).
+    pub chara: i32,
+    pub costume: i32,
+    /// The blast cost (stocks * 100000).
+    pub cost: i32,
+    /// The transformation's kind (parameter + 0xA4; fusion 5).
+    pub kind: i32,
+    pub variant: i32,
+    pub anim_chara: i32,
+    pub anim1_chara: i32,
+    pub voice_chara: i32,
+    /// The extra object of sequence 3 and its costume.
+    pub obj_id: i32,
+    pub obj_costume: i32,
+    /// Fusion: the partner member; a transformation -1.
+    pub partner: i32,
+    /// `changeAllowed`: 0 refuses changes (unless flag 0x10F).
+    pub allowed: i32,
+}
+
 /// What `BtlSuper_MeasureRushStep` measures of a rush's chain of motions.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RushMeasure {
@@ -338,6 +363,10 @@ pub(crate) struct Env<'a> {
     pub gate: InputGate,
     /// The executable's tables of the technique effects.
     pub fx: &'a crate::btl_tech_volley::FxTables,
+    /// `BattleSide_GetChangeAllowed` by player.
+    pub change_allowed: [i32; 2],
+    /// `BattleSide.charaBits` by player (`BattleSide_IsCharaUsable`).
+    pub chara_bits: [[u64; 3]; 2],
 }
 
 impl Env<'_> {
@@ -462,6 +491,13 @@ pub(crate) struct Chr {
     /// `relPos` / `relRot`: the placement flag 0xF6 adds to the stage's place.
     pub rel_pos: [f32; 3],
     pub rel_rot: [f32; 3],
+    /// `form` (+0x12CC).
+    pub form: Form,
+    /// `savedPos` / `savedRot` / `savedArea` / `savedFlagF` / `savedFlagE`: where flag 0xF5 puts the fighter back.
+    pub saved_pos: [f32; 3],
+    pub saved_rot: [f32; 3],
+    pub saved_area: i32,
+    pub saved_flags: [bool; 2],
     /// `framesLeftOverride` (+0x1294): what `BtlCharApi_GetTechniqueFramesLeft` answers when >= 0 (reset every
     /// frame with the action bits).
     pub frames_left_override: i32,
@@ -597,6 +633,11 @@ impl Chr {
             rel_pos: [0.0; 3],
             rel_rot: [0.0; 3],
             frames_left_override: -1,
+            form: Form::default(),
+            saved_pos: [0.0; 3],
+            saved_rot: [0.0; 3],
+            saved_area: 0,
+            saved_flags: [false; 2],
             burst_node: 0,
             next_attack: Attack::default(),
             attack: Attack::default(),
@@ -657,6 +698,7 @@ impl Chr {
         chr.anim_play(data, 0, 0.0);
         chr.obj.sample_pose(&data.obj);
         chr.obj.calc_matrices(&data.obj);
+        chr.form.allowed = env.change_allowed[player];
         // BtlMember_LoadParams(chr, 0, 1, 100 %, variant 0) with no abilities.
         let entry = data.entry;
         let g = &mut chr.gauge;
@@ -1107,6 +1149,111 @@ impl Chr {
         let yaw = (target[0] - pos[0]).atan2(target[2] - pos[2]);
         let area = env.col.find_zone_near(-1, pos) as i32;
         self.place(data, pos, [0.0, yaw, 0.0], area);
+    }
+
+    /// `BtlChar_OnModelLoaded` after a character change swapped the side's files in: the object set up again from
+    /// the new model where it stood (`BtlObj_Rebind`, `BtlChar_BindObject`), the requested motion started on it,
+    /// and for a transformation (0xEC..0xF0) the member's gauges reloaded for the new character keeping the health
+    /// ratio (parameter form flags 1 / 2: + 5000 / + 10000 health, 4: full ki). Abilities are not ported.
+    pub(crate) fn on_model_loaded(&mut self, data: &SideData, opp: &SideData, env: &Env) {
+        let radius = data.tables.params.radius();
+        let old = std::mem::replace(&mut self.obj, Obj::new(&data.obj, radius));
+        self.obj.pos = old.pos;
+        self.obj.rot = old.rot;
+        self.obj.scale = old.scale;
+        self.obj.mtx = old.mtx;
+        self.obj.root_pos = old.root_pos;
+        self.obj.lean = old.lean;
+        self.obj.flags = old.flags;
+        self.obj.area = old.area;
+        self.anim.sub = -1;
+        self.flags.clear(0xBE);
+        self.flags.clear_range(0x98, 0x99);
+        self.flags.set(0x12B);
+        // BtlAnim_FlushRequest.
+        if self.flags.test(anim_flag::REQ) {
+            let (next, blend) = (self.anim.next, self.blend_time);
+            self.anim_play_any(data, opp, env, next, blend);
+        }
+        self.obj.sample_pose(&data.obj);
+        self.pose_to_obj(true);
+        self.obj.calc_matrices(&data.obj);
+        if matches!(self.act.current, 0xEC..=0xF0) {
+            let form_flags = data.tables.params.form_flags();
+            let g = &mut self.gauge;
+            g.variant = self.form.variant;
+            let ratio = if g.health_max > 0 {
+                g.health as f32 / g.health_max as f32
+            } else {
+                0.0
+            };
+            // BtlMember_LoadParams(chr, active, 0, 0, 0).
+            g.health_max = data.entry.health_max.max(10000);
+            g.ki_max = 100_000;
+            g.blast_max = data.entry.blast_stocks * 100_000;
+            g.health = (g.health_max as f32 * ratio + 0.5) as i32;
+            if form_flags & 1 != 0 {
+                g.health += 5000;
+            }
+            if form_flags & 2 != 0 {
+                g.health += 10000;
+            }
+            if form_flags & 4 != 0 {
+                g.ki = g.ki_max;
+            }
+            g.health = g.health.clamp(1, g.health_max);
+            g.blast = g.blast.clamp(0, g.blast_max);
+        }
+    }
+
+    /// `BtlChar_SavePlacement`: the position, rotation, area and flags 0xF / 0xE flag 0xF5 restores (the body warp
+    /// at the body's centre).
+    pub(crate) fn save_placement(&mut self) {
+        self.saved_pos = self.pose.pos;
+        self.saved_rot = self.pose.rot;
+        self.body_warp_pos = self.obj.body_sphere().0;
+        self.saved_area = self.obj.area;
+        self.saved_flags = [self.flags.test(0xF), self.flags.test(0xE)];
+    }
+
+    /// `BtlChar_PlaceCenter` (flag 0xF4): at the stage's place.
+    pub(crate) fn place_center(&mut self, data: &SideData, env: &Env) {
+        if self.flags.test(0xF4) {
+            let (pos, rot, area) = stage_place(env);
+            self.place(data, pos, rot, area);
+        }
+    }
+
+    /// `BtlChar_PlaceCenterHigh` (flag 0xF7): the stage's place at the top of the stage plus half the height.
+    pub(crate) fn place_center_high(&mut self, data: &SideData, env: &Env) {
+        if self.flags.test(0xF7) {
+            let (mut pos, rot, area) = stage_place(env);
+            pos[1] = env.stage.bounds.top + data.height() * 0.5;
+            self.place(data, pos, rot, area);
+        }
+    }
+
+    /// `BtlChar_PlaceSaved` (flag 0xF5): the saved placement and its flags 0xF / 0xE (0x10 with 0xF).
+    pub(crate) fn place_saved(&mut self, data: &SideData) {
+        if !self.flags.test(0xF5) {
+            return;
+        }
+        let (pos, rot, area) = (self.saved_pos, self.saved_rot, self.saved_area);
+        self.place(data, pos, rot, area);
+        let [f, e] = self.saved_flags;
+        if f {
+            self.flags.set_held(0xF);
+        } else {
+            self.flags.clear(0xF);
+        }
+        if e {
+            self.flags.set_held(0xE);
+        } else {
+            self.flags.clear(0xE);
+        }
+        if f {
+            self.flags.set(0x10);
+        }
     }
 
     /// `BtlChar_PlaceRelative` (flag 0xF6): the stage's place plus the offsets `BtlChar_RequestPlaceRelative`
