@@ -1406,7 +1406,8 @@ impl Battle {
             Roster::new([&data[0], &data[1]], &env, assets.cpu)
         };
         let mut roster = roster;
-        roster.scene.gdust = crate::eft_gdust::GndDust::new(assets.stage.dust.as_ref());
+        roster.scene.gdust =
+            crate::eft_gdust::GndDust::new(assets.stage.dust.as_ref(), assets.stage.light_colors);
         // Battle_Init: the tasks' inits, then Battle_Restart's reset.
         roster.scene.stage = assets.new_stage_fx();
         roster.scene.stage.reset();
@@ -1985,7 +1986,10 @@ impl Battle {
             Roster::new([&data[0], &data[1]], &env, self.assets.cpu)
         };
         // The scene's dust manager keeps the starting stage's template.
-        self.roster.scene.gdust = crate::eft_gdust::GndDust::new(self.assets.stage.dust.as_ref());
+        self.roster.scene.gdust = crate::eft_gdust::GndDust::new(
+            self.assets.stage.dust.as_ref(),
+            self.assets.stage.light_colors,
+        );
         self.roster.scene.stage = stage_fx;
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         self.fade = Fade::start_in(1.0);
@@ -2127,7 +2131,7 @@ impl Battle {
             if !paused && !loading {
                 roster.sample_input(&pads, data, env);
                 roster.update_input(data, env);
-                roster.update_main(data, env, &mut *input.libc);
+                roster.update_main(data, env, &mut *input.libc, &mut vu0);
             }
             roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
             if !paused && !loading {
@@ -2378,10 +2382,12 @@ impl Battle {
                 .scene
                 .fx
                 .draw(&fxw, &mut ot, &ctx, |chr| demo || chr == 0);
+            // EftBurst_IsBusy: the transition's first 150 frames.
+            let busy = self.burst.as_ref().is_some_and(|b| b.frame < 150);
             self.roster
                 .scene
                 .gdust
-                .draw(&mut ot, &ctx, &self.assets.dust_textures);
+                .draw(&mut ot, &ctx, &self.assets.dust_textures, busy);
             // EftSurf_DrawMeshes (layer 0) and EftBurst_Draw (layer 4) send their packets straight to the GS while
             // the scene draws: before the table.
             let mut list = direct;
@@ -3251,8 +3257,10 @@ mod tests {
         let mut actions = std::collections::BTreeSet::new();
         let mut pressed = 0u32;
         let mut min_gap = start_gap;
+        let mut dust = 0;
         for _ in 0..5400 {
             battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            dust = dust.max(battle.roster.scene.gdust.fighter_parts());
             actions.insert(battle.roster.chars[1].act.current);
             pressed |= battle.roster.chars[1].input.inject_buttons;
             min_gap = min_gap.min(gap(&battle));
@@ -3265,6 +3273,8 @@ mod tests {
             actions, battle.roster.chars[0].gauge.health
         );
         assert!(pressed != 0, "the CPU pressed nothing");
+        // The fight raises the fighters' dust (dashes, landings, falls).
+        assert!(dust > 0);
         assert!(min_gap < start_gap - 10.0, "the CPU did not close in");
         assert!(
             battle.roster.chars[0].gauge.health < health,

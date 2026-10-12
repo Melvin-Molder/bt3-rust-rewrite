@@ -48,6 +48,9 @@ pub struct StageResource {
     pub weather: Option<StageWeather>,
     /// `StgDataA.surf` (+0x58 / +0x5C, `BtlStage_GetList58`): the reflecting surface's record.
     pub surf: Option<StageSurfRec>,
+    /// `StgDataA.lightColors` (+0x78 / +0x7C, `BtlStage_GetLightColors`): the first record's two colours (the
+    /// fighters' dust takes them).
+    pub light_colors: Option<[u8; 8]>,
 }
 
 /// `StgSurfRec`: what the reflecting surface takes over its file's parameters (the light's y and z negated as
@@ -381,6 +384,18 @@ impl StageResource {
                 color_b: [b(0x1B), b(0x1C), b(0x1D), b(0x1E)],
             })
         };
+        let light_colors = if read_count(bytes, data_offset + 0x78, "stage light colours")? == 0 {
+            None
+        } else {
+            let o = resolve_relative(
+                bytes,
+                data_offset,
+                read_u32(bytes, data_offset + 0x7C)?,
+                8,
+                "stage light colours",
+            )?;
+            Some(bytes[o..o + 8].try_into().unwrap())
+        };
         let geysers = parse_mef_list(bytes, 0)?
             .into_iter()
             .map(|o| {
@@ -428,6 +443,7 @@ impl StageResource {
             geysers,
             weather,
             surf,
+            light_colors,
         })
     }
 }

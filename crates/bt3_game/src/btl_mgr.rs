@@ -231,6 +231,7 @@ impl Roster {
         data: [&SideData; 2],
         env: &Env,
         libc: &mut crate::rng::LibcRandom,
+        vu0: &mut crate::rng::Vu0Random,
     ) {
         let frame = self.frame;
         let blasts = &self.scene.records;
@@ -348,6 +349,7 @@ impl Roster {
             );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             self.scene.spawn_held_disc(me, data[i]);
+            ground_fx(me, data[i], env, &mut self.scene.gdust, libc, vu0);
             water_fx(
                 me,
                 data[i],
@@ -597,6 +599,70 @@ impl Roster {
             chr.flags.set_stage(12);
         }
         self.snapshot(5);
+    }
+}
+
+/// A fighter as the ground dust reads it (`BtlScene_GetCharScale`: its height over 19.35).
+pub(crate) fn dust_chr(me: &Chr, data: &SideData) -> crate::eft_gdust::DustChr {
+    crate::eft_gdust::DustChr {
+        pos: me.pose.pos,
+        dir: me.pose.dir,
+        moved: me.pose.moved,
+        height: data.height(),
+        scale: data.height() / 19.35,
+        nodes: std::array::from_fn(|n| me.obj.node_pos(n as u32)),
+    }
+}
+
+/// `BtlFx_UpdateGroundFx`: requests 0x2F..0x36 (dropped on some grounds): the slide (0x30) and dash (0x33)
+/// emitters switched as their bit starts and ends, the body's dust (0x34), the landing ring at the ground point
+/// (0x35; the body's dust when the ground is under water), two small puffs at each foot (0x32).
+fn ground_fx(
+    me: &mut Chr,
+    data: &SideData,
+    env: &Env,
+    dust: &mut crate::eft_gdust::GndDust,
+    libc: &mut crate::rng::LibcRandom,
+    vu0: &mut crate::rng::Vu0Random,
+) {
+    if me.pose.ground_flags & 0x3000_0065 != 0 {
+        for bit in 0x2F..=0x36 {
+            me.clear_fx(bit);
+        }
+    }
+    let c = dust_chr(me, data);
+    let side = me.player;
+    if me.fx_new(0x30) {
+        dust.set_slide(side, true, &c, vu0);
+    }
+    if me.fx_ended(0x30) {
+        dust.set_slide(side, false, &c, vu0);
+    }
+    if me.fx_new(0x33) {
+        dust.set_dash(side, true, &c, libc, vu0);
+    }
+    if me.fx_ended(0x33) {
+        dust.set_dash(side, false, &c, libc, vu0);
+    }
+    if me.test_fx(0x34) {
+        dust.spawn_burst(side, &c, libc, vu0);
+    }
+    let coef = &env.fx.sin_coef;
+    if me.test_fx(0x35) {
+        let ground = me.pose.ground_pos;
+        if env.stage.water_level.is_some_and(|w| ground[1] > w) {
+            dust.spawn_burst(side, &c, libc, vu0);
+        } else {
+            dust.spawn_landing(side, ground, libc, vu0, coef);
+        }
+    }
+    if me.test_fx(0x32) {
+        let y = me.pose.ground_pos[1];
+        for node in [0xF, 0xB] {
+            let mut p = me.obj.node_pos(node);
+            p[1] = y;
+            dust.spawn_impact(side, p, c.scale, libc, vu0, coef);
+        }
     }
 }
 

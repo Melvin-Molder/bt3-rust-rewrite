@@ -1170,6 +1170,13 @@ impl Chr {
         !self.test_fx(bit) && test_bit(&self.prev_fx_bits, bit)
     }
 
+    /// `BtlChar_ClearFxBit`.
+    pub(crate) fn clear_fx(&mut self, bit: u32) {
+        if let Some(b) = self.fx_bits.get_mut((bit >> 3) as usize) {
+            *b &= !(1 << (bit & 7));
+        }
+    }
+
     /// `BtlChar_SetFxBit`.
     pub(crate) fn set_fx(&mut self, bit: u32) {
         if let Some(b) = self.fx_bits.get_mut((bit >> 3) as usize) {

@@ -1028,7 +1028,9 @@ impl Scene {
             }
         }
         // The ground dust (BtlScene_IsTimeStopped: paused); the stage effects of layer 0 in their table's order.
-        self.gdust.update(w.paused);
+        let dust_chars = std::array::from_fn(|i| crate::btl_mgr::dust_chr(&w.chars[i], w.data[i]));
+        self.gdust
+            .update(w.paused, Some(&dust_chars), w.libc, w.vu0);
         self.stage.update(w.chars, w.data, w.paused, w.libc, w.vu0);
         // Layer 1: the technique effects.
         self.tech.update(
