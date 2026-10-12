@@ -6,17 +6,18 @@
 //! 0x10 then fires a volley of shots from it at the opponent, two of three spread. 3 (0x197, 0x198, 0x200, 0x2A4):
 //! a hit record at the opponent's node 3 from event 0x10. Its end raises flag 0xA9 (and 0xA8 when not yet).
 //!
-//! Not ported: the emitters (drawing).
+//! Its emitters are driven at the shot's place (`EftRingShot_Draw`), the shots' own phases left to the shots.
 
 use bt3_data::eft_pack::{EmitSet, SetHead};
 
 use crate::btl_blast::{HitRec, Tag, World};
-use crate::btl_chr::{add, length, scale3, sub};
+use crate::btl_chr::{SideData, add, length, scale3, sub};
 use crate::btl_tech_fx::{
     EV_ABORT, EV_END, EV_FIRE, EV_START, EmitNodes, T_HIT_CHAR, T_MULTI, TechSrc, aim_dir,
-    aim_dir_keep, stopped, update_trail_width,
+    aim_dir_keep, emit_state, parts_alive, stopped, update_parts, update_trail_width,
 };
 use crate::btl_tech_volley::{Shots, scene_rand_f};
+use crate::eft::{EmitState, Modules, is_part_deferred};
 
 // EFT_RINGSHOT_*.
 const R_COUNT: u32 = 0x1;
@@ -74,6 +75,7 @@ pub(crate) struct Ring {
     vel: [f32; 3],
     path: [[f32; 3]; 4],
     nodes: EmitNodes,
+    emit: Option<EmitState>,
     shots: [RingShot; 20],
     fired: i32,
     total: i32,
@@ -124,7 +126,7 @@ fn spline3(p: &[[f32; 3]], t: f32) -> [f32; 3] {
 
 impl Ring {
     /// `EftRingShot_Init`.
-    pub(crate) fn new(id: u32, src: TechSrc, set: &EmitSet) -> Self {
+    pub(crate) fn new(id: u32, src: TechSrc, data: &SideData, set: &EmitSet) -> Self {
         let def = src.def;
         let kind = match def.id {
             0x26D => 0,
@@ -152,6 +154,7 @@ impl Ring {
             vel: [0.0; 3],
             path: [[0.0; 3]; 4],
             nodes: EmitNodes::default(),
+            emit: emit_state(data, src.slot),
             shots: [RingShot::default(); 20],
             fired: 0,
             total: def.shots * def.volley,
@@ -175,6 +178,13 @@ impl Ring {
         self.dead
     }
 
+    /// `EftRingShot_Reset`: its emitters' objects die.
+    pub(crate) fn kill_parts(&mut self, fx: &mut Modules) {
+        if let Some(st) = &mut self.emit {
+            st.kill_all(fx);
+        }
+    }
+
     /// Whether flag 0xA8 is still owed at the end (`EftRingShot_Term`).
     pub(crate) fn done(&self) -> bool {
         self.flags & R_DONE != 0
@@ -185,6 +195,7 @@ impl Ring {
     pub(crate) fn update(
         &mut self,
         w: &mut World,
+        fx: &mut Modules,
         events: u32,
         cur_slot: i32,
         requests: &mut u32,
@@ -262,7 +273,23 @@ impl Ring {
             }
             self.flags |= R_COUNT;
         }
-        // EftRingShot_Draw: drawing only.
+        if let Some(st) = &mut self.emit {
+            let (count, fast) = (self.flags & R_COUNT != 0, self.flags & R_FAST_END != 0);
+            update_parts(
+                fx,
+                w,
+                &self.src,
+                st,
+                &self.nodes,
+                events,
+                count,
+                fast,
+                self.pos,
+                self.dir,
+                self.size,
+                is_part_deferred,
+            );
+        }
         if advance {
             self.state += 1;
         }
@@ -426,11 +453,15 @@ impl Ring {
                 _ => {}
             }
             let (pos, dir) = (s.pos, s.dir);
+            // The shot's emitters: phase 1 of slot 1 on FIRE, phase 3 of slot 3 on event 0x10 (the carrier).
+            let sel = if self.kind == 2 { (3, 3) } else { (1, 1) };
             let handle = shots.create(
                 next_id,
                 self.src,
-                &w.chars[side],
+                w,
                 &self.head_set,
+                &self.nodes,
+                sel,
                 pos,
                 dir,
                 life,
@@ -606,9 +637,12 @@ impl Ring {
 
     /// `EftRingShot_PostUpdate`: the shots are reaped; result bit 0 moves the record's volume where the pass put
     /// it, bit 2 starts the end.
-    pub(crate) fn post_update(&mut self, w: &World, shots: &Shots) {
+    pub(crate) fn post_update(&mut self, w: &World, fx: &mut Modules, shots: &Shots) {
         if stopped(w, self.src.side) {
             return;
+        }
+        if let Some(st) = &mut self.emit {
+            parts_alive(fx, w.data[self.src.side], &self.src, st, false);
         }
         self.reap(shots);
         if self.tag.result & 1 != 0 {

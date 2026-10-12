@@ -9,8 +9,10 @@
 //! The held ki blast discs are listed per fighter (`EftDiscMgr`): the throw takes the first not yet thrown, and
 //! the ki blast parameters go to the list's FIRST disc, as in the original; a disc's end unlinks the list's first.
 //!
-//! Not ported: the model, its textures, rolls, banks, fades and the emitters (drawing; their libc `rand()` draws
-//! are kept), and the character change that kills a ki blast disc.
+//! A piece drives its technique set's emitters on node slot 5 (`EftDisc_SpawnParts`).
+//!
+//! Not ported: the model, its textures, rolls, banks and fades (drawing; their libc `rand()` draws are kept), and
+//! the character change that kills a ki blast disc.
 
 use std::f32::consts::PI;
 
@@ -21,8 +23,10 @@ use crate::btl_chr::{Chr, SideData, add, dot, length, scale3, sub};
 use crate::btl_obj::node_side;
 use crate::btl_tech_fx::{
     EV_ABORT, EV_END, EV_FIRE, EV_START, EmitNodes, T_HIT_CHAR, T_MULTI, TechSrc, aim_dir,
-    aim_dir_keep, in_rush_sequence, stopped, update_trail_width,
+    aim_dir_keep, emit_state, in_rush_sequence, parts_alive, reset_parts, stopped, update_parts,
+    update_trail_width,
 };
+use crate::eft::{EmitState, Modules};
 
 /// `EftDiscMgr_Init`: discs, both fighters together.
 const DISCS_MAX: usize = 20;
@@ -81,6 +85,8 @@ pub(crate) struct Disc {
     head_set: SetHead,
     trail_width: f32,
     trail_time: f32,
+    /// A piece's emitters (its technique slot's set).
+    emit: Option<EmitState>,
 }
 
 /// A held list entry (`EftDiscNode`): 1 used, 0x10 thrown at once, 0x20 thrown.
@@ -189,11 +195,14 @@ impl Discs {
     }
 
     /// A fighter's discs reset (`EftDisc_Reset`, then `EftDisc_Term`).
-    pub(crate) fn reset_side(&mut self, side: usize) {
+    pub(crate) fn reset_side(&mut self, fx: &mut Modules, side: usize) {
         let mut i = 0;
         while i < self.list.len() {
             if self.list[i].arg.owner == side {
-                let d = self.list.remove(i);
+                let mut d = self.list.remove(i);
+                if let Some(st) = &mut d.emit {
+                    st.kill_all(fx);
+                }
                 if d.flags & D_PIECE == 0 && d.arg.kind < 2 {
                     self.pop_held(d.arg.owner);
                 }
@@ -286,6 +295,7 @@ impl Discs {
             head_set,
             trail_width: head_set.width[0],
             trail_time: 0.0,
+            emit: None,
         };
         match arg.kind {
             0 | 1 => {
@@ -307,6 +317,9 @@ impl Discs {
             3 => d.flags |= D_FLYING,
             4 => d.flags |= D_PIECE | D_FLYING,
             _ => {}
+        }
+        if d.flags & D_PIECE != 0 {
+            d.emit = arg.src.and_then(|s| emit_state(data, s.slot));
         }
         d.flags |= D_ALIVE;
         self.list.push(d);
@@ -429,10 +442,18 @@ impl Discs {
     }
 
     /// The discs' updates (layer 3, before the blast objects): each one's record; a dead one is removed.
-    pub(crate) fn update(&mut self, w: &World, records: &mut Vec<HitRec>, max: usize) {
+    pub(crate) fn update(
+        &mut self,
+        w: &mut World,
+        fx: &mut Modules,
+        events: [u32; 2],
+        records: &mut Vec<HitRec>,
+        max: usize,
+    ) {
         let mut i = 0;
         while i < self.list.len() {
-            let rec = self.list[i].update(w);
+            let owner = self.list[i].arg.owner;
+            let rec = self.list[i].update(w, fx, events[owner]);
             if let Some(rec) = rec
                 && records.len() < max
             {
@@ -450,11 +471,35 @@ impl Discs {
         }
     }
 
-    /// `EftDisc_PostUpdate`: any result ends the disc.
-    pub(crate) fn post_update(&mut self, w: &World) {
+    /// `EftDisc_PostUpdate`: any result ends the disc; a piece's emitters, given the reset flags when the pass moved
+    /// it.
+    pub(crate) fn post_update(&mut self, w: &mut World, fx: &mut Modules) {
         for d in &mut self.list {
-            if !d.stopped(w) && d.tag.result & 0x3F != 0 {
+            if d.stopped(w) {
+                continue;
+            }
+            if d.tag.result & 0x3F != 0 {
                 d.flags |= D_DEAD;
+            }
+            if d.flags & D_PIECE != 0
+                && let (Some(src), Some(st)) = (d.arg.src, &mut d.emit)
+            {
+                parts_alive(fx, w.data[src.side], &src, st, false);
+                if d.tag.result & 1 != 0 {
+                    let skip = piece_skip(d.flags);
+                    let a = d.arg;
+                    reset_parts(
+                        fx,
+                        w,
+                        &src,
+                        st,
+                        &EmitNodes::default(),
+                        a.pos,
+                        a.dir,
+                        a.scale,
+                        skip,
+                    );
+                }
             }
         }
     }
@@ -484,7 +529,7 @@ impl Disc {
     /// `EftDisc_Update`: a held disc grows and follows the hand (a ki blast disc of kind 0 is lost once its fighter
     /// stops charging, flag 0x8E), one thrown at once leaves when grown; a flying one homes and moves, ends at its
     /// life, and adds its record.
-    fn update(&mut self, w: &World) -> Option<HitRec> {
+    fn update(&mut self, w: &mut World, fx: &mut Modules, events: u32) -> Option<HitRec> {
         let owner = self.arg.owner;
         let mut hold = false;
         if self.flags & D_PIECE == 0 {
@@ -535,6 +580,7 @@ impl Disc {
         }
         let mut rec = None;
         if self.flags & D_PIECE != 0 {
+            self.spawn_parts(w, fx, events);
             update_trail_width(&mut self.trail_width, &mut self.trail_time, &self.head_set);
         }
         if self.flags & D_FLYING != 0 && self.flags & (D_END | D_DEAD) == 0 && !w.paused {
@@ -545,6 +591,29 @@ impl Disc {
         }
         self.timer += 1.0;
         rec
+    }
+
+    /// `EftDisc_SpawnParts`: a piece's emitters on node slot 5 (held: not of phase 1; flying: not of phase 0) at
+    /// the piece, without node slots.
+    fn spawn_parts(&mut self, w: &mut World, fx: &mut Modules, events: u32) {
+        let (Some(src), Some(st)) = (self.arg.src, &mut self.emit) else {
+            return;
+        };
+        let a = self.arg;
+        update_parts(
+            fx,
+            w,
+            &src,
+            st,
+            &EmitNodes::default(),
+            events,
+            self.flags & (D_END | D_DEAD) != 0,
+            false,
+            a.pos,
+            a.dir,
+            a.scale,
+            piece_skip(self.flags),
+        );
     }
 
     /// `EftDisc_AddHit`: two spheres at its position and its last one.
@@ -588,6 +657,19 @@ impl Disc {
     }
 }
 
+/// The emitters `EftDisc_SpawnParts` leaves out for a piece's flags.
+fn piece_skip(flags: u32) -> impl Fn(&EmitSet, u8, usize) -> bool {
+    move |set, kind, sub| {
+        let Some(g) = set.groups[usize::from(kind)] else {
+            return true;
+        };
+        let p = &set.parts[g.first + sub];
+        let held = flags & D_HELD != 0 && p.phase() != 1 && p.node() == 5;
+        let flying = flags & D_FLYING != 0 && p.phase() != 0 && p.node() == 5;
+        !(held || flying)
+    }
+}
+
 /// `EftMath_WrapAngle`.
 fn eft_wrap(a: f32) -> f32 {
     const TWO_PI: f32 = 6.283_185_3;
@@ -617,7 +699,10 @@ pub(crate) struct Multi {
     life: f32,
     release_scale: f32,
     dir: [f32; 3],
+    /// Where its emitters are driven (`head`, the muzzle from the FIRE).
+    head: [f32; 3],
     nodes: EmitNodes,
+    emit: Option<EmitState>,
     /// The pieces: the disc and 1 fired, 2 released.
     pieces: [(Option<u32>, u32); PIECES],
     count: i32,
@@ -627,7 +712,7 @@ pub(crate) struct Multi {
 
 impl Multi {
     /// `EftMulti_Init`.
-    pub(crate) fn new(src: TechSrc, set: &EmitSet) -> Self {
+    pub(crate) fn new(src: TechSrc, data: &SideData, set: &EmitSet) -> Self {
         Self {
             src,
             flags: if src.def.flags & 0x8000 != 0 {
@@ -640,7 +725,9 @@ impl Multi {
             life: f32::from(set.head.end_frames),
             release_scale: 0.0,
             dir: [0.0; 3],
+            head: [0.0; 3],
             nodes: EmitNodes::default(),
+            emit: emit_state(data, src.slot),
             pieces: [(None, 0); PIECES],
             count: 0,
             set: set.clone(),
@@ -656,12 +743,30 @@ impl Multi {
         self.dead
     }
 
+    /// `EftMulti_Reset`: its emitters' objects die.
+    pub(crate) fn kill_parts(&mut self, fx: &mut Modules) {
+        if let Some(st) = &mut self.emit {
+            st.kill_all(fx);
+        }
+    }
+
+    /// `EftMulti_PostUpdate`: its emitters (it publishes no record, so the hit results never come).
+    pub(crate) fn post_update(&mut self, w: &World, fx: &mut Modules) {
+        if stopped(w, self.src.side) {
+            return;
+        }
+        if let Some(st) = &mut self.emit {
+            parts_alive(fx, w.data[self.src.side], &self.src, st, false);
+        }
+    }
+
     /// `EftMulti_Update`: the aim on START (from the start node), its firing aim on FIRE (from the muzzle), the
     /// pieces; ends once all are fired and gone, on the END, or at once on ABORT; dies once ended and empty.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn update(
         &mut self,
         w: &mut World,
+        fx: &mut Modules,
         events: u32,
         cur_slot: i32,
         discs: &mut Discs,
@@ -695,7 +800,8 @@ impl Multi {
                 }
                 2 => {
                     if test(EV_FIRE) {
-                        self.dir = aim_dir_keep(w, side, self.nodes.pos(1));
+                        self.head = self.nodes.pos(1);
+                        self.dir = aim_dir_keep(w, side, self.head);
                         self.state = 3;
                     }
                 }
@@ -719,7 +825,27 @@ impl Multi {
             }
             self.flags |= 1;
         }
-        // EftMulti_UpdateParts: drawing only.
+        // EftMulti_UpdateParts: the emitters on slot 5 are the pieces'.
+        if let Some(st) = &mut self.emit {
+            let (ending, kill) = (self.flags & 1 != 0, self.flags & 4 != 0);
+            update_parts(
+                fx,
+                w,
+                &self.src,
+                st,
+                &self.nodes,
+                events,
+                ending,
+                kill,
+                self.head,
+                self.dir,
+                def.scale,
+                |set, kind, sub| {
+                    set.groups[usize::from(kind)]
+                        .is_some_and(|g| set.parts[g.first + sub].node() == 5)
+                },
+            );
+        }
         if advance {
             self.state += 1;
         }

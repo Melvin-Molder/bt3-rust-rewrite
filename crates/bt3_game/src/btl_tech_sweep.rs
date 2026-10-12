@@ -4,16 +4,19 @@
 //! the stage cuts the beam a mark is left for ten frames. A hit or a guard stops its records; the END event, or
 //! ABORT at once, ends it once its marks are over; its end raises flag 0xA8.
 //!
-//! Not ported: the marks' impact effects and the stage objects they break, and the emitters (drawing).
+//! Its emitters are driven at the beam's end along the aim (`EftSweep_Emit`).
+//!
+//! Not ported: the marks' impact effects and the stage objects they break.
 
 use bt3_data::eft_pack::{EmitSet, SetHead};
 
 use crate::btl_blast::{HitRec, Tag, World};
-use crate::btl_chr::{Chr, add, length, scale3, sub};
+use crate::btl_chr::{Chr, SideData, add, length, scale3, sub};
 use crate::btl_tech_fx::{
     EV_ABORT, EV_END, EV_FIRE, EV_START, EmitNodes, T_HIT_CHAR, T_MULTI, TechSrc, aim_dir,
-    aim_dir_keep, stopped, update_trail_width,
+    aim_dir_keep, emit_state, parts_alive, stopped, update_parts, update_trail_width,
 };
+use crate::eft::{EmitState, Modules};
 
 // EFT_SWEEP_*.
 const S_ENDING: u32 = 0x1;
@@ -52,6 +55,7 @@ pub(crate) struct Sweep {
     prev: [f32; 3],
     vel: [f32; 3],
     nodes: EmitNodes,
+    emit: Option<EmitState>,
     head_set: SetHead,
     trail_width: f32,
     trail_time: f32,
@@ -79,7 +83,14 @@ fn rot_x(v: [f32; 3], a: f32) -> [f32; 3] {
 
 impl Sweep {
     /// `EftSweep_Init` with `EftSweep_InitPath`.
-    pub(crate) fn new(id: u32, src: TechSrc, me: &Chr, opp: &Chr, set: &EmitSet) -> Self {
+    pub(crate) fn new(
+        id: u32,
+        src: TechSrc,
+        me: &Chr,
+        opp: &Chr,
+        data: &SideData,
+        set: &EmitSet,
+    ) -> Self {
         let def = src.def;
         let head_set = set.head;
         let mut s = Self {
@@ -100,6 +111,7 @@ impl Sweep {
             prev: [0.0; 3],
             vel: [0.0; 3],
             nodes: EmitNodes::default(),
+            emit: emit_state(data, src.slot),
             head_set,
             trail_width: head_set.width[0],
             trail_time: 0.0,
@@ -123,6 +135,13 @@ impl Sweep {
 
     pub(crate) fn dead(&self) -> bool {
         self.dead
+    }
+
+    /// `EftSweep_Reset`: its emitters' objects die.
+    pub(crate) fn kill_parts(&mut self, fx: &mut Modules) {
+        if let Some(st) = &mut self.emit {
+            st.kill_all(fx);
+        }
     }
 
     /// `EftSweep_Move`: the end one step further round its circle about `pos`, in the plane of the aim (the
@@ -169,7 +188,13 @@ impl Sweep {
     }
 
     /// `EftSweep_Update`. Returns the record.
-    pub(crate) fn update(&mut self, w: &World, events: u32, cur_slot: i32) -> Option<HitRec> {
+    pub(crate) fn update(
+        &mut self,
+        w: &mut World,
+        fx: &mut Modules,
+        events: u32,
+        cur_slot: i32,
+    ) -> Option<HitRec> {
         let side = self.src.side;
         if stopped(w, side) {
             return None;
@@ -224,7 +249,23 @@ impl Sweep {
             }
             self.flags |= S_ENDING;
         }
-        // EftSweep_Emit: drawing only.
+        if let Some(st) = &mut self.emit {
+            let (ending, now) = (self.flags & S_ENDING != 0, self.flags & S_NOW != 0);
+            update_parts(
+                fx,
+                w,
+                &self.src,
+                st,
+                &self.nodes,
+                events,
+                ending,
+                now,
+                self.cur,
+                self.dir,
+                self.width,
+                |_, _, _| false,
+            );
+        }
         if next {
             self.state += 1;
         }
@@ -268,9 +309,12 @@ impl Sweep {
     }
 
     /// `EftSweep_PostUpdate`: a hit or a guard (task flags 1 / 2) stops its records.
-    pub(crate) fn post_update(&mut self, w: &World) {
+    pub(crate) fn post_update(&mut self, w: &World, fx: &mut Modules) {
         if stopped(w, self.src.side) {
             return;
+        }
+        if let Some(st) = &mut self.emit {
+            parts_alive(fx, w.data[self.src.side], &self.src, st, false);
         }
         if self.tag.flags & 3 != 0 {
             self.flags &= !S_TRAIL;

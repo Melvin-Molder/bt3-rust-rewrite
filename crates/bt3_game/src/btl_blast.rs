@@ -31,7 +31,7 @@ use crate::btl_obj::mask_to_node;
 use crate::btl_tech_fx::{
     TechFx, TechSrc, absorb_amount, guard_rush, hit_by_rush, tech_outclasses, try_dodge_tech,
 };
-use crate::eft::{EmitState, FxWorld, Modules, Nodes, SetRef, SpawnCtx, spawn};
+use crate::eft::{EmitState, FxWorld, Modules, Nodes, SetAssets, SetRef, SpawnCtx, spawn};
 use crate::rng::LibcRandom;
 
 /// `EFT_HIT_MAX`.
@@ -832,7 +832,7 @@ impl Scene {
         for list in &mut self.ki_objs[side] {
             list.clear();
         }
-        self.tech.reset_side(chars, side);
+        self.tech.reset_side(chars, &mut self.fx, side);
     }
 
     /// `BtlFx_SpawnHitSparkReq17` for a ki blast of type 4: request 0x17 grows a disc in the firing hand (the
@@ -888,8 +888,13 @@ impl Scene {
             }
         }
         // Layer 1: the technique effects.
-        self.tech
-            .update(w, &mut self.records, HIT_MAX, &mut self.next_id);
+        self.tech.update(
+            w,
+            &mut self.fx,
+            &mut self.records,
+            HIT_MAX,
+            &mut self.next_id,
+        );
         // BtlScene_IsAnyCharStopped.
         let stopped = w.paused || w.chars.iter().any(Chr::is_frozen);
         for side in 0..2 {
@@ -935,11 +940,18 @@ impl Scene {
         if !w.paused {
             self.step_struggle(w);
         }
-        self.tech.discs.update(w, &mut self.records, HIT_MAX);
-        self.tech.update_shots(w, &mut self.records, HIT_MAX);
+        self.tech
+            .update_discs(w, &mut self.fx, &mut self.records, HIT_MAX);
+        self.tech
+            .update_shots(w, &mut self.fx, &mut self.records, HIT_MAX);
         let fxw = FxWorld {
-            sets: std::array::from_fn(|s| w.data[s].blast_assets),
+            sets: std::array::from_fn(|s| w.data[s].fx_sets()),
             any_frozen: stopped,
+            stopped: [0, 1].map(|s| crate::btl_tech_fx::stopped(w, s)),
+            // The update does not draw.
+            clash_a: [false; 2],
+            node3: [[0.0; 3]; 2],
+            ray_texture: None,
         };
         self.fx.update(&fxw, w.libc, w.vu0);
         self.clamp_to_stage(w.env);
@@ -953,7 +965,7 @@ impl Scene {
         // BtlScene_PostUpdate: EftHit_UpdateResults, then layer 1's and layer 2's post-updates; the impacts are not
         // ported.
         self.update_results();
-        self.tech.post_update(w);
+        self.tech.post_update(w, &mut self.fx);
         for side in 0..2 {
             for list in 0..2 {
                 for task in &mut self.lists[side][list] {
@@ -970,8 +982,8 @@ impl Scene {
                 }
             }
         }
-        self.tech.discs.post_update(w);
-        self.tech.post_update_shots(w);
+        self.tech.discs.post_update(w, &mut self.fx);
+        self.tech.post_update_shots(w, &mut self.fx);
         for (i, chr) in w.chars.iter_mut().enumerate() {
             chr.live_blasts = [0; 2];
             for rec in self
@@ -1634,19 +1646,7 @@ fn spawn_parts(t: &mut Task, w: &mut World, fx: &mut Modules, reset: bool) {
     let (Some(set), Some(assets)) = (list_head(data, t.list), data.blast_assets[t.list]) else {
         return;
     };
-    let opp = src ^ 1;
-    let ctx = SpawnCtx {
-        chr: src,
-        set,
-        assets,
-        set_ref: SetRef {
-            side: src,
-            list: t.list,
-        },
-        char_scale: [data.height() / 19.35, w.data[opp].height() / 19.35],
-        opp_chara_flags: w.data[opp].tables.params.chara_flags(),
-        opp_node3: w.chars[opp].obj.node_pos(3),
-    };
+    let ctx = spawn_ctx(w, src, set, assets, t.list);
     let ending = t.flags & W_ENDING != 0;
     for kind in 0..0x13u8 {
         if set.head.mask & (1 << kind) == 0 {
@@ -1675,9 +1675,31 @@ fn spawn_parts(t: &mut Task, w: &mut World, fx: &mut Modules, reset: bool) {
                     f,
                     t.radius,
                     w.libc,
+                    w.vu0,
                 );
             }
         }
+    }
+}
+
+/// What `EftEmit_Spawn` reads of the owner `side` of the set `list` (`BtlScene_GetCharScale` is the height over
+/// 19.35).
+pub(crate) fn spawn_ctx<'s>(
+    w: &World,
+    side: usize,
+    set: &'s EmitSet,
+    assets: &'s SetAssets,
+    list: usize,
+) -> SpawnCtx<'s> {
+    let opp = side ^ 1;
+    SpawnCtx {
+        chr: side,
+        set,
+        assets,
+        set_ref: SetRef { side, list },
+        char_scale: [w.data[side].height() / 19.35, w.data[opp].height() / 19.35],
+        opp_chara_flags: w.data[opp].tables.params.chara_flags(),
+        opp_node3: w.chars[opp].obj.node_pos(3),
     }
 }
 

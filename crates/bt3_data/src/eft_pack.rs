@@ -424,6 +424,15 @@ impl EffectPack {
     }
 }
 
+/// `BtlScene_GetCommonEntry`: entry `idx` of the common effect file (common file 3, `gCommonRes->data[1]`).
+pub fn common_entry(file: &[u8], idx: usize) -> Option<&[u8]> {
+    file.get(idx * 4..idx * 4 + 4)?;
+    file.get(entry_offset(file, idx)..)
+}
+
+/// `EftRayMgr_Init`: the ray bursts' texture set is common effect entry 10.
+pub const COMMON_RAY_TEXTURES: usize = 10;
+
 /// `BtlCharApi_GetPlayerEffectPack`: the effect pack of technique slot `slot` (0..4) is entry `slot + 1` of the
 /// character's second animation file (`BtlObj_RequestCharaModel`); `None` when it is empty.
 pub fn tech_pack(anim_file: &[u8], slot: usize) -> Option<&[u8]> {
@@ -512,6 +521,455 @@ impl RibbonAnim {
             color,
             pulse,
             pulse_time: [f32_at(b, 0xA8), f32_at(b, 0xAC), f32_at(b, 0xB0)],
+        })
+    }
+}
+
+/// `EftPart10Def`: a kind 10 emitter's first definition block (0x20E bytes); every value has three keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Part10Def {
+    /// Particle size at birth / middle / death per key: minimum, and range.
+    pub size: [[f32; 3]; 3],
+    pub size_range: [[f32; 3]; 3],
+    /// Start angle (turns).
+    pub angle: [f32; 3],
+    pub angle_range: [f32; 3],
+    /// Spins (half turns).
+    pub spin_x: [f32; 3],
+    pub spin_x_range: [f32; 3],
+    pub spin_y: [f32; 3],
+    pub spin_y_range: [f32; 3],
+    pub spin: [f32; 3],
+    pub spin_range: [f32; 3],
+    /// The burst's direction jitter (half turns).
+    pub ang_a: [f32; 3],
+    pub ang_a_range: [f32; 3],
+    pub ang_b: [f32; 3],
+    pub ang_b_range: [f32; 3],
+    /// The start distance from the emitter (`dist` + `dist_base`), and the speed.
+    pub dist: [f32; 3],
+    pub dist_range: [f32; 3],
+    pub dist_base: [f32; 3],
+    pub dist_vel: [f32; 3],
+    pub dist_vel_range: [f32; 3],
+    /// The particle's offset (x, y).
+    pub scale_x: [f32; 3],
+    pub scale_y: [f32; 3],
+    /// Seconds.
+    pub life: [f32; 3],
+    pub life_range: [f32; 3],
+    pub wait: [f32; 3],
+    pub wait_range: [f32; 3],
+    /// The size pulse {from, to} per key, and its time.
+    pub pulse: [[f32; 2]; 3],
+    pub pulse_time: [f32; 3],
+    pub twist_step: f32,
+    /// The emitter's spin (flag 0x40): three keys, or one value with flag 0x20.
+    pub spin_a: [f32; 3],
+    pub spin_a_range: [f32; 3],
+    pub spin_b: [f32; 3],
+    pub spin_b_range: [f32; 3],
+    pub scale: [f32; 3],
+    pub scale_range: [f32; 3],
+    /// Particles per ring side, per key.
+    pub count: [f32; 3],
+    pub spin_time: f32,
+    pub spin_mid: f32,
+    pub key_time: f32,
+    pub key_mid: f32,
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub size_mid: f32,
+    /// 1 aimed along the direction, 2 mirrored when spinning backwards, 4 random spin direction, 8 clipped,
+    /// 0x10 random sheet frame, 0x20 / 0x40 emitter spin, 0x80 size pulse, 0x100 colour pulse, 0x200 keyed.
+    pub flags: i32,
+    pub cols: u8,
+    pub rows: u8,
+    pub tex_step: u8,
+    pub layer: u8,
+    pub ring_from: f32,
+    pub ring_to: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    /// 1: facing the camera.
+    pub mode: u8,
+    /// 1 no colour ramp, 2 a ramp on every other particle at random.
+    pub color_mode: u8,
+}
+
+impl Part10Def {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x20E {
+            return Err(invalid_data("kind 10 parameters are truncated"));
+        }
+        let f = |o: usize| f32_at(b, o);
+        let three = |o: usize| [f(o), f(o + 4), f(o + 8)];
+        let nine = |o: usize| std::array::from_fn(|k| three(o + k * 0xC));
+        Ok(Self {
+            size: nine(0),
+            size_range: nine(0x24),
+            angle: three(0x48),
+            angle_range: three(0x54),
+            spin_x: three(0x60),
+            spin_x_range: three(0x6C),
+            spin_y: three(0x78),
+            spin_y_range: three(0x84),
+            spin: three(0x90),
+            spin_range: three(0x9C),
+            ang_a: three(0xA8),
+            ang_a_range: three(0xB4),
+            ang_b: three(0xC0),
+            ang_b_range: three(0xCC),
+            dist: three(0xD8),
+            dist_range: three(0xE4),
+            dist_base: three(0xF0),
+            dist_vel: three(0xFC),
+            dist_vel_range: three(0x108),
+            scale_x: three(0x114),
+            scale_y: three(0x120),
+            life: three(0x12C),
+            life_range: three(0x138),
+            wait: three(0x144),
+            wait_range: three(0x150),
+            pulse: std::array::from_fn(|k| [f(0x15C + k * 8), f(0x160 + k * 8)]),
+            pulse_time: three(0x174),
+            twist_step: f(0x180),
+            spin_a: three(0x184),
+            spin_a_range: three(0x190),
+            spin_b: three(0x19C),
+            spin_b_range: three(0x1A8),
+            scale: three(0x1B4),
+            scale_range: three(0x1C0),
+            count: three(0x1CC),
+            spin_time: f(0x1D8),
+            spin_mid: f(0x1DC),
+            key_time: f(0x1E0),
+            key_mid: f(0x1E4),
+            fade_in: f(0x1E8),
+            fade_out: f(0x1EC),
+            size_mid: f(0x1F0),
+            flags: u32_at(b, 0x1F4) as i32,
+            cols: b[0x1F8],
+            rows: b[0x1F9],
+            tex_step: b[0x1FA],
+            layer: b[0x1FB],
+            ring_from: f(0x1FC),
+            ring_to: f(0x200),
+            yaw: f(0x204),
+            pitch: f(0x208),
+            mode: b[0x20C],
+            color_mode: b[0x20D],
+        })
+    }
+}
+
+/// `EftPart10Def2`: a kind 10 emitter's colours (its second definition block, 0x12C bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Part10Def2 {
+    /// 0..255 per key.
+    pub color: [[f32; 4]; 3],
+    pub color_range: [[f32; 4]; 3],
+    pub end_color: [[f32; 4]; 3],
+    pub end_color_range: [[f32; 4]; 3],
+    /// The colour multiplier pulse {from, to} per key, for red, green and blue, and its time.
+    pub mul: [[[f32; 2]; 3]; 3],
+    pub mul_time: [f32; 3],
+    /// The part of a particle's life over which its colour ramps.
+    pub fade0: [f32; 3],
+    pub fade1: [f32; 3],
+}
+
+impl Part10Def2 {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x12C {
+            return Err(invalid_data("kind 10 colours are truncated"));
+        }
+        let f = |o: usize| f32_at(b, o);
+        let vecs = |o: usize| -> [[f32; 4]; 3] {
+            std::array::from_fn(|k| std::array::from_fn(|i| f(o + k * 0x10 + i * 4)))
+        };
+        Ok(Self {
+            color: vecs(0),
+            color_range: vecs(0x30),
+            end_color: vecs(0x60),
+            end_color_range: vecs(0x90),
+            mul: std::array::from_fn(|c| {
+                std::array::from_fn(|k| [f(0xC0 + c * 0x18 + k * 8), f(0xC4 + c * 0x18 + k * 8)])
+            }),
+            mul_time: [f(0x108), f(0x10C), f(0x110)],
+            fade0: [f(0x114), f(0x118), f(0x11C)],
+            fade1: [f(0x120), f(0x124), f(0x128)],
+        })
+    }
+}
+
+/// `EftLinkDef`: a kind 15 sprite chain's first definition block (0x1A4 bytes); every animated value has three
+/// keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LinkDef {
+    /// The sprites' turns (turns).
+    pub rot_x: [f32; 3],
+    pub rot_x_range: [f32; 3],
+    pub rot_z: [f32; 3],
+    pub rot_z_range: [f32; 3],
+    /// The direction of the drift offset (turns), and its distance.
+    pub dir_ang: [f32; 3],
+    pub dir_ang_range: [f32; 3],
+    /// Half turns per frame.
+    pub spin: [f32; 3],
+    pub spin_range: [f32; 3],
+    /// Twist per sprite along the chain (turns).
+    pub twist: [f32; 3],
+    pub ofs_x: [f32; 3],
+    pub ofs_y: [f32; 3],
+    /// The random push along the chain.
+    pub along_min: [f32; 3],
+    pub along_max: [f32; 3],
+    pub dist: [f32; 3],
+    pub dist_range: [f32; 3],
+    pub dist_base: [f32; 3],
+    /// Size at birth / middle / death per key: minimum, and range.
+    pub size: [[f32; 3]; 3],
+    pub size_range: [[f32; 3]; 3],
+    /// Seconds.
+    pub life: [f32; 3],
+    pub life_range: [f32; 3],
+    pub wait: [f32; 3],
+    pub wait_range: [f32; 3],
+    pub pulse: [[f32; 2]; 3],
+    pub pulse_time: [f32; 3],
+    pub key_time: f32,
+    pub key_split: f32,
+    pub fade_in: f32,
+    pub fade_out: f32,
+    pub size_split: f32,
+    pub grow_split: f32,
+    /// Seconds.
+    pub grow_time: f32,
+    /// Distance between two sprites, per key of the growth.
+    pub spacing: [f32; 3],
+    pub scale: [f32; 3],
+    pub scale_range: [f32; 3],
+    pub cols: u8,
+    pub rows: u8,
+    pub tex_step: u8,
+    pub layer: u8,
+    /// 2 no depth, 4 clipped, 8 mirrored when spinning backwards, 0x10 facing the camera, 0x20 / 0x40 colour ramp,
+    /// 0x80 random sheet frame, 0x100 random spin sign, 0x200 grows, 0x400 keyed, 0x800 size pulse, 0x1000 colour
+    /// pulse, 0x2000 the drift is not scaled.
+    pub flags: i32,
+}
+
+impl LinkDef {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x1A4 {
+            return Err(invalid_data("kind 15 parameters are truncated"));
+        }
+        let f = |o: usize| f32_at(b, o);
+        let three = |o: usize| [f(o), f(o + 4), f(o + 8)];
+        let nine = |o: usize| std::array::from_fn(|k| three(o + k * 0xC));
+        Ok(Self {
+            rot_x: three(0),
+            rot_x_range: three(0xC),
+            rot_z: three(0x18),
+            rot_z_range: three(0x24),
+            dir_ang: three(0x30),
+            dir_ang_range: three(0x3C),
+            spin: three(0x48),
+            spin_range: three(0x54),
+            twist: three(0x60),
+            ofs_x: three(0x6C),
+            ofs_y: three(0x78),
+            along_min: three(0x84),
+            along_max: three(0x90),
+            dist: three(0x9C),
+            dist_range: three(0xA8),
+            dist_base: three(0xB4),
+            size: nine(0xC0),
+            size_range: nine(0xE4),
+            life: three(0x108),
+            life_range: three(0x114),
+            wait: three(0x120),
+            wait_range: three(0x12C),
+            pulse: std::array::from_fn(|k| [f(0x138 + k * 8), f(0x13C + k * 8)]),
+            pulse_time: three(0x150),
+            key_time: f(0x15C),
+            key_split: f(0x160),
+            fade_in: f(0x164),
+            fade_out: f(0x168),
+            size_split: f(0x16C),
+            grow_split: f(0x170),
+            grow_time: f(0x174),
+            spacing: three(0x178),
+            scale: three(0x184),
+            scale_range: three(0x190),
+            cols: b[0x19C],
+            rows: b[0x19D],
+            tex_step: b[0x19E],
+            layer: b[0x19F],
+            flags: u32_at(b, 0x1A0) as i32,
+        })
+    }
+}
+
+/// `EftLinkDef2`: a kind 15 chain's colours, in the layout of kind 10's.
+pub type LinkDef2 = Part10Def2;
+
+/// `EftRaysKey`: one key of a ray.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RaysKey {
+    pub height: f32,
+    pub width: f32,
+    pub color: [u8; 4],
+}
+
+/// `EftRaysRayDef` (0x78 bytes): one ray of a kind 2 part.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RayDef {
+    /// Key 2's height is also the reference height of the texture mapping.
+    pub key: [RaysKey; 3],
+    /// The width flickers between x + y * rand and z + w * rand.
+    pub len: [f32; 4],
+    /// Seconds.
+    pub flick_time: f32,
+    /// The colour factor pulses between `col_a` and `col_b` (its w is the pulse time in seconds).
+    pub col_a: [f32; 3],
+    pub col_b: [f32; 4],
+    /// Degrees.
+    pub angle: f32,
+    /// Radians per frame.
+    pub spin: f32,
+    /// Seconds for key 0 -> 1 -> 2, and the fraction spent on the first leg.
+    pub key_time: f32,
+    pub key_split: f32,
+    /// Frames before the ray appears.
+    pub delay: u16,
+    /// Ordering-table layer.
+    pub blend: i8,
+}
+
+/// `EftRaysDef`: a kind 2 part's rays (its first definition block, 0x4B8 bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RaysDef {
+    pub rays: [RayDef; 10],
+    pub count: i32,
+    /// 1 key animation, 2 width flicker, 4 colour pulse.
+    pub flags: i32,
+}
+
+impl RaysDef {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x4B8 {
+            return Err(invalid_data("ray parameters are truncated"));
+        }
+        let rays = std::array::from_fn(|r| {
+            let o = r * 0x78;
+            let f = |x: usize| f32_at(b, o + x);
+            RayDef {
+                key: std::array::from_fn(|k| RaysKey {
+                    height: f(k * 0x10),
+                    width: f(k * 0x10 + 4),
+                    color: [
+                        b[o + k * 0x10 + 0xC],
+                        b[o + k * 0x10 + 0xD],
+                        b[o + k * 0x10 + 0xE],
+                        b[o + k * 0x10 + 0xF],
+                    ],
+                }),
+                len: [f(0x30), f(0x34), f(0x38), f(0x3C)],
+                flick_time: f(0x40),
+                col_a: [f(0x44), f(0x48), f(0x4C)],
+                col_b: [f(0x50), f(0x54), f(0x58), f(0x5C)],
+                angle: f(0x60),
+                spin: f(0x64),
+                key_time: f(0x68),
+                key_split: f(0x6C),
+                delay: u16::from_le_bytes([b[o + 0x70], b[o + 0x71]]),
+                blend: b[o + 0x72] as i8,
+            }
+        });
+        Ok(Self {
+            rays,
+            count: u32_at(b, 0x4B0) as i32,
+            flags: u32_at(b, 0x4B4) as i32,
+        })
+    }
+}
+
+/// `EftArcParam`: a chain's parameter block (kind 18's first definition block, 0x1E8 bytes).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChainPrm {
+    /// 1 keyed, 2 clipped polygons, 4 width pulse, 8 colour pulse, 0x10 turned onto the emitter's direction.
+    pub flags: u32,
+    /// 0 / 2 the head fades, 1 the strand crawls, 2 a random yaw per strand.
+    pub kind: u8,
+    /// 0 every strand drifts in colour, 1 every other one at random.
+    pub offset_mode: u8,
+    /// Ordering-table layer (>= 2: the second GS context).
+    pub layer: u8,
+    /// Strands per burst, and a random part.
+    pub count_base: u8,
+    pub count_range: u8,
+    /// Seconds of the key animation, and the fraction where key 1 is reached.
+    pub key_time: f32,
+    pub key_mid: f32,
+    /// The 39 rows of three keys (`r0..r38`).
+    pub rows: [[f32; 3]; 39],
+}
+
+impl ChainPrm {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x1E8 {
+            return Err(invalid_data("chain parameters are truncated"));
+        }
+        Ok(Self {
+            flags: u32_at(b, 0),
+            kind: b[4],
+            offset_mode: b[5],
+            layer: b[6],
+            count_base: b[8],
+            count_range: b[9],
+            key_time: f32_at(b, 0xC),
+            key_mid: f32_at(b, 0x10),
+            rows: std::array::from_fn(|r| {
+                std::array::from_fn(|k| f32_at(b, 0x14 + r * 0xC + k * 4))
+            }),
+        })
+    }
+}
+
+/// `EftArcKeys`: a chain's colours and colour pulse at the three keys (its second definition block).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ChainKeys {
+    pub col_base: [[f32; 4]; 3],
+    pub col_range: [[f32; 4]; 3],
+    pub col2_base: [[f32; 4]; 3],
+    pub col2_range: [[f32; 4]; 3],
+    /// The colour pulse's factors {from, to} per key, for red, green and blue.
+    pub mul: [[[f32; 2]; 3]; 3],
+    /// Seconds.
+    pub mul_time: [f32; 3],
+}
+
+impl ChainKeys {
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        if b.len() < 0x114 {
+            return Err(invalid_data("chain keys are truncated"));
+        }
+        let vecs = |o: usize| -> [[f32; 4]; 3] {
+            std::array::from_fn(|k| std::array::from_fn(|i| f32_at(b, o + k * 0x10 + i * 4)))
+        };
+        Ok(Self {
+            col_base: vecs(0),
+            col_range: vecs(0x30),
+            col2_base: vecs(0x60),
+            col2_range: vecs(0x90),
+            mul: std::array::from_fn(|c| {
+                std::array::from_fn(|k| {
+                    std::array::from_fn(|i| f32_at(b, 0xC0 + c * 0x18 + k * 8 + i * 4))
+                })
+            }),
+            mul_time: [f32_at(b, 0x108), f32_at(b, 0x10C), f32_at(b, 0x110)],
         })
     }
 }

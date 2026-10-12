@@ -14,10 +14,15 @@
 //! The sweep of type 3 is in `btl_tech_sweep`, the ring shot of type 4 in `btl_tech_ring`, the multi of type 5
 //! (its pieces are discs) in `btl_tech_disc`.
 //!
+//! Every item drives the emitters of its slot's set (header entry 4 of the slot's effect pack) through the particle
+//! modules of `eft` (`update_parts`: `EftEmit_GetFlagsFromReq` and `EftEmit_SpawnOwn`, from the owner's technique
+//! events), keeps them alive in its post-update (`EftEmit_UpdateAlive`, a fighter hit marking the phase 6 ones,
+//! `EftEmit_MarkKind6`) and kills them when the scene resets its fighter (`EftEmit_KillAll`).
+//!
 //! Not ported: the skills' shots (slots 0, 1); the items of effect types 2, 7, 8 and 9 (their timeline runs,
-//! so flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); every emitter, stage blur, flash and sound
-//! (the beam is not drawn); the rush catches (reactions 0x1D / 0x1E) and throws (0x22) of a technique hit, which
-//! let the record pass; the beam struggle (`EftStruggle`); abilities; the battle events.
+//! so flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); the prop shots' models, stage blur, flash
+//! and sound; the rush catches (reactions 0x1D / 0x1E) and throws (0x22) of a technique hit, which let the record
+//! pass; abilities; the battle events.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -35,12 +40,16 @@ use crate::btl_tech_disc::{Discs, Multi};
 use crate::btl_tech_ring::Ring;
 use crate::btl_tech_sweep::Sweep;
 use crate::btl_tech_volley::{Shots, Volley, scene_rand_f};
+use crate::eft::{EmitState, Modules, Nodes, SetAssets, spawn};
 
 /// A technique slot's effect pack (`effectPacks[slot]`): what the ported effect types read of it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TechPack {
-    /// The type 0 effect's emitter set (header entry 4); `None` when it cannot be read.
+    /// The slot's emitter set (header entry 4, `EftEmit_LoadSet` of every effect type's manager); `None` when it
+    /// cannot be read.
     pub blast: Option<EmitSet>,
+    /// Its decoded textures and module definitions (slots 2..4 only).
+    pub assets: Option<crate::eft::SetAssets>,
 }
 
 // EFT_TECH_EVT_*: a fighter's technique events of the frame.
@@ -215,6 +224,8 @@ struct Beam {
     tail: [f32; 3],
     vel: [f32; 3],
     nodes: EmitNodes,
+    /// The emitters (`emit`).
+    emit: Option<EmitState>,
     head_set: SetHead,
     /// `EftSetState`'s width animations.
     trail_width: f32,
@@ -377,6 +388,28 @@ fn attr_kind(chr: &Chr, data: &SideData, cur_slot: i32, bits: u32) -> i32 {
 }
 
 impl EmitNodes {
+    /// The slots as the emitters read them.
+    pub(crate) fn spawn_nodes(&self) -> Nodes {
+        Nodes::from_slots(
+            self.flags & 0xFFF,
+            std::array::from_fn(|i| [self.n[i][0].1, self.n[i][1].1]),
+            std::array::from_fn(|i| self.c[i].1),
+        )
+    }
+
+    /// `EftBlastObj_Init`'s slot: slot `i` takes the node the animation attribute of its event names, sampled now
+    /// (its resolved bit is left as it is).
+    pub(crate) fn set_attr_slot(&mut self, chr: &Chr, data: &SideData, cur_slot: i32, i: usize) {
+        const BITS: [u32; 6] = [2, 4, 8, 0x10, 0x20, 0x40];
+        let node = attr_kind(chr, data, cur_slot, BITS[i]);
+        self.n[i][0] = (node, chr.obj.node_pos(node as u32));
+    }
+
+    /// Slot `i`'s first node taken as `node`, sampled now (the volley's shots of technique 0x1C6).
+    pub(crate) fn set_slot_node(&mut self, chr: &Chr, i: usize, node: i32) {
+        self.n[i][0] = (node, chr.obj.node_pos(node as u32));
+    }
+
     /// The position of event slot `i` (`n[i][0].pos`).
     pub(crate) fn pos(&self, i: usize) -> [f32; 3] {
         self.n[i][0].1
@@ -443,6 +476,132 @@ impl EmitNodes {
                     self.c[i].1 = pos(self.c[0].0);
                 }
             }
+        }
+    }
+}
+
+/// The emitter set of a fighter's technique slot and its assets.
+pub(crate) fn slot_set<'d>(data: &SideData<'d>, slot: i32) -> Option<(&'d EmitSet, &'d SetAssets)> {
+    let pack = (*data.tech_packs.get(usize::try_from(slot).ok()?)?)?;
+    Some((pack.blast.as_ref()?, pack.assets.as_ref()?))
+}
+
+/// `EftEmit_InitState` of an item's slot set; `None` when the slot has none.
+pub(crate) fn emit_state(data: &SideData, slot: i32) -> Option<EmitState> {
+    slot_set(data, slot).map(|(set, _)| EmitState::new(set))
+}
+
+/// An item's `*_UpdateParts` (mode 0): every emitter of its slot's set that `skip` leaves gets its flags from the
+/// owner's events (`EftEmit_GetFlagsFromReq`, `ending` / `kill` the item's) and is driven at `pos` along `dir`
+/// (`EftEmit_SpawnOwn`), sized by `scale`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_parts(
+    fx: &mut Modules,
+    w: &mut World,
+    src: &TechSrc,
+    state: &mut EmitState,
+    nodes: &EmitNodes,
+    events: u32,
+    ending: bool,
+    kill: bool,
+    pos: [f32; 3],
+    dir: [f32; 3],
+    scale: f32,
+    skip: impl Fn(&EmitSet, u8, usize) -> bool,
+) {
+    drive_parts(
+        fx,
+        w,
+        src,
+        state,
+        nodes,
+        pos,
+        dir,
+        scale,
+        skip,
+        |st, set, kind, n| st.flags_from_req(set, kind, n, ending, kill, events),
+    );
+}
+
+/// `*_SpawnParts` with the reset flags (`EftEmit_GetResetFlags`, after a hit moved the item).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reset_parts(
+    fx: &mut Modules,
+    w: &mut World,
+    src: &TechSrc,
+    state: &mut EmitState,
+    nodes: &EmitNodes,
+    pos: [f32; 3],
+    dir: [f32; 3],
+    scale: f32,
+    skip: impl Fn(&EmitSet, u8, usize) -> bool,
+) {
+    drive_parts(
+        fx,
+        w,
+        src,
+        state,
+        nodes,
+        pos,
+        dir,
+        scale,
+        skip,
+        |st, set, kind, n| st.reset_flags(set, kind, n),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_parts(
+    fx: &mut Modules,
+    w: &mut World,
+    src: &TechSrc,
+    state: &mut EmitState,
+    nodes: &EmitNodes,
+    pos: [f32; 3],
+    dir: [f32; 3],
+    scale: f32,
+    skip: impl Fn(&EmitSet, u8, usize) -> bool,
+    flags_of: impl Fn(&mut EmitState, &EmitSet, u8, usize) -> u32,
+) {
+    let side = src.side;
+    let Some((set, assets)) = slot_set(w.data[side], src.slot) else {
+        return;
+    };
+    let ctx = crate::btl_blast::spawn_ctx(w, side, set, assets, src.slot as usize);
+    let nodes = nodes.spawn_nodes();
+    for kind in 0..0x13u8 {
+        if set.head.mask & (1 << kind) == 0 {
+            continue;
+        }
+        let Some(g) = set.groups[usize::from(kind)] else {
+            continue;
+        };
+        for sub in 0..g.count {
+            if skip(set, kind, sub) {
+                continue;
+            }
+            let f = flags_of(state, set, kind, g.first + sub);
+            if f != 0 {
+                spawn(
+                    fx, state, &nodes, &ctx, pos, dir, kind, sub, f, scale, w.libc, w.vu0,
+                );
+            }
+        }
+    }
+}
+
+/// `EftEmit_UpdateAlive` of an item's emitters, then `EftEmit_MarkKind6` when `mark` (a fighter was hit).
+pub(crate) fn parts_alive(
+    fx: &mut Modules,
+    data: &SideData,
+    src: &TechSrc,
+    state: &mut EmitState,
+    mark: bool,
+) {
+    if let Some((set, _)) = slot_set(data, src.slot) {
+        state.update_alive(set, fx);
+        if mark {
+            state.mark_kind6(set);
         }
     }
 }
@@ -522,6 +681,7 @@ impl Beam {
         src: TechSrc,
         prop: bool,
         chr: &Chr,
+        data: &SideData,
         set: &EmitSet,
         rand: &mut u32,
         ts: bool,
@@ -548,6 +708,7 @@ impl Beam {
             tail: [0.0; 3],
             vel: [0.0; 3],
             nodes: EmitNodes::default(),
+            emit: emit_state(data, src.slot),
             head_set,
             trail_width: head_set.width[0],
             trail_time: 0.0,
@@ -608,7 +769,13 @@ impl Beam {
     /// `EftBlast_Update`: charge (scaled by the fighter's charge), fire from the muzzle on FIRE, fly (homing),
     /// end on END; ABORT ends it at once. While it flies it adds a hit record when the definition has flag 1.
     /// Returns the record; the item is dead when flag 2 is set.
-    fn update(&mut self, w: &mut World, events: u32, cur_slot: i32) -> Option<HitRec> {
+    fn update(
+        &mut self,
+        w: &mut World,
+        fx: &mut Modules,
+        events: u32,
+        cur_slot: i32,
+    ) -> Option<HitRec> {
         let side = self.src.side;
         if stopped(w, side) {
             return None;
@@ -705,7 +872,29 @@ impl Beam {
             }
             self.flags |= 1;
         }
-        // EftBlast_UpdateParts / EftPropShot_UpdateParts and UpdateProp: drawing only.
+        // EftBlast_UpdateParts / EftPropShot_UpdateParts (the prop's model is not ported).
+        if let Some(st) = &mut self.emit {
+            let scale = if self.prop {
+                self.scale
+            } else {
+                self.draw_scale
+            };
+            let (ending, kill) = (self.flags & 1 != 0, self.flags & 4 != 0);
+            update_parts(
+                fx,
+                w,
+                &self.src,
+                st,
+                &self.nodes,
+                events,
+                ending,
+                kill,
+                self.head,
+                self.dir,
+                scale,
+                |_, _, _| false,
+            );
+        }
         if !self.prop && self.flags & 0x10 != 0 && self.flags & 0x200 != 0 {
             let h = self.head_set;
             step_width(
@@ -780,11 +969,14 @@ impl Beam {
 
     /// `EftBlast_PostUpdate`: a fighter hit stops the head for definitions with flag 0x10000; result bit 0 holds
     /// the head where the pass put it (the tail follows), bit 2 ends the beam.
-    fn post_update(&mut self, w: &World) {
+    fn post_update(&mut self, w: &World, fx: &mut Modules) {
         if stopped(w, self.src.side) {
             return;
         }
-        // EftEmit_UpdateAlive / MarkKind6: the emitters are not ported.
+        if let Some(st) = &mut self.emit {
+            let hit = self.tag.flags & T_HIT_CHAR != 0;
+            parts_alive(fx, w.data[self.src.side], &self.src, st, hit);
+        }
         if !self.prop {
             if self.tag.flags & T_HIT_CHAR != 0 {
                 if self.src.def.flags & 0x1_0000 != 0 {
@@ -878,6 +1070,7 @@ impl TechFx {
                         src,
                         prop,
                         me,
+                        data,
                         set,
                         &mut self.rand,
                         time_stopped,
@@ -888,26 +1081,26 @@ impl TechFx {
                 let items = &mut self.sweeps[side][slot as usize];
                 if items.len() < ITEMS {
                     *next_id += 1;
-                    items.push(Sweep::new(*next_id, src, me, opp, set));
+                    items.push(Sweep::new(*next_id, src, me, opp, data, set));
                 }
             }
             4 => {
                 let items = &mut self.rings[side][slot as usize];
                 if items.len() < ITEMS {
                     *next_id += 1;
-                    items.push(Ring::new(*next_id, src, set));
+                    items.push(Ring::new(*next_id, src, data, set));
                 }
             }
             5 => {
                 let items = &mut self.multis[side][slot as usize];
                 if items.len() < ITEMS {
-                    items.push(Multi::new(src, set));
+                    items.push(Multi::new(src, data, set));
                 }
             }
             1 => {
                 let items = &mut self.volleys[side][slot as usize];
                 if items.len() < ITEMS
-                    && let Some(v) = Volley::new(src, set)
+                    && let Some(v) = Volley::new(src, data, set)
                 {
                     items.push(v);
                 }
@@ -968,6 +1161,7 @@ impl TechFx {
     pub(crate) fn update(
         &mut self,
         w: &mut World,
+        fx: &mut Modules,
         records: &mut Vec<HitRec>,
         max: usize,
         next_id: &mut u32,
@@ -996,12 +1190,13 @@ impl TechFx {
                 self.cur_slot[side] = -1;
             }
         }
+        self.shots.cur_slot = self.cur_slot;
         for side in 0..2 {
             for slot in 0..5 {
                 let mut k = 0;
                 while k < self.beams[side][slot].len() {
                     let beam = &mut self.beams[side][slot][k];
-                    let rec = beam.update(w, self.events[side], self.cur_slot[side]);
+                    let rec = beam.update(w, fx, self.events[side], self.cur_slot[side]);
                     // EftBlast_Term / EftPropShot_Term (not technique 0x19A's prop, which raised it).
                     let a8 = beam.src.def.kind != 0 && !(beam.prop && beam.flags & 0x800 != 0);
                     if let Some(rec) = rec
@@ -1021,7 +1216,7 @@ impl TechFx {
                 let mut k = 0;
                 while k < self.sweeps[side][slot].len() {
                     let s = &mut self.sweeps[side][slot][k];
-                    if let Some(rec) = s.update(w, self.events[side], self.cur_slot[side])
+                    if let Some(rec) = s.update(w, fx, self.events[side], self.cur_slot[side])
                         && records.len() < max
                     {
                         records.push(rec);
@@ -1040,6 +1235,7 @@ impl TechFx {
                     let r = &mut self.rings[side][slot][k];
                     let rec = r.update(
                         w,
+                        fx,
                         self.events[side],
                         self.cur_slot[side],
                         &mut self.requests[side],
@@ -1070,6 +1266,7 @@ impl TechFx {
                     let m = &mut self.multis[side][slot][k];
                     m.update(
                         w,
+                        fx,
                         self.events[side],
                         self.cur_slot[side],
                         &mut self.discs,
@@ -1089,7 +1286,7 @@ impl TechFx {
                     let v = &mut self.volleys[side][slot][k];
                     v.update(
                         w,
-                        w.env.fx,
+                        fx,
                         self.events[side],
                         self.cur_slot[side],
                         &mut self.requests[side],
@@ -1113,24 +1310,36 @@ impl TechFx {
     /// The reset of a fighter's tasks (`BtlScene_Reset`, the owner tag 0x800 / 0x1000): its items die with their
     /// term callbacks' flags (0xA8 for a technique's, a ring shot's 0xA8 when not yet given and 0xA9), its blast
     /// objects and discs are gone; the scene's generator restarts at 0.
-    pub(crate) fn reset_side(&mut self, chars: &mut [Chr; 2], side: usize) {
+    pub(crate) fn reset_side(&mut self, chars: &mut [Chr; 2], fx: &mut Modules, side: usize) {
         let held = &mut chars[side].flags;
         for slot in 0..5 {
-            for b in self.beams[side][slot].drain(..) {
+            for mut b in self.beams[side][slot].drain(..) {
+                // EftBlast_Reset / EftPropShot_Reset.
+                if let Some(st) = &mut b.emit {
+                    st.kill_all(fx);
+                }
                 if b.src.def.kind != 0 && !(b.prop && b.flags & 0x800 != 0) {
                     held.set_held(0xA8);
                 }
             }
-            let kinds = self.volleys[side][slot]
-                .drain(..)
-                .map(|v| v.src().def.kind)
-                .chain(self.sweeps[side][slot].drain(..).map(|s| s.src().def.kind))
-                .chain(self.multis[side][slot].drain(..).map(|m| m.src().def.kind))
-                .collect::<Vec<_>>();
+            let mut kinds = Vec::new();
+            for mut v in self.volleys[side][slot].drain(..) {
+                v.kill_parts(fx);
+                kinds.push(v.src().def.kind);
+            }
+            for mut s in self.sweeps[side][slot].drain(..) {
+                s.kill_parts(fx);
+                kinds.push(s.src().def.kind);
+            }
+            for mut m in self.multis[side][slot].drain(..) {
+                m.kill_parts(fx);
+                kinds.push(m.src().def.kind);
+            }
             if kinds.iter().any(|&k| k != 0) {
                 held.set_held(0xA8);
             }
-            for r in self.rings[side][slot].drain(..) {
+            for mut r in self.rings[side][slot].drain(..) {
+                r.kill_parts(fx);
                 if !r.done() {
                     held.set_held(0xA8);
                 }
@@ -1139,19 +1348,37 @@ impl TechFx {
                 }
             }
         }
-        self.shots.reset_side(side);
-        self.discs.reset_side(side);
+        self.shots.reset_side(fx, side);
+        self.discs.reset_side(fx, side);
         self.rand = 0;
     }
 
+    /// Layer 3's discs (`EftDisc_Update`), after the ki blasts.
+    pub(crate) fn update_discs(
+        &mut self,
+        w: &mut World,
+        fx: &mut Modules,
+        records: &mut Vec<HitRec>,
+        max: usize,
+    ) {
+        self.discs.update(w, fx, self.events, records, max);
+    }
+
     /// Layer 3's blast objects (`EftBlastObj_Update`), after the ki blasts.
-    pub(crate) fn update_shots(&mut self, w: &World, records: &mut Vec<HitRec>, max: usize) {
-        self.shots.update(w, self.events, records, max);
+    pub(crate) fn update_shots(
+        &mut self,
+        w: &mut World,
+        fx: &mut Modules,
+        records: &mut Vec<HitRec>,
+        max: usize,
+    ) {
+        self.shots.cur_slot = self.cur_slot;
+        self.shots.update(w, fx, self.events, records, max);
     }
 
     /// Layer 3's post-update of the blast objects.
-    pub(crate) fn post_update_shots(&mut self, w: &World) {
-        self.shots.post_update(w);
+    pub(crate) fn post_update_shots(&mut self, w: &World, fx: &mut Modules) {
+        self.shots.post_update(w, fx);
     }
 
     /// `EftTechEvtTask_UpdateNormal` of a technique: START runs the fire timer, FIRE the end timer, the motion's
@@ -1219,20 +1446,23 @@ impl TechFx {
     }
 
     /// Layer 1 of `BtlScene_PostUpdate`: every item reads what the passes reported.
-    pub(crate) fn post_update(&mut self, w: &World) {
+    pub(crate) fn post_update(&mut self, w: &World, fx: &mut Modules) {
         for side in 0..2 {
             for slot in 0..5 {
                 for beam in &mut self.beams[side][slot] {
-                    beam.post_update(w);
+                    beam.post_update(w, fx);
                 }
                 for v in &mut self.volleys[side][slot] {
-                    v.post_update(w, &self.shots);
+                    v.post_update(w, fx, &self.shots);
                 }
                 for s in &mut self.sweeps[side][slot] {
-                    s.post_update(w);
+                    s.post_update(w, fx);
                 }
                 for r in &mut self.rings[side][slot] {
-                    r.post_update(w, &self.shots);
+                    r.post_update(w, fx, &self.shots);
+                }
+                for m in &mut self.multis[side][slot] {
+                    m.post_update(w, fx);
                 }
             }
         }

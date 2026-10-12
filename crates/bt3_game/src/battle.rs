@@ -74,6 +74,8 @@ pub const STAGE_FILE: u32 = 0x171;
 pub const BGM_FIRST: u32 = 0x10B16;
 /// `BtlObjLight_Init`: section 1 of common file 2 is the light's texture file.
 const COMMON_LIGHT_FILE: u32 = 2;
+/// `gCommonRes->data[1]`: common file 3, the common effect file (`BtlScene_GetCommonEntry`).
+const COMMON_EFFECT_FILE: u32 = 3;
 /// Common file 4: the character table (`ChrTblEntry`, 0x3C bytes, header word 1) and the item table
 /// (`ItemTblEntry`, 0x28 bytes, header word 2).
 const CHARA_TABLE_FILE: u32 = 4;
@@ -110,6 +112,8 @@ pub struct BattleAssets {
     pub stage_textures: Vec<RgbaTexture>,
     /// The effect textures of the fighters' emitter sets (raw GS colours; bilinear, clamped).
     pub effect_textures: Vec<RgbaTexture>,
+    /// `gEftRay->tex[0]`: the ray bursts' texture among the effect textures.
+    pub(crate) ray_texture: Option<usize>,
     pub(crate) fighters: Vec<FighterModel>,
     stage: StageResource,
     stage_model: StageModel,
@@ -251,6 +255,7 @@ pub fn load(
         shade_textures: Vec::new(),
         stage_textures,
         effect_textures: Vec::new(),
+        ray_texture: None,
         fighters: Vec::new(),
         stage,
         stage_model,
@@ -278,6 +283,18 @@ pub fn load(
         menu_sheet,
         menu_texts,
     };
+    // EftRayMgr_Init: EftTexSet_Load32 of common effect entry 10; the bursts draw its first texture.
+    let common_fx = read(COMMON_EFFECT_FILE)?;
+    if let Some(entry) =
+        bt3_data::eft_pack::common_entry(&common_fx, bt3_data::eft_pack::COMMON_RAY_TEXTURES)
+        && let Ok(res) = TextureResource::parse(entry)
+        && let Some(e) = res.entries.first()
+    {
+        assets.ray_texture = Some(assets.effect_textures.len());
+        assets
+            .effect_textures
+            .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+    }
     for side in setup.sides {
         let file_id = CHARA_FILE + side.chara.max(0) as u32 * 10 + side.costume.max(0) as u32;
         let file = read(file_id)?;
@@ -322,11 +339,20 @@ pub fn load(
         // BtlRes_Request: the second animation file is chara * 10 + 0x599.
         let anim_file = read(MOTION_FILE + 1 + side.chara.max(0) as u32 * 10)?;
         fighter.effect = EffectPack::parse(&anim_file);
-        fighter.tech_packs = std::array::from_fn(|slot| {
-            tech_pack(&anim_file, slot).map(|pack| TechPack {
-                blast: tech_blast_set(pack),
-            })
-        });
+        for slot in 0..5 {
+            let Some(pack) = tech_pack(&anim_file, slot) else {
+                continue;
+            };
+            let blast = tech_blast_set(pack);
+            // The skills' effects (slots 0, 1) are not ported.
+            let assets = match &blast {
+                Some(set) if slot >= 2 => {
+                    Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?)
+                }
+                _ => None,
+            };
+            fighter.tech_packs[slot] = Some(TechPack { blast, assets });
+        }
         if let Some(pack) = &fighter.effect {
             for (list, set) in pack.blast_sets.iter().enumerate() {
                 if let Some(set) = set {
@@ -1008,9 +1034,25 @@ impl Battle {
             let mut ot = OrderTable::new();
             let fxw = FxWorld {
                 sets: std::array::from_fn(|s| {
-                    std::array::from_fn(|l| self.assets.fighters[s].blast_assets[l].as_ref())
+                    let f = &self.assets.fighters[s];
+                    std::array::from_fn(|l| {
+                        if l < 2 {
+                            f.blast_assets[l].as_ref()
+                        } else {
+                            f.tech_packs[l].as_ref().and_then(|p| p.assets.as_ref())
+                        }
+                    })
                 }),
                 any_frozen: self.roster.chars.iter().any(|c| c.is_frozen()),
+                // Drawing does not test it.
+                stopped: [false; 2],
+                clash_a: self
+                    .roster
+                    .chars
+                    .each_ref()
+                    .map(crate::btl_clash::Clash::in_clash_a),
+                node3: self.roster.chars.each_ref().map(|c| c.obj.node_pos(3)),
+                ray_texture: self.assets.ray_texture,
             };
             // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else side 0's view.
             let demo = self.demo.is_active();
@@ -3168,6 +3210,16 @@ mod tests {
         slot: i32,
         frames: usize,
     ) -> Option<(Vec<(i32, i32)>, Option<usize>, i32)> {
+        fire_slot_with(chara, slot, frames, |_, _, _| {})
+    }
+
+    /// `fire_slot`, calling `each` with the battle after every frame of the technique.
+    fn fire_slot_with(
+        chara: i32,
+        slot: i32,
+        frames: usize,
+        mut each: impl FnMut(&Battle, usize, &BattleFrame),
+    ) -> Option<(Vec<(i32, i32)>, Option<usize>, i32)> {
         use crate::btl_input::pad::{L2, START, TRIANGLE, UP};
         let dir = if slot == 3 { UP } else { 0 };
         let mut setup = BattleSetup::default();
@@ -3188,7 +3240,7 @@ mod tests {
         };
         let mut frame = |battle: &mut Battle, held: u32| {
             let start = held & START != 0 && battle.prev_held[0] & START == 0;
-            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false)
         };
         for i in 0..200 {
             let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
@@ -3212,7 +3264,8 @@ mod tests {
                 4..6 => L2 | TRIANGLE | dir,
                 _ => 0,
             };
-            frame(&mut battle, held);
+            let out = frame(&mut battle, held);
+            each(&battle, i, &out);
             let a = &battle.roster.chars[0];
             let o = &battle.roster.chars[1];
             if end_at.is_none() && a.anim.cur == end_anim {
@@ -3455,6 +3508,57 @@ mod tests {
         assert_ne!(r.chars[0].act.current, 0x104);
         assert!(r.scene.struggle.is_none());
         assert!(r.scene.records.is_empty());
+    }
+
+    #[test]
+    fn real_technique_emitters_draw_and_end() {
+        // The technique sets' emitters drive every particle module: Goku's Kamehameha (slot 2) sprite animations,
+        // a ribbon, particles, sprites, a ray burst and rays; character 1's slot 2 chains; character 106's ring
+        // emitters; character 13's sprite chains. Their objects draw while the technique runs and are gone, with
+        // every pooled node, ring, particle and sprite, once it is over.
+        const ANIM: usize = 0;
+        const RIBBON: usize = 1;
+        const PTCL: usize = 2;
+        const BILL: usize = 3;
+        const CHAIN: usize = 5;
+        const RAY: usize = 6;
+        const RAYS: usize = 7;
+        const PART10: usize = 8;
+        const LINK: usize = 9;
+        let cases: [(i32, i32, &[usize]); 4] = [
+            (0, 2, &[ANIM, RIBBON, PTCL, BILL, RAY, RAYS]),
+            (1, 2, &[CHAIN]),
+            (106, 2, &[PART10]),
+            (13, 2, &[LINK]),
+        ];
+        for (chara, slot, kinds) in cases {
+            let mut most = [0usize; 10];
+            let mut tris = 0;
+            let mut end = None;
+            let r = fire_slot_with(chara, slot, 160, |b, i, out| {
+                let fx = &b.roster.scene.fx;
+                for (m, c) in most.iter_mut().zip(fx.counts(None)) {
+                    *m = (*m).max(c);
+                }
+                tris = tris.max(out.effects.len());
+                if i == 159 {
+                    end = Some((
+                        fx.counts(None),
+                        fx.chain_nodes_used(),
+                        fx.part10_particles(),
+                        fx.link_sprites(),
+                    ));
+                }
+            });
+            if r.is_none() {
+                return;
+            }
+            assert!(tris > 0, "character {chara}");
+            for &k in kinds {
+                assert!(most[k] > 0, "character {chara}: module {k} {most:?}");
+            }
+            assert_eq!(end, Some(([0; 10], 0, 0, 0)), "character {chara}");
+        }
     }
 
     #[test]

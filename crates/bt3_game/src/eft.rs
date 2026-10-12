@@ -2,8 +2,12 @@
 //! and eft_sweep.c), the particle modules they start, and the depth-sorted pass the modules draw into (the ordering
 //! table of src/sys/gfx_ot.c, with the clipper and projection of src/sys/vu0_math.c).
 //!
-//! Ported modules: kind 14, the keyframed sprite animations (`EftAnimPart_*` of src/battle/eft_char_parts.c playing
-//! `EftSprAnim_*` of src/battle/eft_sprite_anim.c). The other kinds start nothing yet.
+//! The sets are the ki blasts' (`SetRef::list` 0 / 1) and the technique slots' (2..4). Ported modules, by emitter
+//! kind: 0 the ray bursts (`eft_ray`), 2 the rays (`eft_rays`), 5 the particle emitters (`eft_ptcl`), 9 the quad
+//! emitters (`eft_quad`), 10 the ring emitters (`eft_part10`), 14 the keyframed sprite animations (`EftAnimPart_*`
+//! of src/battle/eft_char_parts.c playing `EftSprAnim_*` of src/battle/eft_sprite_anim.c, here), 15 the sprite
+//! chains (`eft_link`), 16 the sprites (`eft_bill`), 17 the ribbons (`eft_ribbon`) and 18 the chains (`eft_chain`).
+//! Kind 12 (`EftZap`) is not ported: none of these sets has it.
 //!
 //! The draw pass: every module queues GS triangles into a slot of the ordering table (a depth slot 0..0xFFF from
 //! the projected z, far ones first, or the first / last slot) and one of its two layers; `Ot_Draw` sends them in
@@ -14,14 +18,21 @@
 use std::f32::consts::PI;
 
 use bt3_data::eft_pack::{
-    BillDef, BillDef2, EmitSet, PtclDef, PtclDef2, QuadDef, QuadDef2, RibbonAnim, RibbonPrm,
-    SprPack,
+    BillDef, BillDef2, ChainKeys, ChainPrm, EmitSet, LinkDef, LinkDef2, Part10Def, Part10Def2,
+    PtclDef, PtclDef2, QuadDef, QuadDef2, RaysDef, RibbonAnim, RibbonPrm, SprPack,
 };
 
 use crate::battle::{IDENTITY, Mtx, apply, inverse_rt};
 use crate::eft_bill::{B_DEAD, B_FRONT, BILLS, Bill};
+use crate::eft_chain::{C_DEAD, C_FRONT, CHAINS, Chain, NodePool};
+use crate::eft_link::{CHAINS as LINKS, L_KILL, Link, Pool as LinkPool};
+use crate::eft_part10::{
+    EMITTERS as PART10_EMITTERS, F_KILL as PART10_KILL, F_NODEPTH, Part10, Pools as Part10Pools,
+};
 use crate::eft_ptcl::{EMITTERS, Emitter, W_DEAD, W_DETACH, W_FRONT};
 use crate::eft_quad::{E_DEAD, E_OWN_ORIGIN, E_VIEW_ONLY, Pool, QuadEmitter, Rng};
+use crate::eft_ray::{MODE_CUT, MODE_SPIN, RAYS, RayArg, RayBurst};
+use crate::eft_rays::{P_DEAD, PARTS as RAYS_PARTS, RAY_POOL, RaysPart};
 use crate::eft_ribbon::{R_DEAD, R_STOP, RIBBON_NODES, RIBBONS, Ribbon};
 use crate::rng::{LibcRandom, Vu0Random};
 
@@ -82,7 +93,7 @@ const SUBDIV_CORNER: [[usize; 4]; 4] = [[0, 1, 2, 3], [1, 0, 3, 2], [2, 3, 0, 1]
 pub(crate) const OFFSET_X: f32 = 2048.0 - 256.0;
 pub(crate) const OFFSET_Y: f32 = 2048.0 - 224.0;
 /// `view->screenDist`.
-const SCREEN_DIST: f32 = 433.0;
+pub(crate) const SCREEN_DIST: f32 = 433.0;
 
 // ---- vectors and matrices (the VU0 library) ------------------------------------------------------------------
 
@@ -143,7 +154,7 @@ fn scale_diag(m: &Mtx, s: V3) -> Mtx {
 }
 
 /// `Mtx_RotateXYZ`: the rows of `m` through the rotations about X, then Y, then Z.
-fn rotate_xyz(m: &Mtx, r: V3) -> Mtx {
+pub(crate) fn rotate_xyz(m: &Mtx, r: V3) -> Mtx {
     let (sx, cx) = r[0].sin_cos();
     let (sy, cy) = r[1].sin_cos();
     let (sz, cz) = r[2].sin_cos();
@@ -546,6 +557,25 @@ pub(crate) fn queue_strip(
     front_slot: bool,
     float_q: bool,
 ) {
+    queue_strip_colors(
+        ot, ctx, quad, st, [color; 4], layer, texture, front, front_slot, float_q,
+    );
+}
+
+/// `queue_strip` with a colour per corner.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn queue_strip_colors(
+    ot: &mut OrderTable,
+    ctx: &DrawCtx,
+    quad: &[V3; 4],
+    st: [[f32; 2]; 4],
+    colors: [V4; 4],
+    layer: u8,
+    texture: Option<usize>,
+    front: bool,
+    front_slot: bool,
+    float_q: bool,
+) {
     // (x, y in 1/16 pixel, z, w).
     let mut scr = [(0i32, 0i32, 0i32, 0i32); 4];
     let mut qs = [0.0f32; 4];
@@ -579,11 +609,11 @@ pub(crate) fn queue_strip(
             v.2 = 0xFF_FFFF;
         }
         if !front_slot {
-            return queue_strip_at(ot, &scr, qs, st, color, layer, texture, z);
+            return queue_strip_at(ot, &scr, qs, st, colors, layer, texture, z);
         }
     }
     let z = sum(&scr);
-    queue_strip_at(ot, &scr, qs, st, color, layer, texture, z);
+    queue_strip_at(ot, &scr, qs, st, colors, layer, texture, z);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -592,12 +622,11 @@ fn queue_strip_at(
     scr: &[(i32, i32, i32, i32); 4],
     qs: [f32; 4],
     st: [[f32; 2]; 4],
-    color: V4,
+    colors: [V4; 4],
     layer: u8,
     texture: Option<usize>,
     z: i32,
 ) {
-    let col = color.map(|c| c as i32 as u8);
     let vert = |k: usize| {
         let q = qs[k];
         EffectVertex {
@@ -607,7 +636,7 @@ fn queue_strip_at(
                 (scr[k].2 & 0xFF_FFFF) as f32,
             ],
             stq: [st[k][0] * q, st[k][1] * q, q],
-            rgba: col,
+            rgba: colors[k].map(|c| c as i32 as u8),
         }
     };
     let l = if layer >= 2 { layer - 2 } else { layer };
@@ -693,6 +722,17 @@ pub(crate) struct SetAssets {
     pub bill: Vec<Option<(BillDef, BillDef2)>>,
     /// The definitions of kind 9 quad emitters.
     pub quad: Vec<Option<(QuadDef, QuadDef2)>>,
+    /// The parameter blocks and keys of kind 18 chains.
+    pub chain: Vec<Option<(ChainPrm, ChainKeys)>>,
+    /// The ray data of kind 2 parts.
+    pub rays: Vec<Option<RaysDef>>,
+    /// The definitions of kind 10 emitters.
+    pub part10: Vec<Option<(Part10Def, Part10Def2)>>,
+    /// The definitions of kind 15 chains.
+    pub link: Vec<Option<(LinkDef, LinkDef2)>>,
+    /// Per emitter of kind 15: its image with the palette of its resource's first entry (`EftLink_SelectTex` with
+    /// palette 0).
+    pub link_tex: Vec<Option<usize>>,
 }
 
 impl SetAssets {
@@ -760,6 +800,61 @@ impl SetAssets {
                 }
             }
         }
+        let mut chain = vec![None; set.pairs.len()];
+        if let Some(g) = set.groups[18] {
+            for j in 0..g.count {
+                if let (a, Some(b)) = set.pairs[g.first_pair + j] {
+                    chain[g.first_pair + j] = ChainPrm::parse(set.at(a))
+                        .ok()
+                        .zip(ChainKeys::parse(set.at(b)).ok());
+                }
+            }
+        }
+        let mut rays = vec![None; set.pairs.len()];
+        if let Some(g) = set.groups[2] {
+            for j in 0..g.count {
+                let (a, _) = set.pairs[g.first_pair + j];
+                rays[g.first_pair + j] = RaysDef::parse(set.at(a)).ok();
+            }
+        }
+        let mut part10 = vec![None; set.pairs.len()];
+        if let Some(g) = set.groups[10] {
+            for j in 0..g.count {
+                if let (a, Some(b)) = set.pairs[g.first_pair + j] {
+                    part10[g.first_pair + j] = Part10Def::parse(set.at(a))
+                        .ok()
+                        .zip(Part10Def2::parse(set.at(b)).ok());
+                }
+            }
+        }
+        let mut link = vec![None; set.pairs.len()];
+        let mut link_tex = vec![None; set.parts.len()];
+        if let Some(g) = set.groups[15] {
+            for j in 0..g.count {
+                if let (a, Some(b)) = set.pairs[g.first_pair + j] {
+                    link[g.first_pair + j] = LinkDef::parse(set.at(a))
+                        .ok()
+                        .zip(LinkDef2::parse(set.at(b)).ok());
+                }
+                let part = &set.parts[g.first + j];
+                let res = g.cat_first + part.res();
+                let image = usize::from(part.tex());
+                link_tex[g.first + j] = if image == 0 {
+                    tex[1].get(res).and_then(|t| t.first()).copied()
+                } else if let Some(&o) = set.textures[1].get(res) {
+                    let r = bt3_data::tex::TextureResource::parse(set.at(o))?;
+                    match (r.entries.get(image), r.entries.first()) {
+                        (Some(e), Some(clut)) => {
+                            textures.push(bt3_data::gs::decode_sprite_texture_with_clut(e, clut)?);
+                            Some(textures.len() - 1)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+            }
+        }
         Ok(Self {
             tex,
             spr,
@@ -767,6 +862,11 @@ impl SetAssets {
             ptcl,
             bill,
             quad,
+            chain,
+            rays,
+            part10,
+            link,
+            link_tex,
         })
     }
 }
@@ -819,11 +919,23 @@ struct SprLayerState {
     spin: V3,
 }
 
-/// Where a part's resources are: the owner side, its blast list and the emitter's pair / texture resource.
+/// Where a part's resources are: the owner side and its set (`list` 0 / 1: the blast lists' sets; 2..4: the
+/// technique slots' sets).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SetRef {
     pub side: usize,
     pub list: usize,
+}
+
+/// `FxWorld::sets`' entries per side.
+pub(crate) const SET_LISTS: usize = 5;
+
+impl SetRef {
+    /// The kind of `BtlScene_IsEffectStopped` its objects are given (`EftEmit_Spawn`'s `srcKind`): 0 for the ki
+    /// blasts' sets (`EftKiBlast_SpawnParts`), 1 for the techniques' (`EftEmit_SpawnOwn`).
+    fn stop_kind(self) -> u8 {
+        if self.list < 2 { 0 } else { 1 }
+    }
 }
 
 /// An `EftAnimPart` task with its `EftSprAnim` object.
@@ -1244,14 +1356,38 @@ pub(crate) enum Handle {
     Ptcl(u32),
     Bill(u32),
     Quad(u32),
+    Chain(u32),
+    Ray(u32),
+    Rays(u32),
+    Part10(u32),
+    Link(u32),
 }
 
 /// What the modules read of the battle while they update or draw.
 pub(crate) struct FxWorld<'a> {
-    /// Per side: the set assets of its two blast lists.
-    pub sets: [[Option<&'a SetAssets>; 2]; 2],
+    /// Per side: the set assets of its two blast lists and of its technique slots 2..4 (`SetRef::list`).
+    pub sets: [[Option<&'a SetAssets>; SET_LISTS]; 2],
     /// `BtlScene_IsAnyCharStopped`: a fighter in hit-stop.
     pub any_frozen: bool,
+    /// `BtlScene_IsCharStopped` of each fighter.
+    pub stopped: [bool; 2],
+    /// `BtlCharApi_IsInClashA` of each fighter (drawing).
+    pub clash_a: [bool; 2],
+    /// Each fighter's node 3 (drawing).
+    pub node3: [V3; 2],
+    /// The ray bursts' texture (`gEftRay->tex[0]`, from common effect entry 10).
+    pub ray_texture: Option<usize>,
+}
+
+impl FxWorld<'_> {
+    /// `BtlScene_IsEffectStopped(chr, kind)` of an object of the set `set`: kind 0 any fighter stopped, kind 1 its
+    /// own.
+    fn effect_stopped(&self, set: SetRef, chr: usize) -> bool {
+        match set.stop_kind() {
+            0 => self.any_frozen,
+            _ => self.stopped[chr],
+        }
+    }
 }
 
 /// The particle modules of the effect scene (layer 3's managers that the ki blasts use).
@@ -1268,6 +1404,19 @@ pub(crate) struct Modules {
     quads: Vec<QuadEmitter>,
     /// `gEftQuadMgr`'s quads.
     quad_pool: Pool,
+    chains: Vec<Chain>,
+    /// `gEftChain`'s nodes.
+    chain_pool: NodePool,
+    rays: Vec<RayBurst>,
+    rays_parts: Vec<RaysPart>,
+    /// `gEftRays->free`: rays of the pool not in use.
+    rays_free: usize,
+    part10s: Vec<Part10>,
+    /// `gEftPart10Mgr`'s rings and particles.
+    part10_pools: Part10Pools,
+    links: Vec<Link>,
+    /// `gEftLink`'s sprites.
+    link_pool: LinkPool,
     next_id: u32,
 }
 
@@ -1282,6 +1431,15 @@ impl Default for Modules {
             bills: Vec::new(),
             quads: Vec::new(),
             quad_pool: Pool::default(),
+            chains: Vec::new(),
+            chain_pool: NodePool::default(),
+            rays: Vec::new(),
+            rays_parts: Vec::new(),
+            rays_free: RAY_POOL,
+            part10s: Vec::new(),
+            part10_pools: Part10Pools::default(),
+            links: Vec::new(),
+            link_pool: LinkPool::default(),
             next_id: 0,
         }
     }
@@ -1370,6 +1528,43 @@ impl Modules {
         self.bills.len()
     }
 
+    /// Live objects per module: sprite animations, ribbons, particle emitters, sprites, quad emitters, chains, ray
+    /// bursts, rays, ring emitters, sprite chains; of one set, or of all.
+    #[cfg(test)]
+    pub(crate) fn counts(&self, set: Option<SetRef>) -> [usize; 10] {
+        let of = |s: SetRef| set.is_none_or(|x| x == s);
+        [
+            self.anim.iter().filter(|p| of(p.set)).count(),
+            self.ribbons.iter().filter(|r| of(r.set)).count(),
+            self.ptcls.iter().filter(|e| of(e.set)).count(),
+            self.bills.iter().filter(|b| of(b.set)).count(),
+            self.quads.iter().filter(|e| of(e.set)).count(),
+            self.chains.iter().filter(|c| of(c.set)).count(),
+            self.rays.iter().filter(|r| of(r.set)).count(),
+            self.rays_parts.iter().filter(|r| of(r.set)).count(),
+            self.part10s.iter().filter(|e| of(e.set)).count(),
+            self.links.iter().filter(|l| of(l.set)).count(),
+        ]
+    }
+
+    /// Kind 15 sprites of the pool in use.
+    #[cfg(test)]
+    pub(crate) fn link_sprites(&self) -> usize {
+        self.link_pool.used()
+    }
+
+    /// Kind 10 particles of the pool in use.
+    #[cfg(test)]
+    pub(crate) fn part10_particles(&self) -> usize {
+        self.part10_pools.particles()
+    }
+
+    /// Chain nodes of the pool in use.
+    #[cfg(test)]
+    pub(crate) fn chain_nodes_used(&self) -> usize {
+        self.chain_pool.used()
+    }
+
     /// Particles of the pool in use (`gEftPtcl->used`).
     #[cfg(test)]
     pub(crate) fn particles_used(&self) -> usize {
@@ -1384,18 +1579,31 @@ impl Modules {
         self.bills.iter_mut().find(|b| b.id == h && b.alive())
     }
 
+    fn chain_mut(&mut self, h: u32) -> Option<&mut Chain> {
+        self.chains.iter_mut().find(|c| c.id == h && c.alive())
+    }
+
     fn ptcl_mut(&mut self, h: u32) -> Option<&mut Emitter> {
         self.ptcls.iter_mut().find(|e| e.id == h && e.alive())
     }
 
     /// Whether a handle names a live object (`EftEmit_UpdateAlive`'s tests).
-    fn alive(&self, h: Handle) -> bool {
+    fn alive(&mut self, h: Handle) -> bool {
         match h {
             Handle::Anim(id) => self.anim_alive(id),
             Handle::Ribbon(id) => self.ribbons.iter().any(|r| r.id == id),
             Handle::Ptcl(id) => self.ptcls.iter().any(|e| e.id == id && e.alive()),
             Handle::Bill(id) => self.bills.iter().any(|b| b.id == id && b.alive()),
             Handle::Quad(id) => self.quads.iter().any(|e| e.id == id && e.alive()),
+            Handle::Chain(id) => self.chains.iter().any(|c| c.id == id && c.alive()),
+            Handle::Ray(id) => self
+                .rays
+                .iter_mut()
+                .find(|r| r.id == id)
+                .is_some_and(RayBurst::poll_alive),
+            Handle::Rays(id) => self.rays_parts.iter().any(|r| r.id == id && r.alive()),
+            Handle::Part10(id) => self.part10s.iter().any(|e| e.id == id && e.alive()),
+            Handle::Link(id) => self.links.iter().any(|l| l.id == id && l.alive()),
         }
     }
 
@@ -1427,6 +1635,31 @@ impl Modules {
                     e.kill();
                 }
             }
+            Handle::Chain(id) => {
+                if let Some(c) = self.chain_mut(id) {
+                    c.flags |= C_DEAD;
+                }
+            }
+            Handle::Ray(id) => {
+                if let Some(r) = self.rays.iter_mut().find(|r| r.id == id) {
+                    r.kill();
+                }
+            }
+            Handle::Rays(id) => {
+                if let Some(r) = self.rays_parts.iter_mut().find(|r| r.id == id) {
+                    r.flags |= P_DEAD;
+                }
+            }
+            Handle::Part10(id) => {
+                if let Some(e) = self.part10s.iter_mut().find(|e| e.id == id && e.alive()) {
+                    e.flags |= PART10_KILL;
+                }
+            }
+            Handle::Link(id) => {
+                if let Some(l) = self.links.iter_mut().find(|l| l.id == id && l.alive()) {
+                    l.flags |= L_KILL;
+                }
+            }
         }
     }
 
@@ -1437,8 +1670,7 @@ impl Modules {
             let p = &mut self.anim[i];
             let pack = w.sets[p.set.side][p.set.list].and_then(|s| s.spr[p.pair].as_ref());
             if let Some(pack) = pack {
-                // BtlScene_IsEffectStopped(chr, kind): kind 0 is "any fighter stopped".
-                p.update(pack, w.any_frozen, libc);
+                p.update(pack, w.effect_stopped(p.set, p.chr), libc);
             } else {
                 p.flags |= AP_DEAD;
             }
@@ -1452,7 +1684,12 @@ impl Modules {
         while i < self.ribbons.len() {
             let r = &mut self.ribbons[i];
             match w.sets[r.set.side][r.set.list].and_then(|s| s.ribbon[r.pair].as_ref()) {
-                Some((prm, anim)) => r.update(prm, anim, w.any_frozen, &mut self.ribbon_nodes_free),
+                Some((prm, anim)) => r.update(
+                    prm,
+                    anim,
+                    w.effect_stopped(r.set, r.chr()),
+                    &mut self.ribbon_nodes_free,
+                ),
                 None => r.flags |= R_DEAD,
             }
             if r.flags & R_DEAD != 0 {
@@ -1467,7 +1704,13 @@ impl Modules {
         while i < self.ptcls.len() {
             let e = &mut self.ptcls[i];
             match w.sets[e.set.side][e.set.list].and_then(|s| s.ptcl[e.pair].as_ref()) {
-                Some((def, def2)) => e.update(def, def2, w.any_frozen, &mut self.ptcl_used, libc),
+                Some((def, def2)) => e.update(
+                    def,
+                    def2,
+                    w.effect_stopped(e.set, e.chr()),
+                    &mut self.ptcl_used,
+                    libc,
+                ),
                 None => e.flags |= W_DEAD,
             }
             if e.flags & W_DEAD != 0 {
@@ -1487,7 +1730,8 @@ impl Modules {
                         vu0: &mut *vu0,
                         libc: &mut *libc,
                     };
-                    e.update(def, def2, w.any_frozen, &mut self.quad_pool, &mut rng);
+                    let stopped = w.effect_stopped(e.set, e.chr());
+                    e.update(def, def2, stopped, &mut self.quad_pool, &mut rng);
                 }
                 None => e.flags |= E_DEAD,
             }
@@ -1503,11 +1747,96 @@ impl Modules {
         while i < self.bills.len() {
             let b = &mut self.bills[i];
             match w.sets[b.set.side][b.set.list].and_then(|s| s.bill[b.pair].as_ref()) {
-                Some((def, def2)) => b.update(def, def2, w.any_frozen),
+                Some((def, def2)) => b.update(def, def2, w.effect_stopped(b.set, b.chr())),
                 None => b.flags |= B_DEAD,
             }
             if b.flags & B_DEAD != 0 {
                 self.bills.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        // EftChain_Update (entry 18 of the module table); a dead chain's task ends (EftChain_Term).
+        let mut i = 0;
+        while i < self.chains.len() {
+            let c = &mut self.chains[i];
+            match w.sets[c.set.side][c.set.list].and_then(|s| s.chain[c.pair].as_ref()) {
+                Some((p, keys)) => {
+                    let stopped = w.effect_stopped(c.set, c.chr());
+                    c.update(p, keys, stopped, &mut self.chain_pool, libc);
+                }
+                None => c.flags |= C_DEAD,
+            }
+            if c.flags & C_DEAD != 0 {
+                c.free(&mut self.chain_pool);
+                self.chains.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        // EftPart10_Update; an ended emitter's task ends (EftPart10_Term).
+        let mut i = 0;
+        while i < self.part10s.len() {
+            let e = &mut self.part10s[i];
+            let dead = match w.sets[e.set.side][e.set.list].and_then(|s| s.part10[e.pair].as_ref())
+            {
+                Some((def, def2)) => {
+                    let stopped = w.effect_stopped(e.set, e.chr());
+                    e.update(def, def2, stopped, &mut self.part10_pools, vu0, libc)
+                }
+                None => true,
+            };
+            if dead {
+                e.free(&mut self.part10_pools);
+                self.part10s.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        // EftLink_Update; an ended chain's task ends (EftLink_Term).
+        let mut i = 0;
+        while i < self.links.len() {
+            let l = &mut self.links[i];
+            let dead = match w.sets[l.set.side][l.set.list].and_then(|s| s.link[l.pair].as_ref()) {
+                Some((def, def2)) => {
+                    let stopped = w.effect_stopped(l.set, l.chr());
+                    l.update(def, def2, stopped, &mut self.link_pool, vu0, libc)
+                }
+                None => true,
+            };
+            if dead {
+                l.free(&mut self.link_pool);
+                self.links.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        // EftRays_Update; a dead part's task ends (EftRays_Term).
+        let mut i = 0;
+        while i < self.rays_parts.len() {
+            let r = &mut self.rays_parts[i];
+            match w.sets[r.set.side][r.set.list].and_then(|s| s.rays[r.pair].as_ref()) {
+                Some(def) => {
+                    let stopped = w.effect_stopped(r.set, r.chr());
+                    r.update(def, stopped, libc);
+                }
+                None => r.flags |= P_DEAD,
+            }
+            if r.flags & P_DEAD != 0 {
+                r.free(&mut self.rays_free);
+                self.rays_parts.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        // EftRay_Update. Mode 2 bursts (technique starts) are not created by the emitters, and the technique camera
+        // cuts are not ported.
+        let mut i = 0;
+        while i < self.rays.len() {
+            let r = &mut self.rays[i];
+            let stopped = w.effect_stopped(r.set, r.chr());
+            if r.update(stopped, false, false, libc) {
+                self.rays.remove(i);
             } else {
                 i += 1;
             }
@@ -1600,6 +1929,54 @@ impl Modules {
                 b.draw(def, ot, ctx);
             }
         }
+        // EftChain_Draw: a front chain only while its fighter is in view (BtlScene_IsEffectHidden: no fighter
+        // hides).
+        for c in &self.chains {
+            if c.flags & C_FRONT != 0 && !cam_shown(c.chr()) {
+                continue;
+            }
+            if let Some((p, _)) =
+                w.sets[c.set.side][c.set.list].and_then(|s| s.chain[c.pair].as_ref())
+            {
+                c.draw(p, ot, ctx);
+            }
+        }
+        // EftPart10_Draw.
+        for e in &self.part10s {
+            if let Some((def, _)) =
+                w.sets[e.set.side][e.set.list].and_then(|s| s.part10[e.pair].as_ref())
+            {
+                e.draw(def, ot, ctx);
+            }
+        }
+        // EftLink_Draw.
+        for l in &self.links {
+            if let Some((def, _)) =
+                w.sets[l.set.side][l.set.list].and_then(|s| s.link[l.pair].as_ref())
+            {
+                l.draw(def, &self.link_pool, ot, ctx);
+            }
+        }
+        // EftRays_Draw (BtlScene_IsEffectHidden: no fighter hides).
+        for r in &self.rays_parts {
+            if let Some(def) = w.sets[r.set.side][r.set.list].and_then(|s| s.rays[r.pair].as_ref())
+            {
+                r.draw(def, ot, ctx);
+            }
+        }
+        // EftRay_Draw (BtlScene_IsEffectHidden: no fighter hides; no camera cut runs).
+        for r in &self.rays {
+            let chr = r.chr();
+            r.draw(
+                w.ray_texture,
+                cam_shown(chr),
+                false,
+                w.clash_a[chr],
+                w.node3[chr ^ 1],
+                ot,
+                ctx,
+            );
+        }
     }
 }
 
@@ -1636,6 +2013,21 @@ pub(crate) struct Nodes {
 }
 
 impl Nodes {
+    /// The slots of a technique item's node set: per slot its one or two positions and its c[] position; `flags`
+    /// bit 2i + 1 marks a pair.
+    pub(crate) fn from_slots(flags: u32, n: [[V3; 2]; 6], c: [V3; 6]) -> Self {
+        let mut out = Self {
+            flags,
+            ..Self::default()
+        };
+        for i in 0..6 {
+            out.n[i][0].0 = n[i][0];
+            out.n[i][1].0 = n[i][1];
+        }
+        out.c = c;
+        out
+    }
+
     /// `EftEmit_SetNode` with a fighter node.
     pub(crate) fn set_node(&mut self, slot: usize, node: u32) {
         self.flags |= 1 << (slot * 2);
@@ -1765,6 +2157,33 @@ impl EmitState {
         flags
     }
 
+    /// `EftEmit_GetFlagsFromReq`: from the owner's technique events of the frame (`EftShot_TestBits`).
+    pub(crate) fn flags_from_req(
+        &mut self,
+        set: &EmitSet,
+        kind: u8,
+        n: usize,
+        ending: bool,
+        kill: bool,
+        events: u32,
+    ) -> u32 {
+        self.flags_for(set, kind, n, ending, kill, events & 0x7E)
+    }
+
+    /// `EftEmit_MarkKind6`: the emitters of phase 6 neither started nor stopped start with the next flags.
+    pub(crate) fn mark_kind6(&mut self, set: &EmitSet) {
+        for g in set.groups.iter().flatten() {
+            if set.head.mask & (1 << g.kind) == 0 {
+                continue;
+            }
+            for n in g.first..g.first + g.count {
+                if self.flags[n] & (E_STARTED | E_STOPPED) == 0 && set.parts[n].phase() == 6 {
+                    self.flags[n] |= E_KIND6;
+                }
+            }
+        }
+    }
+
     /// `EftEmit_GetFlagsFromMask`: from a mask of phases 0..5 happening now.
     pub(crate) fn flags_from_mask(
         &mut self,
@@ -1802,7 +2221,7 @@ impl EmitState {
 
     /// `EftEmit_UpdateAlive`: forgets the objects that ended; the groups that still have a live object of a
     /// non-one-shot emitter.
-    pub(crate) fn update_alive(&mut self, set: &EmitSet, fx: &Modules) -> u32 {
+    pub(crate) fn update_alive(&mut self, set: &EmitSet, fx: &mut Modules) -> u32 {
         let mut result = 0;
         for half in 0..2 {
             for g in set.groups.iter().flatten() {
@@ -1847,6 +2266,21 @@ impl EmitState {
     }
 }
 
+/// `EftEmit_IsPartDeferred`: an emitter of a phase the set fires shots in, on that phase's node slot (or slot
+/// 5), is driven by the shots, not by its owner.
+pub(crate) fn is_part_deferred(set: &EmitSet, kind: u8, idx: usize) -> bool {
+    let Some(g) = set.groups[usize::from(kind)] else {
+        return false;
+    };
+    let part = &set.parts[g.first + idx];
+    let phase = part.phase();
+    if (set.head.phase_mask >> phase) & 1 == 0 {
+        return false;
+    }
+    let a = part.node();
+    a == 5 || matches!((phase, a), (0, 0) | (1, 1) | (3, 2) | (4, 3) | (5, 4))
+}
+
 /// What `EftEmit_Spawn` reads of the owner.
 pub(crate) struct SpawnCtx<'a> {
     pub chr: usize,
@@ -1877,6 +2311,7 @@ pub(crate) fn spawn(
     flags: u32,
     scale: f32,
     libc: &mut LibcRandom,
+    vu0: &mut Vu0Random,
 ) {
     let Some(g) = c.set.groups[usize::from(kind)] else {
         return;
@@ -1982,6 +2417,13 @@ pub(crate) fn spawn(
             5 => spawn_type5(fx, handles, flags, c, n, idx, size, scale, rate, p, d, libc),
             16 => spawn_type16(fx, handles, flags, c, n, idx, size, scale, rate, p, d, libc),
             9 => spawn_type9(fx, handles, flags, c, n, idx, size, scale, rate, p, d),
+            18 => spawn_type18(fx, handles, flags, c, n, idx, size, scale, rate, p, d),
+            0 => spawn_type0(fx, handles, flags, c, n, size, scale, rate, p, libc),
+            2 => spawn_type2(fx, handles, flags, c, n, idx, size, scale, rate, p, d, libc),
+            10 => spawn_type10(fx, handles, flags, c, n, idx, size, scale, rate, p, d, vu0),
+            15 => spawn_type15(
+                fx, handles, flags, c, n, idx, size, scale, rate, p, pos, d, vu0,
+            ),
             14 => spawn_type14(fx, handles, flags, c, n, idx, size, scale, rate, p, d),
             17 => spawn_type17(
                 fx, handles, flags, c, n, idx, size, scale, rate, p, pos, d, libc,
@@ -2187,6 +2629,382 @@ fn spawn_type16(
             b.end_delay = 0.0;
         }
         b.stop();
+    }
+}
+
+/// `EftEmit_SpawnType0`: a ray burst at the node, of the emitter's mode: 0 in the world (re-rolled every frame, its
+/// own end only for a one-shot emitter), 1 on the screen (ended by a camera cut). Every start creates one.
+#[allow(clippy::too_many_arguments)]
+fn spawn_type0(
+    fx: &mut Modules,
+    handles: &mut [Option<Handle>; 40],
+    flags: u32,
+    c: &SpawnCtx,
+    n: usize,
+    size: f32,
+    scale: f32,
+    rate: f32,
+    pos: V3,
+    libc: &mut LibcRandom,
+) {
+    let part = &c.set.parts[n];
+    let mut arg = RayArg {
+        pos,
+        color: [0xC0, 0xC0, 0xC0, 0x70],
+        life: rate,
+        length: scale * 100.0,
+        width: size,
+        inner: part.offset() * scale,
+        jitter: part.offset2() * scale,
+        mode: MODE_SPIN,
+        count: u32::from(part.count()),
+        chr: c.chr,
+        blend: 1,
+        space: 0,
+        delay: i32::from(part.delay()),
+        fade_frames: i32::from(part.hold()),
+        auto_kill: part.phase() == 2,
+    };
+    match part.mode() {
+        0 => {}
+        1 => {
+            arg.color = [0x80; 4];
+            arg.length = scale * 800.0;
+            arg.width = 2.0;
+            arg.mode = MODE_CUT;
+            arg.space = 1;
+            arg.auto_kill = true;
+        }
+        _ => return,
+    }
+    if flags & SPAWN_START != 0 {
+        // EftRay_Create: nothing when the list is full.
+        handles[n] = if fx.rays.len() < RAYS {
+            fx.next_id += 1;
+            fx.rays
+                .push(RayBurst::new(fx.next_id, c.set_ref, &arg, libc));
+            Some(Handle::Ray(fx.next_id))
+        } else {
+            None
+        };
+    }
+    let Some(Handle::Ray(id)) = handles[n] else {
+        return;
+    };
+    let Some(r) = fx.rays.iter_mut().find(|r| r.id == id) else {
+        return;
+    };
+    if flags & (SPAWN_MOVE | SPAWN_STOP) != 0 {
+        r.set_pos(pos);
+    }
+    if flags & SPAWN_STOP != 0 {
+        r.kill();
+        handles[n] = None;
+    }
+}
+
+/// `EftEmit_SpawnType2`: a rays part at the node, offset along the direction. A killed part keeps its handle until
+/// it is gone.
+#[allow(clippy::too_many_arguments)]
+fn spawn_type2(
+    fx: &mut Modules,
+    handles: &mut [Option<Handle>; 40],
+    flags: u32,
+    c: &SpawnCtx,
+    n: usize,
+    idx: usize,
+    size: f32,
+    scale: f32,
+    rate: f32,
+    pos: V3,
+    dir: V3,
+    libc: &mut LibcRandom,
+) {
+    let Some(g) = c.set.groups[2] else {
+        return;
+    };
+    let part = &c.set.parts[n];
+    let p = add(scale3(dir, part.offset() * scale), pos);
+    let pair = g.first_pair + idx;
+    // EftRays_Create: nothing when the list is full.
+    if flags & SPAWN_START != 0
+        && handles[n].is_none()
+        && fx.rays_parts.len() < RAYS_PARTS
+        && let Some(def) = c.assets.rays.get(pair).and_then(Option::as_ref)
+    {
+        // EftRays_GetTex: image texIdx of the set's four-texture resource.
+        let texture = c.assets.tex[3]
+            .get(g.cat_first + part.res())
+            .and_then(|t| t.get(usize::from(part.tex())))
+            .copied();
+        fx.next_id += 1;
+        let mut r = RaysPart::new(
+            fx.next_id,
+            c.chr,
+            c.set_ref,
+            pair,
+            texture,
+            rate,
+            def,
+            &mut fx.rays_free,
+            libc,
+        );
+        r.set_size(size);
+        r.set_pos(if part.flags() & 0x40 != 0 { pos } else { p });
+        r.delay = f32::from(part.delay());
+        r.hold = f32::from(part.hold());
+        r.set_fade(f32::from(part.fade()));
+        fx.rays_parts.push(r);
+        handles[n] = Some(Handle::Rays(fx.next_id));
+    }
+    let Some(Handle::Rays(id)) = handles[n] else {
+        return;
+    };
+    let Some(r) = fx.rays_parts.iter_mut().find(|r| r.id == id) else {
+        return;
+    };
+    if flags & (SPAWN_MOVE | SPAWN_STOP) != 0 {
+        r.set_pos(p);
+    }
+    if flags & SPAWN_SCALE != 0 {
+        r.set_size(size);
+    }
+    if flags & SPAWN_KILL != 0 {
+        r.flags |= P_DEAD;
+    } else if flags & SPAWN_STOP != 0 {
+        r.stop();
+    }
+}
+
+/// `EftEmit_SpawnType15`: a sprite chain from the node to the instance's position, each end offset along the
+/// direction (its warp and direction calls do nothing).
+#[allow(clippy::too_many_arguments)]
+fn spawn_type15(
+    fx: &mut Modules,
+    handles: &mut [Option<Handle>; 40],
+    flags: u32,
+    c: &SpawnCtx,
+    n: usize,
+    idx: usize,
+    size: f32,
+    scale: f32,
+    rate: f32,
+    pos: V3,
+    pos2: V3,
+    dir: V3,
+    vu0: &mut Vu0Random,
+) {
+    let Some(g) = c.set.groups[15] else {
+        return;
+    };
+    let part = &c.set.parts[n];
+    let p = add(scale3(dir, part.offset() * scale), pos);
+    let p2 = add(scale3(dir, part.offset2() * scale), pos2);
+    let pair = g.first_pair + idx;
+    // EftLink_Create: nothing when the list is full.
+    if flags & SPAWN_START != 0
+        && handles[n].is_none()
+        && fx.links.len() < LINKS
+        && let Some((def, def2)) = c.assets.link.get(pair).and_then(Option::as_ref)
+    {
+        let texture = c.assets.link_tex.get(n).copied().flatten();
+        let (a, b) = if part.flags() & 0x40 != 0 {
+            (pos, pos2)
+        } else {
+            (p, p2)
+        };
+        fx.next_id += 1;
+        let mut l = Link::new(
+            fx.next_id, c.chr, c.set_ref, pair, texture, a, b, size, rate, def, def2, vu0,
+        );
+        l.set_delay(f32::from(part.delay()));
+        l.set_stop_delay(f32::from(part.hold()));
+        l.set_fade(f32::from(part.fade()));
+        fx.links.push(l);
+        handles[n] = Some(Handle::Link(fx.next_id));
+    }
+    let Some(Handle::Link(id)) = handles[n] else {
+        return;
+    };
+    let Some(l) = fx.links.iter_mut().find(|l| l.id == id) else {
+        return;
+    };
+    if flags & SPAWN_MOVE != 0 {
+        if flags & SPAWN_WARP == 0 {
+            l.set_pos(p);
+            l.set_pos2(p2);
+        }
+    } else if flags & SPAWN_DIR2 != 0 {
+        l.set_pos2(p2);
+    }
+    if flags & SPAWN_SCALE != 0 {
+        l.set_size(size);
+    }
+    if flags & SPAWN_KILL != 0 {
+        if l.alive() {
+            l.flags |= L_KILL;
+        }
+        handles[n] = None;
+    } else if flags & SPAWN_STOP != 0 {
+        if flags & SPAWN_FADE != 0 {
+            l.set_stop_delay(0.0);
+        }
+        l.stop();
+    }
+}
+
+/// `EftEmit_SpawnType10`: a ring emitter at the node, offset along the direction.
+#[allow(clippy::too_many_arguments)]
+fn spawn_type10(
+    fx: &mut Modules,
+    handles: &mut [Option<Handle>; 40],
+    flags: u32,
+    c: &SpawnCtx,
+    n: usize,
+    idx: usize,
+    size: f32,
+    scale: f32,
+    rate: f32,
+    pos: V3,
+    dir: V3,
+    vu0: &mut Vu0Random,
+) {
+    let Some(g) = c.set.groups[10] else {
+        return;
+    };
+    let part = &c.set.parts[n];
+    let p = add(scale3(dir, part.offset() * scale), pos);
+    let pair = g.first_pair + idx;
+    // EftPart10_Create: nothing when the list is full.
+    if flags & SPAWN_START != 0
+        && handles[n].is_none()
+        && fx.part10s.len() < PART10_EMITTERS
+        && let Some((def, def2)) = c.assets.part10.get(pair).and_then(Option::as_ref)
+    {
+        // EftPart10_SelectTex: image texIdx of the set's resource.
+        let texture = c.assets.tex[1]
+            .get(g.cat_first + part.res())
+            .and_then(|t| t.get(usize::from(part.tex())))
+            .copied();
+        let at = if part.flags() & 0x40 != 0 { pos } else { p };
+        fx.next_id += 1;
+        let mut e = Part10::new(
+            fx.next_id, c.chr, c.set_ref, pair, texture, at, dir, size, rate, def, def2, vu0,
+        );
+        e.delay = f32::from(part.delay());
+        e.set_hold(f32::from(part.hold()));
+        e.set_fade(f32::from(part.fade()));
+        if part.flags() & 0x20 != 0 {
+            e.flags |= F_NODEPTH;
+        }
+        fx.part10s.push(e);
+        handles[n] = Some(Handle::Part10(fx.next_id));
+    }
+    let Some(Handle::Part10(id)) = handles[n] else {
+        return;
+    };
+    let Some(e) = fx.part10s.iter_mut().find(|e| e.id == id) else {
+        return;
+    };
+    if flags & SPAWN_MOVE != 0 {
+        if flags & SPAWN_WARP != 0 {
+            e.warp(p);
+        } else {
+            e.set_pos(p);
+        }
+    }
+    if flags & SPAWN_SCALE != 0 {
+        e.set_size(size);
+    }
+    if flags & SPAWN_DIR != 0 {
+        e.set_dir(dir);
+    }
+    if flags & SPAWN_KILL != 0 {
+        if e.alive() {
+            e.flags |= PART10_KILL;
+        }
+        handles[n] = None;
+    } else if flags & SPAWN_STOP != 0 {
+        if flags & SPAWN_FADE != 0 {
+            e.set_hold(0.0);
+        }
+        e.stop();
+    }
+}
+
+/// `EftEmit_SpawnType18`: a chain at the node, offset along the direction.
+#[allow(clippy::too_many_arguments)]
+fn spawn_type18(
+    fx: &mut Modules,
+    handles: &mut [Option<Handle>; 40],
+    flags: u32,
+    c: &SpawnCtx,
+    n: usize,
+    idx: usize,
+    size: f32,
+    scale: f32,
+    rate: f32,
+    pos: V3,
+    dir: V3,
+) {
+    let Some(g) = c.set.groups[18] else {
+        return;
+    };
+    let part = &c.set.parts[n];
+    let p = add(scale3(dir, part.offset() * scale), pos);
+    let pair = g.first_pair + idx;
+    // EftChain_Create: nothing when the list is full.
+    if flags & SPAWN_START != 0
+        && handles[n].is_none()
+        && fx.chains.len() < CHAINS
+        && let Some((prm, keys)) = c.assets.chain.get(pair).and_then(Option::as_ref)
+    {
+        // EftChain_SetTex: image texIdx of the set's resource.
+        let texture = c.assets.tex[1]
+            .get(g.cat_first + part.res())
+            .and_then(|t| t.get(usize::from(part.tex())))
+            .copied();
+        let at = if part.flags() & 0x40 != 0 { pos } else { p };
+        fx.next_id += 1;
+        let mut ch = Chain::new(
+            fx.next_id, c.chr, c.set_ref, pair, texture, at, dir, rate, size, prm, keys,
+        );
+        ch.set_node_count(i32::from(part.count()));
+        ch.delay = f32::from(part.delay());
+        ch.end_wait = f32::from(part.hold());
+        if part.flags() & 0x20 != 0 {
+            ch.flags |= C_FRONT;
+        }
+        fx.chains.push(ch);
+        handles[n] = Some(Handle::Chain(fx.next_id));
+    }
+    let Some(Handle::Chain(id)) = handles[n] else {
+        return;
+    };
+    let Some(ch) = fx.chain_mut(id) else {
+        return;
+    };
+    if flags & SPAWN_MOVE != 0 {
+        if flags & SPAWN_WARP != 0 {
+            ch.warp(p);
+        } else {
+            ch.set_pos(p);
+        }
+    }
+    if flags & SPAWN_SCALE != 0 {
+        ch.set_size(size);
+    }
+    if flags & SPAWN_DIR != 0 {
+        ch.set_dir(dir);
+    }
+    if flags & SPAWN_KILL != 0 {
+        ch.flags |= C_DEAD;
+        handles[n] = None;
+    } else if flags & SPAWN_STOP != 0 {
+        if flags & SPAWN_FADE != 0 {
+            ch.end_wait = 0.0;
+        }
+        ch.stop();
     }
 }
 
@@ -2450,6 +3268,64 @@ mod tests {
         let mut poly = vec![v(-1.0), v(-2.0), v(-3.0)];
         clip_plane(&mut poly, plane);
         assert!(poly.is_empty());
+    }
+
+    /// A set of one group of kind 5 whose emitters have these (phase, node slot) pairs.
+    fn set_of(parts: &[(u8, u8)], phase_mask: u8) -> EmitSet {
+        let mut set = EmitSet::default();
+        set.head.mask = 1 << 5;
+        set.head.phase_mask = phase_mask;
+        set.groups[5] = Some(bt3_data::eft_pack::EmitGroup {
+            kind: 5,
+            first: 0,
+            count: parts.len(),
+            ..Default::default()
+        });
+        set.parts = parts
+            .iter()
+            .map(|&(phase, node)| {
+                let mut b = [0u8; 0x40];
+                b[8] = phase;
+                b[0xA] = node;
+                bt3_data::eft_pack::EmitPart(b)
+            })
+            .collect();
+        set
+    }
+
+    #[test]
+    fn deferred_emitters_are_the_shots_phases_on_their_slots() {
+        // Phase 1 fires shots: its emitters on node slot 1 (or 5) are the shots', the others the owner's.
+        let set = set_of(&[(1, 1), (1, 0), (1, 5), (3, 2)], 0b10);
+        let deferred: Vec<bool> = (0..4).map(|i| is_part_deferred(&set, 5, i)).collect();
+        assert_eq!(deferred, [true, false, true, false]);
+        let set = set_of(&[(1, 1)], 0);
+        assert!(!is_part_deferred(&set, 5, 0));
+    }
+
+    #[test]
+    fn a_technique_event_starts_its_phase_and_a_hit_marks_phase_6() {
+        let set = set_of(&[(1, 0), (6, 0)], 0);
+        let mut st = EmitState::new(&set);
+        // START (2) does not start a phase 1 emitter; FIRE (4) does.
+        assert_eq!(
+            st.flags_from_req(&set, 5, 0, false, false, 2) & SPAWN_START,
+            0
+        );
+        assert_ne!(
+            st.flags_from_req(&set, 5, 0, false, false, 4) & SPAWN_START,
+            0
+        );
+        // A phase 6 emitter starts only once marked (EftEmit_MarkKind6).
+        assert_eq!(
+            st.flags_from_req(&set, 5, 1, false, false, 0x7E) & SPAWN_START,
+            0
+        );
+        st.mark_kind6(&set);
+        assert_ne!(
+            st.flags_from_req(&set, 5, 1, false, false, 0) & SPAWN_START,
+            0
+        );
     }
 
     #[test]

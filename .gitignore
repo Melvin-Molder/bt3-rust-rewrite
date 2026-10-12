@@ -65,8 +65,13 @@
 !/crates/bt3_game/src/btl_tech_volley.rs
 !/crates/bt3_game/src/eft.rs
 !/crates/bt3_game/src/eft_bill.rs
+!/crates/bt3_game/src/eft_chain.rs
 !/crates/bt3_game/src/eft_ptcl.rs
+!/crates/bt3_game/src/eft_link.rs
+!/crates/bt3_game/src/eft_part10.rs
 !/crates/bt3_game/src/eft_quad.rs
+!/crates/bt3_game/src/eft_ray.rs
+!/crates/bt3_game/src/eft_rays.rs
 !/crates/bt3_game/src/eft_ribbon.rs
 !/crates/bt3_data/src/eft_pack.rs
 !/crates/bt3_game/src/model_draw.rs

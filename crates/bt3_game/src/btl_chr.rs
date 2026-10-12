@@ -216,7 +216,18 @@ pub(crate) struct SideData<'a> {
     pub chara: i32,
 }
 
-impl SideData<'_> {
+impl<'a> SideData<'a> {
+    /// The assets of the side's emitter sets by `SetRef::list`: the two blast lists, then technique slots 2..4.
+    pub(crate) fn fx_sets(&self) -> [Option<&'a crate::eft::SetAssets>; crate::eft::SET_LISTS] {
+        std::array::from_fn(|l| {
+            if l < 2 {
+                self.blast_assets[l]
+            } else {
+                self.tech_packs[l].and_then(|p| p.assets.as_ref())
+            }
+        })
+    }
+
     /// `BtlCharApi_GetHeight`: the model header's size[0].
     pub(crate) fn height(&self) -> f32 {
         self.obj.model.header.size[0]
