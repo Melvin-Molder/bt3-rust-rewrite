@@ -231,6 +231,8 @@ pub enum TitleSound {
     SeStopBanks(u32),
     /// `StreamSe_PlayDefault(0, id)`.
     StreamSe(u32),
+    /// `StreamSe_FadeOutStep(player)`.
+    StreamSeFadeOutStep(u32),
     /// `StreamSe_Play(player, id, volume, pan)` (players 0 and 1).
     StreamSeEx {
         player: u32,

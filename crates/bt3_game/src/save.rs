@@ -27,6 +27,7 @@ const CUSTOM_COUNT: usize = 97;
 const REC_COUNT: usize = 14;
 
 // Offsets in the block.
+const OFS_UNLOCK: usize = 0x8;
 const OFS_LEVEL: usize = 0xC;
 const OFS_SLOT: usize = 0x10;
 const OFS_MISSION_PAGES: usize = 0x20C;
@@ -126,6 +127,50 @@ impl SaveData {
         };
         save.image = save.to_image();
         save
+    }
+
+    fn word(&self, at: usize) -> i32 {
+        self.image
+            .get(at..at + 4)
+            .map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
+    }
+
+    fn set_word(&mut self, at: usize, v: i32) {
+        if let Some(b) = self.image.get_mut(at..at + 4) {
+            b.copy_from_slice(&v.to_le_bytes());
+        }
+    }
+
+    /// `unlockFlags`: the dragon balls (bits 0..6) and the history menu's guide events (0x80, 0x100, 0x200).
+    pub fn unlock_flags(&self) -> i32 {
+        self.word(OFS_UNLOCK)
+    }
+
+    pub fn set_unlock_flags(&mut self, v: i32) {
+        self.set_word(OFS_UNLOCK, v);
+    }
+
+    /// `level`: the history menu's difficulty, 0..2.
+    pub fn level(&self) -> i32 {
+        self.word(OFS_LEVEL)
+    }
+
+    pub fn set_level(&mut self, v: i32) {
+        self.set_word(OFS_LEVEL, v);
+    }
+
+    /// `slot[n].flags` of a history sub menu (`MSLOT_*`); read as the original reads it past the nine slots.
+    pub fn slot_flags(&self, n: usize) -> i32 {
+        self.word(OFS_SLOT + n * 0x10)
+    }
+
+    pub fn set_slot_flags(&mut self, n: usize, v: i32) {
+        self.set_word(OFS_SLOT + n * 0x10, v);
+    }
+
+    /// `slot[n].val[k]`: 0 the listed episodes, 1 the cleared ones, 2 the new ones (bit per episode).
+    pub fn slot_val(&self, n: usize, k: usize) -> i32 {
+        self.word(OFS_SLOT + n * 0x10 + 4 + k * 4)
     }
 
     /// `ZSAVE->rec[slot] = rec`: a custom character with its items and extra slots (the record's other two

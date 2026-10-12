@@ -80,6 +80,7 @@ mod fade;
 mod flash;
 mod font;
 mod gfx_water;
+mod hist_select;
 mod hud;
 mod hud_combo;
 mod hud_gauge;
@@ -194,6 +195,8 @@ enum Scene {
     CharSelect(Box<CharSelScreen>),
     /// `TeamSel_Run(2)`, progress mode 40.
     TeamSelect(Box<team_select::TeamSelScreen>),
+    /// `HistSel_Run(1)`, progress mode 6: the story mode's saga select.
+    HistSelect(Box<hist_select::HistSelScreen>),
     Black,
     Loading(LoadingScreen),
     /// `Battle_Load`: the loading screen while the battle's files are read.
@@ -226,6 +229,7 @@ impl Scene {
             | Scene::DuelMenu(_)
             | Scene::CharSelect(_)
             | Scene::TeamSelect(_)
+            | Scene::HistSelect(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
                 2.0 * VBLANK_SECONDS
@@ -326,6 +330,9 @@ struct Game {
     duel_menu: Option<DuelMenuData>,
     /// The duel fields of `gProgress`.
     duel: DuelProgress,
+    hist_select: Option<hist_select::HistSelData>,
+    /// The story mode's fields of `gProgress`.
+    hist: hist_select::HistProgress,
     char_select: Option<CharSelData>,
     /// The character select's fields of `gProgress`.
     char_progress: CharSelProgress,
@@ -662,6 +669,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             main_menu: None,
             duel_menu: None,
             duel: DuelProgress::default(),
+            hist_select: None,
+            hist: hist_select::HistProgress::default(),
             char_select: None,
             char_progress: CharSelProgress::default(),
             chr_table,
@@ -1087,6 +1096,11 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 game.pending_map = None;
             }
             TitleSound::StreamSe(id) => play_stream_se(game, commands, 0, id, 0x40),
+            TitleSound::StreamSeFadeOutStep(player) => {
+                if let Some(p) = &mut game.stream_se[player as usize & 1] {
+                    p.level = sound::fade_out_step(p.level);
+                }
+            }
             TitleSound::StreamSeEx {
                 player, id, volume, ..
             } => play_stream_se(game, commands, player as usize & 1, id, volume),
@@ -1466,6 +1480,7 @@ fn run_frames(
                     stop_all(game, &mut commands);
                     match result {
                         MainMenuResult::Title => start_title(game, &mut commands, &mut audio),
+                        MainMenuResult::Mode(6) => start_hist_select(game, &mut commands),
                         MainMenuResult::Mode(38) => start_duel_menu(game, &mut commands),
                         MainMenuResult::Mode(53) => {
                             // Dc_Main: the top menu's and the list's cursors start over.
@@ -1521,6 +1536,39 @@ fn run_frames(
                     match result {
                         CharSelResult::Back => start_duel_menu(game, &mut commands),
                         CharSelResult::Battle(setup) => start_battle(game, setup),
+                    }
+                }
+            }
+            Scene::HistSelect(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                game.hist = screen.progress();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Hist_Main: Adx_StopAll after HistSel_Run.
+                    stop_all(game, &mut commands);
+                    match result {
+                        hist_select::HistSelResult::Back => {
+                            start_main_menu(game, &mut commands, &mut audio)
+                        }
+                        hist_select::HistSelResult::Saga => {
+                            info!(
+                                "progress mode 7 (the story mode's episode list) is not ported yet"
+                            );
+                            game.scene = Scene::Black;
+                        }
+                        hist_select::HistSelResult::Ending => {
+                            info!("progress mode 3 (the ending movie) is not ported yet");
+                            game.scene = Scene::Black;
+                        }
                     }
                 }
             }
@@ -2529,6 +2577,58 @@ fn start_char_select(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the character select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Hist_Main` mode 6: the menu music, then `HistSel_Run(1)` from `gMenuArc2`.
+fn start_hist_select(game: &mut Game, commands: &mut Commands) {
+    if game.hist_select.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, hist_select::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    hist_select::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| hist_select::HistSelAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = hist_select::HistSelLayout::new(background, |key| firsts[&key]);
+                game.hist_select = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the saga select: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .hist_select
+        .as_ref()
+        .expect("saga select assets are loaded");
+    let mut sounds = Vec::new();
+    match hist_select::HistSelScreen::new(
+        data,
+        game.hist,
+        &game.save,
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, hist_select::BGM_FILE_ID);
+            game.scene = Scene::HistSelect(Box::new(screen));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start the saga select: {error}");
             game.scene = Scene::Black;
         }
     }

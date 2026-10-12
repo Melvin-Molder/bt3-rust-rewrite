@@ -184,6 +184,47 @@ pub fn scroll_y(flash: &mut Flash, r: ClipRef, uv: Uv, y: &mut f32, dy: f32) {
     flash.clip_set_uv(r, cell);
 }
 
+/// `Num_Draw(flash, fmt, first 0, count, value, w, h, mode)`: one clip per digit (`name(n)`, n = 0 the last), on a
+/// sheet of four `w * h` cells a row; mode 0 hides leading zeros (the last digit always shows).
+pub fn num_draw(
+    flash: &mut Flash,
+    name: impl Fn(i32) -> String,
+    count: i32,
+    value: i32,
+    (w, h): (i32, i32),
+    mode: i32,
+) {
+    let mut value = value.abs();
+    let mut started = false;
+    for i in (0..count).rev() {
+        let clip = flash.find(None, &name(i));
+        let d = value / 10i32.pow(i as u32);
+        let digit = if d == 0 && started {
+            0
+        } else if d != 0 {
+            value -= d * 10i32.pow(i as u32);
+            started = true;
+            d
+        } else if mode != 0 || i == 0 {
+            0
+        } else {
+            flash.clip_set_flags(clip, PROP_VISIBLE, false);
+            continue;
+        };
+        flash.clip_set_flags(clip, PROP_VISIBLE, true);
+        flash.clip_set_uv(
+            clip,
+            Uv {
+                u0: w * (digit % 4),
+                v0: h * (digit / 4),
+                u1: w * (digit % 4) + w,
+                v1: h * (digit / 4) + h,
+                tex: 0,
+            },
+        );
+    }
+}
+
 /// `gLipSync` with `gLipSyncOpen` / `gLipSyncWaiting`: (start frame, open) keys of a voice line.
 #[derive(Clone, Debug, Default)]
 pub struct LipSync {

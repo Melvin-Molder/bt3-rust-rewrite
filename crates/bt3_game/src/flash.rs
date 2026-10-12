@@ -419,6 +419,23 @@ impl Flash {
         }
     }
 
+    /// `Flash_StepFrames` (`FlashTl_StepFrames` of the root): `step` frames on, playing, if the frame exists (a
+    /// step other than 1 goes there as a goto).
+    pub fn step_frames(&mut self, step: i32) {
+        let count = self.program.timelines[self.tl(TlId::Root).program]
+            .frames
+            .len() as i64;
+        let tl = self.tl_mut(TlId::Root);
+        let frame = i64::from(tl.frame) + i64::from(step);
+        if (0..=count).contains(&frame) {
+            tl.frame = frame as u32;
+            tl.state |= TL_PLAY;
+            if step != 1 {
+                tl.state |= TL_GOTO;
+            }
+        }
+    }
+
     /// `Flash_GotoLabel`: jumps the root timeline.
     pub fn goto_label(&mut self, label: &str, restart: bool) {
         self.goto_label_tl(TlId::Root, label.as_bytes(), restart);
