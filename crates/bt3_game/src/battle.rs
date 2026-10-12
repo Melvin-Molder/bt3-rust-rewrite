@@ -5218,6 +5218,76 @@ mod tests {
     }
 
     #[test]
+    fn real_script_item_change_reaches_the_fighter_after_phase_3() {
+        use crate::btl_chr::MemberItems;
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        for _ in 0..400 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(
+                start,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        // An item with ability 1 (two more dashes in a row) and not ability 0.
+        let table = battle.assets.chara_table.clone();
+        let has = |id: u16, n: i32| {
+            let stats = item_set_stats(&table, &[id, 0, 0, 0, 0, 0, 0, 0]);
+            MemberItems {
+                bonus: [0; 7],
+                ability: stats.ability,
+            }
+            .has(n)
+        };
+        let item = (1..=400u16).find(|&id| has(id, 1) && !has(id, 0)).unwrap();
+        let before = battle.roster.chars[0].dash_limit;
+        assert!(!battle.roster.chars[0].has_ability(1));
+        // BtlFacade_SetMemberItems: the setup's member changes, the fighter only holds the requests.
+        battle.set_member_items(0, -1, [i32::from(item) - 1, -1, -1, -1, -1, -1, -1, -1]);
+        assert!(!battle.roster.chars[0].has_ability(1));
+        assert!(
+            battle.roster.chars[0].flags.test(0x103) && battle.roster.chars[0].flags.test(0x108)
+        );
+        // Phase 3 counts the dashes with the old abilities, then takes the requests.
+        battle.run_frame(
+            false,
+            [PadState::default(); 2],
+            0,
+            &mut libc,
+            &mut random,
+            None,
+            false,
+        );
+        assert_eq!(battle.roster.chars[0].dash_limit, before);
+        assert!(battle.roster.chars[0].has_ability(1));
+        assert!(!battle.roster.chars[0].flags.test(0x108));
+        battle.run_frame(
+            false,
+            [PadState::default(); 2],
+            0,
+            &mut libc,
+            &mut random,
+            None,
+            false,
+        );
+        assert_eq!(battle.roster.chars[0].dash_limit, before + 2);
+    }
+
+    #[test]
     fn real_battle_ends_by_ko_and_by_time_up() {
         use crate::battle_seq::{REASON_KO, REASON_TIME_UP, WIN_P1};
         let mut setup = BattleSetup::default();

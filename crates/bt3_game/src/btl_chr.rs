@@ -832,6 +832,10 @@ pub(crate) struct Chr {
     pub took_damage: bool,
     /// The battle events this fighter raised this frame (`BtlEvent_Raise`): side and event.
     pub events: Vec<(usize, u32)>,
+    /// What the battle setup's members (`BattleSide_GetMember`) hold after the story script changed their items
+    /// (`BattleSide_SetMemberItems`): held flags 0x103 + n / 0x108 + n copy member n's bonus levels / ability words
+    /// into `members` at the end of phase 3.
+    pub setup_items: [MemberItems; 5],
     /// Effect / sound request bits of this frame (`fxBits`, fighter + 0x1262) and of the frame before
     /// (`prevFxBits`, + 0x126B).
     pub fx_bits: [u8; 0x10],
@@ -983,6 +987,7 @@ impl Chr {
             sec_timer: 0,
             input_off_timer: 0,
             events: Vec::new(),
+            setup_items: [MemberItems::default(); 5],
             script_motion: 0,
             script_motion_blend: 0.0,
             script_motion_loop: 0,

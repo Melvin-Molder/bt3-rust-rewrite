@@ -1079,6 +1079,23 @@ fn begin_frame(chr: &mut Chr, data: &SideData, env: &Env) {
     chr.input.tech_class = -1;
     let blocked = chr.flags.test(0x11E) || chr.flags.test(0x11F) || chr.flags.test(0xB1);
     chr.input.update(&env.gate, blocked);
+    // BtlChar_ApplyBonusRequests / BtlChar_ApplyAbilityRequests: the members whose items the story script changed.
+    for i in 0..5 {
+        if chr.flags.test(0x103 + i as u32) {
+            if let Some(m) = chr.members.get_mut(i) {
+                m.items.bonus = chr.setup_items[i].bonus;
+            }
+            chr.flags.clear(0x103 + i as u32);
+        }
+    }
+    for i in 0..5 {
+        if chr.flags.test(0x108 + i as u32) {
+            if let Some(m) = chr.members.get_mut(i) {
+                m.items.ability = chr.setup_items[i].ability;
+            }
+            chr.flags.clear(0x108 + i as u32);
+        }
+    }
 }
 
 /// `BtlChar_UpdateSeqFlags`: held flag 1 (intro), 2 (ready), 3 (fight) or 4 (after) and the lock-on.

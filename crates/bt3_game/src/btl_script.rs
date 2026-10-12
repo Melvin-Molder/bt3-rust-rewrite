@@ -779,10 +779,11 @@ impl Battle {
         self.roster.chars[side & 1].active as i32
     }
 
-    /// `BtlFacade_SetMemberItems`: a member's items (-1 the fighting one) replaced and what derives from them
-    /// recomputed (`BtlMember_ApplyItems`, unclamped), then copied to the fighter (`BtlChar_ApplyBonusRequests` /
-    /// `ApplyAbilityRequests`, here at once).
-    fn set_member_items(&mut self, side: usize, member: i32, ids: [i32; 8]) {
+    /// `BtlFacade_SetMemberItems`: a member's items (-1 the fighting one) replaced in the setup and what derives
+    /// from them recomputed (`BattleSide_SetMemberItems` / `BtlMember_ApplyItems`, unclamped), then the fighter
+    /// asked to copy them (`BtlCtrl_ReloadMemberBonus` / `ReloadMemberAbilities`: held flags 0x103 + member and
+    /// 0x108 + member, taken at the end of its phase 3).
+    pub(crate) fn set_member_items(&mut self, side: usize, member: i32, ids: [i32; 8]) {
         let ids = ids.map(|i| (i as u16).wrapping_add(1));
         let stats = bt3_data::chara_data::item_set_stats(&self.assets.chara_table, &ids);
         let s = stats.stat;
@@ -796,8 +797,10 @@ impl Battle {
         } else {
             member as usize
         };
-        if let Some(x) = c.members.get_mut(m) {
-            x.items = items;
+        if m < 5 {
+            c.setup_items[m] = items;
+            c.flags.set_held(0x103 + m as u32);
+            c.flags.set_held(0x108 + m as u32);
         }
     }
 
