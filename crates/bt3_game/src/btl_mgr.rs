@@ -352,6 +352,20 @@ impl Roster {
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             crate::btl_fx::update_all(me, data[i], env, &mut self.scene.impacts);
             self.scene.spawn_held_disc(me, data[i]);
+            // BtlFx_UpdateChargeFx: the charge aura while request 7 holds, its burst on request 8.
+            if let Some(set) = crate::btl_blast::charge_set(data[i]) {
+                let c = &mut self.scene.charges[i];
+                if me.test_fx(7) {
+                    if !c.is_active() {
+                        c.start(set, data[i].height(), me.obj.node_pos(3));
+                    }
+                } else if c.is_active() {
+                    c.stop();
+                }
+                if me.test_fx(8) {
+                    c.burst();
+                }
+            }
             transform_fx(me, data[i], env, &mut self.scene.transforms);
             movement_fx(me, opp, data[i], &mut self.scene, libc);
             ground_fx(me, data[i], env, &mut self.scene.gdust, libc, vu0);

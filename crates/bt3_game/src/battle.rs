@@ -259,6 +259,8 @@ pub(crate) struct FighterModel {
     pub(crate) shock_assets: Option<SetAssets>,
     /// The rush-finish burst's set's assets (`EftRushBurstMgr_Init`).
     pub(crate) rush_burst_assets: Option<SetAssets>,
+    /// The charge aura's set's assets (`EftChargeMgr_Init`).
+    pub(crate) charge_assets: Option<SetAssets>,
     /// The technique slots' effect packs (`effectPacks`, the second animation file's entries 1..5).
     pub(crate) tech_packs: [Option<TechPack>; 5],
     /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
@@ -644,6 +646,10 @@ pub(crate) fn load_side(
         }
         if let Some(set) = &pack.rush_burst_set {
             fighter.rush_burst_assets =
+                Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
+        }
+        if let Some(set) = &pack.charge_set {
+            fighter.charge_assets =
                 Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
         }
         // EftShockMgr_Init: EftTexSet_Load32 of entry 2; the parts animate entry 1.
@@ -1153,6 +1159,7 @@ fn load_fighter(
         absorb_assets: None,
         shock_assets: None,
         rush_burst_assets: None,
+        charge_assets: None,
         tech_packs: Default::default(),
         skill_text: None,
     })
@@ -1282,6 +1289,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         absorb_assets: f.absorb_assets.as_ref(),
         shock_assets: f.shock_assets.as_ref(),
         rush_burst_assets: f.rush_burst_assets.as_ref(),
+        charge_assets: f.charge_assets.as_ref(),
         tech_packs: std::array::from_fn(|i| f.tech_packs[i].as_ref()),
         costume: f.costume,
         chara: f.chara,
@@ -7132,6 +7140,62 @@ mod tests {
         let (log, _, _) = run_transform(&mut battle, 0, 420);
         assert!(log.iter().any(|l| l.1 == 0xEF), "{log:x?}");
         assert_eq!(log.last().map(|l| (l.1, l.2)), Some((0xB, 106)), "{log:x?}");
+    }
+
+    #[test]
+    fn real_ki_charge_raises_the_charge_aura() {
+        use crate::btl_input::pad::L2;
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, pads(0), 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert!(crate::btl_blast::charge_set(&side_data(&battle.assets.fighters[0])).is_some());
+        let list = crate::eft::SetRef {
+            side: 0,
+            list: crate::eft_charge::LIST,
+        };
+        // Charging (L2) holds request 7: one aura at node 3 whose set's objects appear.
+        let (mut most, mut objects) = (0, 0);
+        for _ in 0..60 {
+            battle.run_frame(false, pads(L2), 0, &mut libc, &mut random, None, false);
+            most = most.max(battle.roster.scene.charges[0].count());
+            objects = objects.max(
+                battle
+                    .roster
+                    .scene
+                    .fx
+                    .counts(Some(list))
+                    .iter()
+                    .sum::<usize>(),
+            );
+        }
+        assert_eq!(most, 1);
+        assert!(objects > 0, "the aura started nothing");
+        // Released, it runs its end frames and goes.
+        for _ in 0..300 {
+            battle.run_frame(false, pads(0), 0, &mut libc, &mut random, None, false);
+            if battle.roster.scene.charges[0].count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(battle.roster.scene.charges[0].count(), 0);
     }
 
     #[test]

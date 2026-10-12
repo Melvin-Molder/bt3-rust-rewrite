@@ -333,6 +333,8 @@ pub(crate) struct Scene {
     pub absorbs: [crate::eft_absorb::Absorbs; 2],
     /// Each fighter's shocks (its kind 4 manager, layer 2).
     pub shocks: [crate::eft_shock::Shocks; 2],
+    /// Each fighter's charge auras (its kind 0 manager, layer 2).
+    pub charges: [crate::eft_charge::Charges; 2],
     /// Each fighter's rush-finish bursts (its kind 5 manager, layer 2).
     pub rush_bursts: [crate::eft_rushburst::RushBursts; 2],
     /// The screen shock waves (`gScrWarp`).
@@ -993,6 +995,7 @@ impl Scene {
         self.absorbs[side].reset(&mut self.fx);
         self.shocks[side].reset(&mut self.fx);
         self.rush_bursts[side].reset(&mut self.fx);
+        self.charges[side].reset(&mut self.fx);
         self.tech.reset_side(chars, &mut self.fx, side);
     }
 
@@ -1065,6 +1068,24 @@ impl Scene {
         // BtlScene_IsAnyCharStopped.
         let stopped = w.paused || w.chars.iter().any(Chr::is_frozen);
         for side in 0..2 {
+            // Kind 0, the charge aura.
+            if let Some(set) = charge_set(w.data[side])
+                && let Some(assets) = w.data[side].charge_assets
+            {
+                let ctx = spawn_ctx(w, side, set, assets, crate::eft_charge::LIST);
+                let chars = &*w.chars;
+                let node_pos = |n| chars[side].obj.node_pos(n);
+                self.charges[side].update(
+                    &mut self.fx,
+                    &mut self.warps,
+                    side,
+                    &node_pos,
+                    &ctx,
+                    w.paused,
+                    w.libc,
+                    w.vu0,
+                );
+            }
             for list in 0..2 {
                 let mut i = 0;
                 while i < self.lists[side][list].len() {
@@ -1281,6 +1302,9 @@ impl Scene {
         self.update_results();
         self.tech.post_update(w, &mut self.fx);
         for side in 0..2 {
+            if let Some(set) = charge_set(w.data[side]) {
+                self.charges[side].post_update(set, &mut self.fx);
+            }
             for list in 0..2 {
                 for task in &mut self.lists[side][list] {
                     task_post_update(task, w, &mut self.fx);
@@ -2209,6 +2233,15 @@ pub(crate) fn absorb_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
         return None;
     }
     pack.absorb_set.as_ref()
+}
+
+/// The charge aura's set, when the character's pack makes the kind 0 manager (pack bit 0).
+pub(crate) fn charge_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
+    let pack = data.effect?;
+    if pack.kind_bits & 1 == 0 {
+        return None;
+    }
+    pack.charge_set.as_ref()
 }
 
 /// The rush-finish burst's set, when the character's pack makes the kind 5 manager (pack bit 5).
