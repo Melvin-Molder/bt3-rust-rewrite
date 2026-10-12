@@ -219,6 +219,66 @@ pub(crate) struct Member {
     pub present: bool,
     pub gauge: Gauge,
     pub items: MemberItems,
+    /// `cpuLevel` and `aiType`: what the AI plays this member with.
+    pub cpu_level: i32,
+    pub ai_type: usize,
+}
+
+/// One opponent of mode 3's pool, ready for `BtlMember_Replace`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct PoolEntry {
+    pub chara: i32,
+    pub costume: i32,
+    pub cpu_level: i32,
+    pub ai_type: usize,
+    pub items: MemberItems,
+}
+
+impl Member {
+    /// `BtlMember_LoadParams(chr, n, 1, 100 %, variant 0)` with the member's bonuses and abilities: the health
+    /// maximum, the starting ki (none with ability 0x18, full with 0x19, + 40000 / 20000 with 0x17 / 0x16) and blast
+    /// stocks (full with 0x1A).
+    pub(crate) fn load(env: &Env, src: &PoolEntry) -> Self {
+        let items = src.items;
+        let entry = env
+            .common
+            .charas
+            .get(src.chara.max(0) as usize)
+            .copied()
+            .unwrap_or_default();
+        let mut g = Gauge {
+            health_max: items.health_max(entry.health_max),
+            ki_max: 100_000,
+            blast_max: entry.blast_stocks * 100_000,
+            ..Gauge::default()
+        };
+        g.health = ((g.health_max as f32 * 100.0 / 100.0) as i32).max(1);
+        g.health_max = g.health_max.max(g.health);
+        g.ki = if items.has(0x18) {
+            0
+        } else if items.has(0x19) {
+            g.ki_max
+        } else if items.has(0x17) {
+            entry.ki_start + 40000
+        } else if items.has(0x16) {
+            entry.ki_start + 20000
+        } else {
+            entry.ki_start
+        }
+        .min(g.ki_max);
+        if items.has(0x1A) {
+            g.blast = g.blast_max;
+        }
+        Member {
+            chara: src.chara,
+            costume: src.costume,
+            present: true,
+            gauge: g,
+            items,
+            cpu_level: src.cpu_level,
+            ai_type: src.ai_type,
+        }
+    }
 }
 
 /// What a member's items give it (`BtlMgrMember.bonus` / `.ability`, from the battle setup's member).
@@ -485,6 +545,11 @@ pub(crate) struct Env<'a> {
     pub chara_bits: [[u64; 3]; 2],
     /// The members' items by player (`BattleSide.members[n]`).
     pub items: [[MemberItems; 5]; 2],
+    /// The members' `cpuLevel` and `aiType` by player.
+    pub cpu_level: [i32; 2],
+    pub ai_type: [[usize; 5]; 2],
+    /// `Battle_GetWork5A8()`: mode 3's opponents.
+    pub pool: &'a [PoolEntry],
     /// `Battle_GetStage`.
     pub stage_id: i32,
 }
@@ -637,6 +702,8 @@ pub(crate) struct Chr {
     /// `members` (+0x9A4), `active` (+0x994): the team and who fights.
     pub members: Vec<Member>,
     pub active: usize,
+    /// `Battle_GetWork5A8()->cur`: the pool opponent side 1 is up to in mode 3.
+    pub pool_cur: usize,
     /// `Battle_GetStage`, for the abilities that depend on it.
     pub stage_id: i32,
     /// The opponent's active member's ability bits (`BtlOpp_HasAbility`), kept by the roster.
@@ -906,6 +973,7 @@ impl Chr {
             prev_fx_bits: [0; 0x10],
             voice_last: [0; crate::btl_snd::VOICE_KINDS],
             voice_timer: [0; crate::btl_snd::VOICE_KINDS],
+            pool_cur: 0,
         };
         // BtlChar_BindObject.
         chr.flags.clear(0xBE);
@@ -931,43 +999,18 @@ impl Chr {
         chr.members = env.team[player][..count]
             .iter()
             .zip(env.items[player])
-            .map(|(&(chara, costume), items)| {
-                let entry = env
-                    .common
-                    .charas
-                    .get(chara.max(0) as usize)
-                    .copied()
-                    .unwrap_or_default();
-                let mut g = Gauge {
-                    health_max: items.health_max(entry.health_max),
-                    ki_max: 100_000,
-                    blast_max: entry.blast_stocks * 100_000,
-                    ..Gauge::default()
-                };
-                g.health = ((g.health_max as f32 * 100.0 / 100.0) as i32).max(1);
-                g.health_max = g.health_max.max(g.health);
-                g.ki = if items.has(0x18) {
-                    0
-                } else if items.has(0x19) {
-                    g.ki_max
-                } else if items.has(0x17) {
-                    entry.ki_start + 40000
-                } else if items.has(0x16) {
-                    entry.ki_start + 20000
-                } else {
-                    entry.ki_start
-                }
-                .min(g.ki_max);
-                if items.has(0x1A) {
-                    g.blast = g.blast_max;
-                }
-                Member {
-                    chara,
-                    costume,
-                    present: true,
-                    gauge: g,
-                    items,
-                }
+            .zip(env.ai_type[player])
+            .map(|((&(chara, costume), items), ai_type)| {
+                Member::load(
+                    env,
+                    &PoolEntry {
+                        chara,
+                        costume,
+                        cpu_level: env.cpu_level[player],
+                        ai_type,
+                        items,
+                    },
+                )
             })
             .collect();
         chr.gauge = chr.members[0].gauge;
@@ -975,6 +1018,32 @@ impl Chr {
             chr.switch_gauge = 100_000;
         }
         chr
+    }
+
+    /// `BtlMember_Replace`: the member takes the place of the first one but the fighting one without health (a
+    /// slot past the team's end makes it longer); its slot, or none when every slot is taken.
+    pub(crate) fn replace_member(&mut self, env: &Env, src: &PoolEntry) -> Option<usize> {
+        let slot = (0..5).find(|&i| i != self.active && self.member_gauge(i).health <= 0)?;
+        let member = Member::load(env, src);
+        if slot < self.members.len() {
+            self.members[slot] = member;
+        } else {
+            self.members.push(member);
+        }
+        Some(slot)
+    }
+
+    /// `BtlColl_NextPoolMember`: side 1's next opponent of mode 3's pool joins its team.
+    pub(crate) fn next_pool_member(&mut self, env: &Env) {
+        if self.player != 1 {
+            return;
+        }
+        let next = self.pool_cur + 1;
+        if let Some(src) = env.pool.get(next)
+            && self.replace_member(env, src).is_some()
+        {
+            self.pool_cur = next;
+        }
     }
 
     /// `BtlMember_HasAbility`: the active member has ability bit `n`.
@@ -2426,6 +2495,9 @@ impl Chr {
             self.gauge.max_power = 0;
             self.stun_timer = 0;
             self.flags.clear(0xBE);
+            if env.mode == 3 && self.count_alive() == 0 {
+                self.next_pool_member(env);
+            }
         }
         before - self.gauge.health
     }

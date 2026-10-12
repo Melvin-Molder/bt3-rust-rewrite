@@ -24,6 +24,7 @@ pub mod stage_anim;
 pub mod stage_col;
 pub mod stage_model;
 pub mod stage_surf;
+pub mod survival;
 pub mod tex;
 
 const SECTOR_SIZE: u64 = 2048;

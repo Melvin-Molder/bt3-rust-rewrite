@@ -223,8 +223,13 @@ pub struct BattleAssets {
     /// The active members' `cpuLevel` and `aiType`.
     pub(crate) cpu_level: [i32; 2],
     pub(crate) ai_type: [usize; 2],
-    /// The members' item bonuses and abilities.
+    /// The members' item bonuses and abilities, and AI types.
     pub(crate) member_items: [[MemberItems; 5]; 2],
+    pub(crate) member_ai_type: [[usize; 5]; 2],
+    /// Mode 3's opponents (`Battle_GetWork5A8()`), their bonuses clamped as the computer's in modes 1..4.
+    pub(crate) pool: Vec<crate::btl_chr::PoolEntry>,
+    /// `gProgress->tutorial`.
+    pub(crate) tutorial: i32,
     /// `Battle_IsSplitScreen`.
     pub(crate) screen_mode: i32,
     /// `Battle_GetBgm`.
@@ -331,6 +336,10 @@ pub fn load(
     setup: &BattleSetup,
 ) -> Result<BattleAssets, String> {
     let error = |e: std::io::Error| e.to_string();
+    // BattleSetup_FinishEx: the mode's rules.
+    let mut setup = setup.clone();
+    setup.finish();
+    let setup = &setup;
     // BtlObjLight_FindRes0 uploads texture 0 of the light file to block 0x3D40; the models' TEX0_2 reads that
     // block as a 256-wide PSMT8 texture (TBW 4) on its first row.
     let common = read(COMMON_LIGHT_FILE)?;
@@ -406,14 +415,20 @@ pub fn load(
     let prompt_defs = crate::hud_prompt::PromptDefs::read(elf).map_err(error)?;
     let menu_sheet = load_menu_sheet(&hud_file, &mut hud_textures).map_err(error)?;
     let menu_texts = MenuTexts::read(&hud_file, MENU_TEXT_COUNT);
-    // PauseMenu_GetMenu: the versus trees without a replay; the other modes' menus are not ported.
-    let menus = if setup.mode == 0 {
-        Some((
+    // PauseMenu_GetMenu: the versus trees without a replay, else the mode's pause menu. Modes 2..7 have no result
+    // menu (the sequence never opens one), so their pause tree stands in that slot too. Story mode's are not
+    // ported.
+    let menus = match setup.mode {
+        0 => Some((
             Tree::read(elf, crate::btl_menu::PAUSE_VERSUS).map_err(error)?,
             Tree::read(elf, crate::btl_menu::RESULT_VERSUS).map_err(error)?,
-        ))
-    } else {
-        None
+        )),
+        2..=7 => {
+            let pause = Tree::read(elf, crate::btl_menu::PAUSE_MODES[setup.mode as usize - 2])
+                .map_err(error)?;
+            Some((pause.clone(), pause))
+        }
+        _ => None,
     };
     let replay_menus = if setup.mode == 0 {
         Some((
@@ -432,7 +447,8 @@ pub fn load(
         sets[1..].copy_from_slice(&side.team_items);
         sets.map(|ids| item_set_stats(&chara_table, &ids))
     });
-    let ai_type = items.map(|side| side[0].ai_type.max(0) as usize);
+    let member_ai_type = items.map(|side| side.map(|s| s.ai_type.max(0) as usize));
+    let ai_type = member_ai_type.map(|side| side[0]);
     let member_items = std::array::from_fn(|side| {
         // BattleSetup_FinishEx: the bonuses clamped to -20..20, or -20..60 for the computer in modes 1..4.
         let wide = matches!(setup.mode, 1..=4) && setup.sides[side].control == 2;
@@ -520,6 +536,22 @@ pub fn load(
         cpu_level: setup.sides.map(|side| side.cpu_level),
         ai_type,
         member_items,
+        member_ai_type,
+        pool: setup
+            .pool
+            .iter()
+            .map(|m| {
+                let stats = item_set_stats(&chara_table, &m.items);
+                crate::btl_chr::PoolEntry {
+                    chara: m.chara,
+                    costume: m.costume,
+                    cpu_level: m.cpu_level,
+                    ai_type: stats.ai_type.max(0) as usize,
+                    items: crate::battle::member_items(&stats, true),
+                }
+            })
+            .collect(),
+        tutorial: setup.tutorial,
         screen_mode: setup.screen_mode,
         bgm: setup.bgm,
         menus,
@@ -906,7 +938,7 @@ const MODEL_MOTIONS: usize = 8;
 const MODEL_MOTION_SECTION: usize = 0x1D;
 
 /// Entries of the HUD file's offset table read as menu texts (`BtlMenu_GetText`).
-const MENU_TEXT_COUNT: usize = 0x40;
+const MENU_TEXT_COUNT: usize = 0x4E;
 /// `BtlMenu_Init`: the menu sheet is the texture file at HUD file word 7.
 const MENU_SHEET_WORD: usize = 7;
 
@@ -1477,7 +1509,7 @@ pub struct Battle {
     pub(crate) replay: crate::btl_replay::Replay,
     started: bool,
     /// `gBtlAi`.
-    ai: AiMgr,
+    pub(crate) ai: AiMgr,
     /// `gBtlMenu` with the versus menus.
     pub(crate) menu: Option<PauseMenu>,
     /// Last frame's buttons per pad, for the menus' pressed words.
@@ -1577,6 +1609,9 @@ impl BattleAssets {
             team_count: self.team_count,
             switch_enabled: self.switch_enabled,
             items: self.member_items,
+            cpu_level: self.cpu_level,
+            ai_type: self.member_ai_type,
+            pool: &self.pool,
             stage_id: self.stage_id,
             chara_bits: std::array::from_fn(|side| {
                 // BattleSetup_FixForMode: every character in mode 1, and for the computer's side in modes 2, 3,
@@ -1820,6 +1855,7 @@ impl Battle {
         // PauseMenu_Init; BtlGame_Reset closes both trees.
         let menu = assets.menus.clone().map(|(pause, result)| {
             let mut menu = PauseMenu::new(pause, result);
+            menu.tutorial = assets.tutorial;
             menu.reset();
             menu.scripts = std::array::from_fn(|side| assets.fighters[side].skill_text.clone());
             menu
@@ -2224,12 +2260,34 @@ impl Battle {
             rng: &mut unused,
             blasts: &mut no_blasts,
         };
-        self.ai.reset_one(
-            &mut ctx,
-            side,
-            self.assets.cpu_level[side],
-            self.assets.ai_type[side],
+        // BtlCharApi_GetCpuLevel / GetAiType: the active member's.
+        let (level, kind) = ctx.chars[side].members.get(ctx.chars[side].active).map_or(
+            (self.assets.cpu_level[side], self.assets.ai_type[side]),
+            |m| (m.cpu_level, m.ai_type),
         );
+        self.ai.reset_one(&mut ctx, side, level, kind);
+    }
+
+    /// `BtlAiMgr_SetLevel(side, level)` from the CPU level menu.
+    pub(crate) fn set_ai_level(&mut self, side: usize, level: i32) {
+        let data = [
+            side_data(&self.assets.fighters[0]),
+            side_data(&self.assets.fighters[1]),
+        ];
+        let env = self.assets.env(self.seq.state_id(), self.gate());
+        let mut unused = GameRandom::from_key(&[0]);
+        let mut no_blasts = Vec::new();
+        let mut ctx = AiCtx {
+            chars: &mut self.roster.chars,
+            data: [&data[0], &data[1]],
+            env: &env,
+            ai: &self.assets.ai,
+            tab: &self.assets.ai_tables,
+            nav: &self.assets.nav,
+            rng: &mut unused,
+            blasts: &mut no_blasts,
+        };
+        self.ai.set_level(&mut ctx, side, level);
     }
 
     /// The demo camera's requests of this frame: `ChrCam_UpdateDemo` (flag 0xDA stops it, 0xD7..0xD9 play the
@@ -2534,8 +2592,16 @@ impl Battle {
             let env = self.assets.env(self.seq.state_id(), self.gate());
             self.roster.chars[side].hud_prompt(&data, &env, self.seq.paused)
         });
+        // BtlCtrl_GetWork5A8Count: in mode 3 the pool opponent side 1 is up to, plus one once its team is down, at
+        // most the pool's size.
+        let count = (self.assets.mode == 3).then(|| {
+            let chr = &self.roster.chars[1];
+            let n = chr.pool_cur + usize::from(chr.count_alive() < 1);
+            n.min(self.assets.pool.len()) as i32
+        });
         self.hud.pre_update(
             self.seq.time_left(),
+            count,
             &sides,
             &teams,
             &combos,
@@ -3975,6 +4041,99 @@ mod tests {
             "{health} -> {}",
             battle.roster.chars[1].gauge.health
         );
+    }
+
+    /// Mode 3: side 1's fallen fighter is replaced by the pool's next opponent (`BtlColl_NextPoolMember`), which
+    /// switches in with its own character, CPU level and items; past the pool's end a K.O. ends the battle.
+    #[test]
+    fn real_survival_brings_in_the_next_opponent() {
+        use crate::battle_seq::{REASON_KO, WIN_P1};
+        use crate::char_select::PoolMember;
+        let dummy = |chara| PoolMember {
+            chara,
+            costume: 0,
+            cpu_level: -1,
+            items: [0; 8],
+        };
+        let mut setup = BattleSetup {
+            mode: 3,
+            pool: vec![dummy(1), dummy(2)],
+            ..BattleSetup::default()
+        };
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        assert_eq!(battle.assets.fighters[1].chara, 1);
+        assert_eq!(battle.ai.level(1), -1);
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pad = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, pad(0), 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        let ko = |battle: &mut Battle, libc: &mut LibcRandom, random: &mut GameRandom| {
+            battle.roster.chars[1].gauge.health = 100;
+            for _ in 0..300 {
+                let near =
+                    crate::btl_chr::opp_distance(&battle.roster.chars[0], &battle.roster.chars[1])
+                        < 25.0;
+                let held = if near {
+                    crate::btl_input::pad::SQUARE
+                } else {
+                    crate::btl_input::pad::UP
+                };
+                battle.run_frame(false, pad(held), 0, libc, random, None, false);
+                battle.run_frame(false, pad(0), 0, libc, random, None, false);
+                if battle.roster.chars[1].gauge.health == 0 || battle.seq.state != SeqState::Fight {
+                    break;
+                }
+            }
+        };
+        ko(&mut battle, &mut libc, &mut random);
+        let chr = &battle.roster.chars[1];
+        assert_eq!(chr.pool_cur, 1);
+        assert_eq!(chr.members.len(), 2);
+        assert_eq!((chr.members[1].chara, chr.members[1].cpu_level), (2, -1));
+        assert_eq!(chr.count_alive(), 1);
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        // The next opponent switches in once its files are loaded.
+        for _ in 0..900 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+            if battle.roster.chars[1].active == 1 && battle.assets.fighters[1].chara == 2 {
+                break;
+            }
+        }
+        assert_eq!(battle.roster.chars[1].active, 1);
+        assert_eq!(battle.assets.fighters[1].chara, 2);
+        assert_eq!(battle.ai.level(1), -1);
+        for _ in 0..300 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+            if battle.roster.chars[1].flags.test(3) {
+                break;
+            }
+        }
+        // The pool is spent: this K.O. ends it.
+        ko(&mut battle, &mut libc, &mut random);
+        for _ in 0..10 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+        }
+        assert_eq!(battle.roster.chars[1].pool_cur, 1);
+        assert_eq!(battle.seq.state, SeqState::Finish);
+        assert_eq!((battle.seq.winner, battle.seq.reason), (WIN_P1, REASON_KO));
     }
 
     #[test]

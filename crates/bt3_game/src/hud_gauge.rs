@@ -1121,6 +1121,8 @@ pub(crate) struct TimerPart {
     prev: i32,
     pulse: Ramp,
     slide: Ramp,
+    /// `isClock`: a clock (digits coloured by the time left), else a count.
+    is_clock: bool,
     /// `BATTLE_FLAG_PAUSE`: the slide and the pulse stand still.
     pub(crate) paused: bool,
 }
@@ -1152,6 +1154,7 @@ impl TimerPart {
             prev: 0,
             pulse: Ramp::default(),
             slide: Ramp::default(),
+            is_clock: false,
             paused: false,
         }
     }
@@ -1160,12 +1163,27 @@ impl TimerPart {
     pub(crate) fn set_time(&mut self, seconds: i32) {
         self.prev = self.value;
         self.value = seconds;
+        self.is_clock = true;
         let frame = &mut self.spr[0];
         frame.set_rect(0, 64, 0, 30);
         frame.set_uv(0, 64, 0, 30);
         frame.center();
         frame.move_by(0, -7);
         self.spr[4].show(false);
+    }
+
+    /// `HudTimer_SetCount`: a count in place of the clock (mode 3's opponents beaten), in the other frame (64x32
+    /// at v = 32) with its label.
+    pub(crate) fn set_count(&mut self, count: i32) {
+        self.prev = count;
+        self.value = count;
+        self.is_clock = false;
+        let frame = &mut self.spr[0];
+        frame.set_rect(0, 64, 0, 32);
+        frame.set_uv(0, 64, 32, 64);
+        frame.center();
+        frame.move_by(0, -6);
+        self.spr[4].show(true);
     }
 
     /// The root's and the clock's updates, then the clock's draw.
@@ -1236,7 +1254,11 @@ impl TimerPart {
                 self.spr[i].move_by(w, 0);
             }
         }
-        if (0..4).contains(&value) {
+        if !self.is_clock {
+            for i in 1..4 {
+                self.spr[i].set_tex(0, 0);
+            }
+        } else if (0..4).contains(&value) {
             if value != self.prev {
                 self.pulse.start(0.5, 1.0, 0.0);
             }
@@ -1322,6 +1344,31 @@ mod tests {
             }
         }
         seen
+    }
+
+    /// Mode 3's count takes the clock's place: the other frame and the label, the digits never in the clock's
+    /// warning colours.
+    #[test]
+    fn the_timer_counts_in_place_of_the_clock() {
+        let sheet = HudSheet {
+            base: 0,
+            sizes: vec![[128, 128]; 8],
+            views: Vec::new(),
+        };
+        let mut t = TimerPart::new(&sheet);
+        t.set_time(2);
+        t.update_digits();
+        assert_eq!(t.spr[1].sub, 2);
+        assert!(t.spr[4].hidden);
+        t.set_count(2);
+        t.update_digits();
+        assert_eq!(t.spr[0].uv, [0, 64, 32, 64]);
+        assert!(!t.spr[4].hidden);
+        assert_eq!(t.spr[1].sub, 0);
+        assert_eq!(t.spr[1].uv, [64, 96, 0, 32]);
+        t.set_time(30);
+        assert_eq!(t.spr[0].uv, [0, 64, 0, 30]);
+        assert!(t.spr[4].hidden);
     }
 
     #[test]

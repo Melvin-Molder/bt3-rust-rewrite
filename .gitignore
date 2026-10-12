@@ -28,6 +28,7 @@
 !/crates/bt3_data/src/motion.rs
 !/crates/bt3_data/src/stage_model.rs
 !/crates/bt3_data/src/stage_surf.rs
+!/crates/bt3_data/src/survival.rs
 !/crates/bt3_data/src/cam_anim.rs
 !/crates/bt3_data/src/chara_data.rs
 !/crates/bt3_data/src/elf.rs

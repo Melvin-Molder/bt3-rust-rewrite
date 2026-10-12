@@ -1280,13 +1280,18 @@ impl Hud {
     pub(crate) fn pre_update(
         &mut self,
         time_left: i32,
+        count: Option<i32>,
         sides: &[SideGauge; 2],
         teams: &[crate::hud_team::SideTeam; 2],
         combos: &[crate::hud_combo::SideCombo; 2],
         prompts: &[crate::hud_prompt::SidePrompt; 2],
         paused: bool,
     ) {
-        self.timer.set_time(time_left);
+        // Mode 3 counts the opponents beaten in place of the time.
+        match count {
+            Some(n) => self.timer.set_count(n),
+            None => self.timer.set_time(time_left),
+        }
         self.prompt.paused = paused;
         for (side, p) in prompts.iter().enumerate() {
             self.prompt.set_side(side, p);

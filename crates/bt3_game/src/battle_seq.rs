@@ -669,10 +669,12 @@ impl Battle {
                     input.sounds.push(TitleSound::PauseSeVoice(true));
                 }
             }
+            let mut set_level = None;
             if self.seq.pause_menu
                 && let Some(menu) = &mut self.menu
             {
                 let pad = self.seq.result_pad;
+                menu.cpu_level = self.ai.level(1);
                 let (open, reason) = menu.update(
                     pad as i32,
                     0,
@@ -692,6 +694,11 @@ impl Battle {
                     self.seq.pause_menu = false;
                     self.seq.paused = false;
                 }
+                set_level = menu.set_cpu_level.take();
+            }
+            // The CPU level menu's BtlAiMgr_SetLevel(1, level).
+            if let Some(level) = set_level {
+                self.set_ai_level(1, level);
             }
         }
         if self.check_battle_end(input) {

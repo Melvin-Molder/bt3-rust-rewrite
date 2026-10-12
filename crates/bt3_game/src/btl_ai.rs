@@ -288,6 +288,34 @@ impl AiMgr {
         mgr
     }
 
+    /// `BtlAiMgr_GetLevel`.
+    pub(crate) fn level(&self, side: usize) -> i32 {
+        self.work[side].level
+    }
+
+    /// `BtlAiMgr_SetLevel`: the level, the rates and totals that depend on it, the action sequence restarted.
+    pub(crate) fn set_level(&mut self, c: &mut Ctx, side: usize, level: i32) {
+        let shared = Shared {
+            dist: self.dist,
+            radius_sum: self.radius_sum,
+            sight: self.sight,
+        };
+        let w = &mut self.work[side];
+        w.level = level;
+        if !w.active {
+            return;
+        }
+        let mut ai = Ai {
+            w,
+            c,
+            g: shared,
+            opp_kind: 0,
+        };
+        ai.build_rates();
+        ai.build_totals();
+        ai.w.seq.reset();
+    }
+
     /// `BtlAiMgr_ResetSide` (`AiThink_ResetSide(side, 0)`), after a character change.
     pub(crate) fn reset_one(&mut self, c: &mut Ctx, side: usize, level: i32, kind: usize) {
         self.reset_side(c, side, level, kind);

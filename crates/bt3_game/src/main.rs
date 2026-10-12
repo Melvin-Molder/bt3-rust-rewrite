@@ -320,6 +320,8 @@ struct Game {
     skip_to_menu: bool,
     /// `--battle`: start straight at `Battle_Main` with characters 0 and 1 on stage 0.
     skip_to_battle: bool,
+    /// `--mode N` (`--course C` for survival): the battle mode `--battle` starts in.
+    battle_mode: (i32, usize),
     se: se::SoundEffects,
     font: font::Font,
 }
@@ -337,6 +339,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut skip_to_title = false;
     let mut skip_to_menu = false;
     let mut skip_to_battle = false;
+    let mut battle_mode = (0, 0);
     let mut log_fps = false;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -350,6 +353,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if argument == "--battle" {
             skip_to_title = true;
             skip_to_battle = true;
+        } else if argument == "--mode" {
+            // Story mode (1) needs its script, which is not ported; nothing sets up 8 or 9.
+            battle_mode.0 = arguments
+                .next()
+                .and_then(|value| value.to_string_lossy().parse::<i32>().ok())
+                .filter(|value| matches!(value, 0 | 2..=7))
+                .ok_or("--mode requires a battle mode of 0 or 2 to 7")?;
+            skip_to_title = true;
+            skip_to_battle = true;
+        } else if argument == "--course" {
+            battle_mode.1 = arguments
+                .next()
+                .and_then(|value| value.to_string_lossy().parse::<usize>().ok())
+                .filter(|value| *value < bt3_data::survival::COURSES)
+                .ok_or("--course requires a survival course of 0 to 2")?;
         } else if argument == "--screen" {
             let value = arguments
                 .next()
@@ -510,6 +528,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_to_title,
             skip_to_menu,
             skip_to_battle,
+            battle_mode,
             se: effects,
             font,
         })
@@ -933,12 +952,13 @@ fn run_frames(
     let pad2 = gamepads.iter().count() >= 2;
     if std::mem::take(&mut game.skip_to_title) {
         if game.skip_to_battle {
-            // 1P vs COM: pad 0 against the computer.
-            let mut setup = BattleSetup::default();
-            setup.sides[1].chara = 1;
-            setup.sides[1].control = 2;
-            setup.sides[1].pad = 1;
-            start_battle(&mut game, setup);
+            match quick_battle_setup(&mut game) {
+                Ok(setup) => start_battle(&mut game, setup),
+                Err(error) => {
+                    error!("cannot set up the battle: {error}");
+                    game.scene = Scene::Black;
+                }
+            }
         } else if game.skip_to_menu {
             load_menu_bank(&mut game);
             game.save_loaded = true;
@@ -1220,6 +1240,44 @@ fn leave_battle(
 
 /// `Battle_Main` from `Battle_Init`: `Battle_Load` shows the loading screen (it takes over the shared generators)
 /// while the files are read.
+/// The battle `--battle` / `--mode` start: 1P vs COM, pad 0 against the computer. Survival (mode 3) plays the
+/// course's opponents (`SurvSel_SetupBattle` from menu archive 3, section 2); free training (mode 6) takes the
+/// character select's rule for it (announcer 1, no time limit, no stage change, changes allowed). The other modes keep the versus
+/// rule under their own mode, whose rules `BattleSetup_FinishEx` applies.
+fn quick_battle_setup(game: &mut Game) -> Result<BattleSetup, Box<dyn std::error::Error>> {
+    let (mode, course) = game.battle_mode;
+    if mode == 3 {
+        let mut image = Iso9660::open(&game.iso_path)?;
+        let pack = read_file(&mut image, duel_menu::ARCHIVE_FILE_ID + 3)?;
+        let res = bpe::decode(bt3_data::pack_section(&pack, 2)?)?;
+        let data = bt3_data::survival::SurvivalData::parse(&res)?;
+        return BattleSetup::survival(
+            &data,
+            course,
+            (0, 0, [0; 8]),
+            &mut game.random,
+            &mut game.libc_random,
+        )
+        .ok_or_else(|| "the survival course names a missing opponent".into());
+    }
+    let mut setup = BattleSetup {
+        mode,
+        ..BattleSetup::default()
+    };
+    setup.sides[1].chara = 1;
+    setup.sides[1].control = 2;
+    setup.sides[1].pad = 1;
+    if mode == 6 {
+        setup.announcer = 1;
+        setup.sides[1].cpu_level = -1;
+        for side in &mut setup.sides {
+            side.change_allowed = 1;
+        }
+    }
+    setup.finish();
+    Ok(setup)
+}
+
 fn start_battle(game: &mut Game, setup: BattleSetup) {
     info!("battle setup {setup:?}");
     let game_random = std::mem::replace(&mut game.random, GameRandom::from_key(&[0]));
@@ -1239,7 +1297,9 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
         Err(error) => error!("cannot load the loading screen: {error}"),
     }
     let iso_path = game.iso_path.clone();
+    let job_setup = setup.clone();
     let job = std::thread::spawn(move || {
+        let setup = job_setup;
         let mut image = Iso9660::open(&iso_path).map_err(|e| e.to_string())?;
         // The executable SYSTEM.CNF boots holds the battle's constant tables.
         let cnf = image.read_file("SYSTEM.CNF").map_err(|e| e.to_string())?;

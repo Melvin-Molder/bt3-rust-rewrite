@@ -2,9 +2,9 @@
 //! executable's data (0x2C4E70..0x2C6070), the engine that runs and draws one tree, and the pause-menu wrapper that
 //! turns a picked "result" item into the battle result.
 //!
-//! The versus pause menu (`PauseMenu_Update(pad, 0)` while the fight is paused, with its skill-list page) and
-//! result menu (`PauseMenu_Update(pad, 1)` from the end state) are wired up. The controls page (item type 4) and
-//! the CPU level menu, which no versus tree has, are not ported.
+//! The pause menu (`PauseMenu_Update(pad, 0)` while the fight is paused, with its skill-list page, the tutorials'
+//! controls page and free training's CPU level menu) and the versus result menu (`PauseMenu_Update(pad, 1)` from
+//! the end state) are wired up.
 
 use std::collections::HashMap;
 use std::io;
@@ -22,8 +22,13 @@ pub(crate) const RESULT_VERSUS: u32 = 0x2C_5408;
 /// `gPauseMenuReplayRec` / `gPauseMenuResultReplayRec`: the trees while the battle's own replay plays.
 pub(crate) const PAUSE_REPLAY: u32 = 0x2C_5560;
 pub(crate) const RESULT_REPLAY: u32 = 0x2C_56E8;
+/// `gPauseMenuMode2` .. `gPauseMenuMode7`: the pause menus of battle modes 2..7 (which have no result menu).
+pub(crate) const PAUSE_MODES: [u32; 6] = [
+    0x2C_5B00, 0x2C_5BF8, 0x2C_5D20, 0x2C_5E48, 0x2C_5FD0, 0x2C_6038,
+];
 /// The yes / no box and the CPU level menu, whose cursors the item callbacks set.
 const CONFIRM_MENU: u32 = 0x2C_4F00;
+const CPU_LEVEL_MENU: u32 = 0x2C_5158;
 /// Item callbacks by address.
 const FUNC_CONFIRM: u32 = 0x21_2BA0;
 const FUNC_SKILL_LIST: u32 = 0x21_2C08;
@@ -106,6 +111,7 @@ struct Menu {
 pub(crate) struct Tree {
     menus: Vec<Menu>,
     confirm: Option<usize>,
+    cpu_level: Option<usize>,
 }
 
 impl Tree {
@@ -123,10 +129,12 @@ impl Tree {
         let mut tree = Tree {
             menus: Vec::new(),
             confirm: None,
+            cpu_level: None,
         };
         let mut seen = HashMap::new();
         tree.read_menu(elf, addr, &mut seen, 0)?;
         tree.confirm = seen.get(&CONFIRM_MENU).copied();
+        tree.cpu_level = seen.get(&CPU_LEVEL_MENU).copied();
         Ok(tree)
     }
 
@@ -237,6 +245,13 @@ impl Tree {
         }
     }
 
+    /// `BtlMenu_SetPicked`.
+    fn set_picked(&mut self, m: usize, id: i32, picked: bool) {
+        if let Some((m, i)) = self.find_item(m, id) {
+            self.menus[m].items[i].picked = picked;
+        }
+    }
+
     /// `BtlMenu_Reset`.
     fn reset(&mut self, m: usize) {
         let menu = &mut self.menus[m];
@@ -333,10 +348,20 @@ impl MenuTexts {
 
     /// `BtlMenu_GetItemText(n)`.
     fn item(&self, n: i32) -> &[u16] {
-        usize::try_from(n + 8)
+        self.text(n + 8)
+    }
+
+    /// `BtlMenu_GetText(n)`.
+    fn text(&self, n: i32) -> &[u16] {
+        usize::try_from(n)
             .ok()
             .and_then(|i| self.0.get(i))
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// `BtlMenu_GetControlsText(0, tutorial)`: the controls page of a tutorial for the pad type 0 (texts 0x26..).
+    fn controls(&self, tutorial: i32) -> &[u16] {
+        self.text(0x26 + tutorial)
     }
 }
 
@@ -364,6 +389,12 @@ pub(crate) struct PauseMenu {
     pub(crate) text_ctx: [TextCtx; 2],
     /// `FontIcon_ResetAnim` was called during the update (the caller resets the font's clock).
     pub(crate) reset_anim: bool,
+    /// `gProgress->tutorial`: the tutorial whose controls page mode 5's menu shows.
+    pub(crate) tutorial: i32,
+    /// `BtlAiMgr_GetLevel(1)`, which the CPU level menu starts from.
+    pub(crate) cpu_level: i32,
+    /// `BtlAiMgr_SetLevel(1, level)` asked by the CPU level menu during the update.
+    pub(crate) set_cpu_level: Option<i32>,
 }
 
 impl PauseMenu {
@@ -382,6 +413,9 @@ impl PauseMenu {
                 body_changed: false,
             }; 2],
             reset_anim: false,
+            tutorial: 0,
+            cpu_level: 0,
+            set_cpu_level: None,
         }
     }
 
@@ -425,6 +459,8 @@ impl PauseMenu {
             script: self.scripts[side].as_deref(),
             text_ctx: self.text_ctx[side],
             reset_anim: &mut self.reset_anim,
+            cpu_level: self.cpu_level,
+            set_cpu_level: &mut self.set_cpu_level,
         };
         if run.update(None, 0, pad, input) {
             self.active = false;
@@ -465,6 +501,7 @@ impl PauseMenu {
             list: &self.lists[side],
             script: self.scripts[side].as_deref(),
             ctx: self.text_ctx[side],
+            tutorial: self.tutorial,
         };
         draw_menu(&self.trees[which], 0, self.pad, d, &skills, out);
     }
@@ -484,13 +521,16 @@ struct Run<'r> {
     script: Option<&'r [u16]>,
     text_ctx: TextCtx,
     reset_anim: &'r mut bool,
+    cpu_level: i32,
+    set_cpu_level: &'r mut Option<i32>,
 }
 
-/// The skill list a page draws.
+/// What a page draws: the skill list, and the controls page's tutorial.
 struct Skills<'s> {
     list: &'s SkillList,
     script: Option<&'s [u16]>,
     ctx: TextCtx,
+    tutorial: i32,
 }
 
 impl Run<'_> {
@@ -621,8 +661,11 @@ impl Run<'_> {
         }
     }
 
-    /// The item callbacks of pause_menu.c (the CPU level menu, in no versus tree, does nothing here).
+    /// The item callbacks of pause_menu.c.
     fn call_func(&mut self, func: Func, m: usize, selected: bool, press: MenuInput) -> i32 {
+        if func == Func::CpuLevel {
+            self.cpu_level_func(m, selected);
+        }
         if func == Func::SkillList && self.tree.menus[m].state == STATE_ACTIVE {
             self.skill_list_func(press);
         }
@@ -635,6 +678,32 @@ impl Run<'_> {
             }
         }
         0
+    }
+
+    /// `PauseMenu_CpuLevelFunc`: on opening, the choices cleared and the cursor put on the side 1 AI's level
+    /// (row 1 for none, else 2 + its setting); while the menu is up, the level under the cursor is side 1's.
+    fn cpu_level_func(&mut self, m: usize, selected: bool) {
+        let Some(c) = self.tree.cpu_level else {
+            return;
+        };
+        if selected {
+            for id in 2..8 {
+                self.tree.set_value(self.top, id, 0);
+                self.tree.set_picked(self.top, id, false);
+            }
+            self.tree.menus[c].cursor = match self.cpu_level {
+                -1 => 1,
+                level => cpu_level_setting(level) + 2,
+            };
+        }
+        if self.tree.menus[m].state == STATE_ACTIVE {
+            let cursor = self.tree.menus[c].cursor;
+            *self.set_cpu_level = Some(if cursor == 1 {
+                -1
+            } else {
+                cpu_level_from_setting(cursor - 2)
+            });
+        }
     }
 
     /// `BtlMenu_Update`: returns true once the menu finished closing.
@@ -1065,6 +1134,55 @@ fn draw_frame(
     }
 }
 
+/// `CpuLevel_FromSetting`: the difficulty settings 0..4 as CPU levels (anything else 0).
+pub(crate) fn cpu_level_from_setting(setting: i32) -> i32 {
+    match setting {
+        1 => 6,
+        2 => 13,
+        3 => 21,
+        4 => 29,
+        _ => 0,
+    }
+}
+
+/// `CpuLevel_ToSetting`: a CPU level's difficulty setting; -1 stays -1, a level in between gives 0.
+pub(crate) fn cpu_level_setting(level: i32) -> i32 {
+    match level {
+        -1 => -1,
+        6 => 1,
+        13 => 2,
+        21 => 3,
+        29 => 4,
+        _ => 0,
+    }
+}
+
+/// `BtlText_DrawControls`: the title (row 4 of sheet entry 0) centred at the top and the tutorial's controls
+/// text below it.
+fn draw_controls([x0, x1, y0]: [i32; 3], tutorial: i32, d: &mut MenuDraw, out: &mut Vec<HudPrim>) {
+    let (cx, cy) = ((x0 + (x1 - x0) / 2) as f32, (y0 + 0xE) as f32);
+    out.push(sprite(
+        d.sheet,
+        0,
+        [cx - 128.0, cy - 16.0, cx + 128.0, cy + 16.0],
+        [0.0, 32.0 * 4.0, 256.0, 32.0 * 5.0],
+        GREY,
+    ));
+    let Some(font) = d.font.as_deref_mut() else {
+        return;
+    };
+    font.push_style();
+    let s = &mut font.style;
+    s.shadow_mode = 2;
+    s.spacing_x = 1;
+    s.spacing_y = 4;
+    s.scale = 1.0;
+    s.color = rgba(0xFF, 0xFF, 0xFF, 0x80);
+    s.shadow_color = rgba(0, 0x10, 0x10, 0x40);
+    font.print_at(x0 + 0x10, y0 + 0x2A, d.texts.controls(tutorial));
+    font.pop_style();
+}
+
 /// `BtlMenu_Draw`: the growing box while a menu opens or closes; when active, the deepest open menu.
 fn draw_menu(
     tree: &Tree,
@@ -1098,8 +1216,15 @@ fn draw_menu(
                 if is_skills {
                     draw_skill_page(tree, m, [x, y, w, h], d, skills, out);
                 } else {
-                    // The controls page (no versus tree has one) draws its box only.
                     draw_frame(d.sheet, out, x, x + w, y, y + h, 0);
+                    if tree.is_page(m) {
+                        draw_controls(
+                            [x + menu.pad_x, x - menu.pad_x + w, y + menu.pad_y],
+                            skills.tutorial,
+                            d,
+                            out,
+                        );
+                    }
                 }
                 if !page {
                     let ty = y + menu.pad_y;
@@ -1228,6 +1353,7 @@ mod tests {
         let tree = Tree {
             menus: vec![top, yes_no],
             confirm: Some(1),
+            cpu_level: None,
         };
         PauseMenu::new(tree.clone(), tree)
     }
@@ -1286,5 +1412,67 @@ mod tests {
             },
         );
         assert_eq!(frame(&mut m, cross), Some(0x10));
+    }
+
+    /// The pause menus of modes 2..7 read from the executable: free training's leads to the CPU level menu, which
+    /// starts on the AI's level and hands the level under its cursor back; the tutorials' has the controls page.
+    #[test]
+    fn real_mode_menus_set_the_cpu_level() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
+            return;
+        };
+        let cnf = image.read_file("SYSTEM.CNF").unwrap();
+        let exe = bt3_data::elf::boot_path(&cnf).unwrap();
+        let elf = Elf::parse(image.read_file(&exe).unwrap()).unwrap();
+        let trees: Vec<Tree> = PAUSE_MODES
+            .iter()
+            .map(|&a| Tree::read(&elf, a).unwrap())
+            .collect();
+        // Mode 3: the skill list, then "quit" behind the yes / no box; mode 7 only its title.
+        assert_eq!(trees[1].item_ids(), [1, 8, 9, 20, 1, 1, 0, 1]);
+        assert_eq!(trees[5].item_ids(), [1]);
+        let controls = trees[3]
+            .menus
+            .iter()
+            .position(|m| m.items.first().is_some_and(|i| i.kind == ITEM_CONTROLS));
+        assert!(controls.is_some_and(|m| trees[3].is_page(m)));
+        assert!(trees[4].cpu_level.is_some());
+
+        let mut m = PauseMenu::new(trees[4].clone(), trees[4].clone());
+        m.cpu_level = 13;
+        let texts = MenuTexts::default();
+        let mut sounds = Vec::new();
+        let mut step = |m: &mut PauseMenu, input: MenuInput| {
+            m.update(0, 0, input, None, &texts, &mut sounds);
+            m.set_cpu_level.take()
+        };
+        for _ in 0..6 {
+            assert_eq!(step(&mut m, MenuInput::default()), None);
+        }
+        let down = MenuInput {
+            down: true,
+            ..MenuInput::default()
+        };
+        step(&mut m, down);
+        step(&mut m, down);
+        let cross = MenuInput {
+            cross: true,
+            ..MenuInput::default()
+        };
+        // The callback runs from the next frame: level 13 is setting 2, the cursor on row 4.
+        assert_eq!(step(&mut m, cross), None);
+        assert_eq!(step(&mut m, MenuInput::default()), Some(13));
+        let cpu = m.trees[0].cpu_level.unwrap();
+        assert_eq!(m.trees[0].menus[cpu].cursor, 4);
+        for _ in 0..6 {
+            step(&mut m, MenuInput::default());
+        }
+        step(&mut m, down);
+        assert_eq!(m.trees[0].menus[cpu].cursor, 5);
+        assert_eq!(step(&mut m, MenuInput::default()), Some(21));
+        assert_eq!(cpu_level_setting(-1), -1);
+        assert_eq!(cpu_level_from_setting(4), 29);
     }
 }

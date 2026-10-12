@@ -335,8 +335,18 @@ pub struct SideSetup {
     pub switch_enabled: i32,
 }
 
-/// What `CharSel_Run` hands to the battle (`BattleSetup_SetRule` and the two sides).
+/// One opponent of mode 3's pool (`BattleSetup_SetPoolMember`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PoolMember {
+    pub chara: i32,
+    pub costume: i32,
+    pub cpu_level: i32,
+    /// 1-based item ids.
+    pub items: [u16; 8],
+}
+
+/// What the menus hand to the battle (`BattleSetup_SetRule`, the two sides and mode 3's opponent pool).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct BattleSetup {
     pub screen_mode: i32,
     pub mode: i32,
@@ -346,10 +356,146 @@ pub struct BattleSetup {
     pub stage: i32,
     pub stage_change: i32,
     pub sides: [SideSetup; 2],
+    /// `Battle_GetWork5A8()`: the opponents side 1 fields one after the other in mode 3.
+    pub pool: Vec<PoolMember>,
+    /// `gProgress->tutorial`: the tutorial whose controls mode 5's pause menu shows.
+    pub tutorial: i32,
+}
+
+impl BattleSetup {
+    /// `BattleSetup_FinishEx`'s mode rules: `BattleSetup_FixForMode` (split screen only in modes 0 and 4, mode 9
+    /// without a time limit and mode 7 with limit 5; one fighter a side in modes 4 and 6, and for the player in mode
+    /// 3; the player at a pad and the computer on side 1 in modes 3 and 6, side 1 a dummy at CPU level -1 in mode 6;
+    /// the computer on both sides in modes 7 and 9, at level 29 in 9; mode 9 is then played as 6), then mode 3's
+    /// first opponent as side 1's fighter. No menu sets up mode 9, and its AI type 0 is not kept.
+    pub fn finish(&mut self) {
+        let mode = self.mode;
+        if mode != 0 && mode != 4 && self.screen_mode == 1 {
+            self.screen_mode = 0;
+        }
+        if mode == 9 {
+            self.time_limit = 0;
+        }
+        if mode == 7 {
+            self.time_limit = 5;
+        }
+        for (i, side) in self.sides.iter_mut().enumerate() {
+            match mode {
+                9 => {
+                    if side.control != 2 {
+                        side.control = 2;
+                        side.cpu_level = 29;
+                    }
+                }
+                6 => {
+                    side.team_count = 0;
+                    if i == 0 {
+                        side.control = 0;
+                    } else {
+                        side.control = 2;
+                        side.cpu_level = -1;
+                    }
+                }
+                4 => side.team_count = 0,
+                3 => {
+                    if i == 0 {
+                        side.team_count = 0;
+                        side.control = 0;
+                    } else {
+                        side.control = 2;
+                    }
+                }
+                7 => side.control = 2,
+                _ => {}
+            }
+        }
+        if mode == 9 {
+            self.mode = 6;
+        }
+        if self.mode == 3
+            && let Some(first) = self.pool.first()
+        {
+            let side = &mut self.sides[1];
+            side.chara = first.chara;
+            side.costume = first.costume;
+            side.cpu_level = first.cpu_level;
+            side.items = first.items;
+        }
+    }
+
+    /// `SurvSel_SetupBattle` for course `course`, then `Ub_SetupSolo` with the player's fighter: mode 3 against
+    /// one computer fighter backed by the course's fifty opponents. A random announcer, stage or opponent is drawn
+    /// with `Rand_Range` in that order; the random music (0x18) with `rand() % 24` (`BattleSetup_SetRule`).
+    pub fn survival(
+        data: &bt3_data::survival::SurvivalData,
+        course: usize,
+        player: (i32, i32, [u16; 8]),
+        random: &mut GameRandom,
+        libc: &mut crate::rng::LibcRandom,
+    ) -> Option<Self> {
+        use bt3_data::survival::RANDOM;
+        let def = data.courses.get(course)?;
+        let announcer = if def.announcer == RANDOM {
+            random.range(8) as i32
+        } else {
+            def.announcer
+        };
+        let stage = if def.stage == RANDOM {
+            random.range(0x23) as i32
+        } else {
+            def.stage
+        };
+        let bgm = if def.bgm == RANDOM { 0x18 } else { def.bgm };
+        let bgm = if bgm == 24 { libc.rand() % 24 } else { bgm };
+        let mut pool = Vec::with_capacity(def.opp.len());
+        for &i in &def.opp {
+            let opp = data.opponents.get(usize::try_from(i).ok()?)?;
+            let chara = if opp.chara == RANDOM {
+                let n = random.range(data.random_charas.len() as u32) as usize;
+                *data.random_charas.get(n)?
+            } else {
+                opp.chara
+            };
+            pool.push(PoolMember {
+                chara,
+                costume: opp.costume,
+                cpu_level: opp.cpu_level,
+                items: opp.items(),
+            });
+        }
+        let side = |control, pad, change_allowed| SideSetup {
+            control,
+            pad,
+            change_allowed,
+            switch_enabled: 1,
+            ..SideSetup::default()
+        };
+        let mut setup = Self {
+            screen_mode: 0,
+            mode: 3,
+            bgm,
+            time_limit: def.time_limit,
+            announcer,
+            stage,
+            stage_change: i32::from(def.stage_change != 0),
+            sides: [
+                side(0, 0, 1),
+                side(2, 1, i32::from(def.change_allowed != 0)),
+            ],
+            pool,
+            tutorial: 0,
+        };
+        let (chara, costume, items) = player;
+        setup.sides[0].chara = chara;
+        setup.sides[0].costume = costume;
+        setup.sides[0].items = items;
+        setup.finish();
+        Some(setup)
+    }
 }
 
 /// How `CharSel_Run` ended.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CharSelResult {
     /// 0: back to the duel menu.
     Back,
@@ -575,7 +721,7 @@ impl CharSelScreen {
     }
 
     pub fn result(&self) -> Option<CharSelResult> {
-        self.done
+        self.done.clone()
     }
 
     pub fn progress(&self) -> CharSelProgress {
@@ -903,6 +1049,8 @@ impl CharSelScreen {
                 team_count: 0,
                 switch_enabled: 1,
             }),
+            pool: Vec::new(),
+            tutorial: 0,
         }
     }
 
@@ -2277,5 +2425,97 @@ mod tests {
         assert_eq!(screen.progress().side[0].picked, setup.sides[0].chara);
         assert!(looked);
         assert_eq!(setup.sides[0].items, [3, 7, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// `BattleSetup_FixForMode`: each mode's sides and rule.
+    #[test]
+    fn finish_applies_the_mode_rules() {
+        let versus = |mode| {
+            let mut s = BattleSetup {
+                mode,
+                screen_mode: 1,
+                time_limit: 2,
+                ..BattleSetup::default()
+            };
+            s.sides[0].team_count = 2;
+            s.sides[1].team_count = 2;
+            s.sides[1].control = 2;
+            s.sides[1].cpu_level = 13;
+            s.finish();
+            s
+        };
+        let s = versus(0);
+        assert_eq!((s.screen_mode, s.sides[0].team_count), (1, 2));
+        let s = versus(4);
+        assert_eq!(
+            (s.screen_mode, s.sides[0].team_count, s.sides[1].team_count),
+            (1, 0, 0)
+        );
+        let s = versus(6);
+        assert_eq!(s.screen_mode, 0);
+        assert_eq!((s.sides[1].control, s.sides[1].cpu_level), (2, -1));
+        let s = versus(7);
+        assert_eq!((s.time_limit, s.sides[0].control), (5, 2));
+        let s = versus(9);
+        assert_eq!((s.mode, s.time_limit), (6, 0));
+        assert_eq!((s.sides[0].control, s.sides[0].cpu_level), (2, 29));
+        // Side 1 was the computer already: its level stays.
+        assert_eq!(s.sides[1].cpu_level, 13);
+        let mut s = versus(3);
+        assert_eq!((s.sides[0].team_count, s.sides[1].team_count), (0, 2));
+        s.pool = vec![PoolMember {
+            chara: 7,
+            costume: 1,
+            cpu_level: 21,
+            items: [5, 0, 0, 0, 0, 0, 0, 0],
+        }];
+        s.finish();
+        assert_eq!(
+            (s.sides[1].chara, s.sides[1].cpu_level, s.sides[1].items[0]),
+            (7, 21, 5)
+        );
+    }
+
+    /// The survival courses from the ISO in `rom/`, when it is there: course 0's fifty opponents, the first of
+    /// them side 1's fighter.
+    #[test]
+    fn real_survival_courses_set_up_the_pool() {
+        use crate::duel_menu::ARCHIVE_FILE_ID;
+        use bt3_data::afs::{AfsArchive, partition_entry_for_id};
+        use bt3_data::{Iso9660, bpe};
+
+        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = Iso9660::open(&iso) else {
+            return;
+        };
+        let location = partition_entry_for_id(ARCHIVE_FILE_ID + 3);
+        let archive =
+            AfsArchive::open(&mut image, format!("DATA/PZS3US{}.AFS", location.partition)).unwrap();
+        let pack = archive.read_entry(&mut image, location.index).unwrap();
+        let res = bpe::decode(pack_section(&pack, 2).unwrap()).unwrap();
+        let data = bt3_data::survival::SurvivalData::parse(&res).unwrap();
+        for c in &data.courses {
+            println!(
+                "course: announcer {} stage {} bgm {} time {} change {}/{}",
+                c.announcer, c.stage, c.bgm, c.time_limit, c.stage_change, c.change_allowed
+            );
+        }
+        let mut random = GameRandom::from_key(&[1]);
+        let mut libc = crate::rng::LibcRandom::new(1);
+        let setup =
+            BattleSetup::survival(&data, 0, (3, 0, [0; 8]), &mut random, &mut libc).unwrap();
+        println!(
+            "pool {:?}",
+            setup.pool.iter().map(|m| m.chara).collect::<Vec<_>>()
+        );
+        assert_eq!(setup.mode, 3);
+        assert_eq!(setup.pool.len(), bt3_data::survival::OPPONENTS);
+        assert_eq!(setup.sides[0].chara, 3);
+        assert_eq!((setup.sides[0].control, setup.sides[1].control), (0, 2));
+        assert_eq!(setup.sides[1].chara, setup.pool[0].chara);
+        assert!(setup.pool.iter().all(|m| (0..0xA0).contains(&m.chara)));
+        assert!((0..35).contains(&setup.stage));
+        assert!(BattleSetup::survival(&data, 3, (3, 0, [0; 8]), &mut random, &mut libc).is_none());
     }
 }
