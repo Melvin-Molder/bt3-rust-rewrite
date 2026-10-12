@@ -1,6 +1,7 @@
-//! Draws the post pass (`crate::post`): after the scene camera has drawn the frame (stage, fighters, effects), a
-//! chain of cameras runs one group of consecutive ops with the same source and target each, in order, into the two
-//! 256 x 224 work buffers or back into the frame; the HUD's camera draws after them.
+//! Draws the post passes (`crate::post`): a chain of cameras runs one group of consecutive ops with the same source
+//! and target each, in order, into the work buffers or back into the frame. Two chains: `StgFx_DrawPre`'s between
+//! the stage camera and the fighters' camera, `StgFx_DrawPost`'s after the fighters and the effects; the HUD's
+//! camera draws after them.
 
 use std::collections::HashMap;
 
@@ -22,9 +23,12 @@ use crate::model_draw::FrameBuffers;
 use crate::post::{PostBuf, PostOp};
 
 const GS_POST_SHADER: Handle<Shader> = uuid_handle!("5e2a9c41-7b3d-4f8a-9e16-c2d84a0f7b35");
-/// The render layers of the post cameras (one each) and how many there are: a blur of three passes takes five.
-const POST_LAYER_BASE: usize = 4;
+/// The render layers of each chain's cameras (one each) and how many there are: a blur of three passes takes five.
+const POST_LAYER_BASE: [usize; 2] = [13, 4];
 const POST_CAMERAS: usize = 8;
+/// The camera orders of the chains: the pre chain after the stage camera (0), the post chain after the fighters'
+/// camera (`model_draw::FIGHTER_ORDER`).
+const POST_ORDER_BASE: [isize; 2] = [1, 10];
 
 /// One op's triangles: the source buffer, copied or blended (ALPHA 0x44), in the order of its group.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -102,9 +106,9 @@ pub struct WorkBuffers([Handle<Image>; 2], Handle<Image>);
 #[derive(Resource, Default)]
 pub struct PostMaterials(HashMap<(AssetId<Image>, bool, u16), Handle<GsPostMaterial>>);
 
-/// A post camera: its place in the chain and the image it draws into.
+/// A post camera: its chain, its place in the chain and the image it draws into.
 #[derive(Component)]
-pub struct PostCamera(usize, Option<AssetId<Image>>);
+pub struct PostCamera(usize, usize, Option<AssetId<Image>>);
 
 /// A mesh of the post pass this frame.
 #[derive(Component)]
@@ -132,19 +136,21 @@ fn spawn_post_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>)
         TextureFormat::Rgba8UnormSrgb,
         None,
     ));
-    for i in 0..POST_CAMERAS {
-        commands.spawn((
-            Camera2d,
-            Camera {
-                order: 1 + i as isize,
-                is_active: false,
-                clear_color: ClearColorConfig::None,
-                ..default()
-            },
-            RenderTarget::from(work[0].clone()),
-            RenderLayers::layer(POST_LAYER_BASE + i),
-            PostCamera(i, Some(work[0].id())),
-        ));
+    for chain in 0..2 {
+        for i in 0..POST_CAMERAS {
+            commands.spawn((
+                Camera2d,
+                Camera {
+                    order: POST_ORDER_BASE[chain] + i as isize,
+                    is_active: false,
+                    clear_color: ClearColorConfig::None,
+                    ..default()
+                },
+                RenderTarget::from(work[0].clone()),
+                RenderLayers::layer(POST_LAYER_BASE[chain] + i),
+                PostCamera(chain, i, Some(work[0].id())),
+            ));
+        }
     }
     commands.insert_resource(WorkBuffers(work, wide));
 }
@@ -191,42 +197,44 @@ pub fn sync_post(
         PostBuf::Work(i) => work.0[i & 1].clone(),
         PostBuf::Wide => work.1.clone(),
     };
-    let groups = groups(&game.post_ops);
+    let chains = [groups(&game.pre_ops), groups(&game.post_ops)];
     for (mut cam, mut camera, mut target) in &mut cameras {
-        match groups.get(cam.0) {
+        match chains[cam.0].get(cam.1) {
             Some(g) => {
                 camera.is_active = true;
                 let want = image(g[0].target);
-                if cam.1 != Some(want.id()) {
-                    cam.1 = Some(want.id());
+                if cam.2 != Some(want.id()) {
+                    cam.2 = Some(want.id());
                     *target = RenderTarget::from(want);
                 }
             }
             None => camera.is_active = false,
         }
     }
-    for (n, group) in groups.iter().enumerate().take(POST_CAMERAS) {
-        for (k, op) in group.iter().enumerate() {
-            let texture = image(op.source);
-            let key = (texture.id(), op.blend, k as u16);
-            let material = cache
-                .0
-                .entry(key)
-                .or_insert_with(|| {
-                    materials.add(GsPostMaterial {
-                        texture,
-                        blend: op.blend,
-                        order: k as u16,
+    for (chain, groups) in chains.iter().enumerate() {
+        for (n, group) in groups.iter().enumerate().take(POST_CAMERAS) {
+            for (k, op) in group.iter().enumerate() {
+                let texture = image(op.source);
+                let key = (texture.id(), op.blend, k as u16);
+                let material = cache
+                    .0
+                    .entry(key)
+                    .or_insert_with(|| {
+                        materials.add(GsPostMaterial {
+                            texture,
+                            blend: op.blend,
+                            order: k as u16,
+                        })
                     })
-                })
-                .clone();
-            commands.spawn((
-                PostSlot,
-                Mesh2d(meshes.add(op_mesh(op))),
-                MeshMaterial2d(material),
-                Transform::default(),
-                RenderLayers::layer(POST_LAYER_BASE + n),
-            ));
+                    .clone();
+                commands.spawn((
+                    PostSlot,
+                    Mesh2d(meshes.add(op_mesh(op))),
+                    MeshMaterial2d(material),
+                    Transform::default(),
+                    RenderLayers::layer(POST_LAYER_BASE[chain] + n),
+                ));
+            }
         }
     }
 }

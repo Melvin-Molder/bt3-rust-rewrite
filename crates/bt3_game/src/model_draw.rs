@@ -35,6 +35,12 @@ const GS_DEPTH_SHADER: Handle<Shader> = uuid_handle!("8a1f3c52-6d07-4b9e-a2c4-5e
 const GS_DEPTH_CLUT_SHADER: Handle<Shader> = uuid_handle!("3b6e9d14-2f8a-4c71-b5e0-9a4d7c2e8f15");
 /// The layer of the camera that draws the depth buffer's spare byte.
 const DEPTH_LAYER: usize = 12;
+/// The fighters' camera (`BtlObjDraw_Draw` and after): its layer and order, between `StgFx_DrawPre`'s post chain
+/// and `StgFx_DrawPost`'s. It draws the stage's depth again first (depth only), as the GS depth buffer keeps it.
+const FIGHTER_LAYER: usize = 21;
+pub const FIGHTER_ORDER: isize = 9;
+/// The stage's depth before everything else of the fighters' camera.
+const STAGE_Z_SORT: f32 = -1000.0;
 /// `StgFx_DrawPre`'s depth tint: after the stage, before the back tints.
 const DEPTH_TINT_SORT: f32 = -250.0;
 /// GS Z is 24 bits.
@@ -177,7 +183,9 @@ impl Material2d for GsStageMaterial {
 
 /// A depth-writing stage material as the depth byte's pass draws it (`gs_depth.wgsl`): the stage pass's alpha test
 /// and depth, the byte for colour.
+/// With `z_only` it writes the depth alone, for the fighters' camera.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[bind_group_data(GsDepthKey)]
 pub struct GsDepthMaterial {
     #[texture(0)]
     #[sampler(1)]
@@ -185,6 +193,20 @@ pub struct GsDepthMaterial {
     #[uniform(2)]
     params: Vec4,
     order: u16,
+    z_only: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GsDepthKey {
+    z_only: bool,
+}
+
+impl From<&GsDepthMaterial> for GsDepthKey {
+    fn from(material: &GsDepthMaterial) -> Self {
+        Self {
+            z_only: material.z_only,
+        }
+    }
 }
 
 impl Material2d for GsDepthMaterial {
@@ -197,15 +219,23 @@ impl Material2d for GsDepthMaterial {
     }
 
     fn depth_bias(&self) -> f32 {
-        f32::from(self.order) * 0.01
+        let base = if self.z_only { STAGE_Z_SORT } else { 0.0 };
+        base + f32::from(self.order) * 0.01
     }
 
     fn specialize(
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: Material2dKey<Self>,
+        key: Material2dKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         set_pipeline_state(descriptor, None, true);
+        if key.bind_group_data.z_only
+            && let Some(fragment) = &mut descriptor.fragment
+        {
+            for target in fragment.targets.iter_mut().flatten() {
+                target.write_mask = bevy::render::render_resource::ColorWrites::empty();
+            }
+        }
         Ok(())
     }
 }
@@ -278,7 +308,7 @@ impl Material2d for GsDepthClutMaterial {
 pub struct DepthPlane {
     clut: Handle<Image>,
     tint: [Handle<GsDepthClutMaterial>; 2],
-    materials: HashMap<(usize, usize, usize), Handle<GsDepthMaterial>>,
+    materials: HashMap<(usize, usize, usize, bool), Handle<GsDepthMaterial>>,
     rev: u32,
 }
 
@@ -286,9 +316,9 @@ pub struct DepthPlane {
 #[derive(Component)]
 pub struct DepthTintSlot;
 
-/// A stage slot's twin in the depth byte's pass (same mesh).
+/// A stage slot's twin (same mesh) in the depth byte's pass, or (`true`) the fighters' camera's depth.
 #[derive(Component)]
-pub struct DepthSlot(usize);
+pub struct DepthSlot(usize, bool);
 
 fn spawn_depth_plane(
     mut commands: Commands,
@@ -751,6 +781,7 @@ pub fn sync_effects(
         write_effect_mesh(&mut mesh, tris);
         commands.spawn((
             EffectSlot(index),
+            RenderLayers::layer(FIGHTER_LAYER),
             Mesh2d(meshes.add(mesh)),
             MeshMaterial2d(material(
                 index,
@@ -907,7 +938,19 @@ fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             None,
         ))
     });
+    // The stage (and the depth tint), then StgFx_DrawPre's post chain, then the fighters' camera.
     commands.spawn((Camera2d, SceneCamera, RenderTarget::from(images[0].clone())));
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: FIGHTER_ORDER,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        SceneCamera,
+        RenderTarget::from(images[0].clone()),
+        RenderLayers::layer(FIGHTER_LAYER),
+    ));
     // The HUD after the post pass's cameras (orders 1..8), the window last.
     commands.spawn((
         Camera2d,
@@ -1052,8 +1095,8 @@ pub fn sync_stage(
         plane.rev = textures.rev;
         plane.materials.clear();
     }
-    let mut depth_material = |batch: &StageBatch, textures: &StageTextures| {
-        let key = (batch.group, batch.order, batch.texture);
+    let mut depth_material = |batch: &StageBatch, textures: &StageTextures, z_only: bool| {
+        let key = (batch.group, batch.order, batch.texture, z_only);
         plane
             .materials
             .entry(key)
@@ -1062,6 +1105,7 @@ pub fn sync_stage(
                     texture: textures.images[batch.texture].clone(),
                     params: Vec4::new(stage_alpha_ref(batch.group), 0.0, 0.0, 0.0),
                     order: batch.order as u16,
+                    z_only,
                 })
             })
             .clone()
@@ -1069,7 +1113,7 @@ pub fn sync_stage(
     for (slot, mut handle, mut visibility) in &mut twins {
         match game.stage_batches.get(slot.0) {
             Some(batch) if matches!(batch.group, 1 | 2 | 6) => {
-                let wanted = depth_material(batch, &textures);
+                let wanted = depth_material(batch, &textures, slot.1);
                 if handle.0 != wanted {
                     handle.0 = wanted;
                 }
@@ -1107,18 +1151,20 @@ pub fn sync_stage(
             MeshMaterial2d(material(batch, &mut textures)),
             Transform::default(),
         ));
-        commands.spawn((
-            DepthSlot(index),
-            Mesh2d(mesh),
-            MeshMaterial2d(depth_material(batch, &textures)),
-            Transform::default(),
-            RenderLayers::layer(DEPTH_LAYER),
-            if matches!(batch.group, 1 | 2 | 6) {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            },
-        ));
+        for z_only in [false, true] {
+            commands.spawn((
+                DepthSlot(index, z_only),
+                Mesh2d(mesh.clone()),
+                MeshMaterial2d(depth_material(batch, &textures, z_only)),
+                Transform::default(),
+                RenderLayers::layer(if z_only { FIGHTER_LAYER } else { DEPTH_LAYER }),
+                if matches!(batch.group, 1 | 2 | 6) {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                },
+            ));
+        }
     }
 }
 
@@ -1457,6 +1503,7 @@ pub fn sync_models(
         write_batch_mesh(&mut mesh, batch);
         commands.spawn((
             ModelSlot(index),
+            RenderLayers::layer(FIGHTER_LAYER),
             Mesh2d(meshes.add(mesh)),
             MeshMaterial2d(material((batch.textures, batch.look), &mut textures)),
             Transform::default(),

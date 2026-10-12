@@ -1704,6 +1704,8 @@ pub struct BattleFrame {
     pub under: Vec<EffectTri>,
     /// `StgFx_DrawPre`'s depth tint (`StgDepthTint_Draw`), over the stage before the back tints.
     pub depth_tint: Option<crate::stg_depth::DepthClutDraw>,
+    /// `StgFx_DrawPre`'s post ops after the depth tint, before the fighters.
+    pub pre: Vec<crate::post::PostOp>,
     /// `StgFx_DrawPost`: the frame redrawn through the work buffers after the effects, before the HUD (the
     /// radial blur, the shock waves).
     pub post: Vec<crate::post::PostOp>,
@@ -3427,6 +3429,7 @@ impl Battle {
             effects,
             under,
             depth_tint,
+            pre: Vec::new(),
             post,
             texture_updates,
             shadows,

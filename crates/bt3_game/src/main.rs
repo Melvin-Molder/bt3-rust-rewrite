@@ -288,6 +288,8 @@ struct Game {
     effect_point: Vec<usize>,
     /// `StgFx_DrawPost`'s redraws of the frame (the radial blur).
     post_ops: Vec<post::PostOp>,
+    /// `StgFx_DrawPre`'s ops, between the stage and the fighters.
+    pre_ops: Vec<post::PostOp>,
     /// The battle frame's depth tint (`StgDepthTint_Draw`).
     depth_tint: Option<stg_depth::DepthClutDraw>,
     /// The effect textures whose texels changed this frame (the draw writes them again).
@@ -402,6 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut battle_split = false;
     let mut log_fps = false;
     let mut shot = None;
+    let mut shot_at = 600;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--title" {
@@ -412,10 +415,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if argument == "--fps" {
             log_fps = true;
         } else if argument == "--shot" {
-            // A debugging aid: the window saved as a PNG after 600 updates, then the program ends.
+            // A debugging aid: the window saved as a PNG after `--shot-at` updates, then the program ends.
             shot = Some(PathBuf::from(
                 arguments.next().ok_or("--shot requires a file")?,
             ));
+        } else if argument == "--shot-at" {
+            shot_at = arguments
+                .next()
+                .and_then(|value| value.to_string_lossy().parse::<u32>().ok())
+                .ok_or("--shot-at requires a number of updates")?;
         } else if argument == "--battle" {
             skip_to_title = true;
             skip_to_battle = true;
@@ -604,6 +612,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rumble_sent: [0; 2],
             effect_point: Vec::new(),
             post_ops: Vec::new(),
+            pre_ops: Vec::new(),
             depth_tint: None,
             effect_updates: Vec::new(),
             hud_textures: Vec::new(),
@@ -688,7 +697,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     model_draw::add_to(&mut app);
     post_draw::add_to(&mut app);
     if let Some(path) = shot {
-        app.insert_resource(Shot(path))
+        app.insert_resource(Shot(path, shot_at))
             .add_systems(Update, take_shot);
     }
     if log_fps {
@@ -702,11 +711,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `--shot`: where the window is saved.
+/// `--shot`: where the window is saved, and after how many updates (`--shot-at`, 600 by default).
 #[derive(Resource)]
-struct Shot(PathBuf);
+struct Shot(PathBuf, u32);
 
-/// Saves the window after 600 updates and ends the program 60 updates later.
+/// Saves the window after the shot's updates and ends the program 60 updates later.
 fn take_shot(
     mut commands: Commands,
     shot: Res<Shot>,
@@ -714,12 +723,12 @@ fn take_shot(
     mut exit: MessageWriter<AppExit>,
 ) {
     *frames += 1;
-    if *frames == 600 {
+    if *frames == shot.1 {
         commands
             .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
             .observe(bevy::render::view::screenshot::save_to_disk(shot.0.clone()));
     }
-    if *frames == 660 {
+    if *frames == shot.1 + 60 {
         exit.write(AppExit::Success);
     }
 }
@@ -1546,6 +1555,7 @@ fn run_frames(
                 game.under_effects = frame.under;
                 game.shadow_effects = frame.shadows;
                 game.post_ops = frame.post;
+                game.pre_ops = frame.pre;
                 game.depth_tint = frame.depth_tint;
                 game.effect_updates.clear();
                 for (i, t) in frame.texture_updates {
@@ -1614,6 +1624,7 @@ fn leave_battle(
     game.under_effects.clear();
     game.shadow_effects.clear();
     game.post_ops.clear();
+    game.pre_ops.clear();
     game.depth_tint = None;
     game.hud_prims.clear();
     game.hud_layer = None;
@@ -1737,6 +1748,7 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
     game.under_effects.clear();
     game.shadow_effects.clear();
     game.post_ops.clear();
+    game.pre_ops.clear();
     game.depth_tint = None;
     game.hud_prims.clear();
     game.hud_layer = None;
