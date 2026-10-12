@@ -656,6 +656,10 @@ pub(crate) fn movement_fx(
     libc: &mut crate::rng::LibcRandom,
 ) {
     let side = me.player;
+    // BtlFx_SpawnReq6: the shock.
+    if me.test_fx(6) && crate::btl_blast::shock_pack(data).is_some() {
+        scene.shocks[side].start();
+    }
     if me.obj.test_event(0x400_0000_0000) {
         scene.shotfx.start(side, 0);
     }

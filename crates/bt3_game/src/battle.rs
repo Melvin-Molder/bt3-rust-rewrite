@@ -250,6 +250,8 @@ pub(crate) struct FighterModel {
     pub(crate) blast_assets: [Option<SetAssets>; 2],
     /// The drain glow's set's assets (`EftAbsorbMgr_Init`).
     pub(crate) absorb_assets: Option<SetAssets>,
+    /// The shock's animation and texture set (`EftShockMgr_Init`), as a set's assets.
+    pub(crate) shock_assets: Option<SetAssets>,
     /// The technique slots' effect packs (`effectPacks`, the second animation file's entries 1..5).
     pub(crate) tech_packs: [Option<TechPack>; 5],
     /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
@@ -612,6 +614,24 @@ pub(crate) fn load_side(
         if let Some(set) = &pack.absorb_set {
             fighter.absorb_assets =
                 Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
+        }
+        // EftShockMgr_Init: EftTexSet_Load32 of entry 2; the parts animate entry 1.
+        if let Some((anim, tex)) = &pack.shock
+            && let Ok(spr) = bt3_data::eft_pack::SprPack::parse(anim)
+            && let Ok(res) = TextureResource::parse(tex)
+        {
+            let mut ids = Vec::new();
+            for e in res.entries.iter().take(32) {
+                ids.push(assets.effect_textures.len());
+                assets
+                    .effect_textures
+                    .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+            }
+            fighter.shock_assets = Some(SetAssets {
+                tex: [vec![ids], Vec::new(), Vec::new(), Vec::new()],
+                spr: vec![Some(spr)],
+                ..SetAssets::default()
+            });
         }
     }
     let motions = read(MOTION_FILE + side.anim_chara.max(0) as u32 * 10)?;
@@ -1096,6 +1116,7 @@ fn load_fighter(
         effect: None,
         blast_assets: [None, None],
         absorb_assets: None,
+        shock_assets: None,
         tech_packs: Default::default(),
         skill_text: None,
     })
@@ -1223,6 +1244,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         effect: f.effect.as_ref(),
         blast_assets: std::array::from_fn(|i| f.blast_assets[i].as_ref()),
         absorb_assets: f.absorb_assets.as_ref(),
+        shock_assets: f.shock_assets.as_ref(),
         tech_packs: std::array::from_fn(|i| f.tech_packs[i].as_ref()),
         costume: f.costume,
         chara: f.chara,
@@ -2387,6 +2409,10 @@ impl Battle {
         let effects = {
             let ctx = DrawCtx::new(view.world2screen, view.world2view);
             let mut ot = OrderTable::new();
+            // StgFx_DrawPost's ScrWarp_Update: the shock waves step (not while paused); they are not drawn.
+            if !self.seq.paused {
+                self.roster.scene.warps.update(&ctx);
+            }
             let fxw = FxWorld {
                 sets: std::array::from_fn(|s| {
                     crate::btl_blast::world_sets(
@@ -3300,6 +3326,57 @@ mod tests {
             })
             .map(|r| fx.counts(Some(r)).iter().sum::<usize>())
             .sum()
+    }
+
+    #[test]
+    fn real_circle_dash_shock_waves_and_two_parts() {
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        // START skips the intro: the fight's camera follows P1, whose node 3 is on screen.
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, idle, 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        let data = [
+            side_data(&battle.assets.fighters[0]),
+            side_data(&battle.assets.fighters[1]),
+        ];
+        assert!(crate::btl_blast::shock_pack(&data[0]).is_some());
+        // Request 6 (a circle dash's start) starts the shock.
+        let roster = &mut battle.roster;
+        roster.chars[0].set_fx(6);
+        crate::btl_mgr::movement_fx(
+            &roster.chars[0],
+            &roster.chars[1],
+            &data[0],
+            &mut roster.scene,
+            &mut libc,
+        );
+        assert_eq!(roster.scene.shocks[0].count(), 1);
+        let list = crate::eft::SetRef {
+            side: 0,
+            list: crate::eft_shock::LIST,
+        };
+        let (mut waves, mut parts) = (0, 0);
+        for _ in 0..120 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            let scene = &battle.roster.scene;
+            waves = waves.max(scene.warps.count());
+            parts = parts.max(scene.fx.counts(Some(list))[0]);
+            if scene.shocks[0].count() == 0 {
+                break;
+            }
+        }
+        // One screen shock wave; the two animated parts of the pack's entry 6 together; then it ends.
+        assert_eq!((waves, parts), (1, 2));
+        assert_eq!(battle.roster.scene.shocks[0].count(), 0);
     }
 
     #[test]

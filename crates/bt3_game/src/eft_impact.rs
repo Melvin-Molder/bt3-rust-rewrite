@@ -13,7 +13,7 @@ pub(crate) const SET_ENTRIES: [usize; 14] = [
     0xC, 0x20, 0x25, 0x4C, 0x66, 0x73, 0x88, 0x91, 0xA4, 0xB9, 0xF2, 0x11A, 0x137, 0x158,
 ];
 /// The `SetRef::list` of set `k` of `SET_ENTRIES` (after the sides' own lists).
-pub(crate) const FIRST_LIST: usize = 8;
+pub(crate) const FIRST_LIST: usize = 9;
 /// `gEftImpactList`: 30 tasks.
 const TASKS: usize = 30;
 

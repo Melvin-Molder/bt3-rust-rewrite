@@ -1000,7 +1000,7 @@ pub(crate) struct SetRef {
     pub list: usize,
 }
 
-/// `FxWorld::sets`' entries per side: the side's own eight, then the impacts' common sets.
+/// `FxWorld::sets`' entries per side: the side's own nine, then the impacts' common sets.
 pub(crate) const SET_LISTS: usize =
     crate::eft_impact::FIRST_LIST + crate::eft_impact::SET_ENTRIES.len();
 
@@ -1016,13 +1016,13 @@ pub(crate) fn tech_list(slot: i32) -> usize {
 impl SetRef {
     /// The kind of `BtlScene_IsEffectStopped` its objects are given (`EftEmit_Spawn`'s `srcKind`): 0 for the ki
     /// blasts' sets (`EftKiBlast_SpawnParts`), 1 for the techniques' (`EftEmit_SpawnOwn`), 3 for the drain
-    /// glow's, 2 for the impacts' (both stopped by the pause alone).
+    /// glow's and the shock's parts, 2 for the impacts' (both stopped by the pause alone).
     fn stop_kind(self) -> u8 {
         if self.list < 2 {
             0
         } else if self.list < crate::eft_absorb::LIST {
             1
-        } else if self.list == crate::eft_absorb::LIST {
+        } else if self.list < crate::eft_impact::FIRST_LIST {
             3
         } else {
             2
@@ -1562,7 +1562,7 @@ impl Modules {
 
     /// `EftAnimPart_Create` with `EftAnimPart_Init`; `None` when the list is full.
     #[allow(clippy::too_many_arguments)]
-    fn anim_create(
+    pub(crate) fn anim_create(
         &mut self,
         chr: usize,
         mode: u8,
@@ -1699,7 +1699,7 @@ impl Modules {
     }
 
     /// Whether a handle names a live object (`EftEmit_UpdateAlive`'s tests).
-    fn alive(&mut self, h: Handle) -> bool {
+    pub(crate) fn alive(&mut self, h: Handle) -> bool {
         match h {
             Handle::Anim(id) => self.anim_alive(id),
             Handle::Ribbon(id) => self.ribbons.iter().any(|r| r.id == id),
@@ -1719,7 +1719,7 @@ impl Modules {
     }
 
     /// `EftEmit_KillAll`'s calls.
-    fn kill(&mut self, h: Handle) {
+    pub(crate) fn kill(&mut self, h: Handle) {
         match h {
             Handle::Anim(id) => {
                 if let Some(p) = self.anim_mut(id) {

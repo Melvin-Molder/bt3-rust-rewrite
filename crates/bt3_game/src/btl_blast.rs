@@ -329,6 +329,10 @@ pub(crate) struct Scene {
     pub impacts: crate::eft_impact::Impacts,
     /// Each fighter's drain glows (its kind 9 manager, layer 2).
     pub absorbs: [crate::eft_absorb::Absorbs; 2],
+    /// Each fighter's shocks (its kind 4 manager, layer 2).
+    pub shocks: [crate::eft_shock::Shocks; 2],
+    /// The screen shock waves (`gScrWarp`).
+    pub warps: crate::scr_warp::ScrWarps,
     /// The stage effects of layer 0.
     pub stage: crate::stage_fx::StageFx,
 }
@@ -983,6 +987,7 @@ impl Scene {
             list.clear();
         }
         self.absorbs[side].reset(&mut self.fx);
+        self.shocks[side].reset(&mut self.fx);
         self.tech.reset_side(chars, &mut self.fx, side);
     }
 
@@ -1102,7 +1107,18 @@ impl Scene {
                     }
                 }
             }
-            // Kind 9, the drain glow (the kinds between are not ported).
+            // Kind 4, the shock.
+            if let Some(pack) = shock_pack(w.data[side]) {
+                let me = &w.chars[side];
+                let c = crate::eft_shock::ShockChr {
+                    side,
+                    pos: me.obj.node_pos(3),
+                    dir: me.pose.dir,
+                    scale: w.data[side].height() / 19.35,
+                };
+                self.shocks[side].update(&mut self.fx, &mut self.warps, &c, pack, w.paused, w.vu0);
+            }
+            // Kind 9, the drain glow (the other kinds are not ported).
             if let Some((_, ctx)) = absorb_ctx(w, side) {
                 let chars = &*w.chars;
                 let node_pos = |n| chars[side].obj.node_pos(n);
@@ -2115,6 +2131,15 @@ pub(crate) fn absorb_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
         return None;
     }
     pack.absorb_set.as_ref()
+}
+
+/// The shock's animation, when the character's pack makes the kind 4 manager (pack bit 4).
+pub(crate) fn shock_pack<'a>(data: &SideData<'a>) -> Option<&'a bt3_data::eft_pack::SprPack> {
+    let pack = data.effect?;
+    if pack.kind_bits & (1 << 4) == 0 {
+        return None;
+    }
+    data.shock_assets?.spr.first()?.as_ref()
 }
 
 /// The drain glow's set and what `EftEmit_Spawn` reads of its fighter.
