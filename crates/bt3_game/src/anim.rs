@@ -5,10 +5,11 @@ use crate::flash::{ClipRef, Flash, PROP_REPEAT, PROP_VISIBLE, Uv};
 use crate::rng::GameRandom;
 use crate::title::TitleSound;
 
-/// `VOICE_LANG2_OFFSET`: a fresh save has flag bit 0 set, so menu voices take the second language's files.
-const VOICE_LANG2_OFFSET: u32 = 0x55C;
+/// `VOICE_LANG2_OFFSET`: with save flag bit 0 (a fresh save has it) menu voices take the second set's files.
+pub(crate) const VOICE_LANG2_OFFSET: u32 = 0x55C;
 
-/// `Voice_PlayWithSubtitle(pack, base, line)`: the voice file and the line's mouth keys (pack word `line * 2 + 2`).
+/// `Voice_PlayWithSubtitle(pack, base, line)`: the voice file and the line's mouth keys (pack word `line * 2 + 2`)
+/// of the second voice set, or the first's (`line`, word `line * 2 + 1`).
 pub fn play_with_subtitle(
     lips: &[u8],
     base: u32,
@@ -16,8 +17,10 @@ pub fn play_with_subtitle(
     lip: &mut LipSync,
     sounds: &mut Vec<TitleSound>,
 ) {
-    sounds.push(TitleSound::Voice(base + line as u32 + VOICE_LANG2_OFFSET));
-    let i = line as usize * 2 + 2;
+    let alt = crate::sound::options().alt_voice;
+    let offset = if alt { VOICE_LANG2_OFFSET } else { 0 };
+    sounds.push(TitleSound::Voice(base + line as u32 + offset));
+    let i = line as usize * 2 + if alt { 2 } else { 1 };
     let ofs = lips
         .get(i * 4..i * 4 + 4)
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize & !3);

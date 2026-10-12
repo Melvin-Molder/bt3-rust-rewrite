@@ -312,6 +312,8 @@ struct Game {
     progress: mcflow::Progress,
     /// `McFlow_Init`'s resources: common file base + 0x1D, unpacked (the save icons).
     card_res: Option<Vec<u8>>,
+    /// Common file 4: the character and item tables (a saved replay's members' derived values).
+    chara_table: Vec<u8>,
     /// The Data Center's screens (archive 8, sections 1 and 4) and its fields of `gProgress`.
     dc_menu: Option<dc_menu::DcMenuData>,
     replay_menu: Option<replay_menu::ReplayMenuData>,
@@ -429,9 +431,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (game_random, libc_random) = rng::init_from_timer(timer);
     let mut image = Iso9660::open(&image_path)?;
     // Save_Init's defaults need the item table (common file 4); McFlow_Init's icons are common file base + 0x1D.
-    let chr_table = read_file(&mut image, 4)
-        .map(|file| bt3_data::chara_data::ChrTable::parse(&file, 0xA1))
-        .unwrap_or_default();
+    let chara_table = read_file(&mut image, 4).unwrap_or_default();
+    let chr_table = bt3_data::chara_data::ChrTable::parse(&chara_table, 0xA1);
     let new_save = save::SaveData::new(&chr_table.items);
     let card_res = read_file(&mut image, duel_menu::ARCHIVE_FILE_ID + 0x1D)
         .ok()
@@ -603,6 +604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             card: memcard::McCard::new(memcard::Libmc::new(Some(memcard_dir))),
             progress: mcflow::Progress::default(),
             card_res,
+            chara_table,
             dc_menu: None,
             replay_menu: None,
             dc: dc_menu::DcProgress::default(),
@@ -767,7 +769,15 @@ fn load_title_assets(iso_path: &Path) -> Result<TitleAssets, Box<dyn std::error:
 }
 
 fn adx_to_wav(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let (header, pcm) = adx::decode(bytes).map_err(|error| error.to_string())?;
+    let (header, mut pcm) = adx::decode(bytes).map_err(|error| error.to_string())?;
+    // ADXT_SetOutputMono: a stereo stream played in mono has both channels mixed.
+    if header.channels == 2 && sound::options().mono {
+        for f in pcm.chunks_exact_mut(2) {
+            let m = ((i32::from(f[0]) + i32::from(f[1])) / 2) as i16;
+            f[0] = m;
+            f[1] = m;
+        }
+    }
     Ok(adx::to_wav(
         header.sample_rate,
         header.channels as u16,
@@ -1076,6 +1086,13 @@ fn run_frames(
         if port2.clone().any(|(_, pad)| pad.pressed(button)) {
             held2 |= bit;
         }
+    }
+    // The loaded save's sound options are the ones in force; when they change, SndOpt_Apply's
+    // Bgm_SetVolume(0x40) takes the music to its new level.
+    if sound::set_options(game.save.sound_options())
+        && let Some(player) = &mut game.bgm
+    {
+        player.level = sound::out_volume(sound::CH_BGM, 0x40);
     }
     game.voice_fresh = false;
     start_pending_voice(&mut game, &mut commands, &mut audio);
@@ -2014,7 +2031,10 @@ fn start_replay_menu(game: &mut Game, commands: &mut Commands) {
         .replay_menu
         .as_ref()
         .expect("replay list assets are loaded");
-    let rep = game.last_battle.as_ref().map(|(s, r)| (s, r));
+    let rep = game
+        .last_battle
+        .as_ref()
+        .map(|(s, r)| (s, r, game.chara_table.as_slice()));
     let mut mc = mcflow::McEnv {
         card: &mut game.card,
         save: &mut game.save,

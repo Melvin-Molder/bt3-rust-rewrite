@@ -191,6 +191,21 @@ impl SaveData {
         }
     }
 
+    /// The sound options the save holds (`flags` bit 0, `volume[3]` at 0x16A4).
+    pub fn sound_options(&self) -> crate::sound::SoundOptions {
+        let word = |at: usize| {
+            self.image
+                .get(at..at + 4)
+                .map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
+        };
+        crate::sound::SoundOptions {
+            mono: word(0x16A4) != 0,
+            bgm_volume: word(OFS_BGM_VOLUME),
+            se_volume: word(OFS_SE_VOLUME),
+            alt_voice: word(OFS_FLAGS) & 1 != 0,
+        }
+    }
+
     /// `CHARA_UNLOCKED(id)`.
     pub fn chara_unlocked(&self, id: i32) -> bool {
         let id = id as usize;
@@ -251,5 +266,19 @@ mod tests {
         assert_eq!(back.rec_chara, save.rec_chara);
         assert_eq!(back.chara_bits, save.chara_bits);
         assert_eq!(back.to_image(), img);
+    }
+
+    /// A new save's options are a fresh save's; the block's own words are read.
+    #[test]
+    fn the_sound_options_come_from_the_block() {
+        let mut save = SaveData::default();
+        assert_eq!(save.sound_options(), crate::sound::SoundOptions::default());
+        save.image[0x16A4] = 1;
+        save.image[0x16A8] = 4;
+        save.image[0x16AC] = 2;
+        save.image[0x1608] = 6;
+        let o = save.sound_options();
+        assert!(o.mono && !o.alt_voice);
+        assert_eq!((o.bgm_volume, o.se_volume), (4, 2));
     }
 }

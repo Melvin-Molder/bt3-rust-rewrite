@@ -200,9 +200,11 @@ fn members(side: &SideSetup) -> Vec<(i32, i32, i32, [u16; 8])> {
 }
 
 /// `BattleSetup` as the original lays it out (0x5A8 bytes): "btls", version 7, the rule, the two sides and their
-/// members. The members' bonuses, AI type and abilities, which the battle works out from the items again, are
-/// left 0; so is the option block (`isSet` 0: the battle takes the save's options).
-fn setup_bytes(setup: &BattleSetup) -> Vec<u8> {
+/// members with what `BtlMember_ApplyItems` and `BattleSetup_FinishEx` work out from the items of the item table
+/// (common file 4, `table`): the bonus levels (clamped to -20..20, or -20..60 for the computer in modes 1..4),
+/// the AI type and the ability bits. The option block is left as `isSet` 0 (the battle takes the save's
+/// options).
+fn setup_bytes(setup: &BattleSetup, table: &[u8]) -> Vec<u8> {
     let mut b = vec![0u8; SETUP_SIZE];
     b[0..4].copy_from_slice(&MAGIC.to_le_bytes());
     b[4..8].copy_from_slice(&VERSION.to_le_bytes());
@@ -224,6 +226,7 @@ fn setup_bytes(setup: &BattleSetup) -> Vec<u8> {
         let at = 0xC0 + s * 0x270;
         let m = members(side);
         put(&mut b, at, m.len() as i32);
+        let wide = matches!(setup.mode, 1..=4) && side.control == 2;
         for (k, (chara, costume, cpu, items)) in m.iter().enumerate() {
             let mt = at + 4 + k * 0x64;
             put(&mut b, mt, *chara);
@@ -232,6 +235,16 @@ fn setup_bytes(setup: &BattleSetup) -> Vec<u8> {
             b[mt + 0x10..mt + 0x14].copy_from_slice(&100.0f32.to_le_bytes());
             for (n, id) in items.iter().enumerate() {
                 b[mt + 0x14 + n * 2..mt + 0x16 + n * 2].copy_from_slice(&id.to_le_bytes());
+            }
+            // BtlMember_ApplyItems (bonus 0 stays 0) and BtlMember_ClampBonus.
+            let stats = bt3_data::chara_data::item_set_stats(table, items);
+            let derived = crate::battle::member_items(&stats, wide);
+            for (n, v) in derived.bonus.iter().enumerate() {
+                put(&mut b, mt + 0x28 + n * 4, *v);
+            }
+            put(&mut b, mt + 0x44, stats.ai_type);
+            for (n, v) in derived.ability.iter().enumerate() {
+                put(&mut b, mt + 0x48 + n * 4, *v as i32);
             }
         }
         put(&mut b, at + 0x1FC, side.change_allowed);
@@ -294,11 +307,12 @@ fn setup_from(b: &[u8]) -> Option<BattleSetup> {
 }
 
 impl Replay {
-    /// `BattleReplay_GetBuffer`'s block: the battle's setup (`BattleSetup_FinishEx` copies it in), both
+    /// `BattleReplay_GetBuffer`'s block: the battle's setup (`BattleSetup_FinishEx` copies it in, `table` the
+    /// item table its members' derived values come from), both
     /// tracks (`BtlReplayTrack`: stick bytes, button words, count, position) and the flag words (`loaded` and
     /// the last word cleared).
-    pub(crate) fn to_block(&self, setup: &BattleSetup) -> Vec<u8> {
-        let mut b = setup_bytes(setup);
+    pub(crate) fn to_block(&self, setup: &BattleSetup, table: &[u8]) -> Vec<u8> {
+        let mut b = setup_bytes(setup, table);
         b.resize(BLOCK_SIZE, 0);
         for (p, t) in self.tracks.iter().enumerate() {
             let at = SETUP_SIZE + p * TRACK_SIZE;
@@ -449,7 +463,7 @@ mod tests {
         r.record(0, 0x10, [0x80, 0x7F]);
         r.record(0, 0x20, [0x7F, 0x7F]);
         r.record(1, 0x40, [0, 0xFE]);
-        let block = r.to_block(&setup);
+        let block = r.to_block(&setup, &[]);
         assert_eq!(block.len(), BLOCK_SIZE);
         assert_eq!(&block[0..4], b"btls");
         let (back, mut played) = Replay::from_block(&block).unwrap();
@@ -464,5 +478,58 @@ mod tests {
         assert_eq!(file.len(), FILE_SIZE);
         assert_eq!(header_teams(&file[..HEADER_SIZE]), Some(teams));
         assert!(!crate::memcard::checksum(&mut file, false));
+    }
+
+    /// With the item table of the ISO in `rom/`: a member's derived values are `ItemSet_GetStats`'s, clamped wide
+    /// for the computer in modes 1..4; a member without items has none.
+    #[test]
+    fn real_replay_members_carry_their_item_values() {
+        use bt3_data::Iso9660;
+        use bt3_data::afs::{AfsArchive, partition_entry_for_id};
+        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = Iso9660::open(&iso) else {
+            return;
+        };
+        let location = partition_entry_for_id(4);
+        let archive =
+            AfsArchive::open(&mut image, format!("DATA/PZS3US{}.AFS", location.partition)).unwrap();
+        let table = archive.read_entry(&mut image, location.index).unwrap();
+        // The first items whose stat changes are not all zero.
+        let item = (1..350u16)
+            .find(|&id| {
+                let s = bt3_data::chara_data::item_set_stats(&table, &[id, 0, 0, 0, 0, 0, 0, 0]);
+                s.stat.iter().any(|&v| v != 0)
+            })
+            .unwrap();
+        let items = [item, item, item, item, item, 0, 0, 0];
+        let mut setup = BattleSetup::default();
+        setup.sides[0].items = items;
+        setup.sides[1].items = items;
+        setup.sides[1].control = 2;
+        let word = |b: &[u8], at: usize| i32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let stats = bt3_data::chara_data::item_set_stats(&table, &items);
+        for mode in [0, 2] {
+            setup.mode = mode;
+            let b = Replay::default().to_block(&setup, &table);
+            for side in 0..2 {
+                let mt = 0xC0 + side * 0x270 + 4;
+                let wide = mode == 2 && side == 1;
+                let want = crate::battle::member_items(&stats, wide);
+                let bonus: Vec<i32> = (0..8).map(|n| word(&b, mt + 0x24 + n * 4)).collect();
+                assert_eq!(bonus[0], 0);
+                assert_eq!(bonus[1..], want.bonus);
+                assert_eq!(word(&b, mt + 0x44), stats.ai_type);
+                let ability: Vec<u32> =
+                    (0..4).map(|n| word(&b, mt + 0x48 + n * 4) as u32).collect();
+                assert_eq!(ability, want.ability);
+            }
+        }
+        // A member without items: no bonus, no ability; the AI type of character 0's entry.
+        let b = Replay::default().to_block(&BattleSetup::default(), &table);
+        let mt = 0xC0 + 4;
+        assert!((0..8).all(|n| word(&b, mt + 0x24 + n * 4) == 0));
+        let none = bt3_data::chara_data::item_set_stats(&table, &[0; 8]);
+        assert_eq!(word(&b, mt + 0x44), none.ai_type);
     }
 }

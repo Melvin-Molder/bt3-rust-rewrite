@@ -79,6 +79,18 @@ const STAGE_FILE_SPLIT: u32 = 0x198;
 const SND_COMMON_FILE: u32 = 0x14A;
 const SND_STAGE_FILE: u32 = 0x14E;
 const SND_CHARA_FILE: u32 = 0xBDA;
+/// `BTL_FILE_VOICE_ALT`: the banks of the second voice set.
+const SND_CHARA_FILE_ALT: u32 = 0xC7B;
+
+/// A character's voice bank of the voice set of the options.
+fn voice_bank_file(chara: i32) -> u32 {
+    let base = if crate::sound::options().alt_voice {
+        SND_CHARA_FILE_ALT
+    } else {
+        SND_CHARA_FILE
+    };
+    base + chara.max(0) as u32
+}
 /// `BTL_FILE_TRANSITION` / `BTL_FILE_TRANSITION_3`: the stage change's transition pack (a change to stage 3 has
 /// its own).
 const TRANSITION_FILE: u32 = 0x1C0;
@@ -376,8 +388,8 @@ pub fn load(
     for (mask, file) in [
         (4, SND_COMMON_FILE),
         (8, SND_STAGE_FILE + setup.stage.max(0) as u32),
-        (0x10, SND_CHARA_FILE + setup.sides[0].chara.max(0) as u32),
-        (0x20, SND_CHARA_FILE + setup.sides[1].chara.max(0) as u32),
+        (0x10, voice_bank_file(setup.sides[0].chara)),
+        (0x20, voice_bank_file(setup.sides[1].chara)),
     ] {
         let data = read(file)?;
         if let Some(kind) = crate::btl_snd::CharSound::kind_of_mask(mask) {
@@ -996,7 +1008,7 @@ fn load_menu_sheet(file: &[u8], textures: &mut Vec<RgbaTexture>) -> std::io::Res
 
 /// `BtlMember_ApplyItems` and `BtlMember_ClampBonus` (`wide`: up to 60) as `BtlChar_CopyMemberBonus` /
 /// `CopyMemberAbility` hand them to the fighter: stat changes 2, 0, 1, 2, 3, 3, 3 as bonuses 0..6.
-fn member_items(stats: &ItemSetStats, wide: bool) -> MemberItems {
+pub(crate) fn member_items(stats: &ItemSetStats, wide: bool) -> MemberItems {
     let max = if wide { 60 } else { 20 };
     let s = stats.stat.map(|v| v.clamp(-20, max));
     MemberItems {
@@ -1370,9 +1382,10 @@ fn load_fighter(
         .iter()
         .map(|part| part.batches.iter().map(batch_texture).collect())
         .collect::<Result<Vec<_>, String>>()?;
-    // BtlObj_BindTables / BtlObj_CreateFace: the face's meshes, textures and lip tracks (the second voice set's,
-    // as a fresh save has save flag bit 0).
-    let face_data = bt3_data::face::FaceData::from_file(file, true).map_err(error)?;
+    // BtlObj_BindTables / BtlObj_CreateFace: the face's meshes, textures and lip tracks (of the voice set of the
+    // options).
+    let face_data = bt3_data::face::FaceData::from_file(file, crate::sound::options().alt_voice)
+        .map_err(error)?;
     let mut face_draw = FaceDraw::default();
     let face_tex = header.face_tex;
     if (header.tex_first..header.tex_first.saturating_add(header.tex_count)).contains(&face_tex) {
@@ -2310,7 +2323,8 @@ impl Battle {
         if !model_only && let Some(read) = self.loader.as_mut() {
             let chara = model.chara.max(0) as u32;
             let mask = if side == 0 { 0x10 } else { 0x20 };
-            self.assets.reload_bank(read, mask, SND_CHARA_FILE + chara);
+            self.assets
+                .reload_bank(read, mask, voice_bank_file(chara as i32));
         }
         self.hud
             .set_face(side, self.assets.hud_cpu.faces[side].clone());
@@ -2537,7 +2551,7 @@ impl Battle {
                     }
                     self.assets.fighters[side] = model;
                     let mask = if side == 0 { 0x10 } else { 0x20 };
-                    let file = SND_CHARA_FILE + start.chara.max(0) as u32;
+                    let file = voice_bank_file(start.chara);
                     self.assets.reload_bank(read, mask, file);
                 }
                 Err(e) => bevy::log::error!("cannot load side {side} back: {e}"),
@@ -9697,7 +9711,7 @@ mod tests {
         let walked = battle.roster.chars[0].pose.pos;
         let mut finished = setup.clone();
         finished.finish();
-        let block = battle.replay.to_block(&finished);
+        let block = battle.replay.to_block(&finished, &[]);
         let (loaded_setup, loaded) = crate::btl_replay::Replay::from_block(&block).unwrap();
         assert_eq!(loaded_setup, finished);
 

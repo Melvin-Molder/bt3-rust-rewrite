@@ -10,7 +10,7 @@
 use bt3_data::snd::SeBank;
 
 use crate::battle::{Mtx, inverse_rt};
-use crate::battle_seq::{VOICE_CHARA_BASE, VOICE_CHARA_LINES};
+use crate::battle_seq::{VOICE_CHARA_LINES, voice_chara_base};
 use crate::btl_chr::{Chr, Env, SideData, length, sub};
 use crate::btl_input::wrap_angle;
 use crate::title::TitleSound;
@@ -212,7 +212,7 @@ impl CharSound {
                 // Voice_PlayCharaEx: a line of the owner's character on its voice player.
                 5 | 6 => out.push(TitleSound::VoiceEx {
                     player: owner as u32,
-                    id: VOICE_CHARA_BASE
+                    id: voice_chara_base()
                         + charas[owner].max(0) as u32 * VOICE_CHARA_LINES
                         + req.id as u32,
                     volume: vol,
@@ -758,8 +758,8 @@ mod tests {
         assert_eq!(
             out,
             [
-                v(1, VOICE_CHARA_BASE + 0x56 * 100 + 0x53),
-                v(0, VOICE_CHARA_BASE + 3 * 100 + 4),
+                v(1, voice_chara_base() + 0x56 * 100 + 0x53),
+                v(0, voice_chara_base() + 3 * 100 + 4),
                 v(1, 0x9000),
                 TitleSound::StreamSeEx {
                     player: 1,

@@ -188,7 +188,7 @@ impl ReplayMenuScreen {
     pub fn new(
         data: &ReplayMenuData,
         card_res: Option<&[u8]>,
-        rep: Option<(&BattleSetup, &Replay)>,
+        rep: Option<(&BattleSetup, &Replay, &[u8])>,
         cursor: i32,
         battle_type: i32,
         mc: &mut McEnv,
@@ -677,7 +677,7 @@ mod tests {
         let mut replay = Replay::default();
         replay.record(0, 0x20, [0x7F, 0x7F]);
         let file = crate::btl_replay::file_bytes(
-            &replay.to_block(&setup),
+            &replay.to_block(&setup, &[]),
             &crate::btl_replay::teams(&setup),
         );
         let dir = root.join("BASLUS-21678DBZT3R00");
@@ -707,7 +707,8 @@ mod tests {
         mc.progress.replay_flags = 1;
         setup.sides[0].chara = 30;
         let mut screen =
-            ReplayMenuScreen::new(&data, None, Some((&setup, &replay)), 3, 0, &mut mc).unwrap();
+            ReplayMenuScreen::new(&data, None, Some((&setup, &replay, &[])), 3, 0, &mut mc)
+                .unwrap();
         assert_eq!(run(&mut screen, &mut mc), ReplayMenuResult::Select(39));
         assert_eq!(mc.progress.replay_flags & 1, 0);
         assert_eq!(mc.progress.slots[3].chara[0][0], 30);

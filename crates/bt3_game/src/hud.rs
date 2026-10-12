@@ -24,8 +24,14 @@ const CAPTION_SHEET: usize = 4;
 const PROMPT_SHEET: usize = 3;
 /// The font's icon sheet, appended after the HUD file's five.
 const ICON_SHEET: usize = 5;
-/// `HudNotice_GetVoiceBase` with `SAVE_FLAG_VOICE`, which a fresh save has.
-const ANNOUNCER_BASE: u32 = 0x10B6C;
+/// `HudNotice_GetVoiceBase`: the announcer's lines of the voice set of the options.
+fn announcer_base() -> u32 {
+    if crate::sound::options().alt_voice {
+        0x10B6C
+    } else {
+        0x10B34
+    }
+}
 const ANNOUNCER_LINES: u32 = 7;
 const SHOW_ALL: u32 = 0x1F;
 const SHOW_GAUGES: u32 = 1;
@@ -1376,7 +1382,7 @@ impl Hud {
         };
         self.notice.show(kind);
         if id <= 5 {
-            let line = ANNOUNCER_BASE + self.announcer.max(0) as u32 * ANNOUNCER_LINES + id;
+            let line = announcer_base() + self.announcer.max(0) as u32 * ANNOUNCER_LINES + id;
             sounds.push(TitleSound::StreamSe(line));
         }
     }

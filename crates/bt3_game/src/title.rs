@@ -17,8 +17,16 @@ pub const ARCHIVE_FILE_ID: u32 = 0x1C1 + 1;
 pub const ARCHIVE_SECTION: usize = 1;
 /// `MENU_BGM_TITLE`, which `Progress_Main` starts before `Title_Run`.
 pub const MUSIC_FILE_ID: u32 = 0x10B16;
-/// `TITLE_VOICE_BASE` plus `VOICE_LANG2_OFFSET`: a fresh save has flag bit 0 set.
-const VOICE_BASE: u32 = 0x86F9 + 0x55C;
+/// `TITLE_VOICE_BASE`, plus `VOICE_LANG2_OFFSET` with the second voice set (`Voice_PlayWithSubtitle`).
+fn voice_base() -> u32 {
+    let alt = crate::sound::options().alt_voice;
+    0x86F9
+        + if alt {
+            crate::anim::VOICE_LANG2_OFFSET
+        } else {
+            0
+        }
+}
 const IDLE_FRAMES: i32 = 0x708;
 const LOGO_WAIT: i32 = 300;
 const FADE_FRAMES: i32 = 0x14;
@@ -501,7 +509,7 @@ impl TitleScreen {
             } else {
                 0x40
             };
-            sounds.push(TitleSound::Voice(VOICE_BASE + line));
+            sounds.push(TitleSound::Voice(voice_base() + line));
         }
         match self.state {
             1 => {
@@ -511,7 +519,7 @@ impl TitleScreen {
                     self.clip_goto(1, "fl_ok");
                     self.clip_goto(2, "fl_on_start");
                     self.state = 2;
-                    sounds.push(TitleSound::Voice(VOICE_BASE + self.voice + 6));
+                    sounds.push(TitleSound::Voice(voice_base() + self.voice + 6));
                     sounds.push(TitleSound::Effect(2, 0x38));
                 } else {
                     self.idle(demo, random);

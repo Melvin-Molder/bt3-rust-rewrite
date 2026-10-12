@@ -11,8 +11,14 @@ use crate::font::Font;
 use crate::rng::LibcRandom;
 use crate::title::TitleSound;
 
-/// `VOICE_CHARA_BASE_ALT`: a fresh save has flag bit 0 set, so the battle lines come from the second set.
-pub(crate) const VOICE_CHARA_BASE: u32 = 0xCC32;
+/// `VOICE_CHARA_BASE_ALT` / `voice_chara_base()`: the battle lines of the voice set of the options.
+pub(crate) fn voice_chara_base() -> u32 {
+    if crate::sound::options().alt_voice {
+        0xCC32
+    } else {
+        0x8D4E
+    }
+}
 pub(crate) const VOICE_CHARA_LINES: u32 = 100;
 
 /// `Ramp`: a linear value over `seconds * 30` steps.
@@ -605,7 +611,7 @@ impl Battle {
                     self.roster.chars[side].flags.set(0xEF);
                     self.seq.timer.start(10.0, 0.0, 1.0);
                     self.play_entrance_cut(side);
-                    let voice = VOICE_CHARA_BASE
+                    let voice = voice_chara_base()
                         + (self.seq.chara[i].max(0) as u32 * VOICE_CHARA_LINES
                             + self.seq.line[i] as u32);
                     input.sounds.push(TitleSound::Voice(voice));
@@ -898,7 +904,7 @@ impl Battle {
                     self.play_fighter_cut(side, 2);
                 }
                 self.seq.timer.start(10.0, 0.0, 1.0);
-                let voice = VOICE_CHARA_BASE
+                let voice = voice_chara_base()
                     + (self.seq.chara[0].max(0) as u32 * VOICE_CHARA_LINES
                         + self.seq.line[0] as u32);
                 input.sounds.push(TitleSound::Voice(voice));

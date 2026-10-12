@@ -22,8 +22,6 @@ const VOICES: usize = 48;
 const BANKS: usize = 8;
 /// `gSndBankVolume`.
 const BANK_VOLUME: [i32; BANKS] = [0xD8, 0xE0, 0x80, 0x80, 0x80, 0x80, 0x80, 0];
-/// `SaveData.seVolume` of a fresh save (option.c).
-const SE_OPTION_VOLUME: i32 = 9;
 /// sceHSyn port volume: `Snd_SetMasterVolume(0x7F)` at boot sends it to every port (S:220c → hsyn #10).
 const PORT_VOLUME: i32 = 0x7F;
 
@@ -145,7 +143,9 @@ impl SoundEffects {
         if !self.loaded[slot] || self.queue.len() >= 32 || id >= 0x100 {
             return;
         }
-        let volume = (volume * BANK_VOLUME[slot] * SE_OPTION_VOLUME / 0x480).clamp(0, 0x7F);
+        // Snd_ScaleVolume: with the save's sound effect volume.
+        let option = crate::sound::options().se_volume;
+        let volume = (volume * BANK_VOLUME[slot] * option / 0x480).clamp(0, 0x7F);
         let pan = (pan + 0x40).clamp(0, 0x7F);
         let pitch = ((pitch as f32 * 18.75) as i32).clamp(-1200, 1200);
         self.queue.push(Cmd::Play(Play {
@@ -486,6 +486,7 @@ impl Engine {
 
     /// Mixes `out.len() / 2` stereo frames at 48 kHz.
     pub fn render(&mut self, out: &mut [f32]) {
+        let mono = crate::sound::options().mono;
         for frame in out.chunks_exact_mut(2) {
             self.tick_acc += 1_000_000;
             if self.tick_acc >= TICK_USEC * u64::from(SAMPLE_RATE) {
@@ -499,6 +500,11 @@ impl Engine {
                     left += l;
                     right += r;
                 }
+            }
+            // Snd_SetStereo(0): the driver mixes both sides into each.
+            if mono {
+                let m = (left + right) / 2;
+                (left, right) = (m, m);
             }
             frame[0] = left.clamp(-0x8000, 0x7FFF) as f32 / 32768.0;
             frame[1] = right.clamp(-0x8000, 0x7FFF) as f32 / 32768.0;

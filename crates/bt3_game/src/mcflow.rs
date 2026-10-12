@@ -155,9 +155,9 @@ pub struct McFlow {
 
 impl McFlow {
     /// `McFlow_Init`: the card resources (common file base + 0x1D, unpacked: word 1 the system icon, word 2 the
-    /// replay icon) and the battle's replay as the file the save flow writes (`rep`: its setup and tracks, none
-    /// when there was no battle).
-    pub fn new(res: Option<&[u8]>, rep: Option<(&BattleSetup, &Replay)>) -> Self {
+    /// replay icon) and the battle's replay as the file the save flow writes (`rep`: its setup, its tracks and the
+    /// item table; none when there was no battle).
+    pub fn new(res: Option<&[u8]>, rep: Option<(&BattleSetup, &Replay, &[u8])>) -> Self {
         let icon = |n: usize, size: usize| {
             res.and_then(|r| {
                 let at =
@@ -167,8 +167,8 @@ impl McFlow {
             .unwrap_or_else(|| vec![0; size])
         };
         let rep_save = match rep {
-            Some((setup, replay)) => {
-                btl_replay::file_bytes(&replay.to_block(setup), &btl_replay::teams(setup))
+            Some((setup, replay, table)) => {
+                btl_replay::file_bytes(&replay.to_block(setup, table), &btl_replay::teams(setup))
             }
             None => btl_replay::file_bytes(&[], &[[btl_replay::NO_CHARA; 5]; 2]),
         };
@@ -1824,7 +1824,7 @@ mod tests {
             replay.record(0, f, [0x7F, 0x80]);
             replay.record(1, f * 2, [0x10, 0x7F]);
         }
-        let mut flow = McFlow::new(None, Some((&setup, &replay)));
+        let mut flow = McFlow::new(None, Some((&setup, &replay, &[])));
         flow.set_slot(2);
         flow.start(MODE_REPLAY_SAVE, &mut env);
         assert_eq!(
