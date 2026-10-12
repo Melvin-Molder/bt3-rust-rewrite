@@ -473,6 +473,8 @@ pub(crate) struct Env<'a> {
     pub glow: Option<&'a crate::eft_glow::GlowCfg>,
     /// The aura's settings (common effect entry 1).
     pub aura: Option<&'a crate::eft_aura::AuraCfg>,
+    /// The body lightning's node pairs (common effect entry 4).
+    pub bolt: Option<&'a crate::eft_bolt::BoltCfg>,
     /// `BattleSide_GetChangeAllowed` by player.
     pub change_allowed: [i32; 2],
     /// `BattleSide.members` (character, costume) by player, `memberCount` of them, and `switchEnabled`.

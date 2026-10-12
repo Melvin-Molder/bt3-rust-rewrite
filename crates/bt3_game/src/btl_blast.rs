@@ -327,6 +327,8 @@ pub(crate) struct Scene {
     pub shotfx: crate::eft_shotfx::ShotFx,
     /// The aura (`gEftAuraPool`, layer 3).
     pub auras: crate::eft_aura::Auras,
+    /// The body lightning (`gEftBoltPool`, layer 3).
+    pub bolts: crate::eft_bolt::Bolts,
     /// The power-up glow (`gEftGlow`, layer 3).
     pub glows: crate::eft_glow::Glows,
     /// The impacts (`gEftImpactList`, layer 3).
@@ -1175,7 +1177,8 @@ impl Scene {
                 self.absorbs[side].update(&mut self.fx, &c, &ctx, w.paused, w.libc, w.vu0);
             }
         }
-        // Layer 3 (`gEftLayer3Classes`): the ground dust (BtlScene_IsTimeStopped: paused), the aura, the glow, the
+        // Layer 3 (`gEftLayer3Classes`): the ground dust (BtlScene_IsTimeStopped: paused), the aura, the body
+        // lightning, the glow, the
         // speed lines, the
         // vanish lines, the struggle, the discs, the impacts, the blast objects, then the particle modules.
         let dust_chars = std::array::from_fn(|i| crate::btl_mgr::dust_chr(&w.chars[i], w.data[i]));
@@ -1188,6 +1191,23 @@ impl Scene {
                 crate::btl_fx::aura_chr(&chars[s], w.data[s], &node_pos[s])
             });
             self.auras.update(cfg, &ac, w.paused, w.libc);
+        }
+        if let Some(cfg) = w.env.bolt {
+            let chars = &*w.chars;
+            let node_pos = [0, 1].map(|s| move |n: u32| chars[s].obj.node_pos(n));
+            let bc = std::array::from_fn(|s| crate::eft_bolt::BoltChr {
+                side: s,
+                height: w.data[s].height(),
+                param_flags: u32::from(w.data[s].tables.params.chara_flags()),
+                model_new: chars[s].flags.test(0x12B),
+                aura_visible: self.auras.is_visible(s),
+                burst_rising: self.auras.is_burst_rising(s),
+                glow_active: self.glows.is_active(s),
+                node_pos: &node_pos[s],
+            });
+            // EftAuraMgr_Update's part (the aura manager runs before its tasks; nothing of it reads them).
+            self.bolts.manage(&bc);
+            self.bolts.update(cfg, &bc, w.paused, w.libc);
         }
         if let Some(cfg) = w.env.glow {
             let chars = &*w.chars;

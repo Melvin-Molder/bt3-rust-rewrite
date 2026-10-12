@@ -134,6 +134,9 @@ pub struct BattleAssets {
     /// `EftAuraMgr_Init`: the aura's settings and flame textures.
     pub(crate) aura_cfg: Option<crate::eft_aura::AuraCfg>,
     pub(crate) aura_textures: crate::eft_aura::AuraTextures,
+    /// `EftBoltMgr_Init`: the body lightning's node pairs and textures.
+    pub(crate) bolt_cfg: Option<crate::eft_bolt::BoltCfg>,
+    pub(crate) bolt_textures: crate::eft_bolt::BoltTextures,
     /// `EftGlowMgr_Init`: the power-up glow's settings and textures.
     pub(crate) glow_cfg: Option<crate::eft_glow::GlowCfg>,
     pub(crate) glow_textures: crate::eft_glow::GlowTextures,
@@ -387,6 +390,8 @@ pub fn load(
         transform_sets: Vec::new(),
         aura_cfg: None,
         aura_textures: crate::eft_aura::AuraTextures::default(),
+        bolt_cfg: None,
+        bolt_textures: crate::eft_bolt::BoltTextures::default(),
         glow_cfg: None,
         glow_textures: crate::eft_glow::GlowTextures::default(),
         stage_sun: None,
@@ -537,6 +542,24 @@ pub fn load(
                     .and_then(|clut| bt3_data::gs::decode_sprite_texture_with_clut(img, clut).ok());
                 assets.aura_textures.paired.push(push(t));
             }
+        }
+    }
+    // EftBoltMgr_Init: the node pairs (common entry 4), the bolt texture (entry 5) and the flash sheet (entry 6),
+    // each the first image under its first palette.
+    assets.bolt_cfg =
+        bt3_data::eft_pack::common_entry(&common_fx, 4).and_then(crate::eft_bolt::BoltCfg::parse);
+    for (n, slot) in [
+        (5, &mut assets.bolt_textures.bolt),
+        (6, &mut assets.bolt_textures.flash),
+    ] {
+        if let Some(entry) = bt3_data::eft_pack::common_entry(&common_fx, n)
+            && let Ok(res) = TextureResource::parse(entry)
+            && let Some(e) = res.entries.first()
+        {
+            *slot = Some(assets.effect_textures.len());
+            assets
+                .effect_textures
+                .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
         }
     }
     // EftGlowMgr_Init: the settings (common entry 7); entry 9's image under each palette of its first nine
@@ -1392,6 +1415,7 @@ impl BattleAssets {
             transform: &self.transform_sets,
             glow: self.glow_cfg.as_ref(),
             aura: self.aura_cfg.as_ref(),
+            bolt: self.bolt_cfg.as_ref(),
             change_allowed: self.change_allowed,
             team: self.team,
             team_count: self.team_count,
@@ -2579,8 +2603,8 @@ impl Battle {
                 &mut *libc,
             );
             // Layer 3: the aura (not of a hidden fighter, in a technique or a rush sequence, or with a glow), the
-            // glow (not of a hidden fighter; both at 0.3 in its own view with object flag bit 21), the speed
-            // lines, the vanish lines, then the particle modules.
+            // body lightning and the glow (not of a hidden fighter; all at 0.3 in its own view with object flag bit
+            // 21), the speed lines, the vanish lines, then the particle modules.
             if let Some(cfg) = &self.assets.aura_cfg {
                 let chars = &self.roster.chars;
                 let data = [0, 1].map(|s| side_data(&self.assets.fighters[s]));
@@ -2612,6 +2636,22 @@ impl Battle {
                     },
                     stage_flag,
                 );
+            }
+            {
+                let chars = &self.roster.chars;
+                self.roster
+                    .scene
+                    .bolts
+                    .draw(&self.assets.bolt_textures, &mut ot, &ctx, |chr| {
+                        let o = &chars[chr].obj;
+                        if o.flags & 2 == 0 {
+                            None
+                        } else if (demo || chr == 0) && o.flags & 0x20_0000 != 0 {
+                            Some(0.3)
+                        } else {
+                            Some(1.0)
+                        }
+                    });
             }
             if let Some(cfg) = &self.assets.glow_cfg {
                 let chars = &self.roster.chars;
@@ -8099,6 +8139,51 @@ mod tests {
             battle.roster.scene.fx.bills_alive(),
             0,
             "a sprite outlived its blast"
+        );
+    }
+
+    #[test]
+    fn real_lightning_crackles_on_a_fighter_with_its_parameter_flag() {
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 6;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        assert!(battle.assets.bolt_cfg.is_some());
+        assert!(
+            battle.assets.bolt_textures.bolt.is_some()
+                && battle.assets.bolt_textures.flash.is_some()
+        );
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        // The lightning starts with the battle, before the fight; only P1 has the flag (8).
+        let (mut bolts, mut flashes, mut drawn) = (0, 0, 0);
+        let tex = battle.assets.bolt_textures;
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let frame = battle.run_frame(start, idle, 0, &mut libc, &mut random, None, false);
+            let (b, f, on) = battle.roster.scene.bolts.state(0);
+            assert!(on);
+            bolts = bolts.max(b);
+            flashes = flashes.max(f);
+            drawn = drawn.max(
+                frame
+                    .effects
+                    .iter()
+                    .filter(|t| {
+                        t.texture.is_some() && (t.texture == tex.bolt || t.texture == tex.flash)
+                    })
+                    .count(),
+            );
+            assert_eq!(battle.roster.scene.bolts.state(1), (0, 0, false));
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert!(
+            bolts >= 3 && flashes >= 3 && drawn > 0,
+            "{bolts} {flashes} {drawn}"
         );
     }
 }

@@ -774,6 +774,13 @@ impl Auras {
             .any(|a| a.chr == chr && a.flags & 1 != 0 && !(a.alpha <= 0.0))
     }
 
+    /// `EftAura_IsBurstRising`: visible, in the rising part of a burst.
+    pub(crate) fn is_burst_rising(&self, chr: usize) -> bool {
+        self.tasks
+            .iter()
+            .any(|a| a.chr == chr && a.flags & 1 != 0 && !(a.alpha <= 0.0) && a.burst == 1)
+    }
+
     /// `EftAura_Command`: 0 start, 1 stop, 2 burst, 3 burst end, 4 burst peak, 5 fade in, 6 fade out, 7 kill.
     pub(crate) fn command(&mut self, cfg: &AuraCfg, c: &AuraChr, cmd: u8) {
         let chr = c.side;
