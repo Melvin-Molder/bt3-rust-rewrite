@@ -42,6 +42,7 @@ impl Scroll {
     }
 
     /// Whether a load draws a random number.
+    #[cfg(test)]
     pub(crate) fn random(&self) -> bool {
         self.sheet.angle < 0
     }

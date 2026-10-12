@@ -145,6 +145,7 @@ impl StageFx {
         &mut self,
         ot: &mut OrderTable,
         direct: &mut Vec<crate::eft::EffectTri>,
+        updates: &mut Vec<(usize, bt3_data::gs::RgbaTexture)>,
         ctx: &DrawCtx,
         chars: &[Chr; 2],
         light: V3,
@@ -152,6 +153,8 @@ impl StageFx {
         libc: &mut LibcRandom,
     ) {
         if let Some(s) = &self.surf {
+            // EftSurf_BuildPalettes, before the views draw.
+            updates.extend(s.palettes(&ctx.world2view).into_iter().flatten());
             s.draw(ot, direct, ctx);
         }
         if let Some(w) = &mut self.weather {

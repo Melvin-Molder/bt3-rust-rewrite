@@ -219,6 +219,8 @@ struct Game {
     /// The fighters' effect textures and this frame's effect triangles in draw order.
     effect_textures: Vec<RgbaTexture>,
     effects: Vec<eft::EffectTri>,
+    /// The effect textures whose texels changed this frame (the draw writes them again).
+    effect_updates: Vec<usize>,
     /// The HUD sheets of the battle and this frame's HUD sprites.
     hud_textures: Vec<RgbaTexture>,
     hud_prims: Vec<hud::HudPrim>,
@@ -424,6 +426,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             stage_batches: Vec::new(),
             effect_textures: Vec::new(),
             effects: Vec::new(),
+            effect_updates: Vec::new(),
             hud_textures: Vec::new(),
             hud_prims: Vec::new(),
             hud_layer: None,
@@ -1060,6 +1063,13 @@ fn run_frames(
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
                 game.effects = frame.effects;
+                game.effect_updates.clear();
+                for (i, t) in frame.texture_updates {
+                    if let Some(slot) = game.effect_textures.get_mut(i) {
+                        *slot = t;
+                        game.effect_updates.push(i);
+                    }
+                }
                 // The menu texts, then the screen fade over everything.
                 let mut quads = Vec::new();
                 game.font.flush(&mut quads);

@@ -136,8 +136,9 @@ pub struct BattleAssets {
     pub(crate) bound: Option<(bt3_data::stage::StageBound, Option<usize>)>,
     /// The scrolling sheet (stage pack entry 7) and its first texture among the stage textures.
     pub(crate) scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
-    /// The surfaces' meshes (stage pack entry 0xD) and their textures among the effect textures.
-    pub(crate) surf: Option<(Vec<bt3_data::stage_surf::SurfMesh>, Vec<Option<usize>>)>,
+    /// The surfaces (stage pack entry 0xD), their textures among the effect textures and the reflecting
+    /// surface's normal maps (entry 0xA).
+    pub(crate) surf: Option<SurfAssets>,
     pub(crate) fighters: Vec<FighterModel>,
     /// The light ramp the shading rows are looked up through, and common file 2 (`BtlLoad_StepChara` reloads a
     /// side with them).
@@ -451,7 +452,7 @@ pub fn load(
     assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
     assets.stage_pack14 = pack14.map(|t| assets.push_effect_textures(t));
     assets.stage_pack11 = pack11.map(|t| assets.push_effect_textures(t));
-    assets.surf = surf.map(|(m, t)| (m, assets.push_optional_textures(t)));
+    assets.surf = surf.map(|s| assets.install_surf(s));
     assets.bound = bound.map(|(p, t)| (p, assets.push_effect_textures(t).first().copied()));
     for (index, side) in setup.sides.into_iter().enumerate() {
         let load = SideLoad {
@@ -780,11 +781,45 @@ pub(crate) struct LoadedStage {
     bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
     /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
     scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
-    /// `EftSurf_Init`: the surface file's meshes and textures (entry 0xD).
-    surf: Option<(
-        Vec<bt3_data::stage_surf::SurfMesh>,
-        Vec<Option<RgbaTexture>>,
+    /// `EftSurf_Init`: the surface file's meshes, textures and parameters (entry 0xD), and the normal maps of a
+    /// reflecting one (`EftTexSet_Load34` of entry 0xA, all but its last four textures).
+    surf: Option<LoadedSurf>,
+}
+
+/// A stage's surfaces as read from its file.
+pub(crate) struct LoadedSurf {
+    meshes: Vec<bt3_data::stage_surf::SurfMesh>,
+    textures: Vec<Option<RgbaTexture>>,
+    param: bt3_data::stage_surf::SurfParam,
+    normals: Option<Vec<bt3_data::gs::IndexedTexture>>,
+}
+
+/// The surfaces as the battle keeps them: their textures among the effect textures, and the reflecting
+/// surface's normal maps with the two textures its lit palettes are written into.
+#[derive(Clone, Debug)]
+pub(crate) struct SurfAssets {
+    pub meshes: Vec<bt3_data::stage_surf::SurfMesh>,
+    pub textures: Vec<Option<usize>>,
+    pub param: bt3_data::stage_surf::SurfParam,
+    pub normals: Option<(
+        std::sync::Arc<Vec<bt3_data::gs::IndexedTexture>>,
+        [usize; 2],
     )>,
+}
+
+/// A texture record with its TCC bit clear (the draw sets it; the texels decode the same).
+fn without_tcc<'a>(e: &bt3_data::tex::TextureEntry<'a>) -> bt3_data::tex::TextureEntry<'a> {
+    bt3_data::tex::TextureEntry {
+        pixel_data: e.pixel_data,
+        clut_data: e.clut_data,
+        pixel_size: e.pixel_size,
+        clut_size: e.clut_size,
+        pixel_blt: e.pixel_blt,
+        clut_blt: e.clut_blt,
+        tbp_offset: e.tbp_offset,
+        cbp_offset: e.cbp_offset,
+        texture_register: e.texture_register & !(1 << 34),
+    }
 }
 
 /// Reads stage `stage_id`'s file (`BTL_FILE_STAGE + stage`).
@@ -890,7 +925,25 @@ fn load_stage(
             .iter()
             .map(|t| decode_sprite_texture(t).ok())
             .collect();
-        Some((file.meshes, textures))
+        let reflects = file.meshes.iter().any(|m| m.flags & 0x800 != 0);
+        let normals = if reflects && entry_size(0xA) > 0 {
+            let res = TextureResource::parse(pack_section(&stage_file, 0xA).map_err(error)?)
+                .map_err(error)?;
+            let n = res.entries.len().saturating_sub(4);
+            res.entries[..n]
+                .iter()
+                .map(|e| bt3_data::gs::decode_indexed_texture(&without_tcc(e)).ok())
+                .collect::<Option<Vec<_>>>()
+                .filter(|f| !f.is_empty())
+        } else {
+            None
+        };
+        Some(LoadedSurf {
+            meshes: file.meshes,
+            textures,
+            param: file.param,
+            normals,
+        })
     } else {
         None
     };
@@ -1041,6 +1094,8 @@ pub struct BattleFrame {
     pub exit: Option<u32>,
     /// `BtlScene_Draw` and `Ot_Draw`: the effects' triangles in the order the GS draws them, after the fighters.
     pub effects: Vec<EffectTri>,
+    /// Effect textures whose texels changed this frame (the reflecting surface's lit palettes).
+    pub texture_updates: Vec<(usize, RgbaTexture)>,
 }
 
 /// The battle as far as it is ported.
@@ -1176,6 +1231,23 @@ impl BattleAssets {
         self.bank_requests.push((mask, data));
     }
 
+    /// The surfaces' textures among the effect textures, and two for the reflecting surface's lit palettes (the
+    /// first normal map through its own palette until the first frame).
+    fn install_surf(&mut self, s: LoadedSurf) -> SurfAssets {
+        let textures = self.push_optional_textures(s.textures);
+        let normals = s.normals.map(|frames| {
+            let first = frames[0].with_palette(&frames[0].palette);
+            let out = self.push_effect_textures(vec![first.clone(), first]);
+            (std::sync::Arc::new(frames), [out[0], out[1]])
+        });
+        SurfAssets {
+            meshes: s.meshes,
+            textures,
+            param: s.param,
+            normals,
+        }
+    }
+
     /// Appends the textures that decoded to the effect textures; their indices.
     fn push_optional_textures(&mut self, t: Vec<Option<RgbaTexture>>) -> Vec<Option<usize>> {
         t.into_iter()
@@ -1245,10 +1317,13 @@ impl BattleAssets {
         let mut fx = crate::stage_fx::StageFx::default();
         fx.scroll = self.new_scroll();
         // EftSurf_Init.
-        fx.surf = self
-            .surf
-            .clone()
-            .map(|(m, t)| crate::eft_surf::Surf::new(m, t, self.stage.water_level.unwrap_or(0.0)));
+        fx.surf = self.surf.clone().map(|s| {
+            let reflect = s.normals.map(|(frames, out)| {
+                crate::eft_surf::Reflect::new(frames, s.param, self.stage.surf.as_ref(), out)
+            });
+            let level = self.stage.water_level.unwrap_or(0.0);
+            crate::eft_surf::Surf::new(s.meshes, s.textures, level, reflect)
+        });
         // EftWeather_Init: the record on, the textures of pack entry 0xB.
         fx.weather = self
             .stage
@@ -1304,7 +1379,7 @@ impl BattleAssets {
             .bound
             .map(|(p, t)| (p, self.push_effect_textures(t).first().copied()));
         self.scroll = s.scroll;
-        self.surf = s.surf.map(|(m, t)| (m, self.push_optional_textures(t)));
+        self.surf = s.surf.map(|t| self.install_surf(t));
         self.stage_id = stage_id;
         self.stage_rev += 1;
     }
@@ -2260,6 +2335,7 @@ impl Battle {
             .collect();
         batches.sort_by_key(|batch| batch.textures);
         // BtlScene_Draw(1), then Ot_Draw.
+        let mut texture_updates = Vec::new();
         let effects = {
             let ctx = DrawCtx::new(view.world2screen, view.world2view);
             let mut ot = OrderTable::new();
@@ -2291,6 +2367,7 @@ impl Battle {
             roster.scene.stage.draw(
                 &mut ot,
                 &mut direct,
+                &mut texture_updates,
                 &ctx,
                 &roster.chars,
                 self.light_dir,
@@ -2348,6 +2425,7 @@ impl Battle {
             sounds,
             exit: self.seq.left.then_some(self.seq.reason),
             effects,
+            texture_updates,
         }
     }
 }
@@ -5428,9 +5506,21 @@ mod tests {
         let read = battle.loader.as_mut().unwrap();
         let mut with = Vec::new();
         for s in 0..0x27 {
-            let Some((meshes, textures)) = load_stage(read, s).ok().and_then(|st| st.surf) else {
+            let Some(LoadedSurf {
+                meshes,
+                textures,
+                normals,
+                ..
+            }) = load_stage(read, s).ok().and_then(|st| st.surf)
+            else {
                 continue;
             };
+            // The reflecting surfaces' normal maps decode.
+            assert_eq!(
+                normals.is_some(),
+                meshes.iter().any(|m| m.flags & 0x800 != 0),
+                "stage {s}"
+            );
             // Every texture of the surface files decodes; every mesh names one.
             assert!(textures.iter().all(Option::is_some), "stage {s}");
             assert!(
@@ -5457,7 +5547,7 @@ mod tests {
             .surf
             .as_ref()
             .unwrap()
-            .1
+            .textures
             .iter()
             .flatten()
             .copied()
@@ -5482,6 +5572,45 @@ mod tests {
                 .count();
         }
         assert!(drawn > 0);
+        // Stage 2's reflecting surface: its two lit textures are written every frame and its triangles draw
+        // with them, the specular one added.
+        setup.stage = 2;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let (_, out) = battle
+            .assets
+            .surf
+            .as_ref()
+            .unwrap()
+            .normals
+            .clone()
+            .unwrap();
+        let (mut lit, mut added) = (0, 0);
+        for _ in 0..10 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            let updated: Vec<usize> = frame.texture_updates.iter().map(|u| u.0).collect();
+            assert_eq!(updated, out);
+            lit += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture == Some(out[0]))
+                .count();
+            added += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture == Some(out[1]) && t.blend == crate::eft::EffectBlend::Add)
+                .count();
+        }
+        assert!(lit > 0 && added > 0, "{lit} {added}");
     }
 
     #[test]

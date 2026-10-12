@@ -342,6 +342,21 @@ pub fn sync_effects(
         let wrapped = images.add(model_image(texture, ImageAddressMode::Repeat));
         textures.images.push([clamped, wrapped]);
     }
+    // Textures whose texels changed: written again in place, so the materials keep them.
+    for &i in &game.effect_updates {
+        let (Some(texture), Some(pair)) = (game.effect_textures.get(i), textures.images.get(i))
+        else {
+            continue;
+        };
+        for (handle, mode) in pair
+            .iter()
+            .zip([ImageAddressMode::ClampToEdge, ImageAddressMode::Repeat])
+        {
+            if let Some(mut image) = images.get_mut(handle) {
+                *image = model_image(texture, mode);
+            }
+        }
+    }
     let blank = textures
         .blank
         .get_or_insert_with(|| {

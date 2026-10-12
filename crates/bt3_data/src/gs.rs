@@ -24,6 +24,39 @@ pub fn decode_sprite_texture(entry: &TextureEntry<'_>) -> io::Result<RgbaTexture
     Ok(texels.with_palette(&palette))
 }
 
+/// A paletted texture as the GS holds it: its texel indices row by row and its palette in index order (alpha
+/// 0x80 = 1.0), to be drawn with other palettes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexedTexture {
+    pub width: u32,
+    pub height: u32,
+    pub indices: Vec<u8>,
+    pub palette: Vec<[u8; 4]>,
+}
+
+impl IndexedTexture {
+    /// The texture through `palette` (alpha doubled, as `decode_sprite_texture` gives it).
+    pub fn with_palette(&self, palette: &[[u8; 4]]) -> RgbaTexture {
+        TexelIndices {
+            width: self.width as usize,
+            height: self.height as usize,
+            indices: self.indices.clone(),
+        }
+        .with_palette(palette)
+    }
+}
+
+/// A sprite texture's indices and palette (`decode_sprite_texture` before the lookup).
+pub fn decode_indexed_texture(entry: &TextureEntry<'_>) -> io::Result<IndexedTexture> {
+    let (texels, palette) = sprite_texels(entry, entry)?;
+    Ok(IndexedTexture {
+        width: texels.width as u32,
+        height: texels.height as u32,
+        indices: texels.indices,
+        palette,
+    })
+}
+
 /// `decode_sprite_texture` with the palette that `clut_entry` uploads.
 pub fn decode_sprite_texture_with_clut(
     entry: &TextureEntry<'_>,

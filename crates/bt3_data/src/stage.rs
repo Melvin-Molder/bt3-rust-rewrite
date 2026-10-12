@@ -46,6 +46,20 @@ pub struct StageResource {
     pub geysers: Vec<StageGeyser>,
     /// `StgDataA.weather` (+0x60 / +0x64, `BtlStage_GetList60`): the first weather record.
     pub weather: Option<StageWeather>,
+    /// `StgDataA.surf` (+0x58 / +0x5C, `BtlStage_GetList58`): the reflecting surface's record.
+    pub surf: Option<StageSurfRec>,
+}
+
+/// `StgSurfRec`: what the reflecting surface takes over its file's parameters (the light's y and z negated as
+/// `BtlStage_BindData` does).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageSurfRec {
+    pub light_dir: [f32; 3],
+    pub specular: f32,
+    pub fade_dist: f32,
+    pub anim_speed: u16,
+    pub color_a: [u8; 4],
+    pub color_b: [u8; 4],
 }
 
 /// `StgWeatherRec`: the weather particles' wind, size, flags and count.
@@ -343,6 +357,30 @@ impl StageResource {
                 count: u16::from_le_bytes([bytes[o + 0x16], bytes[o + 0x17]]),
             })
         };
+        let surf = if read_count(bytes, data_offset + 0x58, "stage surface")? == 0 {
+            None
+        } else {
+            let o = resolve_relative(
+                bytes,
+                data_offset,
+                read_u32(bytes, data_offset + 0x5C)?,
+                0x20,
+                "stage surface",
+            )?;
+            let b = |k: usize| bytes[o + k];
+            Some(StageSurfRec {
+                light_dir: [
+                    read_f32(bytes, o)?,
+                    -read_f32(bytes, o + 4)?,
+                    -read_f32(bytes, o + 8)?,
+                ],
+                specular: read_f32(bytes, o + 0xC)?,
+                fade_dist: read_f32(bytes, o + 0x10)?,
+                anim_speed: u16::from_le_bytes([b(0x14), b(0x15)]),
+                color_a: [b(0x17), b(0x18), b(0x19), b(0x1A)],
+                color_b: [b(0x1B), b(0x1C), b(0x1D), b(0x1E)],
+            })
+        };
         let geysers = parse_mef_list(bytes, 0)?
             .into_iter()
             .map(|o| {
@@ -389,6 +427,7 @@ impl StageResource {
             smoke,
             geysers,
             weather,
+            surf,
         })
     }
 }
