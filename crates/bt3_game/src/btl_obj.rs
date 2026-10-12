@@ -38,6 +38,8 @@ pub(crate) struct ObjData<'a> {
     pub chara: i32,
     /// `mdl.param->height` (parameter block +4): the scale of the vertical root motion.
     pub height: f32,
+    /// What the model gives its face, when it has one.
+    pub face: Option<&'a std::sync::Arc<crate::btl_face::FaceModel>>,
 }
 
 /// `BobjPart`: one node's local pose of this frame and its world matrix.
@@ -272,6 +274,8 @@ pub(crate) struct Obj {
     pub work: Work,
     /// Layer 0's borrowed motion (`BtlObjAnim_PlayFrom`).
     pub borrowed: Option<Motion>,
+    /// `obj->face`: `None` for a model without eyes or a mouth.
+    pub face: Option<crate::btl_face::Face>,
 }
 
 impl Obj {
@@ -344,6 +348,48 @@ impl Obj {
             },
             work: Work::default(),
             borrowed: None,
+            face: data
+                .face
+                .and_then(|m| crate::btl_face::Face::new(std::sync::Arc::clone(m))),
+        }
+    }
+
+    /// `BtlObj_GetMouthMode`: -1 without a face.
+    pub(crate) fn mouth_mode(&self) -> i32 {
+        self.face.as_ref().map_or(-1, |f| f.mode)
+    }
+
+    /// `BtlObj_SetSubState` with a mode that draws no random number (0, 1, 5..12).
+    pub(crate) fn set_mouth(&mut self, mode: i32) {
+        if let Some(f) = &mut self.face {
+            f.set_mode(mode);
+        }
+    }
+
+    /// `BtlObj_SetSubState`.
+    pub(crate) fn set_sub_state(&mut self, mode: i32, arg: i32, libc: &mut crate::rng::LibcRandom) {
+        if let Some(f) = &mut self.face {
+            f.set_sub_state(mode, arg, libc);
+        }
+    }
+
+    /// `BtlObj_SetEyeFrame`.
+    pub(crate) fn set_eye_frame(&mut self, frame: u32) {
+        if let Some(f) = &mut self.face {
+            f.set_eye_frame(&mut self.flags, frame);
+        }
+    }
+
+    /// `BtlObj_GetEyeFrame`: -1 without a face.
+    pub(crate) fn eye_frame(&self) -> i64 {
+        self.face.as_ref().map_or(-1, |f| i64::from(f.eye_forced))
+    }
+
+    /// `BtlObj_UpdateFace`.
+    pub(crate) fn update_face(&mut self, libc: &mut crate::rng::LibcRandom) {
+        let flags = self.flags;
+        if let Some(f) = &mut self.face {
+            f.update(flags, libc);
         }
     }
 
@@ -841,6 +887,11 @@ impl Obj {
                 2 => quat_mul(self.lean, node.rot),
                 0x2E => crate::btl_obj_chain::q_slerp(node.rot, self.head_rot, self.head_weight),
                 0x2F => crate::btl_obj_chain::q_slerp(node.rot, self.neck_rot, self.neck_weight),
+                // The jaw turns by the face's angles while the mouth is not at rest.
+                0x31 => match &self.face {
+                    Some(f) if f.jaw_active() => quat_from_euler(f.jaw),
+                    _ => node.rot,
+                },
                 _ => node.rot,
             };
             let mut local = quat_to_mtx(q);

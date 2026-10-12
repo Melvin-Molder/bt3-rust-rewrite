@@ -257,6 +257,7 @@ impl Roster {
                 blasts,
                 clash,
                 change: &mut *change,
+                libc: &mut *libc,
             }
             .update();
             me.anim_apply_blend();
@@ -273,6 +274,7 @@ impl Roster {
             me.obj.sample_pose(&data[i].obj);
             me.obj.update_events(&data[i].obj);
             me.update_lean();
+            crate::btl_fx::face_events(me);
             me.obj.calc_matrices(&data[i].obj);
             me.obj_to_pose();
             crate::btl_head::update_look_offset(me, data[i], env.gate.time_stopped);
@@ -357,7 +359,7 @@ impl Roster {
                 &mut env.snd(),
                 self.frame,
             );
-            crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
+            crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame, libc);
             crate::btl_fx::update_all(me, data[i], env, &mut self.scene.impacts);
             let scene = &mut self.scene;
             crate::btl_fx::power_up_look(
@@ -370,6 +372,8 @@ impl Roster {
             );
             crate::btl_fx::screen_filter(me, &mut self.scene.blurs);
             crate::btl_fx::trigger_obj_1e_1f(me);
+            crate::btl_fx::update_eyes_flag137(me);
+            crate::btl_fx::update_mouth_flag96(me);
             crate::btl_fx::update_obj_flag80(me, data[i]);
             crate::btl_fx::push_back_on_event_400(me, data[i]);
             crate::btl_fx::obj_mask_event_400(me, data[i]);
@@ -436,6 +440,7 @@ impl Roster {
                 data,
                 env,
                 frame,
+                libc: &mut *libc,
             };
             pair.body_hit_update();
             pair.update();
@@ -468,6 +473,7 @@ impl Roster {
             &mut self.rand,
             self.frame,
             powers,
+            libc,
         );
         if let Some(winner) = self.clash.struggle_end.take() {
             self.scene.end_struggle(&mut self.chars, winner);
@@ -667,11 +673,16 @@ impl Roster {
 
     /// `BtlChars_EndFrame`: the late updates (`BtlChar_UpdateLate`: the voices and technique sounds, this
     /// frame's stat modifiers; the effects are not ported), stages 11 and 12, the frame's movement vectors.
-    pub(crate) fn end_frame(&mut self, data: [&SideData; 2], env: &Env) {
+    pub(crate) fn end_frame(
+        &mut self,
+        data: [&SideData; 2],
+        env: &Env,
+        libc: &mut crate::rng::LibcRandom,
+    ) {
         for i in 0..2 {
             let chr = &mut self.chars[i];
             if !chr.is_frozen() {
-                chr.late_voice(data[i], data[i ^ 1], env, self.frame);
+                chr.late_voice(data[i], data[i ^ 1], env, self.frame, libc);
                 chr.set_stat_frame_mods();
             }
         }

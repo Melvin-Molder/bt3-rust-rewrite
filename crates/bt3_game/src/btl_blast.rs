@@ -2891,7 +2891,7 @@ fn try_deflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
     deflect_sound(w, target, rec, 0x13);
     let chr = &mut w.chars[target];
-    chr.voice(w.env, w.frame, 0xB);
+    chr.voice(w.env, w.frame, 0xB, &mut *w.libc);
     chr.add_blast(5000);
     if perfect {
         chr.flags.set(0x6B);
@@ -2924,7 +2924,7 @@ fn try_reflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
     deflect_sound(w, target, rec, 0x14);
     let chr = &mut w.chars[target];
-    chr.voice(w.env, w.frame, 0xB);
+    chr.voice(w.env, w.frame, 0xB, &mut *w.libc);
     chr.deflect_dir = deflect_dir_of(chr, rec);
     chr.set_fx(0x2E);
     true
@@ -3169,7 +3169,7 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
         chr.react.yaw = yaw;
         chr.react.back = front;
         chr.set_impulse_dir(dir, push_of(&blast, false));
-        chr.voice(env, w.frame, 0);
+        chr.voice(env, w.frame, 0, &mut *w.libc);
     }
     chr.set_fx(0x1D);
     let sound = if blast.kind_type() == 2 {

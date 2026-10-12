@@ -1229,11 +1229,20 @@ impl Chr {
 
     // ---- motion control (btl_anim.c) -------------------------------------------------------------------------
 
+    /// `BtlAnim_Play`'s face part: a held mouth shape (modes 9..12) rests, the eyes go back to the blink.
+    fn face_on_new_motion(&mut self) {
+        if (9..13).contains(&self.obj.mouth_mode()) {
+            self.obj.set_mouth(0);
+        }
+        self.obj.set_eye_frame(9);
+    }
+
     /// `BtlAnim_Play`: starts a motion on the main layer now, raising flag 0x2B; a blend over `blend` seconds.
     pub(crate) fn anim_play(&mut self, data: &SideData, motion: i32, blend: f32) {
         // Motions with table flag 0x20000000 play from the opponent's table (throws): not ported.
         self.obj.play(&data.obj, 0, motion.max(0) as usize, true);
         self.obj.flags &= !0x60;
+        self.face_on_new_motion();
         self.flags.clear(anim_flag::F30);
         self.flags.clear_range(anim_flag::REQ, anim_flag::END);
         self.flags.set(anim_flag::NEW);
@@ -1259,6 +1268,7 @@ impl Chr {
         self.obj
             .play_from(&data.obj, &opp.obj, motion.max(0) as usize, flags);
         self.obj.flags &= !0x60;
+        self.face_on_new_motion();
         self.flags.clear(anim_flag::F30);
         self.flags.clear_range(anim_flag::REQ, anim_flag::END);
         self.flags.set(anim_flag::NEW);

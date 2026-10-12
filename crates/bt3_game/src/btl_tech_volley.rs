@@ -61,6 +61,8 @@ pub(crate) struct FxTables {
     pub aim_scripts: [Vec<AimStep>; 2],
     /// The vanish lines' body segments and column slices.
     pub shotfx: crate::eft_shotfx::Tables,
+    /// The faces' talk patterns and jaw tracks.
+    pub face: crate::btl_face::FaceTables,
 }
 
 impl FxTables {
@@ -88,6 +90,7 @@ impl FxTables {
             sin_coef: [c[0], c[1], c[2], c[3]],
             aim_scripts,
             shotfx: crate::eft_shotfx::Tables::read(elf)?,
+            face: crate::btl_face::FaceTables::read(elf)?,
         })
     }
 }

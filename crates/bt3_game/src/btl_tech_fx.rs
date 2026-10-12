@@ -2192,7 +2192,13 @@ pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool 
     }
     chr.set_fx(0x1D);
     let sound = s.hit_sound(slot) as u32;
-    crate::btl_snd::hit_sound(Some(&mut *chr), Some(rec.pos), sound, env, w.frame);
+    crate::btl_snd::hit_sound(
+        Some((&mut *chr, &mut *w.libc)),
+        Some(rec.pos),
+        sound,
+        env,
+        w.frame,
+    );
     let flags = if slot == 0 { 0x20_0000 } else { 0x40_0000 };
     chr.damage(env, w.data[target], s.damage(slot), flags);
     true
@@ -2377,7 +2383,13 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         chr.react.reaction = REACT_NOFLINCH;
         chr.set_fx(0x1D);
         let sound = t.hit_sound(slot, alt) as u32;
-        crate::btl_snd::hit_sound(Some(&mut *chr), Some(rec.pos), sound, env, w.frame);
+        crate::btl_snd::hit_sound(
+            Some((&mut *chr, &mut *w.libc)),
+            Some(rec.pos),
+            sound,
+            env,
+            w.frame,
+        );
         chr.damage(env, w.data[target], dmg, hit_damage_flags(slot));
         recoil(w, side, slot);
         return true;
@@ -2397,7 +2409,13 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
     chr.set_fx(0x1D);
     let sound = t.hit_sound(slot, alt) as u32;
-    crate::btl_snd::hit_sound(Some(&mut *chr), Some(rec.pos), sound, env, w.frame);
+    crate::btl_snd::hit_sound(
+        Some((&mut *chr, &mut *w.libc)),
+        Some(rec.pos),
+        sound,
+        env,
+        w.frame,
+    );
     chr.damage(env, w.data[target], dmg, hit_damage_flags(slot));
     chr.flags.set_held(0x1D);
     chr.flags.set_held(0x1E);
@@ -2467,7 +2485,7 @@ pub(crate) fn try_dodge_tech(w: &mut World, target: usize, hit_count: i32, src: 
         dir = 1;
     }
     chr.flags.set(if dir == 0 { 0x74 } else { 0x75 });
-    chr.voice(w.env, frame, 0x1F);
+    chr.voice(w.env, frame, 0x1F, &mut *w.libc);
     if rush {
         // A timed evasion of a technique fills the blast stocks by one with ability 0x22.
         if !chr.flags.test(0x80) && free && chr.has_ability(0x22) {

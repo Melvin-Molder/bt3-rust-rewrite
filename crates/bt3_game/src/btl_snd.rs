@@ -316,7 +316,14 @@ fn hit_sound_line(level: i32, frame: u32) -> i32 {
 /// 0x60 unless 0x5C); the object's sound events at its node 3. A shown weapon outside a rush sequence turns the
 /// impact sounds into 0x4D / 0x36; a visible fighter's camera shakes (5 for 0.1 s, 10 for 0.2 s). The sparks are
 /// `btl_fx::update_all`.
-pub(crate) fn fx_event_sounds(me: &mut Chr, opp: &mut Chr, data: &SideData, env: &Env, frame: u32) {
+pub(crate) fn fx_event_sounds(
+    me: &mut Chr,
+    opp: &mut Chr,
+    data: &SideData,
+    env: &Env,
+    frame: u32,
+    libc: &mut crate::rng::LibcRandom,
+) {
     let mut impact = None;
     if me.anim_test_attr(0x100) {
         impact = Some(((frame % 2) as i32 + 2, 0x4D, 5.0, 0.1));
@@ -338,7 +345,7 @@ pub(crate) fn fx_event_sounds(me: &mut Chr, opp: &mut Chr, data: &SideData, env:
             (&mut *opp, &*me)
         };
         if !other.flags.test(0x13B) && !speaker.is_frozen() {
-            speaker.voice(env, frame, 1);
+            speaker.voice(env, frame, 1, libc);
         }
     }
     if !me.flags.test(0x91) && me.anim_test_attr(2) && (!me.flags.test(0x60) || me.flags.test(0x5C))
@@ -469,7 +476,7 @@ pub(crate) fn after_hit_sounds(me: &Chr, data: &SideData, env: &Env, frame: u32)
 /// `BtlColl_PlayHitSound`: a technique's or skill's hit sound kind 0..4: the impact at the record (none for 0) and
 /// the victim's voice kind (0, 0, 1, 3, 3).
 pub(crate) fn hit_sound(
-    victim: Option<&mut Chr>,
+    victim: Option<(&mut Chr, &mut crate::rng::LibcRandom)>,
     pos: Option<[f32; 3]>,
     kind: u32,
     env: &Env,
@@ -487,8 +494,8 @@ pub(crate) fn hit_sound(
         env.snd()
             .request(pos, -1, KIND_COMMON, 200.0, 1500.0, sound);
     }
-    if let Some(chr) = victim {
-        chr.voice(env, frame, voice);
+    if let Some((chr, libc)) = victim {
+        chr.voice(env, frame, voice, libc);
     }
 }
 
@@ -500,8 +507,15 @@ fn at(chr: &Chr, node: u32) -> [f32; 3] {
 impl Chr {
     /// `BtlChar_PlayVoice`: a line of voice kind `kind` (`voiceTbl`: one, or one of several by the frame, never
     /// the last one twice) unless the fighter is dead or the kind is cooling down (in mode 1 not kinds 14..16 and
-    /// 34); kinds below 15 are sounds of the fighter's own bank, the others streamed voice lines.
-    pub(crate) fn voice(&mut self, env: &Env, frame: u32, kind: usize) {
+    /// 34); kinds below 15 are sounds of the fighter's own bank with one talk pattern of the mouth, the others
+    /// streamed voice lines with their lip track.
+    pub(crate) fn voice(
+        &mut self,
+        env: &Env,
+        frame: u32,
+        kind: usize,
+        libc: &mut crate::rng::LibcRandom,
+    ) {
         if self.is_dead() || kind >= VOICE_KINDS || self.voice_timer[kind] > 0 {
             return;
         }
@@ -523,8 +537,10 @@ impl Chr {
         let mut snd = env.snd();
         if kind < 15 {
             self.play_own(&mut snd, line);
+            self.obj.set_sub_state(4, 0, libc);
         } else {
             self.play_voice(&mut snd, line);
+            self.obj.set_sub_state(2, line, libc);
         }
         self.voice_last[kind] = line;
         self.voice_timer[kind] = (e.interval * 30.0) as i32;
@@ -618,25 +634,32 @@ impl Chr {
 
     /// The voice parts of `BtlChar_UpdateLate`: `BtlChar_StopVoiceOnFlag` (flag 0x129 cuts the side's voice line;
     /// story mode's script text, which would keep it, is not ported), `BtlCharSnd_PlayTechSounds` and
-    /// `BtlMove_UpdateAnimVoice`. The lip-sync state (`BtlObj_SetSubState`) is not ported.
+    /// `BtlMove_UpdateAnimVoice`.
     pub(crate) fn late_voice(
         &mut self,
         data: &SideData,
         opp_data: &SideData,
         env: &Env,
         frame: u32,
+        libc: &mut crate::rng::LibcRandom,
     ) {
         if self.flags.test(0x129) {
             env.snd().stop_voice(self.player);
         }
-        self.play_tech_sounds(&mut env.snd(), data, opp_data);
-        self.update_anim_voice(env, frame);
+        self.play_tech_sounds(&mut env.snd(), data, opp_data, libc);
+        self.update_anim_voice(env, frame, libc);
     }
 
     /// `BtlCharSnd_PlayTechSounds`: the sound (motion events 0x10000 .. 0x80000, own bank) and voice line (events
     /// 0x8000 and 0x80_0000_0000) of the skill or technique in use; against an opponent with character flag 0x80
-    /// the technique's flags 0x20 / 0x40 drop the second and third sound.
-    fn play_tech_sounds(&self, snd: &mut CharSound, data: &SideData, opp_data: &SideData) {
+    /// the technique's flags 0x20 / 0x40 drop the second and third sound. The voice lines play their lip tracks.
+    fn play_tech_sounds(
+        &mut self,
+        snd: &mut CharSound,
+        data: &SideData,
+        opp_data: &SideData,
+        libc: &mut crate::rng::LibcRandom,
+    ) {
         let slot = crate::btl_act::id_class(self.act.current);
         let (se, line) = match slot {
             0 => (-1, 0x53),
@@ -664,14 +687,16 @@ impl Chr {
         }
         if self.anim_test_attr(0x8000) {
             self.play_voice(snd, line);
+            self.obj.set_sub_state(2, line, libc);
         }
         if self.anim_test_attr(0x80_0000_0000) {
             self.play_voice(snd, line + 1);
+            self.obj.set_sub_state(2, line + 1, libc);
         }
     }
 
     /// `BtlMove_UpdateAnimVoice`: the voices and streamed sounds of the motions flagged 0x12F .. 0x133.
-    fn update_anim_voice(&mut self, env: &Env, frame: u32) {
+    fn update_anim_voice(&mut self, env: &Env, frame: u32, libc: &mut crate::rng::LibcRandom) {
         let mut kind = None;
         if self.flags.test(0x12F) && self.anim_test_attr(0x8000) {
             kind = Some(0xE);
@@ -705,7 +730,7 @@ impl Chr {
             self.play_stream(&mut env.snd(), 0x8D41);
         }
         if let Some(kind) = kind {
-            self.voice(env, frame, kind);
+            self.voice(env, frame, kind, libc);
         }
     }
 }

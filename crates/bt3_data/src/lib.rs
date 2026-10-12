@@ -12,6 +12,7 @@ pub mod chara_data;
 pub mod eft_mesh;
 pub mod eft_pack;
 pub mod elf;
+pub mod face;
 pub mod fod;
 pub mod font;
 pub mod gs;
@@ -264,6 +265,16 @@ fn read_at(file: &mut File, offset: u64, size: usize, file_size: u64) -> io::Res
 
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+/// `BObjFile_GetEntry`: entry `n` of a pack, `None` when it is empty (its offset equals the next one's).
+pub fn pack_entry(pack: &[u8], n: usize) -> Option<&[u8]> {
+    let word = |i: usize| {
+        pack.get(i * 4..i * 4 + 4)
+            .map(|b| (u32::from_le_bytes(b.try_into().unwrap()) & !3) as usize)
+    };
+    let start = word(n)?;
+    (word(n + 1)? != start).then(|| pack.get(start..)).flatten()
 }
 
 /// `MPACK_AT`: section `n` of a menu pack starts at header word `n`, rounded down to a word.

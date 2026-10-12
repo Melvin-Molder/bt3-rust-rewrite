@@ -174,7 +174,12 @@ pub fn tex0_cbp(tex0: u64) -> u32 {
 }
 
 /// Walks a part's DMA chain (one `ret` packet in the files) and its VIF codes, keeping VU1 memory as
-/// program 0 sees it (TOPS-relative), and takes a batch at every MSCAL / MSCNT.
+/// program 0 sees it (TOPS-relative), and takes a batch at every MSCAL / MSCNT. The face's mouth meshes are
+/// such chains too.
+pub fn parse_chain(stream: &[u8]) -> io::Result<Vec<Batch>> {
+    parse_vif(stream)
+}
+
 fn parse_vif(stream: &[u8]) -> io::Result<Vec<Batch>> {
     let mut batches = Vec::new();
     walk_vif(stream, |memory| {

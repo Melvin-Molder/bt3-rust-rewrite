@@ -261,6 +261,8 @@ pub(crate) struct Ctx<'a, 'd> {
     pub clash: &'a ClashC,
     /// The character change requests (`gBtlChars->change`).
     pub change: &'a mut crate::btl_change::ChangeQueue,
+    /// libc `rand()` (the mouth's talk patterns).
+    pub libc: &'a mut crate::rng::LibcRandom,
 }
 
 /// Whether action `id` has a handler here.
@@ -360,7 +362,7 @@ impl Ctx<'_, '_> {
 
     /// `BtlChar_PlayVoice`.
     fn voice(&mut self, kind: usize) {
-        self.me.voice(self.env, self.frame, kind);
+        self.me.voice(self.env, self.frame, kind, &mut *self.libc);
     }
 
     /// `BtlAct_PlayPickedVoice`: the voice kind of the attack record, if any.

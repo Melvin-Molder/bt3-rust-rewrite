@@ -572,7 +572,7 @@ impl Battle {
             }
             SeqState::Ready => self.hud.show_notice(1, input.sounds),
             // BtlSeq_StopTalk (not in mode 1).
-            SeqState::WinTalk if self.assets.mode != 1 => input.sounds.push(TitleSound::VoiceStop),
+            SeqState::WinTalk if self.assets.mode != 1 => self.stop_talk(input),
             SeqState::End => {
                 if self.demo.is_active() {
                     self.demo.stop();
@@ -604,6 +604,10 @@ impl Battle {
                         + (self.seq.chara[i].max(0) as u32 * VOICE_CHARA_LINES
                             + self.seq.line[i] as u32);
                     input.sounds.push(TitleSound::Voice(voice));
+                    let line = self.seq.line[i];
+                    self.roster.chars[side]
+                        .obj
+                        .set_sub_state(2, line, &mut *input.libc);
                     self.seq.step += 1;
                 }
             }
@@ -873,6 +877,10 @@ impl Battle {
                     + (self.seq.chara[0].max(0) as u32 * VOICE_CHARA_LINES
                         + self.seq.line[0] as u32);
                 input.sounds.push(TitleSound::Voice(voice));
+                let line = self.seq.line[0];
+                self.roster.chars[side]
+                    .obj
+                    .set_sub_state(2, line, &mut *input.libc);
                 self.seq.step += 1;
             }
             2 => {
@@ -903,10 +911,18 @@ impl Battle {
             _ => {}
         }
         if input.start {
-            input.sounds.push(TitleSound::VoiceStop);
+            self.stop_talk(input);
             return SeqState::End;
         }
         SeqState::WinTalk
+    }
+
+    /// `BtlSeq_StopTalk`: both mouths rest, both voices stop.
+    fn stop_talk(&mut self, input: &mut SeqInput) {
+        for c in &mut self.roster.chars {
+            c.obj.set_mouth(0);
+        }
+        input.sounds.push(TitleSound::VoiceStop);
     }
 
     /// `BtlSeqEnd_Enter`: mode 0 with a finished battle opens the result menu, for pad 0 (or the winner's pad in
@@ -1069,8 +1085,7 @@ impl Battle {
             if self.seq.step != 4 {
                 self.xfade.capture_and_start();
             }
-            // BtlSeq_StopTalk.
-            input.sounds.push(TitleSound::VoiceStop);
+            self.stop_talk(input);
             return SeqState::Ready;
         }
         SeqState::IntroTalk

@@ -7,6 +7,7 @@ mod btl_blast;
 mod btl_change;
 mod btl_chr;
 mod btl_clash;
+mod btl_face;
 mod btl_flags;
 mod btl_fx;
 mod btl_head;

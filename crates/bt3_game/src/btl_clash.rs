@@ -215,6 +215,7 @@ impl Clash {
         rand_state: &mut u32,
         frame: u32,
         powers: StrugglePowers,
+        libc: &mut crate::rng::LibcRandom,
     ) {
         let both_a = |c: &[Chr; 2]| Self::in_clash_a(&c[0]) && Self::in_clash_a(&c[1]);
         if self.state == 0 {
@@ -236,13 +237,13 @@ impl Clash {
                 }
             }
             1..=5 => {
-                self.state = self.update_a(chars, data, env, frame, powers);
+                self.state = self.update_a(chars, data, env, frame, powers, libc);
                 if !both_a(chars) {
                     Self::hold_clash_a(chars);
                     self.state = 0;
                 }
             }
-            6..=8 => self.state = self.update_b(chars, env, frame),
+            6..=8 => self.state = self.update_b(chars, env, frame, libc),
             9..=11 => self.state = self.update_c(chars, env, rand_state),
             _ => {}
         }
@@ -259,6 +260,7 @@ impl Clash {
         env: &Env,
         frame: u32,
         powers: StrugglePowers,
+        libc: &mut crate::rng::LibcRandom,
     ) -> i32 {
         let (count0, count1) = (chars[0].clash_count_a, chars[1].clash_count_a);
         let a = &mut self.a;
@@ -272,10 +274,10 @@ impl Clash {
             }
             2 => {
                 if a.timer == 0 {
-                    chars[0].voice(env, frame, 0x14);
+                    chars[0].voice(env, frame, 0x14, libc);
                 }
                 if a.timer == 0x1E {
-                    chars[1].voice(env, frame, 0x14);
+                    chars[1].voice(env, frame, 0x14, libc);
                 }
                 if a.timer < 0x1E {
                     set_orbit_cut(chars, data, 0, 0, powers);
@@ -308,7 +310,7 @@ impl Clash {
                         a.lead = if frame % 2 != 0 { 1 } else { -1 };
                     }
                     let leader = if a.lead > 0 { 0 } else { 1 };
-                    chars[leader].voice(env, frame, 0x15);
+                    chars[leader].voice(env, frame, 0x15, libc);
                 }
                 set_orbit_cut(chars, data, if a.lead > 0 { 0 } else { 1 }, 2, powers);
                 a.timer += 1;
@@ -359,7 +361,7 @@ impl Clash {
                             _ => 0,
                         };
                         chars[l].damage(env, data[l], dmg, flags);
-                        chars[l].voice(env, frame, 0x16);
+                        chars[l].voice(env, frame, 0x16, libc);
                         chars[l].play_stream(&mut env.snd(), 0x8D31);
                         self.struggle_end = Some(-1);
                     }
@@ -387,7 +389,13 @@ impl Clash {
     }
 
     /// `BtlClash_UpdateB`: voice kind 0x18 for each fighter in turn, 0x19 for the winner.
-    fn update_b(&mut self, chars: &mut [Chr; 2], env: &Env, frame: u32) -> i32 {
+    fn update_b(
+        &mut self,
+        chars: &mut [Chr; 2],
+        env: &Env,
+        frame: u32,
+        libc: &mut crate::rng::LibcRandom,
+    ) -> i32 {
         let mut state = self.state;
         match state {
             6 => {
@@ -397,10 +405,10 @@ impl Clash {
             }
             7 => {
                 if self.b_timer == 0 {
-                    chars[0].voice(env, frame, 0x18);
+                    chars[0].voice(env, frame, 0x18, libc);
                 }
                 if self.b_timer == 0xF {
-                    chars[1].voice(env, frame, 0x18);
+                    chars[1].voice(env, frame, 0x18, libc);
                 }
                 self.b_timer += 1;
                 if self.b_timer >= 0x4C {
@@ -432,7 +440,7 @@ impl Clash {
                     };
                     winner.flags.set(0xBF);
                     loser.flags.set(0xC0);
-                    winner.voice(env, frame, 0x19);
+                    winner.voice(env, frame, 0x19, libc);
                     raise_first_clash(winner, loser);
                     crate::chr_cam::end_cut(&mut chars[0]);
                     self.b_winner = win as i32;

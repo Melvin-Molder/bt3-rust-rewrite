@@ -20,7 +20,7 @@ use bt3_data::gs::{
     RgbaTexture, decode_clut256_upload, decode_sprite_texture, decode_sprite_texture_raw,
     psmt8_row_from_upload,
 };
-use bt3_data::model::{CharaModel, ModelPart, TEXTURE_SECTION, tex0_cbp, tex0_tbp};
+use bt3_data::model::{Batch, CharaModel, ModelPart, TEXTURE_SECTION, tex0_cbp, tex0_tbp};
 use bt3_data::motion::{MOTION_COUNT, Motion};
 use bt3_data::pack_section;
 use bt3_data::stage::StageResource;
@@ -241,6 +241,9 @@ pub(crate) struct FighterModel {
     model: CharaModel,
     /// Per part, per batch: the material texture and the shading row.
     batch_textures: Vec<Vec<[usize; 2]>>,
+    /// What the model gives its face (`None` without eyes or a mouth), and how the face draws.
+    pub(crate) face: Option<std::sync::Arc<crate::btl_face::FaceModel>>,
+    face_draw: FaceDraw,
     /// Every motion of the character's table by id (`None` for an empty section), with `BtlAnim_Play`'s table
     /// flags applied.
     pub(crate) motions: Vec<Option<Motion>>,
@@ -274,6 +277,28 @@ pub(crate) struct FighterModel {
     pub(crate) tech_packs: [Option<TechPack>; 5],
     /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
     pub(crate) skill_text: Option<Vec<u16>>,
+}
+
+/// The face's meshes and textures as the draw uses them (`ObjDraw_UploadTextures` puts the face texture of the
+/// frame in place of the model's, `ObjDraw_DrawModel` the mouth shape's mesh in place of the mouth part).
+#[derive(Default)]
+struct FaceDraw {
+    /// The material texture the face textures stand in for (the model's face texture).
+    material: Option<usize>,
+    /// The eye frames' and mouth shapes' textures among the material textures.
+    eyes: Vec<usize>,
+    mouths: [Option<usize>; 8],
+    /// Per mouth shape, its mesh and the batches' textures.
+    chains: [Option<(Vec<Batch>, Vec<[usize; 2]>)>; 8],
+}
+
+impl FaceDraw {
+    fn texture(&self, t: crate::btl_face::FaceTex) -> Option<usize> {
+        match t {
+            crate::btl_face::FaceTex::Eye(i) => self.eyes.get(i).copied(),
+            crate::btl_face::FaceTex::Mouth(i) => self.mouths.get(i).copied().flatten(),
+        }
+    }
 }
 
 /// `BTL_FILE_CHARA_DATA`: a member's 0x1000-byte block, file 8 + character * 2 + side.
@@ -1216,28 +1241,79 @@ fn load_fighter(
             pixels,
         });
     }
+    let batch_texture = |batch: &Batch| -> Result<[usize; 2], String> {
+        let key = (
+            tex0_tbp(batch.tex0[0]).wrapping_sub(model.min_tbp),
+            tex0_cbp(batch.tex0[0]).wrapping_sub(model.min_cbp),
+        );
+        let base = *materials
+            .get(&key)
+            .ok_or("a batch names no material texture")?;
+        let shade = *shades
+            .get(&tex0_cbp(batch.tex0[1]))
+            .ok_or("a batch names no shading CLUT")?;
+        Ok([base, shade])
+    };
     let batch_textures = model
         .parts
         .iter()
-        .map(|part| {
-            part.batches
-                .iter()
-                .map(|batch| {
-                    let key = (
-                        tex0_tbp(batch.tex0[0]) - model.min_tbp,
-                        tex0_cbp(batch.tex0[0]) - model.min_cbp,
-                    );
-                    let base = *materials
-                        .get(&key)
-                        .ok_or("a batch names no material texture")?;
-                    let shade = *shades
-                        .get(&tex0_cbp(batch.tex0[1]))
-                        .ok_or("a batch names no shading CLUT")?;
-                    Ok([base, shade])
-                })
-                .collect::<Result<Vec<_>, String>>()
-        })
+        .map(|part| part.batches.iter().map(batch_texture).collect())
         .collect::<Result<Vec<_>, String>>()?;
+    // BtlObj_BindTables / BtlObj_CreateFace: the face's meshes, textures and lip tracks (the second voice set's,
+    // as a fresh save has save flag bit 0).
+    let face_data = bt3_data::face::FaceData::from_file(file, true).map_err(error)?;
+    let mut face_draw = FaceDraw::default();
+    let face_tex = header.face_tex;
+    if (header.tex_first..header.tex_first.saturating_add(header.tex_count)).contains(&face_tex) {
+        let e = entry(face_tex)?;
+        face_draw.material = materials
+            .get(&(e.tbp_offset as u32, e.cbp_offset as u32))
+            .copied();
+    }
+    let mut add_texture = |e: &bt3_data::tex::TextureEntry| -> Result<usize, String> {
+        let mut texture = decode_sprite_texture(e).map_err(error)?;
+        for pixel in texture.pixels.chunks_exact_mut(4) {
+            pixel[3] = 0xFF;
+        }
+        assets.base_textures.push(texture);
+        Ok(assets.base_textures.len() - 1)
+    };
+    let eye_table = bt3_data::pack_entry(file, bt3_data::face::EYE_TABLE)
+        .map(TextureResource::parse)
+        .transpose()
+        .map_err(error)?;
+    if let Some(t) = &eye_table {
+        for e in &t.entries {
+            face_draw.eyes.push(add_texture(e)?);
+        }
+    }
+    let mut mouth_tex = [false; 8];
+    for i in 4..8 {
+        if let Some(t) = bt3_data::pack_entry(file, bt3_data::face::MOUTH_TEX_FIRST + i - 4) {
+            mouth_tex[i] = true;
+            let t = TextureResource::parse(t).map_err(error)?;
+            if let Some(e) = t.entries.first() {
+                face_draw.mouths[i] = Some(add_texture(e)?);
+            }
+        }
+    }
+    let mut mouth_mesh = [false; 8];
+    for (i, chain) in face_data.mouth_chains.iter().enumerate() {
+        if let Some(batches) = chain {
+            mouth_mesh[i] = true;
+            if let Ok(textures) = batches.iter().map(batch_texture).collect() {
+                face_draw.chains[i] = Some((batches.clone(), textures));
+            }
+        }
+    }
+    let face = std::sync::Arc::new(crate::btl_face::FaceModel {
+        eye_count: eye_table.as_ref().map(|t| t.entries.len() as u32),
+        mouth_mesh,
+        mouth_tex,
+        model_flags: header.flags,
+        lips: face_data.lips,
+        tables: assets.fx_tables.face.clone(),
+    });
     Ok(FighterModel {
         chara: 0,
         costume: 0,
@@ -1245,6 +1321,8 @@ fn load_fighter(
         anim1_chara: 0,
         model,
         batch_textures,
+        face: Some(face),
+        face_draw,
         motions: Vec::new(),
         raw_motions: Vec::new(),
         tables: CharaTables::default(),
@@ -1388,6 +1466,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
             body: f.tables.body.as_ref(),
             chara: f.chara,
             height: f.tables.params.height(),
+            face: f.face.as_ref(),
         },
         tables: &f.tables,
         entry: f.entry,
@@ -2370,13 +2449,6 @@ impl Battle {
             }
             false
         });
-        // BtlObj_UpdateAll (not while paused): the fighters' colour flash and mode-2 fade step.
-        if !paused {
-            for c in &mut self.roster.chars {
-                let fading = c.obj.flags & 0x4_0000 != 0;
-                c.obj.flash.step(fading);
-            }
-        }
         self.check_stage_change();
         if !paused && !self.loading {
             // BtlStage_Update: StgAmb_Update, then the objects' animations and StgRigid_Update (not while paused or
@@ -2458,7 +2530,7 @@ impl Battle {
             self.roster.change.update();
             if !paused {
                 self.with_roster(|roster, data, env| {
-                    roster.end_frame(data, env);
+                    roster.end_frame(data, env, &mut *input.libc);
                     true
                 });
                 // BtlCharSnd_PlayRequests, from this frame's camera.
@@ -2479,6 +2551,15 @@ impl Battle {
                         charas,
                         input.sounds,
                     );
+            }
+        }
+        // BtlObj_UpdateAll (not while paused): per fighter the face (blink and mouth), the colour flash and the
+        // mode-2 fade step.
+        if !paused {
+            for c in &mut self.roster.chars {
+                c.obj.update_face(&mut *input.libc);
+                let fading = c.obj.flags & 0x4_0000 != 0;
+                c.obj.flash.step(fading);
             }
         }
         self.amb_cam = Some(view.eye());
@@ -2566,18 +2647,43 @@ impl Battle {
             ) else {
                 continue;
             };
-            let nodes = &self.roster.chars[side].obj.nodes;
+            let obj = &self.roster.chars[side].obj;
             let parts = model
                 .model
                 .parts
                 .iter()
                 .zip(&model.batch_textures)
-                .zip(nodes);
-            let obj_flags = self.roster.chars[side].obj.flags;
+                .zip(&obj.nodes);
+            let obj_flags = obj.flags;
+            // The face: the mouth shape's mesh for the mouth part, the face texture of the frame for the model's.
+            let face = obj.face.as_ref();
+            let mouth = face
+                .and_then(|f| usize::try_from(f.sub_state()).ok())
+                .and_then(|s| model.face_draw.chains[s].as_ref());
+            let swap = face
+                .and_then(crate::btl_face::Face::texture)
+                .and_then(|t| model.face_draw.texture(t))
+                .zip(model.face_draw.material);
             for ((part, textures), node) in parts {
                 if part.enabled && node_shown(model.model.header.flags, obj_flags, part.node) {
+                    let (batches, textures) = match mouth {
+                        Some((b, t)) if part.node == 0x30 => (b.as_slice(), t.as_slice()),
+                        _ => (part.batches.as_slice(), textures.as_slice()),
+                    };
+                    let swapped: Vec<[usize; 2]>;
+                    let textures = match swap {
+                        Some((to, from)) if textures.iter().any(|t| t[0] == from) => {
+                            swapped = textures
+                                .iter()
+                                .map(|&[b, s]| [if b == from { to } else { b }, s])
+                                .collect();
+                            swapped.as_slice()
+                        }
+                        _ => textures,
+                    };
                     draw_part(
                         part,
+                        batches,
                         textures,
                         &node.mtx,
                         &node.parent,
@@ -3193,6 +3299,7 @@ fn projection() -> (Mtx, Mtx, Mtx) {
 #[allow(clippy::too_many_arguments)]
 fn draw_part(
     part: &ModelPart,
+    batches: &[Batch],
     textures: &[[usize; 2]],
     mtx_a: &Mtx,
     mtx_b: &Mtx,
@@ -3203,7 +3310,7 @@ fn draw_part(
 ) {
     // Mtx_MakeNormalLight(light, lightDir, 0, 0): x of light * n is -L . n; Vec3_Normalize clears w.
     let neg_light = scale3(normalize(light_dir), -1.0);
-    for (batch, &tex) in part.batches.iter().zip(textures) {
+    for (batch, &tex) in batches.iter().zip(textures) {
         let mut flags = [false; 2];
         let mut previous: [Option<ScreenVertex>; 2] = [None, None];
         let out = groups.entry((tex, look)).or_default();
@@ -8702,6 +8809,104 @@ mod tests {
             most = most.max((angle(rot(&battle)) - rest).abs());
         }
         assert!(most > 0.01, "{most}");
+    }
+
+    #[test]
+    fn real_faces_blink_talk_and_swap_their_textures() {
+        use bt3_data::face::LipKey;
+        let Some(mut battle) = fight_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        // Goku: one eye frame (shut), the meshes of mouth shapes 1..5 and shape 5's texture, all 100 lip tracks of
+        // the second voice set; the executable's talk patterns and jaw tracks.
+        let f = &battle.assets.fighters[0];
+        let m = f.face.clone().unwrap();
+        assert_eq!(m.eye_count, Some(1));
+        assert_eq!(
+            m.mouth_mesh,
+            [true, true, true, true, true, false, false, false]
+        );
+        assert_eq!(
+            m.mouth_tex,
+            [false, false, false, false, true, false, false, false]
+        );
+        assert_eq!(m.lips.iter().flatten().count(), 100);
+        assert_eq!(
+            m.lips[0].as_ref().unwrap()[..2],
+            [LipKey { frame: 0, code: 1 }, LipKey { frame: 13, code: 0 }]
+        );
+        assert_eq!(
+            m.tables.talk7,
+            [[0, 0], [3, 2], [6, 3], [9, 4], [15, 3], [18, 2], [21, 0]]
+        );
+        assert_eq!(m.tables.talk5, [[0, 0], [5, 2], [9, 3], [17, 2], [21, 0]]);
+        assert_eq!(m.tables.jaw[1].1, 16);
+        assert!((m.tables.jaw[1].0[0] - 10f32.to_radians()).abs() < 1e-4);
+        // The eye and mouth textures stand in for the face texture: the same size.
+        let material = f.face_draw.material.unwrap();
+        let (eye, mouth5) = (f.face_draw.eyes[0], f.face_draw.mouths[4].unwrap());
+        assert!(f.face_draw.chains[..5].iter().all(Option::is_some));
+        let size = |i: usize| {
+            let t = &battle.assets.base_textures[i];
+            (t.width, t.height)
+        };
+        assert_eq!(size(eye), size(material));
+        assert_eq!(size(mouth5), size(material));
+        let drawn = |frame: &BattleFrame, t: usize| frame.models.iter().any(|b| b.textures[0] == t);
+        // The eyes shut within the first blink wait (the first draws come on the second update), and the frame
+        // draws the eye texture in place of the face texture while they are.
+        let mut shut = None;
+        for _ in 0..200 {
+            let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            if battle.roster.chars[0].obj.face.as_ref().unwrap().eye == 1 {
+                shut = Some(frame);
+                break;
+            }
+            assert!(!drawn(&frame, eye));
+        }
+        let frame = shut.expect("the eyes never blinked");
+        assert!(drawn(&frame, eye) && !drawn(&frame, material));
+        // A held shape 5 (mode 9) draws mouth 5's mesh and texture.
+        battle.roster.chars[0].obj.set_mouth(9);
+        let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert_eq!(
+            battle.roster.chars[0]
+                .obj
+                .face
+                .as_ref()
+                .unwrap()
+                .sub_state(),
+            4
+        );
+        assert!(drawn(&frame, mouth5));
+        battle.roster.chars[0].obj.set_mouth(0);
+        // An own-bank voice line (kind 0) talks one pattern: shapes 2..4 (meshes 1..3), then rest.
+        battle.with_roster(|roster, _, env| {
+            roster.chars[0].voice(env, 0, 0, &mut libc);
+            false
+        });
+        assert_eq!(battle.roster.chars[0].obj.mouth_mode(), 4);
+        let mut subs = Vec::new();
+        for _ in 0..12 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            subs.push(
+                battle.roster.chars[0]
+                    .obj
+                    .face
+                    .as_ref()
+                    .unwrap()
+                    .sub_state(),
+            );
+        }
+        assert!(subs.iter().any(|&s| s >= 1), "{subs:?}");
+        assert_eq!(battle.roster.chars[0].obj.mouth_mode(), 0);
+        // A lip track talks from its first record on.
+        battle.roster.chars[0].obj.set_sub_state(2, 0, &mut libc);
+        battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert_eq!(battle.roster.chars[0].obj.mouth_mode(), 3);
     }
 
     #[test]

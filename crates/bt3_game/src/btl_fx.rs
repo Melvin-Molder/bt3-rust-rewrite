@@ -215,6 +215,49 @@ pub(crate) fn obj_mask_event_400(me: &mut Chr, data: &SideData) {
     }
 }
 
+/// `BtlFx_UpdateObjCmdFlag137`: fighter flag 0x137 forces eye frame 1 (the tired idle's shut eyes); once it
+/// clears, the eyes go back to the blink.
+pub(crate) fn update_eyes_flag137(me: &mut Chr) {
+    if me.flags.test(0x137) {
+        me.obj.set_eye_frame(1);
+    } else if me.obj.eye_frame() == 1 {
+        me.obj.set_eye_frame(9);
+    }
+}
+
+/// `BtlFx_UpdateSubStateFlag96`: fighter flag 0x96 (the low-health idle) holds mouth shape 1 (mode 5) from rest or
+/// a single talk; clearing it returns the mouth to rest.
+pub(crate) fn update_mouth_flag96(me: &mut Chr) {
+    let mode = me.obj.mouth_mode();
+    if me.flags.test(0x96) {
+        if mode == 0 || mode == 4 {
+            me.obj.set_mouth(5);
+        }
+    } else if mode == 5 {
+        me.obj.set_mouth(0);
+    }
+}
+
+/// `BtlFxObj_HandleSubStateEvents` (`BtlFx_UpdateObjEvents`, the motion pass): motion events 1 << 56..58 hold
+/// mouth shapes 5..7 (modes 9..11), 1 << 59 forces eye frame 2, 1 << 60 ends a held shape and the forced eyes.
+pub(crate) fn face_events(me: &mut Chr) {
+    let obj = &mut me.obj;
+    for (bit, mode) in [(56, 9), (57, 0xA), (58, 0xB)] {
+        if obj.test_event(1 << bit) {
+            obj.set_mouth(mode);
+        }
+    }
+    if obj.test_event(1 << 59) {
+        obj.set_eye_frame(2);
+    }
+    if obj.test_event(1 << 60) {
+        if (9..=12).contains(&obj.mouth_mode()) {
+            obj.set_mouth(0);
+        }
+        obj.set_eye_frame(9);
+    }
+}
+
 /// `BtlFx_PushBackOnEvent400`: in a rush sequence of a technique without flag 0x1000000, animation event 0x400
 /// raises flag 0x9F, while which the chains are pushed straight back (the partner object's are not ported).
 pub(crate) fn push_back_on_event_400(me: &mut Chr, data: &SideData) {

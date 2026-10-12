@@ -106,6 +106,8 @@
 !/crates/bt3_data/src/eft_mesh.rs
 !/crates/bt3_data/src/eft_pack.rs
 !/crates/bt3_data/src/burst.rs
+!/crates/bt3_data/src/face.rs
+!/crates/bt3_game/src/btl_face.rs
 !/crates/bt3_game/src/model_draw.rs
 !/crates/bt3_game/src/gs_model.wgsl
 !/crates/bt3_game/src/gs_effect.wgsl
