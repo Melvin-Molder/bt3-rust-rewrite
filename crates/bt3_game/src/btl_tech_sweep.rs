@@ -6,6 +6,8 @@
 //!
 //! Its emitters are driven at the beam's end along the aim (`EftSweep_Emit`).
 //!
+//! The follow of type 7 (`EftFollow_*`, the tail of the same module) is here too.
+//!
 //! Not ported: the marks' impact effects and the stage objects they break.
 
 use bt3_data::eft_pack::{EmitSet, SetHead};
@@ -318,6 +320,207 @@ impl Sweep {
         }
         if self.tag.flags & 3 != 0 {
             self.flags &= !S_TRAIL;
+        }
+    }
+}
+
+// EFT_FOLLOW_*.
+const F_ENDING: u32 = 0x1;
+const F_DEAD: u32 = 0x2;
+const F_NOW: u32 = 0x4;
+const F_STOP_SEEN: u32 = 0x8;
+const F_TRAIL: u32 = 0x10;
+const F_STARTED: u32 = 0x40;
+
+/// An `EftFollow` item (technique effect type 7, the steered dashes): from the FIRE event a record of two spheres
+/// at the fighter's node 3 now and last frame, as wide as the technique's scale times the set's trail width; the
+/// stop (END) or ABORT events end it once the set's end frames are over, and its end raises flag 0xA8, which ends
+/// the dash. The stage light (parameter flag 0x200) is not ported.
+#[derive(Clone, Debug)]
+pub(crate) struct Follow {
+    id: u32,
+    src: TechSrc,
+    pub(crate) tag: Tag,
+    flags: u32,
+    state: u8,
+    width: f32,
+    time: f32,
+    life: f32,
+    /// From node 0x2E to node 3.
+    dir: [f32; 3],
+    start: [f32; 3],
+    cur: [f32; 3],
+    prev: [f32; 3],
+    nodes: EmitNodes,
+    emit: Option<EmitState>,
+    head_set: SetHead,
+    trail_width: f32,
+    trail_time: f32,
+    dead: bool,
+}
+
+impl Follow {
+    /// `EftFollow_Init` (the speed of a set with its own width is never read).
+    pub(crate) fn new(id: u32, src: TechSrc, data: &SideData, set: &EmitSet) -> Self {
+        let head_set = set.head;
+        Self {
+            id,
+            src,
+            tag: Tag::default(),
+            flags: 0,
+            state: 0,
+            width: src.def.scale,
+            time: 0.0,
+            life: f32::from(head_set.end_frames),
+            dir: [0.0; 3],
+            start: [0.0; 3],
+            cur: [0.0; 3],
+            prev: [0.0; 3],
+            nodes: EmitNodes::default(),
+            emit: emit_state(data, src.slot),
+            head_set,
+            trail_width: head_set.width[0],
+            trail_time: 0.0,
+            dead: false,
+        }
+    }
+
+    pub(crate) fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub(crate) fn dead(&self) -> bool {
+        self.dead
+    }
+
+    /// `EftFollow_Reset`: its emitters' objects die.
+    pub(crate) fn kill_parts(&mut self, fx: &mut Modules) {
+        if let Some(st) = &mut self.emit {
+            st.kill_all(fx);
+        }
+    }
+
+    /// `EftFollow_Update`. Returns the record.
+    pub(crate) fn update(
+        &mut self,
+        w: &mut World,
+        fx: &mut Modules,
+        events: u32,
+        cur_slot: i32,
+    ) -> Option<HitRec> {
+        let side = self.src.side;
+        if stopped(w, side) {
+            return None;
+        }
+        let def = self.src.def;
+        let test = |b: u32| events & b != 0;
+        self.nodes
+            .update(&w.chars[side], w.data[side], &def, cur_slot, events);
+        if self.flags & F_STARTED == 0 && (test(EV_START) || test(EV_FIRE)) {
+            self.state = 0;
+            self.flags |= F_STARTED;
+        }
+        let mut next = false;
+        if self.flags & F_STARTED != 0 {
+            match self.state {
+                0 => {
+                    if test(EV_FIRE) {
+                        self.flags |= F_TRAIL;
+                        let obj = &w.chars[side].obj;
+                        self.start = obj.node_pos(3);
+                        self.cur = self.start;
+                        self.prev = obj.node_pos(0x11);
+                        self.state = 1;
+                    }
+                }
+                2 => {
+                    if test(EV_END) {
+                        self.flags |= F_STOP_SEEN | F_ENDING;
+                        self.state = 3;
+                    }
+                }
+                1 | 3 => next = true,
+                _ => {}
+            }
+        }
+        if test(EV_ABORT) {
+            if self.flags & F_STOP_SEEN == 0 {
+                self.flags |= F_NOW;
+            }
+            self.flags |= F_ENDING;
+        }
+        let obj = &w.chars[side].obj;
+        let d = sub(obj.node_pos(3), obj.node_pos(0x2E));
+        let len = length(d);
+        self.dir = if len > 0.0 { scale3(d, 1.0 / len) } else { d };
+        self.prev = self.cur;
+        self.cur = obj.node_pos(3);
+        if let Some(st) = &mut self.emit {
+            let (ending, now) = (self.flags & F_ENDING != 0, self.flags & F_NOW != 0);
+            update_parts(
+                fx,
+                w,
+                &self.src,
+                st,
+                &self.nodes,
+                events,
+                ending,
+                now,
+                self.cur,
+                self.dir,
+                self.width,
+                |_, _, _| false,
+            );
+        }
+        if next {
+            self.state += 1;
+        }
+        if self.flags & F_ENDING != 0 {
+            self.time += 1.0;
+        }
+        if self.flags & F_DEAD != 0 {
+            self.dead = true;
+            return None;
+        }
+        if self.flags & F_ENDING != 0 {
+            if self.flags & F_NOW != 0 || self.time >= self.life {
+                self.flags |= F_DEAD;
+            }
+            return None;
+        }
+        if self.flags & F_TRAIL == 0 {
+            return None;
+        }
+        update_trail_width(&mut self.trail_width, &mut self.trail_time, &self.head_set);
+        if w.paused {
+            return None;
+        }
+        // EftFollow_AddHit: two spheres, never meeting the stage.
+        let mut rec = HitRec::technique_shape(
+            self.src,
+            self.id,
+            self.cur,
+            self.prev,
+            [0.0; 3],
+            self.start,
+            self.width * self.trail_width,
+            0,
+        )?;
+        rec.flags |= H_NEVER;
+        Some(rec)
+    }
+
+    /// `EftFollow_PostUpdate`: a hit (task flag 1, marking the phase 6 emitters) or a guard (2) stops its records.
+    pub(crate) fn post_update(&mut self, w: &World, fx: &mut Modules) {
+        if stopped(w, self.src.side) {
+            return;
+        }
+        let hit = self.tag.flags & 1 != 0;
+        if let Some(st) = &mut self.emit {
+            parts_alive(fx, w.data[self.src.side], &self.src, st, hit);
+        }
+        if self.tag.flags & 3 != 0 {
+            self.flags &= !F_TRAIL;
         }
     }
 }

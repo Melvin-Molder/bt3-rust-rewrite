@@ -11,7 +11,7 @@
 //! The prop shot of type 6 (`EftPropShot_*`) is the same item as the beam with its differences; the volley of
 //! type 1 is in `btl_tech_volley`.
 //!
-//! The sweep of type 3 is in `btl_tech_sweep`, the ring shot of type 4 in `btl_tech_ring`, the multi of type 5
+//! The sweep of type 3 and the follow of type 7 are in `btl_tech_sweep`, the ring shot of type 4 in `btl_tech_ring`, the multi of type 5
 //! (its pieces are discs) in `btl_tech_disc`.
 //!
 //! Every item drives the emitters of its slot's set (header entry 4 of the slot's effect pack) through the particle
@@ -19,10 +19,9 @@
 //! events), keeps them alive in its post-update (`EftEmit_UpdateAlive`, a fighter hit marking the phase 6 ones,
 //! `EftEmit_MarkKind6`) and kills them when the scene resets its fighter (`EftEmit_KillAll`).
 //!
-//! Not ported: the skills' shots (slots 0, 1); the items of effect types 2, 7, 8 and 9 (their timeline runs,
-//! so flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); the prop shots' models, stage blur, flash
-//! and sound; the rush catches (reactions 0x1D / 0x1E) and throws (0x22) of a technique hit, which let the record
-//! pass; abilities; the battle events.
+//! Not ported: the skills' shots (slots 0, 1); the items of effect types 2, 8 and 9 (their timeline runs, so
+//! flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); the prop shots' models, stage blur, flash and
+//! sound; abilities; the battle events.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -38,7 +37,7 @@ use crate::btl_input::wrap_angle;
 use crate::btl_obj::mask_to_node;
 use crate::btl_tech_disc::{Discs, Multi};
 use crate::btl_tech_ring::Ring;
-use crate::btl_tech_sweep::Sweep;
+use crate::btl_tech_sweep::{Follow, Sweep};
 use crate::btl_tech_volley::{Shots, Volley, scene_rand_f};
 use crate::eft::{EmitState, Modules, Nodes, SetAssets, spawn};
 
@@ -50,6 +49,8 @@ pub(crate) struct TechPack {
     pub blast: Option<EmitSet>,
     /// Its decoded textures and module definitions (slots 2..4 only).
     pub assets: Option<crate::eft::SetAssets>,
+    /// The placements of a rush technique's steps on the battle's stage (`BtlSuper_GetStagePlacement`).
+    pub places: Option<[[f32; 4]; 5]>,
 }
 
 // EFT_TECH_EVT_*: a fighter's technique events of the frame.
@@ -246,6 +247,7 @@ pub(crate) struct TechFx {
     beams: [[Vec<Beam>; 5]; 2],
     volleys: [[Vec<Volley>; 5]; 2],
     sweeps: [[Vec<Sweep>; 5]; 2],
+    follows: [[Vec<Follow>; 5]; 2],
     multis: [[Vec<Multi>; 5]; 2],
     rings: [[Vec<Ring>; 5]; 2],
     /// The discs: ki blasts of types 4 / 5 and the multis' pieces (layer 3).
@@ -266,6 +268,7 @@ impl Default for TechFx {
             beams: Default::default(),
             volleys: Default::default(),
             sweeps: Default::default(),
+            follows: Default::default(),
             multis: Default::default(),
             rings: Default::default(),
             discs: Discs::default(),
@@ -1084,6 +1087,13 @@ impl TechFx {
                     items.push(Sweep::new(*next_id, src, me, opp, data, set));
                 }
             }
+            7 => {
+                let items = &mut self.follows[side][slot as usize];
+                if items.len() < ITEMS {
+                    *next_id += 1;
+                    items.push(Follow::new(*next_id, src, data, set));
+                }
+            }
             4 => {
                 let items = &mut self.rings[side][slot as usize];
                 if items.len() < ITEMS {
@@ -1146,6 +1156,15 @@ impl TechFx {
             .find(|s| s.id() == id)
         {
             return Some(&mut s.tag);
+        }
+        if let Some(f) = self
+            .follows
+            .iter_mut()
+            .flatten()
+            .flatten()
+            .find(|f| f.id() == id)
+        {
+            return Some(&mut f.tag);
         }
         self.beams
             .iter_mut()
@@ -1226,6 +1245,22 @@ impl TechFx {
                             w.chars[side].flags.set_held(0xA8);
                         }
                         self.sweeps[side][slot].remove(k);
+                    } else {
+                        k += 1;
+                    }
+                }
+                let mut k = 0;
+                while k < self.follows[side][slot].len() {
+                    let f = &mut self.follows[side][slot][k];
+                    if let Some(rec) = f.update(w, fx, self.events[side], self.cur_slot[side])
+                        && records.len() < max
+                    {
+                        records.push(rec);
+                    }
+                    if f.dead() {
+                        // EftFollow_Term.
+                        w.chars[side].flags.set_held(0xA8);
+                        self.follows[side][slot].remove(k);
                     } else {
                         k += 1;
                     }
@@ -1336,6 +1371,10 @@ impl TechFx {
                 kinds.push(m.src().def.kind);
             }
             if kinds.iter().any(|&k| k != 0) {
+                held.set_held(0xA8);
+            }
+            for mut f in self.follows[side][slot].drain(..) {
+                f.kill_parts(fx);
                 held.set_held(0xA8);
             }
             for mut r in self.rings[side][slot].drain(..) {
@@ -1457,6 +1496,9 @@ impl TechFx {
                 }
                 for s in &mut self.sweeps[side][slot] {
                     s.post_update(w, fx);
+                }
+                for f in &mut self.follows[side][slot] {
+                    f.post_update(w, fx);
                 }
                 for r in &mut self.rings[side][slot] {
                     r.post_update(w, fx, &self.shots);
@@ -1693,8 +1735,9 @@ fn hit_damage_flags(slot: i32) -> u32 {
 }
 
 /// `BtlColl_HitByRush`: a technique hits; one with hit direction kind 0 / 2 only from in front of its user. The
-/// reaction by the victim's state (0x800) and the last hit, 0 meaning 0xF and 1 nothing; then no flinch, or the
-/// hit. The catches (0x1D / 0x1E) and throws (0x22) are not ported: the record passes.
+/// reaction by the victim's state (0x800) and the last hit, 0 meaning 0xF and 1 nothing; then no flinch, a catch
+/// (0x1D / 0x1E, `BtlColl_StartRushCatch`), the rush sequence (0x22, `BtlColl_StartThrow`), or the hit. A catch or
+/// a sequence that cannot start lets the record pass. The battle events are not ported.
 pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let Some(src) = rec.tech else {
         return false;
@@ -1722,10 +1765,19 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if react == 0 {
         react = 0xF;
     }
-    if react == 1 || matches!(react, 0x1D | 0x1E | 0x22) {
+    if react == 1 {
         return false;
     }
     let env = w.env;
+    if matches!(react, 0x1D | 0x1E | 0x22) {
+        let [a, b] = &mut *w.chars;
+        let (atk, def) = if side == 0 { (a, b) } else { (b, a) };
+        return if react == 0x22 {
+            crate::btl_hit::start_throw(atk, def, w.data[side], env, slot, t.flags(slot), w.frame)
+        } else {
+            crate::btl_hit::start_rush_catch(def, atk, w.data[side], env, slot, react, yaw)
+        };
+    }
     let dmg = tech_damage(
         &w.chars[side],
         w.data[side],
@@ -1746,10 +1798,11 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         recoil(w, side, slot);
         return true;
     }
-    // BtlColl_ApplyRushHit (the reaction's slot has no ported reader; the stage timer concerns stages 4 / 27).
+    // BtlColl_ApplyRushHit (the stage timer concerns stages 4 / 27).
     let chr = &mut w.chars[target];
     chr.react.reaction = react;
     chr.react.scale = 0.0;
+    chr.react.slot = slot;
     chr.flags.set(0x94);
     chr.react.turn_yaw = if front { yaw } else { wrap_angle(yaw + PI) };
     chr.react.turn_pitch = 0.0;

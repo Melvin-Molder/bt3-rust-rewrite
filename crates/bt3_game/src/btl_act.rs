@@ -36,6 +36,37 @@ fn super_anim(cls: i32, n: i32) -> i32 {
     cls * 0x22 + 0xC1 + n
 }
 
+/// The step `n` of a technique motion (any class's block of 0x22 from 0x105), as the handlers' switches read it.
+fn super_motion(motion: i32) -> Option<i32> {
+    (0x105..0x105 + 3 * 0x22)
+        .contains(&motion)
+        .then_some((motion - 0x105) % 0x22)
+}
+
+/// `BtlAct_GetMotionLevel`: the step 0..4 of a rush sequence's motion (attacker 0x17.., victim 0x1C.. of any
+/// class), 0 for any other.
+fn motion_level(motion: i32) -> i32 {
+    for base in [0x11C, 0x13E, 0x160, 0x121, 0x143, 0x165] {
+        if (base..base + 5).contains(&motion) {
+            return motion - base;
+        }
+    }
+    0
+}
+
+/// `BtlAct_GetLandingAction`: the victim's action after a rush, by the technique's landing kind.
+fn landing_action(kind: i32) -> i32 {
+    match kind {
+        0 => 0xD8,
+        1 => 0xD9,
+        3 => 0xD0,
+        4 => 0xD5,
+        6 => 0xD4,
+        7 => 0xDB,
+        _ => 0xCF,
+    }
+}
+
 /// `BtlAct_IsTechniqueId`: 0x105..0x132.
 pub(crate) fn is_technique_id(id: i32) -> bool {
     (0x106..0x106 + 0x2D).contains(&id) || id == 0x105
@@ -90,8 +121,7 @@ pub(crate) struct Ctx<'a, 'd> {
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xFA..=0xFC | 0x104 | 0x105..=0x11A
-        | 0x130..=0x132)
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xFA..=0xFC | 0x104 | 0x105..=0x13B)
 }
 
 impl Ctx<'_, '_> {
@@ -840,6 +870,14 @@ impl Ctx<'_, '_> {
             0x10F..=0x111 => self.super_charge(phase),
             0x112..=0x114 => self.super_repeat(phase),
             0x115..=0x11A => self.super_quick_beam(phase),
+            0x11B..=0x120 => self.tech_rush_dash(phase),
+            0x121..=0x123 => self.rush_strike(phase),
+            0x124..=0x126 => self.rush_fly(phase),
+            0x127..=0x129 => self.rush_follow(phase),
+            0x12A..=0x12C => self.tech_rush_finish(phase),
+            0x12D..=0x12F | 0x139..=0x13B => self.rush_sequence(phase),
+            0x133..=0x135 => self.rush_caught(phase),
+            0x136..=0x138 => self.launched_up(phase),
             0xFA => self.clash_blows(phase),
             0x104 => self.clash_lost(phase),
             0x130..=0x132 => self.clash_struggle(phase),
@@ -1049,8 +1087,9 @@ impl Ctx<'_, '_> {
                 stun(self.me, [15, 30, 45][reaction - 26]);
                 0xE0
             }
-            // The throw-victim actions 0x131.. / 0x134.. / 0x137..: not ported.
-            29 | 30 | 34 | 41 => -1,
+            29 | 30 => self.me.thr.slot + 0x131,
+            34 => self.me.thr.slot + 0x137,
+            41 => self.me.react.slot + 0x134,
             _ => 0xC0,
         };
         self.set(0x129);
@@ -6581,9 +6620,9 @@ impl Ctx<'_, '_> {
     /// (`BtlAct_SuperLongBeamHandler`): the start motion (level 2 hit-stop), the charge loop until the effect
     /// raises flag 0xA7, the fire, the firing loop until 0xA8 (the long beam: a second stage until 0xA9), the end;
     /// each wait also ends after 150 frames, the original's own timeout (the end of an effect type other than 0,
-    /// and flag 0xA9, come from effects not ported). Not ported either: the self-destruct change of flag 0x2000 (a
-    /// character change), the shakes, vibration, sounds and cuts, and the rush sequences 0x12A.. (flags 0x72 /
-    /// 0x73).
+    /// and flag 0xA9, come from effects not ported). A catch (flag 0x73) goes to the closing motion 0x12A.., a
+    /// sequence (0x72) to 0x12D... Not ported either: the self-destruct change of flag 0x2000 (a character change),
+    /// the shakes, vibration, sounds and cuts.
     fn super_beam(&mut self, phase: u32) {
         let cls = self.current_class();
         let long = (0x10C..=0x10E).contains(&self.current());
@@ -7075,6 +7114,936 @@ impl Ctx<'_, '_> {
         if phase == DECIDE && self.flag(anim_flag::END) {
             let q = self.queued();
             self.request(q);
+        }
+    }
+
+    // ---- the rush techniques (btl_act_super.c, second part) ---------------------------------------------------
+
+    /// `BtlSuper_SetRushFlags`: the per-frame flags of a technique's cinematic part.
+    fn super_rush_flags(&mut self) {
+        for f in [0xD5, 0x1A, 0x3F, 0xBB, 0x128, 0x18, 0x12D] {
+            self.set(f);
+        }
+    }
+
+    /// `BtlSuper_GetRushSpeed`: the dash speed per frame.
+    fn rush_speed(&self, cls: i32) -> f32 {
+        self.tech().rush_speed(cls) * 10.0 * kmh(1.0)
+    }
+
+    /// `BtlSuper_MeasureRushStep`: step `step` of the sequence's chain of motions (attacker motions 0x17..) on the
+    /// sub layer, one per frame: its hits (events 0x200000000), its length and the frames of the first 0x20000 /
+    /// last 0x40000 events, which bound the health drain.
+    fn measure_rush_step(&mut self, cls: i32, step: i32) {
+        if step >= self.tech().steps(cls) {
+            return;
+        }
+        if step == 0 {
+            self.me.rush = crate::btl_chr::RushMeasure {
+                step_a: -1,
+                step_b: -1,
+                ..Default::default()
+            };
+        }
+        self.me.anim_play_sub(self.data, step + cls * 0x22 + 0xD8);
+        if self.me.obj.layers[1].motion.is_none() {
+            return;
+        }
+        let frames = self.me.obj.layers[1].length;
+        let q = |mask: u64, what: u32| self.me.obj.query_event(&self.data.obj, mask, 1, what);
+        let (hits, a_count, a_first, b_count, b_last) = (
+            q(0x2_0000_0000, 3),
+            q(0x2_0000, 3),
+            q(0x2_0000, 0),
+            q(0x4_0000, 3),
+            q(0x4_0000, 2),
+        );
+        let last = step < self.tech().steps(cls) - 1;
+        let r = &mut self.me.rush;
+        r.hits += hits;
+        if r.step_a < 0 {
+            if a_count > 0 {
+                r.frame_a += a_first;
+                r.step_a = step;
+            } else {
+                r.frame_a = (r.frame_a as f32 + (frames + 1.0)) as i32;
+            }
+        }
+        if r.step_b < 0 {
+            if b_count > 0 {
+                r.frame_b += b_last;
+                r.step_b = step;
+            } else {
+                r.frame_b = (r.frame_b as f32 + (frames + 1.0)) as i32;
+            }
+        }
+        r.frames = (r.frames as f32 + frames) as i32;
+        if last {
+            r.frames = (r.frames as f32 + 1.0) as i32;
+        }
+    }
+
+    /// `BtlSuper_SetupRushDamage`: the damage queue of a rush (flag 0xA1): the technique's whole damage (rounded up
+    /// to 10; * 1.5 under flag 0xA0, halved for a victim caught in a motion of flag 0x800) over the motion's own
+    /// hits (`from_anim`) or the measured chain's, at most 15000 a hit, and the health drain over the measured
+    /// window unless the opponent is immune (parameter bit 0x80). Technique flag 0x400 deals none but the end (1
+    /// for a failed sequence), 0x200000 turns the fighter to the opponent's heading and warps its body onto it.
+    fn setup_rush_damage(&mut self, cls: i32, from_anim: bool) {
+        self.set(0xA1);
+        let mut q = crate::btl_chr::DamageQueue {
+            drain_from: -1,
+            drain_to: -1,
+            ..Default::default()
+        };
+        let tf = self.tech().flags(cls);
+        if tf & 0x100_0000 == 0 {
+            let mut damage = crate::btl_tech_fx::tech_damage(
+                self.me,
+                self.data,
+                self.opp_data,
+                self.env,
+                cls,
+                false,
+                true,
+            );
+            let rem = damage % 10;
+            if rem != 0 {
+                damage = damage - rem + 10;
+            }
+            if self.flag(0xA0) {
+                damage += damage / 2;
+            }
+            if self.me.thr.half_damage {
+                damage /= 2;
+            }
+            q.hits = if from_anim {
+                self.query_event(0x2_0000_0000, 0, 3)
+            } else {
+                self.me.rush.hits
+            };
+            q.total_start = damage;
+            q.total = damage;
+            q.flags = match cls {
+                2 => 0x80_0180,
+                3 => 0x100_0180,
+                4 => 0x200_0180,
+                _ => 0x180,
+            };
+            q.per_hit = (damage / (q.hits + 5)).min(15000);
+            let rem = q.per_hit % 10;
+            if rem != 0 {
+                q.per_hit = q.per_hit - rem + 10;
+            }
+            let immune = self.opp_data.tables.params.chara_flags() & 0x80 != 0;
+            let drain = self.tech().drain(cls);
+            if !immune && drain > 0 {
+                let r = self.me.rush;
+                let mut from = r.frame_a.min(r.frames - 30);
+                let mut to = r.frame_b.min(r.frames - 30);
+                if to < from {
+                    std::mem::swap(&mut from, &mut to);
+                }
+                q.drain_health_start = drain;
+                q.drain_health = drain;
+                let mut half = (to - from) / 2;
+                if half <= 0 {
+                    half = 1;
+                }
+                q.drain_health_step = drain / half + 1;
+                q.drain_from = from;
+                q.drain_to = to;
+            }
+            if tf & 0x400 != 0 {
+                q.per_hit = 0;
+                q.flags |= 0x200;
+                if self.me.thr.failed {
+                    q.total_start = 1;
+                    q.total = 1;
+                    q.flags |= 3;
+                }
+            }
+        }
+        self.me.queue = q;
+        if tf & 0x20_0000 != 0 {
+            let yaw = self.opp.snap_rot(6)[1];
+            self.me.set_heading(yaw, 0.0);
+            self.set(0x9B);
+            self.me.body_warp_pos = self.opp.obj.body_sphere().0;
+            self.set(0x55);
+        }
+        if self.tech().id(cls) == 0x2EF && self.opp_data.tables.params.chara_flags() & 0x80 == 0 {
+            self.me.boost_stock = (self.me.boost_stock + 5).clamp(0, 10);
+        }
+    }
+
+    /// The start of a rush technique (dash, strike): the start motion, facing the opponent, the begin, the start
+    /// flags and half the ki (the sequence pays the other half). The camera cut, the sound and the head look are
+    /// not ported.
+    fn rush_start(&mut self, cls: i32) {
+        self.play(super_anim(cls, 0), 0.15);
+        self.me.turn_yaw(self.opp, 2, PI);
+        self.me
+            .turn_pitch(self.data, self.opp, self.opp_data, 1, PI);
+        self.me.turn_model_yaw(PI, 1.0);
+        self.super_begin(cls, false);
+        self.super_start_fx(cls);
+        self.super_class_flag(cls, false);
+        let ki = self.tech().ki(cls) / 2;
+        self.me.spend_ki(ki, true);
+        self.held(0xE);
+    }
+
+    /// Actions 0x11B..0x11D (technique kinds 4, 5) and 0x11E..0x120 (kind 6, flying straight: work[0] bit 0)
+    /// (`BtlAct_SuperRushDashHandler`): start motions 0 and 1 under level 2 hit-stop, then the dash (motion 2, the
+    /// loop 3) at the technique's speed homing on the opponent (turn rates scaled down within 100 of it), live
+    /// (flag 0x49) in the loop, the straight one from motion 2's third frame; the end motion 6 after 16 slow frames,
+    /// the technique's time, the lost lock-on or a miss (0x63). Then 0xB, pushed back (0x64: 0xCF) or the sequence
+    /// (0x72). The vibration, sounds and camera cut are not ported.
+    fn tech_rush_dash(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.rush_start(cls);
+            if (0x11E..=0x120).contains(&self.current()) {
+                self.me.work[0] |= 1;
+            }
+        }
+        let straight = self.me.work[0] & 1 != 0;
+        if phase == RUN {
+            let (mut moving, mut lean) = (false, 0.0);
+            match super_motion(self.anim_id()) {
+                Some(0) => {
+                    self.me.anim_advance_then(super_anim(cls, 1), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                }
+                Some(1) => {
+                    self.me.anim_advance_then(super_anim(cls, 2), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                }
+                Some(2) => {
+                    self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    self.super_set_class(cls);
+                    if self.me.anim_is_new() {
+                        self.set(0xD0);
+                    }
+                    self.me.set_fx(4);
+                    self.set(0x47);
+                    moving = true;
+                    if straight && !self.me.anim_is_new() && !self.me.anim_was_new() {
+                        self.set(0x49);
+                    }
+                    lean = self.me.anim_progress();
+                }
+                Some(3) => {
+                    moving = true;
+                    self.me.anim_advance_loop(0);
+                    lean = 1.0;
+                    self.set(0x49);
+                    self.set(0x47);
+                    self.me.set_fx(4);
+                }
+                Some(6) => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                    lean = 1.0 - self.me.anim_progress();
+                }
+                _ => {}
+            }
+            if moving {
+                let speed = self.rush_speed(cls);
+                if straight {
+                    self.step(6, 6, 3, speed, 10000.0);
+                } else {
+                    let (yaw_accel, pitch_accel) = (self.turn_accel(2), self.turn_accel(3));
+                    let (yaw_max, pitch_max) = (self.turn_max(2), self.turn_max(3));
+                    let near =
+                        (opp_gap_xz(self.me, self.opp, self.data, self.opp_data) * 0.01).min(1.0);
+                    steer_at_opponent(
+                        self.me,
+                        self.opp,
+                        self.data,
+                        self.opp_data,
+                        speed,
+                        yaw_accel,
+                        pitch_accel,
+                        yaw_max * near,
+                        pitch_max * near,
+                        PI,
+                    );
+                    self.me.turn_model_yaw(deg(36.0), 0.5);
+                    self.me.set_direction(3);
+                    self.me.advance(speed, 10000.0);
+                    self.me.apply_gravity();
+                }
+                self.set(9);
+            } else {
+                self.step(6, 6, 7, 0.0, kmh(200.0));
+            }
+            self.me.apply_gravity();
+            self.set(0xBB);
+            self.me.set_fx(0x10);
+            self.me.set_fx(0x3A);
+            if straight {
+                self.set(0x1A);
+            }
+            if self.flag(5) && (self.tech().flags(cls) as i32) >= 0 {
+                let pitch = self.me.pose.pitch.clamp(deg(-63.0), deg(63.0));
+                self.me.set_lean_x(pitch * lean);
+            }
+            let frame = self.me.action_frame;
+            self.measure_rush_step(cls, frame);
+            self.super_boost_input();
+        }
+        if phase == DECIDE {
+            match super_motion(self.anim_id()) {
+                Some(2) => {
+                    if straight && self.flag(0x63) {
+                        self.request_anim(super_anim(cls, 6), 0.15);
+                        self.me.pose.speed = 0.0;
+                    }
+                }
+                Some(3) => {
+                    let mut stop = false;
+                    if crate::btl_chr::length(self.me.pose.moved) < kmh(100.0) {
+                        self.me.work[2] += 1;
+                        if self.me.work[2] >= 16 {
+                            self.me.pose.speed = 0.0;
+                            stop = true;
+                        }
+                    } else {
+                        self.me.work[2] = 0;
+                    }
+                    self.me.work[3] += 1;
+                    if self.me.work[3] as f32 > self.tech().shot_time(cls) * 30.0 {
+                        self.me.pose.speed = 0.0;
+                        stop = true;
+                    }
+                    if !self.flag(5) {
+                        stop = true;
+                    }
+                    if self.flag(0x63) {
+                        self.me.pose.speed = 0.0;
+                        stop = true;
+                    }
+                    if stop {
+                        self.request_anim(super_anim(cls, 6), 0.15);
+                    }
+                }
+                _ => {}
+            }
+            if self.me.work[1] != 0 {
+                self.request(0xB);
+            }
+            if self.flag(0x64) {
+                self.set(0x36);
+                self.request(0xCF);
+            }
+            if self.flag(0x72) {
+                self.me.set_fx(5);
+                self.request(cls + 0x12B);
+            }
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// Actions 0x121..0x123 (technique kind 10, `BtlAct_SuperRushStrikeHandler`): struck from where the fighter
+    /// stands: start motions 0 and 1 under level 2 hit-stop, then motion 2 (moving at 100 km/h, live in its second
+    /// half) straight into the end motion 6. Broken (0x7A): 0xCA; pushed back (0x64): 0xCF; caught (0x72): the
+    /// sequence.
+    fn rush_strike(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.rush_start(cls);
+        }
+        if phase == RUN {
+            let mut moving = false;
+            match super_motion(self.anim_id()) {
+                Some(0) => {
+                    self.me.anim_advance_then(super_anim(cls, 1), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                }
+                Some(1) => {
+                    self.me.anim_advance_then(super_anim(cls, 2), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                }
+                Some(2) => {
+                    self.me.anim_advance_then(super_anim(cls, 6), 0.0, 0);
+                    self.super_set_class(cls);
+                    if 0.5 < self.me.anim_progress() {
+                        self.set(0x49);
+                    }
+                    self.me.set_frames_to_reach(0.5);
+                    moving = true;
+                }
+                Some(6) => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                }
+                _ => {}
+            }
+            let speed = if moving { kmh(100.0) } else { 0.0 };
+            self.step(6, 5, 2, speed, kmh(100.0));
+            self.me.apply_gravity();
+            self.set(0xBB);
+            self.me.set_fx(0x10);
+            self.me.set_fx(0x3A);
+            self.set(0xA5);
+            self.set(0x53);
+            let frame = self.me.action_frame;
+            self.measure_rush_step(cls, frame);
+            self.super_boost_input();
+        }
+        if phase == DECIDE {
+            if self.me.work[1] != 0 {
+                self.request(0xB);
+            }
+            if self.flag(0x7A) {
+                self.request(0xCA);
+            }
+            if self.flag(0x64) {
+                self.set(0x36);
+                self.request(0xCF);
+            }
+            if self.flag(0x72) {
+                self.request(cls + 0x12B);
+            }
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// The flight of the steered dashes 0x124.. / 0x127..: the loop turns by the stick, the others stand.
+    fn rush_fly_move(&mut self, cls: i32, moving: bool, lean: f32) {
+        if moving {
+            let speed = self.rush_speed(cls);
+            self.me.turn_yaw(self.opp, 1, deg(7.2));
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 0, deg(5.4));
+            self.me.turn_model_yaw(PI, 0.5);
+            self.me.set_direction(3);
+            self.me.advance(speed, 10000.0);
+            self.me.apply_gravity();
+            self.set(9);
+        } else {
+            self.step(6, 6, 7, 0.0, kmh(200.0));
+        }
+        self.me.apply_gravity();
+        self.set(0xBB);
+        self.me.set_fx(0x10);
+        self.set(0x1A);
+        if self.flag(5) {
+            let pitch = self.me.pose.pitch;
+            self.me.set_lean_x(pitch * lean);
+        }
+    }
+
+    /// The decide phase of the steered dashes: the loop ends on the effect's flag 0xA8 or the lost lock-on.
+    fn rush_fly_decide(&mut self, cls: i32) {
+        if super_motion(self.anim_id()) == Some(3) {
+            let mut stop = false;
+            if self.flag(0xA8) {
+                self.me.pose.speed = 0.0;
+                stop = true;
+            }
+            if !self.flag(5) {
+                stop = true;
+            }
+            if stop {
+                self.request_anim(super_anim(cls, 6), 0.15);
+            }
+        }
+        if self.me.work[1] != 0 {
+            self.super_finish(cls);
+        }
+    }
+
+    /// The loop motion of the steered dashes: turned to the opponent as it starts.
+    fn rush_fly_loop(&mut self) {
+        self.me.anim_advance_loop(0);
+        if self.me.anim_is_new() {
+            self.me.turn_yaw(self.opp, 2, PI);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 1, PI);
+            self.me.turn_model_yaw(PI, 1.0);
+        }
+    }
+
+    /// Actions 0x124..0x126 (technique kind 8, `BtlAct_SuperRushFlyHandler`): a dash the player steers, hitting on
+    /// the way through its effect: the start motions as the rush dash (the whole ki on entry), then the loop at the
+    /// technique's speed until the effect raises 0xA8 or the lock-on is lost.
+    fn rush_fly(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.play(super_anim(cls, 0), 0.15);
+            self.super_begin(cls, false);
+            self.me.turn_yaw(self.opp, 2, PI);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 1, PI);
+            self.me.turn_model_yaw(PI, 1.0);
+            self.super_start_fx(cls);
+            self.super_class_flag(cls, false);
+            let ki = self.tech().ki(cls);
+            self.me.spend_ki(ki, true);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let (mut moving, mut lean) = (false, 0.0);
+            match super_motion(self.anim_id()) {
+                Some(0) => {
+                    self.me.anim_advance_then(super_anim(cls, 1), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                }
+                Some(1) => {
+                    self.me.anim_advance_then(super_anim(cls, 2), 0.0, 0);
+                    self.super_hit_stop(false);
+                    self.super_set_class(cls);
+                }
+                Some(2) => {
+                    if self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0) {
+                        self.set(0xD0);
+                    }
+                    self.super_set_class(cls);
+                    lean = self.me.anim_progress();
+                }
+                Some(3) => {
+                    self.rush_fly_loop();
+                    moving = true;
+                    lean = 1.0;
+                }
+                Some(6) => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                    lean = 1.0 - self.me.anim_progress();
+                }
+                _ => {}
+            }
+            self.rush_fly_move(cls, moving, lean);
+            self.super_boost_input();
+        }
+        if phase == DECIDE {
+            self.rush_fly_decide(cls);
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// Actions 0x127..0x129 (`BtlAct_SuperRushFollowHandler`): the steered dash as a follow-up: no hit-stop, ki or
+    /// cut, the start motions 0 and 2 hurried to 0.1 s, 30% damage (flag 0xA4).
+    fn rush_follow(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.play(super_anim(cls, 0), 0.15);
+            self.super_begin(cls, false);
+            self.me.turn_yaw(self.opp, 2, PI);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 1, PI);
+            self.me.turn_model_yaw(PI, 1.0);
+            self.super_start_fx(cls);
+            self.held(0xE);
+            if self.me.act.prev == 0x2E {
+                self.set(0xCD);
+            }
+        }
+        if phase == RUN {
+            let (mut moving, mut lean) = (false, 0.0);
+            match super_motion(self.anim_id()) {
+                Some(0) => {
+                    self.me.anim_set_duration(0.1);
+                    self.me.anim_advance_then(super_anim(cls, 2), 0.0, 0);
+                }
+                Some(2) => {
+                    self.me.anim_set_duration(0.1);
+                    if self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0) {
+                        self.set(0xD0);
+                    }
+                    lean = self.me.anim_progress();
+                }
+                Some(3) => {
+                    self.rush_fly_loop();
+                    moving = true;
+                    lean = 1.0;
+                }
+                Some(6) => {
+                    if self.me.anim_advance(0) {
+                        self.me.work[1] = 1;
+                    }
+                    lean = 1.0 - self.me.anim_progress();
+                }
+                _ => {}
+            }
+            self.rush_fly_move(cls, moving, lean);
+            self.set(0xA4);
+        }
+        if phase == DECIDE {
+            self.rush_fly_decide(cls);
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+        }
+    }
+
+    /// The common hold of a sequence's fighters: standing, braked, the rush flags.
+    fn rush_hold(&mut self) {
+        self.step(6, 6, 7, 0.0, kmh(100.0));
+        self.me.brake_vertical();
+        self.super_rush_flags();
+    }
+
+    /// Actions 0x12A..0x12C (`BtlAct_SuperRushFinishHandler`): the closing motion 0x15 of a catching technique,
+    /// dealing its own hits (`BtlSuper_SetupRushDamage` from the motion), out of reach. Its end lands a fighter
+    /// within 5 of the ground. The camera cut and the stage timer (stages 4 / 27) are not ported.
+    fn tech_rush_finish(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.play(super_anim(cls, 0x15), 0.0);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.setup_rush_damage(cls, true);
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.me.work[1] = 1;
+            }
+            self.rush_hold();
+            for f in [0x42, 0x43, 0x44, 0x45, 0x46] {
+                self.set(f);
+            }
+            self.me.set_fx(0x10);
+            self.set(0x136);
+            if self.me.thr.hold_victim {
+                self.set(0x8B);
+                self.set(9);
+            }
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.set(0x8C);
+            self.set(0x33);
+            self.super_finish(cls);
+        }
+        if phase == LEAVE {
+            self.super_leave(cls);
+            if self.me.height_above_ground() < 5.0 {
+                self.held(0xF);
+                self.me.pose.pos[1] = self.me.ground_y();
+                self.clear(0xE);
+            } else {
+                self.held(0xE);
+            }
+        }
+    }
+
+    /// The victim's way out of a rush (`BtlAct_SuperRushSequenceHandler` / `BtlAct_SuperRushCaughtHandler`): the
+    /// landing action of the block's kind, turned by its angles from `yaw` (mirrored when hit from the front), or
+    /// turned round when hit from behind (flag 0x35 too).
+    fn rush_victim_end(&mut self, yaw: f32) {
+        self.held(0x1D);
+        self.held(0x1E);
+        let next = landing_action(self.me.thr.landing_kind);
+        let t = self.me.thr;
+        let back = self.me.react.back;
+        if t.turn_victim {
+            self.set(0x94);
+            if back {
+                self.me.react.turn_yaw = wrap_angle(yaw + t.turn_yaw);
+                self.me.react.turn_pitch = t.turn_pitch;
+            } else {
+                self.me.react.turn_yaw = wrap_angle(wrap_angle(yaw + t.turn_yaw) + PI);
+                self.me.react.turn_pitch = -t.turn_pitch;
+            }
+        } else if back {
+            let (yaw, pitch) = (wrap_angle(self.me.pose.yaw + PI), self.me.pose.pitch);
+            self.me.set_heading(yaw, pitch);
+        }
+        if back {
+            self.set(0x35);
+        }
+        self.request(next);
+    }
+
+    /// A step of a sequence that waits for a model reload (`BtlChange_RequestChara` / `IsLoadedFor` / `SetReady` /
+    /// `SetDone`): the reload is not ported, so the load is ready at once; the step's motion restarts, is placed
+    /// again and jumps to its end. `mine`: this fighter's model is the one reloaded. True once done.
+    fn rush_reload_step(&mut self, k: usize, cls: i32, level: i32, mine: bool) -> bool {
+        let attacker = self.me.work[0] & 1 != 0;
+        match self.me.work[k] {
+            0 => {
+                if self.flag(anim_flag::END) {
+                    self.me.work[k] += 1;
+                }
+            }
+            1 => {
+                if mine {
+                    self.me.body_warp_pos = self.me.obj.body_sphere().0;
+                    let a = self.anim_id();
+                    self.request_anim(a, 0.0);
+                }
+                self.me.work[k] += 1;
+            }
+            2 => {
+                if mine {
+                    let from = if attacker { self.data } else { self.opp_data };
+                    self.me.request_place_relative(from, cls, level);
+                    self.set(0x55);
+                    self.me.anim_jump_to_end();
+                }
+                self.me.work[k] += 1;
+            }
+            _ => return true,
+        }
+        false
+    }
+
+    /// Actions 0x12D..0x12F (attacker, work[0] bit 0) and 0x139..0x13B (the victim of reaction 0x22)
+    /// (`BtlAct_SuperRushSequenceHandler`): a rush's scripted sequence. Both play a chain of up to five motions
+    /// (attacker 0x17.., victim 0x1C..; a step ends on flag 0x31), placed each step relative to the stage's place by
+    /// the attacker's table (flag 0xF6), standing and out of reach. The attacker's damage queue deals the hits
+    /// (`BtlSuper_SetupRushDamage`). At the end the attacker finishes (0x8C, `BtlSuper_Finish`; a self-destruct
+    /// technique leaves it 1 health) and the victim lands (`BtlAct_GetLandingAction`), stands (failed: 0xB) or
+    /// stays down (0xEB). Not ported: the model reloads and character changes (BtlChange, treated as loaded at once),
+    /// the partner objects, the stage timer.
+    fn rush_sequence(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            let anim = match self.current() {
+                0x12D..=0x12F => {
+                    self.me.work[0] |= 1;
+                    super_anim(cls, 0x17)
+                }
+                0x139..=0x13B => super_anim(cls, 0x1C),
+                _ => 0,
+            };
+            self.play(anim, 0.0);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.me.step_frame = [0.0; 5];
+            if self.me.thr.tech == 0x280 {
+                self.me.work[0] |= 4;
+            }
+            if self.me.work[0] & 1 != 0 {
+                self.setup_rush_damage(cls, false);
+                if (0x11B..=0x123).contains(&self.me.act.prev) {
+                    let ki = self.tech().ki(cls) / 2;
+                    self.me.spend_ki(ki, true);
+                }
+                if self.me.thr.partner_chara >= 0 {
+                    self.me.work[0] |= 2;
+                }
+            }
+        }
+        let attacker = self.me.work[0] & 1 != 0;
+        if phase == RUN {
+            let level = motion_level(self.anim_id());
+            let thr = self.me.thr;
+            let own = if attacker { self.data } else { self.opp_data };
+            if self.me.anim_is_new() && (level != 0 || thr.place_first_step) {
+                self.me.request_place_relative(own, cls, level);
+            }
+            if level == thr.partner_step {
+                if self.me.anim_advance(0) {
+                    let a = self.anim_id();
+                    self.request_anim(a + 1, 0.0);
+                }
+            } else if self.me.work[0] & 4 != 0 {
+                if level < thr.step_count - 1 {
+                    let a = self.anim_id();
+                    self.me.anim_advance_then(a + 1, 0.0, 0);
+                } else {
+                    match self.me.work[3] {
+                        0 => {
+                            if self.me.anim_advance(0) {
+                                self.me.work[3] += 1;
+                            }
+                        }
+                        1 => {
+                            if attacker {
+                                let a = self.anim_id();
+                                self.request_anim(a, 0.0);
+                            }
+                            self.me.work[3] += 1;
+                        }
+                        2 => {
+                            if attacker {
+                                self.me.request_place_relative(own, cls, level);
+                                self.me.anim_jump_to_end();
+                            }
+                            self.me.work[1] = 1;
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                self.me.anim_advance(0);
+                let ok_b = if thr.def_reload && thr.last_step == level {
+                    self.rush_reload_step(2, cls, level, !attacker)
+                } else {
+                    true
+                };
+                let ok_a = if thr.atk_reload && thr.step_count - 1 == level {
+                    self.rush_reload_step(3, cls, level, attacker)
+                } else {
+                    true
+                };
+                if self.flag(anim_flag::END) && ok_a && ok_b {
+                    if level < thr.step_count - 1 {
+                        let a = self.anim_id();
+                        self.request_anim(a + 1, 0.0);
+                    } else {
+                        self.me.work[1] = 1;
+                    }
+                }
+            }
+            self.rush_hold();
+            for f in [0x42, 0x43, 0x44, 0x45, 0x46, 9, 0x136, 0x58] {
+                self.set(f);
+            }
+            self.me.set_fx(0x3B);
+            self.set(0x1B);
+            if thr.tech == 0x2E4 && level == 0 {
+                self.set(0x13B);
+            }
+            if attacker {
+                self.set(0x8B);
+                if level < self.tech().stage_fx_end_step(cls) {
+                    self.me.set_fx(0x11);
+                }
+                if self.tech().flags_a(cls) & 0x2000_0000 != 0 {
+                    self.me.set_fx(0x14);
+                }
+                if self.tech().flags(cls) & 0x2000_0000 != 0 {
+                    self.set(0x13B);
+                }
+                if self.tech().flags(cls) & 8 != 0 {
+                    self.set(0x13C);
+                }
+                if self.me.work[0] & 4 != 0 {
+                    self.set(0xA6);
+                }
+            } else {
+                self.set(0x97);
+                self.set(0x95);
+                if self.opp_data.tables.tech().flags_a(cls) & 0x4000_0000 != 0 {
+                    self.me.set_fx(0x14);
+                }
+            }
+            if let Some(f) = usize::try_from(level)
+                .ok()
+                .and_then(|l| self.me.step_frame.get_mut(l))
+            {
+                *f = self.me.obj.frame;
+            }
+            if self.me.work[1] != 0 && attacker && self.tech().flags(cls) & 0x2000 != 0 {
+                let h = self.me.gauge.health - 1;
+                self.me.damage(self.env, self.data, h, 0x5B);
+                if let Some(f) = self.me.gauge.fired.get_mut(cls as usize) {
+                    *f += 1;
+                }
+            }
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.set(0x33);
+            if attacker {
+                self.set(0x8C);
+                self.super_finish(cls);
+            } else if self.me.thr.failed {
+                self.held(0xE);
+                self.request(0xB);
+            } else if self.me.thr.ko_skip_landing && self.me.is_dead() {
+                self.request(0xEB);
+            } else {
+                let yaw = self.me.pose.rot[1];
+                self.rush_victim_end(yaw);
+            }
+        }
+        if phase == LEAVE {
+            self.set(0x37);
+            self.set(0xCD);
+            if attacker {
+                self.super_leave(cls);
+                if self.me.thr.raise_at_end {
+                    self.me.pose.pos[1] += self.me.height_above_ground();
+                } else {
+                    self.held(0xE);
+                }
+            }
+        }
+    }
+
+    /// Actions 0x133..0x135 (the victim of a catch, reactions 0x1D / 0x1E, `BtlAct_SuperRushCaughtHandler`): motion
+    /// 0x16 of the catching technique, looped while the catch holds (0x1E: until flag 0xAF drops) or played once,
+    /// standing and out of reach; then the landing as after a sequence. The sound is not ported.
+    fn rush_caught(&mut self, phase: u32) {
+        let cls = self.current_class();
+        let thr = self.me.thr;
+        if phase == ENTER {
+            self.play(super_anim(cls, 0x16), 0.0);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            if thr.face_attacker {
+                self.me.turn_yaw(self.opp, 2, PI);
+                self.me
+                    .turn_pitch(self.data, self.opp, self.opp_data, 5, PI);
+            }
+        }
+        if phase == RUN {
+            if thr.caught_loop {
+                self.me.anim_advance_loop(0);
+            } else if self.me.anim_advance(0) {
+                self.me.work[1] = 1;
+            }
+            self.rush_hold();
+            for f in [0x95, 0x96, 0x136, 0x42, 0x43, 0x44, 0x45] {
+                self.set(f);
+            }
+            if !thr.caught_loop {
+                self.set(0x46);
+            }
+            if thr.hold_victim {
+                self.set(0x97);
+                self.set(0xA);
+            }
+        }
+        if phase == DECIDE {
+            if thr.caught_loop && !self.flag(0xAF) {
+                self.me.work[1] = 1;
+            }
+            if self.me.work[1] != 0 {
+                let yaw = self.opp.snap_rot(6)[1];
+                self.rush_victim_end(yaw);
+            }
+        }
+        if phase == LEAVE {
+            self.set(0x33);
+        }
+    }
+
+    /// Actions 0x136..0x138 (reaction 0x29, `BtlAct_SuperLaunchedUpHandler`): motion 0x21 of the technique while
+    /// thrown straight up at 1500 km/h; its end: 0xD0.
+    fn launched_up(&mut self, phase: u32) {
+        let cls = self.current_class();
+        if phase == ENTER {
+            self.play(super_anim(cls, 0x21), 0.0);
+        }
+        if phase == RUN {
+            if self.me.anim_advance(0) {
+                self.request(0xD0);
+            }
+            self.step(6, 5, 2, 0.0, kmh(100.0));
+            self.me.move_vertical(kmh(-1500.0), 10000.0);
+            self.set(0xD5);
+            self.set(0x95);
+            self.set(0x96);
+            self.me.set_fx(0x3B);
         }
     }
 

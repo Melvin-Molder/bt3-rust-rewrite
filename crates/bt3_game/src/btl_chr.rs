@@ -132,6 +132,68 @@ pub(crate) struct React {
     pub damage: i32,
     /// `noBlend`: a throw of a character with parameter flag bit 19 starts its motions without a blend.
     pub no_blend: bool,
+    /// `slot`: the technique slot of a technique's hit (the launch 0x29 picks its action by it).
+    pub slot: i32,
+}
+
+/// `thr` (fighter + 0xE90): a rush technique's sequence, filled on the attacker by `BtlColl_StartThrow` /
+/// `BtlColl_StartRushCatch` and copied to the victim.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Throw {
+    pub tech: i32,
+    pub atk_side: i32,
+    pub def_side: i32,
+    pub slot: i32,
+    pub step_count: i32,
+    /// `BtlAct_GetLandingAction`'s kind for the victim.
+    pub landing_kind: i32,
+    /// The step that waits for the partner object (-1 none).
+    pub partner_step: i32,
+    /// The step the victim's model is reloaded in.
+    pub last_step: i32,
+    /// `BtlChange_RequestObject`'s partner object (character < 0: none). The partner objects are not ported: only
+    /// the character is read.
+    pub partner_chara: i32,
+    #[allow(dead_code)]
+    pub partner_costume: i32,
+    #[allow(dead_code)]
+    pub partner_variant: i32,
+    #[allow(dead_code)]
+    pub partner_slot: i32,
+    /// The victim turns by `turn_yaw` / `turn_pitch` at the end.
+    pub turn_victim: bool,
+    /// The victim ends in the neutral action.
+    pub failed: bool,
+    /// `holdVictim` (flags 0x8B / 9 on the attacker, 0x97 / 0xA on the caught victim).
+    pub hold_victim: bool,
+    /// The caught victim faces the attacker.
+    pub face_attacker: bool,
+    /// A dead victim skips the landing (action 0xEB).
+    pub ko_skip_landing: bool,
+    /// The catch loops until flag 0xAF drops (reaction 0x1E).
+    pub caught_loop: bool,
+    /// The attacker's / victim's model is reloaded.
+    pub atk_reload: bool,
+    pub def_reload: bool,
+    pub place_first_step: bool,
+    pub unk54: bool,
+    /// The damage is halved (the victim was in a motion of flag 0x800).
+    pub half_damage: bool,
+    /// The attacker is raised by its height when the sequence ends.
+    pub raise_at_end: bool,
+    pub turn_yaw: f32,
+    pub turn_pitch: f32,
+}
+
+/// What `BtlSuper_MeasureRushStep` measures of a rush's chain of motions.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RushMeasure {
+    pub hits: i32,
+    pub frame_a: i32,
+    pub frame_b: i32,
+    pub step_a: i32,
+    pub step_b: i32,
+    pub frames: i32,
 }
 
 /// The damage a fighter has queued against its opponent (fighter + 0xD94): a throw's hits, dealt on its motion's
@@ -391,6 +453,18 @@ pub(crate) struct Chr {
     pub skill_count3: i32,
     /// `boostStock` (0..10): raised by the throws of character 0x6E.
     pub boost_stock: i32,
+    /// The rush technique's sequence block.
+    pub thr: Throw,
+    /// The measured chain of the rush's motions.
+    pub rush: RushMeasure,
+    /// `stepFrame`: the frame reached in each step of a rush sequence.
+    pub step_frame: [f32; 5],
+    /// `relPos` / `relRot`: the placement flag 0xF6 adds to the stage's place.
+    pub rel_pos: [f32; 3],
+    pub rel_rot: [f32; 3],
+    /// `framesLeftOverride` (+0x1294): what `BtlCharApi_GetTechniqueFramesLeft` answers when >= 0 (reset every
+    /// frame with the action bits).
+    pub frames_left_override: i32,
     /// `burstNode`: the node the finisher 0x66's burst effect follows.
     pub burst_node: i32,
     /// `nextAttack` / `attack`: the pending and the latched attack parameters.
@@ -517,6 +591,12 @@ impl Chr {
             clash_answer_frame: 0,
             skill_count3: 0,
             boost_stock: 0,
+            thr: Throw::default(),
+            rush: RushMeasure::default(),
+            step_frame: [0.0; 5],
+            rel_pos: [0.0; 3],
+            rel_rot: [0.0; 3],
+            frames_left_override: -1,
             burst_node: 0,
             next_attack: Attack::default(),
             attack: Attack::default(),
@@ -904,6 +984,31 @@ impl Chr {
         self.flags.test(anim_flag::NEW)
     }
 
+    /// `BtlAnim_WasNew`: the motion started the frame before.
+    pub(crate) fn anim_was_new(&self) -> bool {
+        self.flags.test_prev(anim_flag::NEW)
+    }
+
+    /// `BtlAnim_JumpToEnd`: no blend, at the last frame, flag 0x31 held.
+    pub(crate) fn anim_jump_to_end(&mut self) {
+        self.obj.blend = 0.0;
+        self.flags.clear(anim_flag::BLENDING);
+        self.flags.set_held(anim_flag::END);
+        self.obj.frame = self.obj.layers[0].length;
+        self.obj.prev_frame = self.obj.frame;
+    }
+
+    /// `BtlColl_SetFramesToReach`: the frames the motion needs to reach `scale` of its length (rounded up), for the
+    /// CPU's technique timing.
+    pub(crate) fn set_frames_to_reach(&mut self, scale: f32) {
+        let need = self.obj.layers[0].length * scale;
+        let (have, rate) = (self.obj.frame, self.obj.step);
+        if need <= have || rate < 0.01 {
+            return;
+        }
+        self.frames_left_override = ((need - have) / rate + 0.99) as i32;
+    }
+
     /// `BtlAnim_TestAttr`: an event of the current frame; nothing while the frame stood still the frame before.
     pub(crate) fn anim_test_attr(&self, mask: u64) -> bool {
         self.prev_stall <= 0 && self.obj.test_event(mask)
@@ -1002,6 +1107,35 @@ impl Chr {
         let yaw = (target[0] - pos[0]).atan2(target[2] - pos[2]);
         let area = env.col.find_zone_near(-1, pos) as i32;
         self.place(data, pos, [0.0, yaw, 0.0], area);
+    }
+
+    /// `BtlChar_PlaceRelative` (flag 0xF6): the stage's place plus the offsets `BtlChar_RequestPlaceRelative`
+    /// stored.
+    pub(crate) fn place_relative(&mut self, data: &SideData, env: &Env) {
+        if !self.flags.test(0xF6) {
+            return;
+        }
+        let (pos, rot, area) = stage_place(env);
+        let pos = add(pos, self.rel_pos);
+        let rot = std::array::from_fn(|k| wrap_angle(rot[k] + self.rel_rot[k]));
+        self.place(data, pos, rot, area);
+    }
+
+    /// `BtlChar_RequestPlaceRelative`: the placement of step `n` of the slot's rush technique, from this fighter's
+    /// table (`own`) or the opponent's (`BtlSuper_GetStagePlacement`), for flag 0xF6. A slot without a table keeps
+    /// the last offsets.
+    pub(crate) fn request_place_relative(&mut self, from: &SideData, slot: i32, n: i32) {
+        let rec = usize::try_from(slot)
+            .ok()
+            .filter(|s| (2..5).contains(s))
+            .and_then(|s| from.tech_packs[s])
+            .and_then(|p| p.places)
+            .and_then(|t| usize::try_from(n).ok().and_then(|n| t.get(n).copied()));
+        if let Some(r) = rec {
+            self.rel_pos = [r[0], r[1], r[2]];
+            self.rel_rot = [0.0, r[3] * PI / 180.0, 0.0];
+        }
+        self.flags.set(0xF6);
     }
 
     /// `BtlChar_Snapshot`: snapshot `n` and the latest one.
@@ -2421,6 +2555,20 @@ pub(crate) fn approach(cur: f32, target: f32, step: f32) -> f32 {
     } else {
         (cur - step).max(target)
     }
+}
+
+/// `BtlStage_GetPlace`: the stage's first place, dropped onto the ground from y = -700 (`BtlStage_ProbeGround`:
+/// the ground under a unit box there; no ground leaves the probe's maximum), facing its target; and its zone.
+pub(crate) fn stage_place(env: &Env) -> ([f32; 3], [f32; 3], i32) {
+    let place = env.stage.places.first();
+    let p = place.map_or([0.0; 3], |p| p.position);
+    let t = place.map_or([0.0; 3], |p| p.target);
+    let yaw = (t[0] - p[0]).atan2(t[2] - p[2]);
+    let pos = [p[0], -700.0, p[2]];
+    let zone = env.col.find_zone_near(-1, pos) as i32;
+    let b = bt3_data::stage_col::ColBox::from_center_half(pos, [1.0; 3]);
+    let g = env.col.ground_probe(zone, &b, pos[0], pos[2], b.min[1]);
+    ([pos[0], g.y, pos[2]], [0.0, yaw, 0.0], zone)
 }
 
 pub(crate) fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {

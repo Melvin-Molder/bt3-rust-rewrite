@@ -16,6 +16,9 @@ pub struct StageResource {
     pub bounds: StageBounds,
     pub starting_placements: Vec<StagePlacement>,
     pub alternate_starting_placements: Vec<StagePlacement>,
+    /// `StgDataA.places` (+0x38 / +0x3C): the first is `BtlStage_GetPlace`'s, where the technique placements
+    /// (fighter requests 0xF4 / 0xF6 / 0xF7) are relative to.
+    pub places: Vec<StagePlacement>,
     /// `StgLight.dir` of the first light record (`BtlStage_GetLightVecB`, with `BtlStage_Relocate`'s y / z sign
     /// flip): the direction `BtlObj_UpdateAll` gives the battle objects' light every frame. `None` when the
     /// stage has no light.
@@ -89,6 +92,7 @@ impl StageResource {
             parse_placements(bytes, data_offset, 0x28, 0x2C, "stage placements")?;
         let alternate_starting_placements =
             parse_placements(bytes, data_offset, 0x30, 0x34, "alternate stage placements")?;
+        let places = parse_placements(bytes, data_offset, 0x38, 0x3C, "stage places")?;
         let light_count = read_count(bytes, data_offset + 0x18, "stage light")?;
         let light_dir = if light_count == 0 {
             None
@@ -114,6 +118,7 @@ impl StageResource {
             bounds,
             starting_placements,
             alternate_starting_placements,
+            places,
             light_dir,
             paths,
         })

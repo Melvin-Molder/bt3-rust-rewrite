@@ -442,6 +442,20 @@ pub fn tech_pack(anim_file: &[u8], slot: usize) -> Option<&[u8]> {
     pack_entry(anim_file, slot + 1)
 }
 
+/// `BtlSuper_GetStagePlacement`'s table (`BtlChar_BindObject`: the table at the pack's header word 3): the five
+/// placements (x, y, z, yaw in degrees) of a rush technique's steps on stage `stage`, the stages one after another.
+pub fn tech_places(pack: &[u8], stage: usize) -> Option<[[f32; 4]; 5]> {
+    let table = usize::try_from(u32::from_le_bytes(pack.get(12..16)?.try_into().ok()?)).ok()?;
+    let at = table.checked_add(stage.checked_mul(5 * 0x10)?)?;
+    let b = pack.get(at..at.checked_add(5 * 0x10)?)?;
+    Some(std::array::from_fn(|n| {
+        std::array::from_fn(|k| {
+            let o = n * 0x10 + k * 4;
+            f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+        })
+    }))
+}
+
 /// `EftBlastMgr_Init`: the emitter set of a type 0 technique effect (the plain blast / beam), header entry 4 of
 /// the slot's pack.
 pub fn tech_blast_set(pack: &[u8]) -> Option<EmitSet> {
@@ -1299,5 +1313,25 @@ impl PtclDef2 {
             }),
             pulse_time: [f32_at(b, 0x108), f32_at(b, 0x10C), f32_at(b, 0x110)],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tech_places_reads_the_stage_rows_of_header_word_3() {
+        // Header word 3 points at the table; stage 1's five records follow stage 0's.
+        let mut pack = vec![0u8; 0x10 + 10 * 0x10];
+        pack[12..16].copy_from_slice(&0x10u32.to_le_bytes());
+        let rec = 0x10 + 5 * 0x10 + 2 * 0x10;
+        for (k, v) in [1.0f32, -160.0, 3.0, 90.0].iter().enumerate() {
+            pack[rec + k * 4..rec + k * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let places = tech_places(&pack, 1).unwrap();
+        assert_eq!(places[2], [1.0, -160.0, 3.0, 90.0]);
+        assert_eq!(places[0], [0.0; 4]);
+        assert!(tech_places(&pack, 2).is_none());
     }
 }

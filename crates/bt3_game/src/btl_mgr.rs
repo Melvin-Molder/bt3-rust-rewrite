@@ -203,7 +203,9 @@ impl Roster {
             }
             .update();
             me.anim_apply_blend();
-            // Of the seven placement requests (flags 0xF3..0xFD) only the stage path's comes from a ported action.
+            // Of the seven placement requests (flags 0xF3..0xFD) the rush sequences' (0xF6) and the stage path's
+            // come from ported actions.
+            me.place_relative(data[i], env);
             place_on_path(me, data[i], env, clash);
             me.pose_to_obj(true);
             me.obj.sample_pose(&data[i].obj);
@@ -522,6 +524,7 @@ fn begin_frame(chr: &mut Chr, env: &Env) {
     chr.combo.new_hit = false;
     chr.combo.changed = false;
     chr.act_bits = 0;
+    chr.frames_left_override = -1;
     chr.fx_bits = [0; 0x10];
     chr.dash_limit = 1;
     chr.vanish_limit = 1;

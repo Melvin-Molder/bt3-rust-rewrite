@@ -658,8 +658,12 @@ impl Ai<'_, '_, '_, '_> {
         })
     }
 
-    /// `BtlCharApi_GetTechniqueFramesLeft` of a fighter: frames to the next event with mask bit 0.
+    /// `BtlCharApi_GetTechniqueFramesLeft` of a fighter: its override when set, else frames to the next event
+    /// with mask bit 0.
     fn technique_frames_left(&self, i: usize) -> f32 {
+        if self.chr(i).frames_left_override >= 0 {
+            return self.chr(i).frames_left_override as f32;
+        }
         let obj = &self.chr(i).obj;
         let at = obj.query_event(&self.c.data[i].obj, 1, 0, 1);
         if at < 0 {

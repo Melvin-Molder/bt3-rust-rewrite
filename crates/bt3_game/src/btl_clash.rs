@@ -214,7 +214,10 @@ impl Clash {
                     chars[w].flags.set_held(0xC3);
                     chars[l].flags.set_held(0xC2);
                     if data[w].tables.tech().is_throw(cls) {
-                        // BtlColl_StartThrow of a technique is not ported.
+                        let tf = data[w].tables.tech().flags(cls);
+                        let [c0, c1] = &mut *chars;
+                        let (win, lose) = if w == 0 { (c0, c1) } else { (c1, c0) };
+                        crate::btl_hit::start_throw(win, lose, data[w], env, cls, tf, frame);
                         chars[w].flags.set_held(0xA0);
                         self.struggle_end = Some(w as i32);
                     } else {

@@ -509,6 +509,53 @@ impl TechTable<'_> {
     pub fn prompt_row(&self, slot: i32) -> i32 {
         self.s8_of(0x229, slot)
     }
+    /// `BtlSuper_GetLandingKind`: what the victim of a rush lands in (`BtlAct_GetLandingAction`).
+    pub fn landing_kind(&self, slot: i32) -> i32 {
+        self.s8_of(0x14D, slot)
+    }
+    /// `BtlSuper_GetLastStep`: the rush step the victim's model is reloaded in (the last when negative).
+    pub fn last_step(&self, slot: i32) -> i32 {
+        let n = self.s8_of(0x168, slot);
+        if n < 0 { self.steps(slot) - 1 } else { n }
+    }
+    /// `BtlSuper_GetThrowAngleA` / `GetThrowAngleB`: the victim's turn after a rush (radians).
+    pub fn throw_angle_a(&self, slot: i32) -> f32 {
+        self.f32_of(0x1E4, slot) * std::f32::consts::PI / 180.0
+    }
+    pub fn throw_angle_b(&self, slot: i32) -> f32 {
+        self.f32_of(0x1F0, slot) * std::f32::consts::PI / 180.0
+    }
+    /// The rush dash speed (+0x1FC, 10 km/h, raw).
+    pub fn rush_speed(&self, slot: i32) -> f32 {
+        self.f32_of(0x1FC, slot)
+    }
+    /// The character a rush brings in and its alternate (+0x208 / +0x20E, raw; `BtlSuper_GetThrowChara`).
+    pub fn throw_chara(&self, slot: i32) -> i32 {
+        self.i16_of(0x208, slot)
+    }
+    pub fn throw_chara_alt(&self, slot: i32) -> i32 {
+        self.i16_of(0x20E, slot)
+    }
+    /// `BtlSuper_GetThrowPartnerStep`.
+    pub fn throw_partner_step(&self, slot: i32) -> i32 {
+        self.s8_of(0x220, slot)
+    }
+    /// `BtlSuper_GetStageFxEndStep` (999 when negative).
+    pub fn stage_fx_end_step(&self, slot: i32) -> i32 {
+        let n = self.s8_of(0x223, slot);
+        if n < 0 { 999 } else { n }
+    }
+    /// `BtlSuper_GetThrowObjectSlot`.
+    pub fn throw_object_slot(&self, slot: i32) -> i32 {
+        self.s8_of(0x226, slot)
+    }
+    /// `BtlSuper_GetFrames22C` / `GetFrames238`: seconds * 30.
+    pub fn frames_22c(&self, slot: i32) -> i32 {
+        (self.f32_of(0x22C, slot) * 30.0) as i32
+    }
+    pub fn frames_238(&self, slot: i32) -> i32 {
+        (self.f32_of(0x238, slot) * 30.0) as i32
+    }
 }
 
 impl CharaTables {

@@ -4,14 +4,16 @@
 //!
 //! A hit is the attacker's current attack id (`BtlAtk_GetId`), the 0x30-byte record it selects in the character's
 //! attack table, the strike volumes of the motion's open hit window touching the defender's body boxes, and the
-//! reaction block `BtlHit_ApplyHit` fills on the defender. Not ported: throws and rushing techniques (flags 0x49,
-//! 0x4C / 0x4D come only from actions that are not ported), camera shake and pad vibration.
+//! reaction block `BtlHit_ApplyHit` fills on the defender. A rushing technique (flag 0x49) that touches its
+//! opponent starts its sequence (`BtlHit_CheckRush`, `BtlColl_StartThrow`). Not ported: camera shake, pad
+//! vibration, sounds and voices.
 
 use std::f32::consts::PI;
 
 use bt3_data::chara_data::{ATTACK_COUNT, AttackRecord};
 
-use crate::btl_chr::{Chr, Env, SideData, kmh, opp_yaw, opp_yaw_from_facing};
+use crate::btl_act::id_class;
+use crate::btl_chr::{Chr, Env, SideData, Throw, kmh, opp_yaw, opp_yaw_from_facing};
 use crate::btl_input::wrap_angle;
 use crate::btl_obj::body_hit_test;
 
@@ -239,6 +241,179 @@ fn reaction_or_base(r: &AttackRecord, o: usize) -> i32 {
     }
 }
 
+/// `BtlColl_IsGuarding`: guard kinds 1..4.
+fn is_guarding(me: &Chr) -> bool {
+    (1..=4).contains(&guard_kind(me))
+}
+
+/// `BtlSuper_GetThrowChara`: the character a rush brings in: the table's, or its alternate when the user is that
+/// character or (characters of 0x100 and above with technique flag 0x40000000) wears costume 1.
+fn throw_chara(data: &SideData, slot: i32) -> i32 {
+    let t = data.tables.tech();
+    let (chara, alt) = (t.throw_chara(slot), t.throw_chara_alt(slot));
+    if data.chara == chara {
+        return alt;
+    }
+    if chara >= 0x100 && t.flags(slot) & 0x4000_0000 != 0 && data.costume == 1 {
+        return alt;
+    }
+    chara
+}
+
+/// `BtlColl_StartThrow`: a rush technique of `slot` catches: the attacker's sequence block is filled (flag 0x72)
+/// and copied to the victim (reaction 0x22), both facing the attacker's heading and out of reach (flags
+/// 0x44..0x46). Refused while the attacker is hit or either is down. The battle events are not ported.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_throw(
+    atk: &mut Chr,
+    def: &mut Chr,
+    atk_data: &SideData,
+    env: &Env,
+    slot: i32,
+    tech_flags: u32,
+    frame: u32,
+) -> bool {
+    if atk.react.reaction >= 3 || atk.is_dead() || def.is_dead() || !atk.flags.test(3) {
+        return false;
+    }
+    let t = atk_data.tables.tech();
+    atk.flags.set(0x72);
+    // BtlSuper_GetThrowCostume / GetThrowGauge20: the user's own for a character with flag 0x40000000.
+    let own = t.throw_chara(slot) < 0x100 && t.flags(slot) & 0x4000_0000 != 0;
+    let costume = if t.throw_chara(slot) >= 0x100 {
+        0
+    } else if own {
+        atk_data.costume
+    } else if t.id(slot) == 0x27F {
+        1
+    } else {
+        0
+    };
+    let angles = tech_flags & 0x40_0000 != 0;
+    atk.thr = Throw {
+        tech: t.id(slot),
+        atk_side: atk.player as i32,
+        def_side: def.player as i32,
+        slot,
+        step_count: t.steps(slot),
+        partner_chara: throw_chara(atk_data, slot),
+        partner_costume: costume,
+        partner_variant: if own { atk.gauge.variant } else { 0 },
+        partner_slot: t.throw_object_slot(slot),
+        partner_step: t.throw_partner_step(slot),
+        last_step: t.last_step(slot),
+        failed: tech_flags & 0x400 != 0 && frame % 2 != 0,
+        landing_kind: t.landing_kind(slot),
+        turn_victim: angles,
+        turn_yaw: if angles { t.throw_angle_a(slot) } else { 0.0 },
+        turn_pitch: if angles { t.throw_angle_b(slot) } else { 0.0 },
+        ko_skip_landing: t.flags_a(slot) & 0x200_0000 != 0,
+        caught_loop: false,
+        atk_reload: tech_flags & 0x2000 != 0 && atk.gauge.variant == 0,
+        def_reload: tech_flags & 0x8_0000 != 0 && def.gauge.variant == 0,
+        place_first_step: tech_flags & 0x800 != 0,
+        unk54: tech_flags & 0x1_0000 != 0,
+        half_damage: env.anim_flags(def.anim.cur) & 0x800 != 0,
+        raise_at_end: tech_flags & 0x400_0000 != 0,
+        ..atk.thr
+    };
+    atk.flags.set(0x94);
+    atk.react.turn_yaw = atk.pose.yaw;
+    atk.react.turn_pitch = 0.0;
+    def.react.reaction = 0x22;
+    def.thr = Throw {
+        partner_chara: -1,
+        partner_costume: 0,
+        partner_variant: 0,
+        partner_slot: 1,
+        hold_victim: def.thr.hold_victim,
+        face_attacker: def.thr.face_attacker,
+        ..atk.thr
+    };
+    def.flags.set(0x94);
+    def.react.turn_yaw = atk.react.turn_yaw;
+    def.react.turn_pitch = atk.react.turn_pitch;
+    def.react.yaw = atk.react.turn_yaw;
+    def.react.back = tech_flags & 0x1000_0000 != 0;
+    for f in [0x44, 0x45, 0x46] {
+        atk.flags.set(f);
+        def.flags.set(f);
+    }
+    raise_first_clash(atk, def);
+    atk.flags.set(0x128);
+    true
+}
+
+/// `BtlColl_StartRushCatch`: a technique's catch reaction (0x1D, 0x1E looping) lands: the attacker's block (flag
+/// 0x73) without a sequence, copied to the victim. The hit sound is not ported.
+pub(crate) fn start_rush_catch(
+    def: &mut Chr,
+    atk: &mut Chr,
+    atk_data: &SideData,
+    env: &Env,
+    slot: i32,
+    react: i32,
+    yaw: f32,
+) -> bool {
+    if atk.react.reaction >= 3 || atk.is_dead() || def.is_dead() || !atk.flags.test(3) {
+        return false;
+    }
+    let t = atk_data.tables.tech();
+    let tf = t.flags(slot);
+    def.react.reaction = react;
+    def.react.scale = 0.0;
+    def.react.turn_yaw = 0.0;
+    def.react.turn_pitch = 0.0;
+    let angles = tf & 0x40_0000 != 0;
+    atk.thr = Throw {
+        tech: t.id(slot),
+        atk_side: atk.player as i32,
+        def_side: def.player as i32,
+        slot,
+        landing_kind: t.landing_kind(slot),
+        turn_victim: angles,
+        turn_yaw: if angles { t.throw_angle_a(slot) } else { 0.0 },
+        turn_pitch: if angles { t.throw_angle_b(slot) } else { 0.0 },
+        hold_victim: tf & 0x10_0000 != 0,
+        face_attacker: tf & 0x80_0000 != 0,
+        caught_loop: react == 0x1E,
+        unk54: tf & 0x1_0000 != 0,
+        half_damage: env.anim_flags(def.anim.cur) & 0x800 != 0,
+        atk_reload: false,
+        partner_step: -1,
+        last_step: -1,
+        def_reload: false,
+        place_first_step: false,
+        raise_at_end: false,
+        ..atk.thr
+    };
+    atk.flags.set(0x73);
+    let a = atk.thr;
+    let d = &mut def.thr;
+    d.tech = a.tech;
+    d.atk_side = a.atk_side;
+    d.def_side = a.def_side;
+    d.slot = a.slot;
+    d.landing_kind = a.landing_kind;
+    d.turn_victim = a.turn_victim;
+    d.hold_victim = a.hold_victim;
+    d.face_attacker = a.face_attacker;
+    d.turn_yaw = a.turn_yaw;
+    d.turn_pitch = a.turn_pitch;
+    d.caught_loop = a.caught_loop;
+    d.atk_reload = a.atk_reload;
+    d.def_reload = a.def_reload;
+    d.partner_step = a.partner_step;
+    d.last_step = a.last_step;
+    d.place_first_step = a.place_first_step;
+    d.unk54 = a.unk54;
+    d.half_damage = a.half_damage;
+    d.raise_at_end = a.raise_at_end;
+    def.react.yaw = yaw;
+    def.react.back = tf & 0x1000_0000 != 0;
+    true
+}
+
 /// `BtlHit_IsFromBehind`: the attacker's heading within 90 degrees of the defender's model yaw.
 fn is_from_behind(atk: &Chr, def: &Chr) -> bool {
     let ang = wrap_angle(def.pose.rot[1] + def.pose.root_rot[1]);
@@ -308,10 +483,9 @@ impl Pair<'_, '_> {
         for chr in self.chars.iter_mut() {
             begin_frame(chr);
         }
-        if self.check_clash() {
+        if self.check_clash() || self.check_rush() {
             return;
         }
-        // BtlHit_CheckRush: flag 0x49 comes only from the rushing techniques, which are not ported.
         for a in 0..2 {
             let (data, opp_data) = (self.data[a], self.data[a ^ 1]);
             let (me, opp) = split(self.chars, a);
@@ -329,6 +503,98 @@ impl Pair<'_, '_> {
     }
 
     /// `BtlHit_CheckClash`: two touching fighters both in a clashing motion (flags 0x47 / 0x48).
+    /// `BtlHit_CheckRush`: a rushing technique (flag 0x49) touching its opponent misses (0x63) one that cannot be
+    /// caught, bounces (0x64) off a giant, is broken or dodged, is guarded from the front (0x6F; 20000 ki), or
+    /// starts its sequence, which ends the collision step. Sounds, voices and ability 0x22 are not ported.
+    fn check_rush(&mut self) -> bool {
+        let (env, frame) = (self.env, self.frame);
+        for a in 0..2 {
+            let (data, opp_data) = (self.data[a], self.data[a ^ 1]);
+            let (me, opp) = split(self.chars, a);
+            if !me.flags.test(0x49)
+                || !crate::btl_chr::is_blocked_by_opponent(me, opp, data, opp_data)
+            {
+                continue;
+            }
+            let anim = env.anim_flags(opp.anim.cur);
+            let slot = id_class(me.act.current);
+            let tf = data.tables.tech().flags(slot);
+            if opp.flags.test(0x42)
+                || anim & 0x800 != 0
+                || (opp.flags.test(0x49) && opp.flags.test(0xA5) && !me.flags.test(0xA5))
+            {
+                me.flags.set(0x63);
+                continue;
+            }
+            if (opp_data.tables.params.size_class() == 4 && tf & 0x800_0000 == 0)
+                || opp.flags.test(0x59)
+            {
+                me.flags.set(0x64);
+                me.flags.set(0x129);
+                continue;
+            }
+            if opp.is_free() && opp.rush_break_window > 0 {
+                if me.flags.test(0xA5) {
+                    if anim & 0x31 != 0 && !is_from_behind(me, opp) {
+                        me.flags.set(0x7A);
+                        opp.flags.set(0x79);
+                        continue;
+                    }
+                } else if anim & 0xB1 != 0 && !opp.flags.test(0x5A) {
+                    me.flags.set(0x63);
+                    opp.flags.set(if frame % 2 != 0 { 0x74 } else { 0x75 });
+                    continue;
+                }
+            }
+            if opp.is_free() && !opp.flags.test(0x5A) {
+                let (use_a, use_b) = (opp.dodges > 0, opp.dodges_b > 0);
+                if (use_a || use_b) && anim & 0xB1 != 0 {
+                    if use_a {
+                        opp.dodges -= 1;
+                    }
+                    if use_b {
+                        opp.dodges_b -= 1;
+                    }
+                    me.flags.set(0x63);
+                    if use_a {
+                        opp.flags.set(if frame % 2 != 0 { 0x74 } else { 0x75 });
+                    }
+                    if use_b {
+                        opp.flags.set(0x77);
+                    }
+                    match opp.skill_slot {
+                        0 => opp.flags.set(0xDE),
+                        1 => opp.flags.set(0xDF),
+                        _ => {}
+                    }
+                    continue;
+                }
+            }
+            if is_guarding(opp) && !is_from_behind(me, opp) && tf & 1 == 0 && !me.flags.test(0xA5) {
+                me.flags.set(0x6F);
+                me.flags.set(0x129);
+                opp.set_fx(0x20);
+                opp.flags.set(0x6D);
+                opp.flags.set(0x94);
+                opp.react.turn_yaw = wrap_angle(me.pose.yaw + PI);
+                opp.react.turn_pitch = 0.0;
+                opp.spend_ki(20000, false);
+                if opp.is_ki_empty() {
+                    opp.flags.set_held(0xBE);
+                }
+                continue;
+            }
+            if !me.flags.test(3) {
+                me.flags.set(0x63);
+                continue;
+            }
+            if start_throw(me, opp, data, env, slot, tf, frame) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn check_clash(&mut self) -> bool {
         for a in 0..2 {
             let (data, opp_data) = (self.data[a], self.data[a ^ 1]);

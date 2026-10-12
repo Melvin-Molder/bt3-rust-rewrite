@@ -351,7 +351,12 @@ pub fn load(
                 }
                 _ => None,
             };
-            fighter.tech_packs[slot] = Some(TechPack { blast, assets });
+            let places = bt3_data::eft_pack::tech_places(pack, setup.stage.max(0) as usize);
+            fighter.tech_packs[slot] = Some(TechPack {
+                blast,
+                assets,
+                places,
+            });
         }
         if let Some(pack) = &fighter.effect {
             for (list, set) in pack.blast_sets.iter().enumerate() {
@@ -3508,6 +3513,127 @@ mod tests {
         assert_ne!(r.chars[0].act.current, 0x104);
         assert!(r.scene.struggle.is_none());
         assert!(r.scene.records.is_empty());
+    }
+
+    /// Runs character `chara`'s technique of `slot` (charged first; `near`: from beside the opponent) against an
+    /// idle Goku / Vegeta: the action pairs as they change (frame, P1 action, P2 action), the health P2 lost and
+    /// the technique's table damage.
+    fn run_technique(
+        chara: i32,
+        slot: i32,
+        frames: usize,
+        near: bool,
+    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32)> {
+        use crate::btl_input::pad::{DOWN, L2, START, TRIANGLE, UP};
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = chara;
+        setup.sides[1].chara = if chara == 0 { 1 } else { 0 };
+        setup.sides[1].pad = 1;
+        let mut battle = real_battle(&setup)?;
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut frame = |battle: &mut Battle, held: u32| {
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+        };
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            frame(&mut battle, if skip && i % 2 == 0 { START } else { 0 });
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        for _ in 0..150 {
+            frame(&mut battle, L2);
+        }
+        for _ in 0..5 {
+            frame(&mut battle, 0);
+        }
+        // Up to the opponent (forward on the stick) for a technique that strikes where it stands.
+        for _ in 0..300 {
+            let r = &battle.roster;
+            let d = crate::btl_chr::opp_distance_xz(&r.chars[0], &r.chars[1]);
+            if !near || d < 30.0 {
+                break;
+            }
+            frame(&mut battle, UP);
+        }
+        for _ in 0..20 {
+            frame(&mut battle, 0);
+        }
+        let dir = match slot {
+            3 => UP,
+            4 => DOWN,
+            _ => 0,
+        };
+        let health = battle.roster.chars[1].gauge.health;
+        let mut log: Vec<(usize, i32, i32)> = Vec::new();
+        for i in 0..frames {
+            let p1 = match i {
+                2..4 => L2,
+                4..6 => L2 | dir | TRIANGLE,
+                _ => 0,
+            };
+            frame(&mut battle, p1);
+            let r = &battle.roster;
+            let (a, b) = (r.chars[0].act.current, r.chars[1].act.current);
+            if log.last().map(|l| (l.1, l.2)) != Some((a, b)) {
+                log.push((i, a, b));
+            }
+        }
+        let table = battle.assets.fighters[0].tables.tech().damage(slot);
+        Some((log, health - battle.roster.chars[1].gauge.health, table))
+    }
+
+    #[test]
+    fn real_rush_techniques_catch_and_finish() {
+        // Vegeta's slot 3 (kind 4, homing dash 0x11C), Goku's slot 3 (kind 6, straight dash 0x11F) and slot 3 of
+        // character 133 (kind 10, struck where it stands, 0x122) catch the opponent (BtlHit_CheckRush ->
+        // BtlColl_StartThrow): both play the sequence (0x12E / victim 0x13A) placed by the technique's table, the
+        // damage queue deals the whole table damage, and the victim lands by the landing kind. Character 61's slot
+        // 2 (kind 8, steered dash 0x124) hits through its follow effect (type 7, reaction 41: launched up 0x136)
+        // and ends when the effect does (flag 0xA8).
+        let has = |log: &[(usize, i32, i32)], a: i32, b: Option<i32>| {
+            log.iter()
+                .any(|&(_, x, y)| x == a && b.is_none_or(|b| y == b))
+        };
+        for (chara, slot, near, dash) in [
+            (1, 3, false, 0x11C),
+            (0, 3, false, 0x11F),
+            (133, 3, true, 0x122),
+        ] {
+            let Some((log, dmg, table)) = run_technique(chara, slot, 700, near) else {
+                return;
+            };
+            assert!(has(&log, dash, None), "{chara}: {log:x?}");
+            assert!(has(&log, 0x12E, Some(0x13A)), "{chara}: {log:x?}");
+            assert_eq!(dmg, table, "{chara}: {log:x?}");
+            let end = log.iter().position(|&(_, a, _)| a == 0x12E).unwrap() + 1;
+            let (_, a, b) = log[end];
+            assert_eq!(a, 0xB, "{chara}: {log:x?}");
+            assert!(matches!(b, 0xCF | 0xD5), "{chara}: {log:x?}");
+            assert_eq!(
+                log.last().map(|l| (l.1, l.2)),
+                Some((0xB, 0xB)),
+                "{chara}: {log:x?}"
+            );
+        }
+        let Some((log, dmg, table)) = run_technique(61, 2, 300, false) else {
+            return;
+        };
+        assert!(has(&log, 0x124, Some(0x136)), "{log:x?}");
+        assert!(has(&log, 0x124, Some(0xD0)), "{log:x?}");
+        assert_eq!(dmg, table);
+        assert!(log.iter().any(|&(i, a, _)| a == 0xB && i > 100), "{log:x?}");
     }
 
     #[test]
