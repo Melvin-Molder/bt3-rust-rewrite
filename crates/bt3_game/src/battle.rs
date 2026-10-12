@@ -13,7 +13,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use crate::eft::{DrawCtx, EffectTri, FxWorld, OrderTable, SetAssets};
 use bt3_data::ai_data::{AiData, AiTables};
 use bt3_data::cam_anim::CamAnim;
-use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables};
+use bt3_data::chara_data::{CharaEntry, CharaTables, CommonTables, ItemSetStats, item_set_stats};
 use bt3_data::eft_pack::{EffectPack, tech_blast_set, tech_pack};
 use bt3_data::elf::Elf;
 use bt3_data::gs::{
@@ -30,7 +30,7 @@ use bt3_data::tex::TextureResource;
 
 use crate::battle_seq::{DemoCam, ScrXfade, Seq, SeqInput};
 use crate::btl_ai::{AiMgr, Ctx as AiCtx};
-use crate::btl_chr::{Env, SideData};
+use crate::btl_chr::{Env, MemberItems, SideData};
 use crate::btl_input::{InputGate, PadState};
 use crate::btl_menu::{MenuDraw, MenuInput, MenuTexts, PauseMenu, Tree};
 use crate::btl_mgr::Roster;
@@ -81,9 +81,6 @@ const COMMON_EFFECT_FILE: u32 = 3;
 /// Common file 4: the character table (`ChrTblEntry`, 0x3C bytes, header word 1) and the item table
 /// (`ItemTblEntry`, 0x28 bytes, header word 2).
 const CHARA_TABLE_FILE: u32 = 4;
-/// `ITEMTBL_TYPE_AI` and `ITEMTBL_AI_FIRST`.
-const ITEM_TYPE_AI: u8 = 2;
-const ITEM_AI_FIRST: i32 = 0x87;
 /// `ChrCam_KeepBehindHead` keeps the camera behind this node.
 #[cfg(test)]
 const HEAD_NODE: u16 = 0x30;
@@ -160,6 +157,8 @@ pub struct BattleAssets {
     /// The active members' `cpuLevel` and `aiType`.
     pub(crate) cpu_level: [i32; 2],
     pub(crate) ai_type: [usize; 2],
+    /// The members' item bonuses and abilities.
+    pub(crate) member_items: [[MemberItems; 5]; 2],
     /// `Battle_IsSplitScreen`.
     pub(crate) screen_mode: i32,
     /// `Battle_GetBgm`.
@@ -279,9 +278,17 @@ pub fn load(
     let ai = AiData::parse(&common).map_err(error)?;
     let ai_tables = AiTables::read(elf).map_err(error)?;
     let chara_table = read(CHARA_TABLE_FILE)?;
-    let ai_type = setup
-        .sides
-        .map(|side| member_ai_type(&chara_table, &side.items));
+    let items = setup.sides.map(|side| {
+        let mut sets = [side.items; 5];
+        sets[1..].copy_from_slice(&side.team_items);
+        sets.map(|ids| item_set_stats(&chara_table, &ids))
+    });
+    let ai_type = items.map(|side| side[0].ai_type.max(0) as usize);
+    let member_items = std::array::from_fn(|side| {
+        // BattleSetup_FinishEx: the bonuses clamped to -20..20, or -20..60 for the computer in modes 1..4.
+        let wide = matches!(setup.mode, 1..=4) && setup.sides[side].control == 2;
+        items[side].map(|s| member_items(&s, wide))
+    });
     let curve = elf.f32s(STAT_CURVE, 39).map_err(error)?;
     let stat_curve = std::array::from_fn(|r| [curve[r * 3], curve[r * 3 + 1], curve[r * 3 + 2]]);
     let limits = elf.read(TIME_LIMIT_TABLE, 16).map_err(error)?;
@@ -334,6 +341,7 @@ pub fn load(
         nav,
         cpu_level: setup.sides.map(|side| side.cpu_level),
         ai_type,
+        member_items,
         screen_mode: setup.screen_mode,
         bgm: setup.bgm,
         menus,
@@ -577,26 +585,15 @@ fn load_menu_sheet(file: &[u8], textures: &mut Vec<RgbaTexture>) -> std::io::Res
     Ok(sheet)
 }
 
-/// `BtlMember_ApplyItems`' AI type (`ItemSet_GetStats`): the last AI item's, else the character table's entry of
-/// character 0 (the member's character is still 0 when the items are applied).
-fn member_ai_type(table: &[u8], items: &[u16; 8]) -> usize {
-    let word = |o: usize| {
-        table
-            .get(o..o + 4)
-            .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
-    };
-    let item_base = (word(8) & !3) as usize;
-    let mut kind = 0;
-    for &id in items.iter().filter(|&&id| id != 0) {
-        let entry = item_base + (usize::from(id) - 1) * 0x28;
-        if table.get(entry) == Some(&ITEM_TYPE_AI) {
-            kind = i32::from(id) - ITEM_AI_FIRST;
-        }
+/// `BtlMember_ApplyItems` and `BtlMember_ClampBonus` (`wide`: up to 60) as `BtlChar_CopyMemberBonus` /
+/// `CopyMemberAbility` hand them to the fighter: stat changes 2, 0, 1, 2, 3, 3, 3 as bonuses 0..6.
+fn member_items(stats: &ItemSetStats, wide: bool) -> MemberItems {
+    let max = if wide { 60 } else { 20 };
+    let s = stats.stat.map(|v| v.clamp(-20, max));
+    MemberItems {
+        bonus: [s[2], s[0], s[1], s[2], s[3], s[3], s[3]],
+        ability: stats.ability,
     }
-    if kind == 0 {
-        kind = word((word(4) & !3) as usize) as i32;
-    }
-    kind.max(0) as usize
 }
 
 /// `Hud_Init`'s sheets. Entries with no image (palettes only) become a transparent texel. Sheet 0 is also kept
@@ -900,6 +897,8 @@ impl BattleAssets {
             team: self.team,
             team_count: self.team_count,
             switch_enabled: self.switch_enabled,
+            items: self.member_items,
+            stage_id: self.stage_id,
             chara_bits: std::array::from_fn(|side| {
                 // BattleSetup_FixForMode: every character in mode 1, and for the computer's side in modes 2, 3,
                 // 4, 7 and 9.
@@ -1093,6 +1092,7 @@ impl Battle {
         let env = self.assets.env(self.seq.state_id(), self.gate());
         let switching = matches!(self.roster.chars[side].act.current, 0xF3..=0xF8);
         self.roster.chars[side].on_model_loaded(&data[side], &data[side ^ 1], &env);
+        self.roster.sync_abilities();
         if model_only {
             return;
         }
@@ -4223,7 +4223,6 @@ mod tests {
 
     /// A team battle run into the fight: side `team_side` has the extra members `team` (after the lead, Goku).
     fn team_battle(team_side: usize, team: &[(i32, i32)]) -> Option<Battle> {
-        use crate::btl_input::pad::START;
         let mut setup = BattleSetup::default();
         for (i, &m) in team.iter().enumerate() {
             setup.sides[team_side].team[i] = m;
@@ -4231,7 +4230,13 @@ mod tests {
         setup.sides[team_side].team_count = team.len() as i32;
         setup.sides[team_side].change_allowed = 1;
         setup.sides[1].pad = 1;
-        let mut battle = real_battle(&setup)?;
+        fight_battle(&setup)
+    }
+
+    /// The battle of `setup` run 40 frames into the fight (side 0 pressing START through the intro).
+    fn fight_battle(setup: &BattleSetup) -> Option<Battle> {
+        use crate::btl_input::pad::START;
+        let mut battle = real_battle(setup)?;
         let mut libc = LibcRandom::new(1);
         let mut random = GameRandom::from_key(&[1]);
         let mut fight = 0;
@@ -4255,6 +4260,38 @@ mod tests {
             battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
         }
         Some(battle)
+    }
+
+    #[test]
+    fn real_items_give_bonuses_and_abilities() {
+        // From the item table of common file 4: an item starting the member with full ki (ability 0x19), and one
+        // raising stat 0 (bonus 1, the melee damage level) without abilities, equipped on side 0.
+        let Some(mut probe) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let table = (probe.loader.as_mut().unwrap())(CHARA_TABLE_FILE).unwrap();
+        let find = |want: &dyn Fn(&ItemSetStats) -> bool| {
+            (1..=400u16).find(|&id| want(&item_set_stats(&table, &[id, 0, 0, 0, 0, 0, 0, 0])))
+        };
+        let full_ki =
+            find(&|s| s.ability[0] & (1 << 0x19) != 0).expect("an item with ability 0x19");
+        let melee =
+            find(&|s| s.stat[0] > 0 && s.ability == [0; 4]).expect("an item raising stat 0");
+        let raise = item_set_stats(&table, &[melee, 0, 0, 0, 0, 0, 0, 0]).stat[0].min(20);
+        let mut setup = BattleSetup::default();
+        setup.sides[0].items[..2].copy_from_slice(&[full_ki, melee]);
+        setup.sides[1].pad = 1;
+        let Some(battle) = fight_battle(&setup) else {
+            return;
+        };
+        let [me, opp] = &battle.roster.chars;
+        assert!(me.has_ability(0x19) && !opp.has_ability(0x19));
+        assert_eq!(me.members[0].items.bonus[1], raise);
+        assert_eq!(opp.members[0].items, Default::default());
+        // The same character on both sides: only side 0 starts with full ki and a higher melee level.
+        assert_eq!(me.gauge.ki, me.gauge.ki_max);
+        assert!(opp.gauge.ki < opp.gauge.ki_max);
+        assert_eq!(me.stat_level(1) - opp.stat_level(1), raise);
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub(crate) struct Roster {
 impl Roster {
     /// `BtlChar_AllocAll` / `BtlChar_ResetAll`.
     pub(crate) fn new(data: [&SideData; 2], env: &Env, cpu: [bool; 2]) -> Self {
-        Self {
+        let mut roster = Self {
             chars: [
                 Chr::new(0, data[0], env, cpu[0]),
                 Chr::new(1, data[1], env, cpu[1]),
@@ -53,7 +53,17 @@ impl Roster {
             clash: Clash::default(),
             change: Default::default(),
             cpu,
-        }
+        };
+        roster.sync_abilities();
+        roster
+    }
+
+    /// Each fighter's copy of the opponent's active abilities (`BtlOpp_HasAbility`); they change only with the
+    /// active member (a switch or a fusion).
+    pub(crate) fn sync_abilities(&mut self) {
+        let bits = [self.chars[0].ability_bits(), self.chars[1].ability_bits()];
+        self.chars[0].opp_ability = bits[1];
+        self.chars[1].opp_ability = bits[0];
     }
 
     /// `BtlChar_ResetAll`: the manager's counters and both fighters from the setup.
@@ -117,8 +127,8 @@ impl Roster {
         }
         self.check_round_reset(data, env);
         self.update_freeze();
-        for chr in &mut self.chars {
-            begin_frame(chr, env);
+        for (chr, data) in self.chars.iter_mut().zip(data) {
+            begin_frame(chr, data, env);
         }
         self.snapshot(0);
         for i in 0..2 {
@@ -560,7 +570,7 @@ fn split(chars: &mut [Chr; 2], i: usize) -> (&mut Chr, &mut Chr) {
 }
 
 /// `BtlChar_BeginFrame`: stage 3, last frame's values kept, the per-frame state cleared, the input consumed.
-fn begin_frame(chr: &mut Chr, env: &Env) {
+fn begin_frame(chr: &mut Chr, data: &SideData, env: &Env) {
     if chr.is_frozen() {
         return;
     }
@@ -579,8 +589,27 @@ fn begin_frame(chr: &mut Chr, env: &Env) {
     chr.act_bits = 0;
     chr.frames_left_override = -1;
     chr.fx_bits = [0; 0x10];
-    chr.dash_limit = 1;
-    chr.vanish_limit = 1;
+    // The dashes and vanishes in a row: the parameter's +0x70 / +0x72 in the powered-up mode, else 1; + 2 / 1
+    // with ability 1 / 0 (dashes) and 3 / 2 (vanishes).
+    let p = &data.tables.params;
+    (chr.dash_limit, chr.vanish_limit) = if chr.flags.test(6) {
+        (
+            i32::from(p.u16_at(0x70) as i16),
+            i32::from(p.u16_at(0x72) as i16),
+        )
+    } else {
+        (1, 1)
+    };
+    if chr.has_ability(1) {
+        chr.dash_limit += 2;
+    } else if chr.has_ability(0) {
+        chr.dash_limit += 1;
+    }
+    if chr.has_ability(3) {
+        chr.vanish_limit += 2;
+    } else if chr.has_ability(2) {
+        chr.vanish_limit += 1;
+    }
     chr.dir_held = -1;
     chr.input.tech_class = -1;
     let blocked = chr.flags.test(0x11E) || chr.flags.test(0x11F) || chr.flags.test(0xB1);

@@ -67,6 +67,21 @@ pub(crate) fn rush_sequence_frame(chr: &Chr) -> f32 {
     frame
 }
 
+/// `BtlParam_ScaleKiCharge`: x0.4 (ability 0x31), x0.6 (0x30) or x0.8 (0x2F), then x1.25 (0x75).
+fn scale_ki_charge(me: &Chr, mut v: i32) -> i32 {
+    if me.has_ability(0x31) {
+        v = v * 4 / 10;
+    } else if me.has_ability(0x30) {
+        v = v * 6 / 10;
+    } else if me.has_ability(0x2F) {
+        v = v * 8 / 10;
+    }
+    if me.has_ability(0x75) {
+        v = v * 125 / 100;
+    }
+    v
+}
+
 /// `BattleSide_IsCharaUsable`: character `chara` is open to the side.
 fn chara_usable(me: &Chr, env: &Env, chara: i32) -> bool {
     let bits = env.chara_bits[me.player];
@@ -78,8 +93,8 @@ fn chara_usable(me: &Chr, env: &Env, chara: i32) -> bool {
 
 /// `BtlAct_CanTransform`: transformation `index` (0..3) of the parameter, when it names a character the side may
 /// use (kind 3 needs the stage's moon), with the blast stocks it costs (`need_blast`) and the side allowed to change
-/// (`need_allowed`); never while the opponent is in a technique (flag 0xAF) or the body is changed. Ability 0x5E is
-/// not ported.
+/// (`need_allowed`); never with ability 0x5E, while the opponent is in a technique (flag 0xAF) or the body is
+/// changed.
 pub(crate) fn can_transform(
     me: &Chr,
     data: &SideData,
@@ -97,7 +112,7 @@ pub(crate) fn can_transform(
     if need_allowed && me.form.allowed == 0 {
         return false;
     }
-    if me.flags.test(0xAF) || me.gauge.body_changed {
+    if me.has_ability(0x5E) || me.flags.test(0xAF) || me.gauge.body_changed {
         return false;
     }
     let p = &data.tables.params;
@@ -125,8 +140,8 @@ pub(crate) fn fusion_partner(me: &Chr, data: &SideData, index: usize) -> Option<
 }
 
 /// `BtlAct_CanFuse`: fusion `index` (0..2) of the parameter names a character the side may use, with the stocks it
-/// costs and a partner on the team, alive and not body-changed; refused as a transformation is (ability 0x5E is not
-/// ported). The partner's member index.
+/// costs and a partner on the team, alive and not body-changed; refused as a transformation is. The partner's member
+/// index.
 pub(crate) fn can_fuse(
     me: &Chr,
     data: &SideData,
@@ -141,7 +156,7 @@ pub(crate) fn can_fuse(
     if need_allowed && me.form.allowed == 0 {
         return None;
     }
-    if me.flags.test(0xAF) || me.gauge.body_changed {
+    if me.has_ability(0x5E) || me.flags.test(0xAF) || me.gauge.body_changed {
         return None;
     }
     let p = &data.tables.params;
@@ -216,10 +231,18 @@ const RUN: u32 = 1;
 const DECIDE: u32 = 2;
 const LEAVE: u32 = 3;
 
-/// `BtlParam_GetAmountA` / `BtlParam_GetAmountB`: the ki of a vanishing step and of vanishing behind the
-/// opponent (abilities 0x23 / 0x24 lower them; abilities are not ported).
-const VANISH_KI: i32 = 10000;
-const VANISH_BEHIND_KI: i32 = 20000;
+/// `BtlParam_GetAmountA` / `BtlParam_GetAmountB`: the ki of a vanishing step (`behind`: of vanishing behind the
+/// opponent), 10000 (20000); half with ability 0x23, nothing with 0x24.
+fn vanish_ki(me: &Chr, behind: bool) -> i32 {
+    let v = if behind { 20000 } else { 10000 };
+    if me.has_ability(0x24) {
+        0
+    } else if me.has_ability(0x23) {
+        v / 2
+    } else {
+        v
+    }
+}
 
 /// What a handler sees: the fighter, its opponent, both sides' data and the battle.
 pub(crate) struct Ctx<'a, 'd> {
@@ -512,7 +535,7 @@ impl Ctx<'_, '_> {
         if mask & 0x20000 != 0
             && self.flags2() & 8 != 0
             && self.flag(5)
-            && self.me.has_ki(VANISH_KI)
+            && self.me.has_ki(vanish_ki(self.me, false))
         {
             for (input, action) in [(0x20, 0x23), (0x1D, 0x20), (0x1E, 0x21), (0x1F, 0x22)] {
                 if self.test(input) {
@@ -524,7 +547,7 @@ impl Ctx<'_, '_> {
         if mask & 0x40000 != 0
             && self.flag(5)
             && self.flag(0x13)
-            && self.me.has_ki(VANISH_BEHIND_KI)
+            && self.me.has_ki(vanish_ki(self.me, true))
             && self.flag(0xB3)
             && self.me.unk1080 > 0
         {
@@ -590,12 +613,16 @@ impl Ctx<'_, '_> {
             return 1;
         }
         if mask & 0x20 != 0 && (self.flag(0xE) || self.flag(0x11)) && self.test(0xA) {
-            let id = if self.data.can_fly() { 0x14 } else { 0x16 };
+            let id = if self.data.can_fly(self.me) {
+                0x14
+            } else {
+                0x16
+            };
             self.set_queue(0, id);
             return 1;
         }
         if mask & 0x40 != 0 && (self.flag(0xE) || self.flag(0x11)) && !self.flag(0xF) {
-            if !self.data.can_fly() && !self.flag(0x11) {
+            if !self.data.can_fly(self.me) && !self.flag(0x11) {
                 if self.test(0xE) {
                     self.set_queue(0, 0x11);
                     return 1;
@@ -694,9 +721,9 @@ impl Ctx<'_, '_> {
             }
         }
         // The ki blasts: ki for the kind, a shot left (blastShots) and room for one more live blast of the class.
-        let limit = blast_limit_a(self.data);
+        let limit = blast_limit_a(self.me, self.data);
         let room = |s: &Self, kind: i32, class: usize| {
-            s.me.has_ki(ki_cost_of(s.data, kind))
+            s.me.has_ki(ki_cost_of(s.me, s.data, kind))
                 && s.me.blast_shots < limit
                 && can_fire(s.me, s.data, class)
         };
@@ -809,7 +836,7 @@ impl Ctx<'_, '_> {
                 (0, 0x42)
             } else if mask & 0x200_0000 != 0 {
                 (3, 0x42)
-            } else if blast_limit_a(self.data) <= 0 {
+            } else if blast_limit_a(self.me, self.data) <= 0 {
                 (4, 0x58)
             } else {
                 (-1, -1)
@@ -1250,7 +1277,7 @@ impl Ctx<'_, '_> {
     /// `BtlAct_UpdateGauges`: the max power gauge's drain (not while flag 0xBB holds it: charging, firing a
     /// technique), which ends the powered-up mode (flag 6) when it empties; ki regeneration in a motion with flag
     /// 0x10000, blast gain with 0x20000, skill 0x18's ki drain, the stats' and skills' timers, the charge gauge's
-    /// decay. The abilities are not ported.
+    /// decay; once a second the abilities' ki and health and the benched members' recovery.
     fn update_gauges(&mut self) {
         if self.time_stopped
             || !self.flag(3)
@@ -1268,8 +1295,10 @@ impl Ctx<'_, '_> {
             let mut amount = 30000 / ((t * 30.0) as i32).max(1);
             if self.flag(0xBC) {
                 amount *= 3;
-            } else if self.flag(0xBD) {
+            } else if self.flag(0xBD) || self.me.has_ability(0x42) {
                 amount *= 2;
+            } else if self.me.has_ability(0x41) {
+                amount = amount * 2 / 3;
             }
             let g = &mut self.me.gauge;
             g.max_power = (g.max_power - amount).max(0);
@@ -1291,15 +1320,19 @@ impl Ctx<'_, '_> {
             return;
         }
         self.me.sec_timer += 1;
-        if self.me.sec_timer >= 30 {
+        let tick = self.me.sec_timer >= 30;
+        if tick {
             self.me.sec_timer = 0;
         }
         let p = &self.data.tables.params;
         if mflags & 0x1_0000 != 0 {
             if self.flag(0xBE) {
-                // BtlParam_GetKiRecoverRate.
-                let mut amount =
-                    (p.s32_at(0x3C) / 30 + (self.me.curve(self.env, 2) / 30.0) as i32).max(10);
+                // BtlParam_GetKiRecoverRate: doubled by ability 0x3C.
+                let mut amount = p.s32_at(0x3C) / 30 + (self.me.curve(self.env, 2) / 30.0) as i32;
+                if self.me.has_ability(0x3C) {
+                    amount *= 2;
+                }
+                let mut amount = amount.max(10);
                 self.set(0xE7);
                 if self.me.input.is_pressed(0x10_0000) {
                     amount *= 4;
@@ -1309,8 +1342,18 @@ impl Ctx<'_, '_> {
                     self.clear(0xBE);
                 }
             } else if !self.flag(0x98) {
-                // BtlParam_GetKiRegenLimit / BtlParam_GetKiRegenRate.
-                if !self.me.has_ki(p.s32_at(0x28).min(100_000)) {
+                // BtlParam_GetKiRegenLimit (+60000 / 40000 / 20000 by ability 0x2E / 0x2D / 0x2C) /
+                // BtlParam_GetKiRegenRate.
+                let extra = if self.me.has_ability(0x2E) {
+                    60000
+                } else if self.me.has_ability(0x2D) {
+                    40000
+                } else if self.me.has_ability(0x2C) {
+                    20000
+                } else {
+                    0
+                };
+                if !self.me.has_ki((p.s32_at(0x28) + extra).min(100_000)) {
                     let rate =
                         (p.s32_at(0x38) / 30 + (self.me.curve(self.env, 1) / 30.0) as i32).max(0);
                     self.me.add_ki(rate);
@@ -1318,11 +1361,44 @@ impl Ctx<'_, '_> {
                 if matches!(self.env.mode, 5 | 6) {
                     self.me.add_ki(1000);
                 }
+                if tick {
+                    // + 20000 / 900 / 600 a second with ability 0x78 / 0x1F / 0x1E, + 300 with 0x57, + 900 in
+                    // water (flag 0x11) with 0x5C.
+                    let has = |a| self.me.has_ability(a);
+                    let mut ki = if has(0x78) {
+                        20000
+                    } else if has(0x1F) {
+                        900
+                    } else if has(0x1E) {
+                        600
+                    } else {
+                        0
+                    };
+                    if has(0x57) {
+                        ki += 300;
+                    }
+                    let water = self.flag(0x11) && has(0x5C);
+                    for amount in [ki, if water { 900 } else { 0 }] {
+                        if amount > 0 {
+                            self.me.add_ki(amount);
+                        }
+                    }
+                }
             }
         }
         if mflags & 0x2_0000 != 0 {
-            // BtlParam_GetBlastGainRate.
-            let rate = (p.s32_at(0x44) / 30 + (self.me.curve(self.env, 3) / 30.0) as i32).max(20);
+            // BtlParam_GetBlastGainRate: x1.2 (ability 0x32), halved (0x1A), x0.8 (0x33).
+            let mut rate = p.s32_at(0x44) / 30 + (self.me.curve(self.env, 3) / 30.0) as i32;
+            if self.me.has_ability(0x32) {
+                rate = rate * 12 / 10;
+            }
+            if self.me.has_ability(0x1A) {
+                rate /= 2;
+            }
+            if self.me.has_ability(0x33) {
+                rate = rate * 8 / 10;
+            }
+            let rate = rate.max(20);
             self.me.add_blast(rate);
             if matches!(self.env.mode, 5 | 6) {
                 self.me.add_blast(0xD05);
@@ -1336,10 +1412,18 @@ impl Ctx<'_, '_> {
             floor = floor.max(self.me.skill_val_e);
         }
         self.me.charge_gauge = (self.me.charge_gauge - 400).max(floor);
-        // The switch gauge fills over the parameter's +0x64 seconds (`BtlParam_GetGauge99CTime`; its abilities are
-        // not ported).
+        // The switch gauge fills over the parameter's +0x64 seconds (`BtlParam_GetGauge99CTime`: / 1.2 with ability
+        // 0x34, then doubled with 0x1B or / 0.8 with 0x35).
         if self.env.switch_enabled[self.me.player] {
-            let secs = p.f32_at(0x64);
+            let mut secs = p.f32_at(0x64);
+            if self.me.has_ability(0x34) {
+                secs /= 1.2;
+            }
+            if self.me.has_ability(0x1B) {
+                secs += secs;
+            } else if self.me.has_ability(0x35) {
+                secs /= 0.8;
+            }
             let me = &mut *self.me;
             me.switch_gauge += (100_000.0 / (secs * 30.0)) as i32;
             if matches!(self.env.mode, 5 | 6) {
@@ -1349,6 +1433,35 @@ impl Ctx<'_, '_> {
         }
         if matches!(self.env.mode, 5 | 6) && !self.flag(0x95) {
             self.me.add_health(200);
+        }
+        if tick {
+            // + 100 / 50 health a second with ability 0x1D / 0x1C, + 100 in water with 0x5C.
+            if self.me.has_ability(0x1D) {
+                self.me.add_health(100);
+            } else if self.me.has_ability(0x1C) {
+                self.me.add_health(50);
+            }
+            if self.flag(0x11) && self.me.has_ability(0x5C) {
+                self.me.add_health(100);
+            }
+            // The benched members alive recover 100 health (+ 200 with ability 0x5F) up to their next 10000, and
+            // 1000 ki (+ 2000 with 0x60).
+            let me = &mut *self.me;
+            for (i, m) in me.members.iter_mut().enumerate() {
+                if i == me.active || !m.present || m.gauge.health <= 0 {
+                    continue;
+                }
+                let g = &mut m.gauge;
+                let cap = (g.health + 9999) / 10000 * 10000;
+                g.health = (g.health + 100).min(cap);
+                if m.items.has(0x5F) {
+                    g.health = (g.health + 200).min(cap);
+                }
+                g.ki = (g.ki + 1000).min(g.ki_max);
+                if m.items.has(0x60) {
+                    g.ki = (g.ki + 2000).min(g.ki_max);
+                }
+            }
         }
     }
 
@@ -1496,7 +1609,14 @@ impl Ctx<'_, '_> {
             }
         }
         self.me.dir_held = dir;
+        // Ability 0x42 in the powered-up mode, and 0x39 in a motion with flag 0x800: flag 0x57.
+        if self.flag(6) && self.me.has_ability(0x42) {
+            self.set(0x57);
+        }
         if self.anim_flags(self.anim_id()) & 0x800 != 0 {
+            if self.me.has_ability(0x39) {
+                self.set(0x57);
+            }
             if !self.me.gauge.low_health_idle {
                 self.me.recover_presses = 0;
             } else if self.anim_flags(self.me.anim.prev) & 0x800 == 0 {
@@ -1600,6 +1720,9 @@ impl Ctx<'_, '_> {
         } else {
             me.unk1080 = -1;
         }
+        if me.flags.test(0x80) && me.has_ability(0x38) {
+            me.dodge_window = 1;
+        }
     }
 
     // ---- handlers ------------------------------------------------------------------------------------------------
@@ -1608,7 +1731,7 @@ impl Ctx<'_, '_> {
     fn idle_motion(&self) -> i32 {
         let low = i32::from(self.me.gauge.low_health_idle);
         if self.flag(0xE) {
-            if !self.data.can_fly() && !self.flag(0x11) {
+            if !self.data.can_fly(self.me) && !self.flag(0x11) {
                 0x18B
             } else {
                 0x26 + low
@@ -1793,18 +1916,21 @@ impl Ctx<'_, '_> {
                     if self.flag(0xF) {
                         self.me.set_fx(0x36);
                     }
-                    // BtlParam_GetRateA / B: per second / 30 plus the curve's row 0 and skill value F / 30, at
-                    // least 200 (the abilities' scaling is not ported).
+                    // BtlParam_GetRateA / B: per second / 30 plus the curve's row 0 and skill value F / 30,
+                    // BtlParam_ScaleKiCharge, at least 200.
                     let p = &self.data.tables.params;
                     let per_second = if self.flag(0x11) {
                         p.s32_at(0x34)
                     } else {
                         p.s32_at(0x30)
                     };
-                    let amount = (per_second / 30
-                        + (self.me.curve(self.env, 0) / 30.0) as i32
-                        + self.me.skill_val_f / 30)
-                        .max(200);
+                    let amount = scale_ki_charge(
+                        self.me,
+                        per_second / 30
+                            + (self.me.curve(self.env, 0) / 30.0) as i32
+                            + self.me.skill_val_f / 30,
+                    )
+                    .max(200);
                     self.me.add_ki(amount);
                     if self.me.gauge.ki >= self.me.gauge.ki_max {
                         if self.me.gauge.blast >= 100_000 {
@@ -1842,7 +1968,7 @@ impl Ctx<'_, '_> {
             }
             let accel = kmh(100.0);
             self.step(6, 6, 7, 0.0, accel);
-            if !self.data.can_fly() && self.flag(0xE) && !self.flag(0x11) {
+            if !self.data.can_fly(self.me) && self.flag(0xE) && !self.flag(0x11) {
                 self.me.move_vertical(accel, accel);
             } else {
                 self.me.apply_gravity();
@@ -2032,19 +2158,41 @@ impl Ctx<'_, '_> {
         self.data.tables.moves.accel[n] * 10.0 * (1000.0 / 3600.0) * (1.0 / 30.0 / 30.0)
     }
 
-    /// `BtlMoveParam_GetKiCost` without abilities: table +0x64 per second, per frame.
+    /// `BtlMoveParam_GetKiCost`: table +0x64 per second, per frame; kinds 0..2 free with ability 0x26, else halved
+    /// with 0x25; kind 3 halved with 0x27.
     fn move_ki_cost(&self, n: usize) -> i32 {
-        self.data.tables.moves.ki_cost[n] / 30
+        let v = self.data.tables.moves.ki_cost[n] / 30;
+        let has = |a| self.me.has_ability(a);
+        match n {
+            0..=2 if has(0x26) => 0,
+            0..=2 if has(0x25) => v / 2,
+            3 if has(0x27) => v / 2,
+            _ => v,
+        }
+    }
+
+    /// `BtlSuper_GetKiCost`: halved with ability 0x2B.
+    fn tech_ki(&self, cls: i32) -> i32 {
+        let ki = self.tech().ki(cls);
+        if self.me.has_ability(0x2B) {
+            ki / 2
+        } else {
+            ki
+        }
     }
 
     /// `BtlAct_GetAction14or16`.
     fn ascend_action(&self) -> i32 {
-        if self.data.can_fly() { 0x14 } else { 0x16 }
+        if self.data.can_fly(self.me) {
+            0x14
+        } else {
+            0x16
+        }
     }
 
     /// `BtlAct_GetAction11or15`.
     fn descend_action(&self) -> i32 {
-        if !self.data.can_fly() && !self.flag(0x11) {
+        if !self.data.can_fly(self.me) && !self.flag(0x11) {
             0x11
         } else {
             0x15
@@ -2090,7 +2238,7 @@ impl Ctx<'_, '_> {
                 let id = self.ascend_action();
                 self.request(id);
             }
-            if self.data.can_fly() && self.me.test(0xC, true) {
+            if self.data.can_fly(self.me) && self.me.test(0xC, true) {
                 let id = self.descend_action();
                 self.request(id);
             }
@@ -2802,7 +2950,7 @@ impl Ctx<'_, '_> {
             self.play(0xF6, 0.15);
             if self.me.act.prev == 0x44 {
                 self.held(0x83);
-                self.me.spend_ki(VANISH_KI, false);
+                self.me.spend_ki(vanish_ki(self.me, false), false);
             }
             if self.flag(0x74) || self.flag(0x75) || self.flag(0x76) {
                 self.me.work[0] |= 1;
@@ -2891,7 +3039,7 @@ impl Ctx<'_, '_> {
     fn vanish_behind(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0xF6, 0.15);
-            self.me.spend_ki(VANISH_BEHIND_KI, false);
+            self.me.spend_ki(vanish_ki(self.me, true), false);
             self.me.set_fx(0xC);
             self.held(0xE);
             self.me.pose.speed = 0.0;
@@ -3010,10 +3158,15 @@ impl Ctx<'_, '_> {
     fn blended_charge_rate(&self) -> f32 {
         let t = self.me.charge_gauge as f32 / 100_000.0;
         let p = &self.data.tables.params;
-        (1.0 - t) * p.f32_at(0x74) + t * p.f32_at(0x78)
+        // BtlParam_GetChargeRateA: x1.2 with ability 0x4A.
+        let mut a = p.f32_at(0x74);
+        if self.me.has_ability(0x4A) {
+            a *= 1.2;
+        }
+        (1.0 - t) * a + t * p.f32_at(0x78)
     }
 
-    /// `BtlAct_GetChargeRate`: at least 0.1 (ability 0x4A is not ported).
+    /// `BtlAct_GetChargeRate`: at least 0.1.
     fn charge_rate(&self) -> f32 {
         self.blended_charge_rate().max(0.1)
     }
@@ -4751,15 +4904,18 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// Actions 0x67..0x69 (`BtlAct_Action67to69`): the ki-spending pose 0xF7 (parameter +0x4C a second; ability
-    /// 0x28 is not ported); out of ki it guards, without the guard input it idles; flag 0x70 chains into
+    /// Actions 0x67..0x69 (`BtlAct_Action67to69`): the ki-spending pose 0xF7 (parameter +0x4C a second, halved
+    /// by ability 0x28); out of ki it guards, without the guard input it idles; flag 0x70 chains into
     /// `BtlAct_GetChainAction` by the parameter's chain kind. The voice and the vibration are not ported.
     fn ki_pose(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0xF7, 0.15);
         }
         if phase == RUN {
-            let drain = self.data.tables.params.s32_at(0x4C) / 30;
+            let mut drain = self.data.tables.params.s32_at(0x4C) / 30;
+            if self.me.has_ability(0x28) {
+                drain /= 2;
+            }
             self.me.spend_ki(drain, false);
             if self.me.anim_advance(0) {
                 if self.me.is_ki_empty() {
@@ -5191,7 +5347,7 @@ impl Ctx<'_, '_> {
     }
 
     /// `BtlAct_GrowSearchWindow`: the window widens by the search type's angle and range (60% against an opponent
-    /// with parameter word bit 0x80; ability 0x6B is not ported), up to pi and 1000000; true when the angle passes
+    /// with parameter word bit 0x80; doubled by ability 0x6B), up to pi and 1000000; true when the angle passes
     /// `limit`.
     fn grow_search_window(&mut self, limit: f32) -> bool {
         const ANGLE: [f32; 10] = [
@@ -5213,6 +5369,10 @@ impl Ctx<'_, '_> {
         let slow = (self.opp_data.tables.params.chara_flags() >> 7) & 1 != 0;
         let mut d_angle = ANGLE.get(t).copied().unwrap_or(0.0);
         let mut d_range = RANGE.get(t).map_or(0.0, |&v| kmh(v));
+        if self.me.has_ability(0x6B) {
+            d_angle += d_angle;
+            d_range += d_range;
+        }
         if slow {
             d_angle *= 0.6;
             d_range *= 0.6;
@@ -5224,7 +5384,8 @@ impl Ctx<'_, '_> {
     }
 
     /// `BtlAct_IsOppInSearchWindow`: the opponent within the window's angle of the facing and its range (narrower
-    /// to the sides), unless it is hidden (flag 0xBA) or cannot be targeted (0xB2). Ability 0x6C is not ported.
+    /// to the sides), unless it is hidden (flag 0xBA; ability 0x6C finds it anyway in the search loop 0x17E) or
+    /// cannot be targeted (0xB2).
     fn opp_in_search_window(&self) -> bool {
         if self.flag(0xB2) {
             return false;
@@ -5233,7 +5394,7 @@ impl Ctx<'_, '_> {
         let yaw = opp_yaw_from_facing(self.me, self.opp).abs();
         yaw <= self.me.search_angle
             && dist < self.me.search_range * ((1.0 - yaw / PI) * 0.85 + 0.15)
-            && !self.flag(0xBA)
+            && (!self.flag(0xBA) || (self.me.has_ability(0x6C) && self.anim_id() == 0x17E))
     }
 
     /// Action 0x36 (`BtlAct_SearchHandler`): looking for an opponent lost from sight (motion 0x17F for search
@@ -6269,9 +6430,10 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x130..0x132 (`BtlAct_ClashStruggleHandler`, forced by flag 0xAA): both fighters in a beam
     /// struggle (clash A). A beam (hit direction kind 1) holds motion 0x16C, else the firing loop, aimed up / down
-    /// unless technique flag 0x1000; the score starts at the clash power / 20 and every direction input from frame
-    /// 16 adds one. The clash's flags end it: 0xC3 (won) 0xB, 0xC2 (lost) 0x104, 0x72 (a catch connected) the rush
-    /// sequence. The camera shakes. The abilities, vibration and the chains' push are not ported.
+    /// unless technique flag 0x1000; the score starts at the clash power / 20 (+ 10 / 6 / 3 with ability 0x14 /
+    /// 0x13 / 0x12, - 10 / 6 / 3 with 0x6A / 0x69 / 0x68) and every direction input from frame 16 adds one. The
+    /// clash's flags end it: 0xC3 (won) 0xB, 0xC2 (lost) 0x104, 0x72 (a catch connected) the rush sequence. The
+    /// camera shakes. The vibration and the chains' push are not ported.
     fn clash_struggle(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -6284,7 +6446,23 @@ impl Ctx<'_, '_> {
             self.clear(0xAA);
             self.me.flags.clear_range(0xBF, 0xC3);
             self.clear(0x11F);
-            self.me.clash_count_a = self.tech().clash_power(cls) / 20;
+            let mut power = self.tech().clash_power(cls) / 20;
+            let has = |a| self.me.has_ability(a);
+            if has(0x14) {
+                power += 10;
+            } else if has(0x13) {
+                power += 6;
+            } else if has(0x12) {
+                power += 3;
+            }
+            if has(0x6A) {
+                power -= 10;
+            } else if has(0x69) {
+                power -= 6;
+            } else if has(0x68) {
+                power -= 3;
+            }
+            self.me.clash_count_a = power;
         }
         if phase == RUN {
             self.me.anim_advance_loop(0);
@@ -6399,9 +6577,9 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0xFA (`BtlAct_ClashBlowsHandler`, forced by flag 0x61): clash B, trading blows (motion 0x173 / 0x174
-    /// by player) while spinning round the opponent; every direction input counts, and one in four frames counts by
-    /// itself (abilities 0x12..0x14 and 0x68..0x6A are not ported; the technique bonus needs `BtlAct_GetPrev`, which
-    /// is never a technique). Won (flag 0xBF) motion 0x175 then 0xB, lost (0xC0) 0x176 with the damage of the
+    /// by player) while spinning round the opponent; every direction input counts, else one frame in 28 / 8 / 5
+    /// counts by itself with ability 0x6A / 0x69 / 0x68, one in four without; abilities 0x14 / 0x13 / 0x12 add one
+    /// count every 5 / 11 / 17 frames (the technique bonus needs `BtlAct_GetPrev`, which is never a technique). Won (flag 0xBF) motion 0x175 then 0xB, lost (0xC0) 0x176 with the damage of the
     /// winner's count, then blown away. The vibration is not ported.
     fn clash_blows(&mut self, phase: u32) {
         if phase == ENTER {
@@ -6415,7 +6593,31 @@ impl Ctx<'_, '_> {
                     self.me.anim_advance_loop(0);
                     self.set(0xE6);
                     self.set(0xED);
-                    if self.test(0x33) || self.me.action_frame % 4 == 0 {
+                    let f = self.me.action_frame;
+                    let m = &*self.me;
+                    let has = |a| m.has_ability(a);
+                    let auto = if has(0x6A) {
+                        28
+                    } else if has(0x69) {
+                        8
+                    } else if has(0x68) {
+                        5
+                    } else {
+                        4
+                    };
+                    let extra = if has(0x14) {
+                        5
+                    } else if has(0x13) {
+                        11
+                    } else if has(0x12) {
+                        17
+                    } else {
+                        0
+                    };
+                    if self.test(0x33) || f % auto == 0 {
+                        count_and_mark(self.me, self.opp);
+                    }
+                    if extra != 0 && f % extra == 0 {
                         count_and_mark(self.me, self.opp);
                     }
                     self.me.combo.timer = 30;
@@ -6632,8 +6834,7 @@ impl Ctx<'_, '_> {
         if slot == 4 && !self.flag(6) {
             return false;
         }
-        // BtlSuper_GetKiCost: ability 0x2B is not ported.
-        if !self.me.has_ki(self.tech().ki(slot)) {
+        if !self.me.has_ki(self.tech_ki(slot)) {
             return false;
         }
         if self.tech().flags(slot) & 0x2000 != 0 {
@@ -6898,7 +7099,7 @@ impl Ctx<'_, '_> {
         self.super_start_fx(cls);
         self.super_class_flag(cls, false);
         self.super_request_cut(cls);
-        let ki = self.tech().ki(cls);
+        let ki = self.tech_ki(cls);
         self.me.spend_ki(ki, true);
     }
 
@@ -7213,7 +7414,7 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x10F..0x111 (`BtlAct_SuperChargeHandler`): the chargeable technique. The charge loop lasts until
     /// the button command (letting go of the blast button, flag 0xA2) or the charge time; the charge is full after
-    /// half of it (ability 0x4A is not ported).
+    /// half of it (a third with ability 0x4A).
     fn super_charge(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -7221,7 +7422,7 @@ impl Ctx<'_, '_> {
             self.super_begin(cls, false);
             self.super_start_fx(cls);
             self.super_class_flag(cls, false);
-            let ki = self.tech().ki(cls);
+            let ki = self.tech_ki(cls);
             self.me.spend_ki(ki, true);
         }
         if phase == RUN {
@@ -7244,6 +7445,9 @@ impl Ctx<'_, '_> {
                         self.me.work[0] |= 1;
                     }
                     self.me.charge = self.me.work[2] as f32 * 2.0 / limit as f32;
+                    if self.me.has_ability(0x4A) {
+                        self.me.charge *= 1.5;
+                    }
                     if self.me.charge >= 1.0 {
                         self.me.charge = 1.0;
                         self.me.set_fx(0x1E);
@@ -7574,6 +7778,7 @@ impl Ctx<'_, '_> {
         if tf & 0x100_0000 == 0 {
             let mut damage = crate::btl_tech_fx::tech_damage(
                 self.me,
+                self.opp,
                 self.data,
                 self.opp_data,
                 self.env,
@@ -7664,7 +7869,7 @@ impl Ctx<'_, '_> {
         self.super_start_fx(cls);
         self.super_class_flag(cls, false);
         self.super_request_cut(cls);
-        let ki = self.tech().ki(cls) / 2;
+        let ki = self.tech_ki(cls) / 2;
         self.me.spend_ki(ki, true);
         self.held(0xE);
     }
@@ -7971,7 +8176,7 @@ impl Ctx<'_, '_> {
             self.super_start_fx(cls);
             self.super_class_flag(cls, false);
             self.super_request_cut(cls);
-            let ki = self.tech().ki(cls);
+            let ki = self.tech_ki(cls);
             self.me.spend_ki(ki, true);
             self.held(0xE);
         }
@@ -8247,7 +8452,7 @@ impl Ctx<'_, '_> {
             if self.me.work[0] & 1 != 0 {
                 self.setup_rush_damage(cls, false);
                 if (0x11B..=0x123).contains(&self.me.act.prev) {
-                    let ki = self.tech().ki(cls) / 2;
+                    let ki = self.tech_ki(cls) / 2;
                     self.me.spend_ki(ki, true);
                 }
                 let t = self.me.thr;
@@ -8494,8 +8699,8 @@ impl Ctx<'_, '_> {
 
     /// `BtlAct_CanTransform`: transformation `index` (0..3) of the parameter, when it names a character the side
     /// may use (kind 3 needs the stage's moon), with the blast stocks it costs (`need_blast`) and the side allowed
-    /// to change (`need_allowed`); never while the opponent is in a technique (flag 0xAF) or the body is changed.
-    /// Ability 0x5E is not ported.
+    /// to change (`need_allowed`); never with ability 0x5E, while the opponent is in a technique (flag 0xAF) or the
+    /// body is changed.
     fn can_transform(&self, index: i32, need_blast: bool, need_allowed: bool) -> bool {
         can_transform(
             self.me,
@@ -9416,9 +9621,10 @@ impl Ctx<'_, '_> {
         self.data.tables.skill()
     }
 
-    /// `BtlSkill_GetBlastCost`: the skill's stocks (at least 1; ability 0x15 is not ported) in gauge units.
+    /// `BtlSkill_GetBlastCost`: the skill's stocks (one less with ability 0x15, at least 1) in gauge units.
     fn skill_cost(&self, slot: i32) -> i32 {
-        self.skill().stocks(slot).max(1) * 100_000
+        let n = self.skill().stocks(slot) - i32::from(self.me.has_ability(0x15));
+        n.max(1) * 100_000
     }
 
     /// `BtlAct_GetSkillAction`: by the skill's sequence, 0xFD / 0xFF / 0x101 plus the slot.
@@ -9784,8 +9990,7 @@ impl Ctx<'_, '_> {
     // ---- the fusions (btl_act_decide.c, btl_act_change.c) ------------------------------------------------------
 
     /// `BtlAct_CanFuse`: fusion `index` (0..2) of the parameter names a character the side may use, with the stocks
-    /// it costs and a partner on the team, alive and not body-changed; refused as a transformation is (ability 0x5E
-    /// is not ported).
+    /// it costs and a partner on the team, alive and not body-changed; refused as a transformation is.
     fn can_fuse(&self, index: usize, need_blast: bool, need_allowed: bool) -> Option<usize> {
         can_fuse(
             self.me,
@@ -9965,7 +10170,11 @@ impl Ctx<'_, '_> {
     /// `BtlAct_QueueFlag21Action`: flags 0x21 / 0x22 (the air recovery inputs) queue 0x25 / 0x27, or 0x28 under
     /// lock-on for 0x22.
     fn queue_flag21_action(&mut self) -> bool {
-        let fly = if self.data.can_fly() { 0x27 } else { 0x25 };
+        let fly = if self.data.can_fly(self.me) {
+            0x27
+        } else {
+            0x25
+        };
         if self.flag(0x21) {
             self.set_queue(0, fly);
             return true;
@@ -10100,7 +10309,11 @@ impl Ctx<'_, '_> {
     /// An air recovery with a direction held by a free fighter (0x25, or 0x27 when it can fly).
     fn request_air_recovery(&mut self) {
         if self.me.is_free() && !self.flag(0x1E) && self.me.input.is_held(DIR_MASK) {
-            self.request(if self.data.can_fly() { 0x27 } else { 0x25 });
+            self.request(if self.data.can_fly(self.me) {
+                0x27
+            } else {
+                0x25
+            });
         }
     }
 
@@ -10510,7 +10723,7 @@ impl Ctx<'_, '_> {
             }
             let accel = kmh(100.0);
             self.step(6, 5, 2, 0.0, accel);
-            if !self.data.can_fly() && self.flag(0xE) && !self.flag(0x11) {
+            if !self.data.can_fly(self.me) && self.flag(0xE) && !self.flag(0x11) {
                 self.me.move_vertical(accel, accel);
             } else {
                 self.me.apply_gravity();
@@ -11061,7 +11274,7 @@ impl Ctx<'_, '_> {
     fn walk(&mut self, phase: u32) {
         if phase == ENTER {
             let mut motion = 2;
-            if !self.data.can_fly() && self.flag(0xE) && !self.flag(0x11) {
+            if !self.data.can_fly(self.me) && self.flag(0xE) && !self.flag(0x11) {
                 motion = 0x18B;
             }
             self.play(motion, 0.15);
@@ -11112,7 +11325,7 @@ impl Ctx<'_, '_> {
                 if self.flag(0x11) {
                     self.request_anim(3, 0.15);
                 }
-            } else if !self.data.can_fly() && !self.flag(0x11) && !self.flag(0xF) {
+            } else if !self.data.can_fly(self.me) && !self.flag(0x11) && !self.flag(0xF) {
                 self.request_anim(0x18B, 0.15);
             }
         }
@@ -11133,7 +11346,7 @@ impl Ctx<'_, '_> {
     fn close_walk(&mut self, phase: u32) {
         if phase == ENTER {
             let mut motion = if self.me.input.stick()[1] < 0.0 { 8 } else { 9 };
-            if !self.data.can_fly() && self.flag(0xE) && !self.flag(0x11) {
+            if !self.data.can_fly(self.me) && self.flag(0xE) && !self.flag(0x11) {
                 motion = 0x18B;
             }
             self.play(motion, 0.15);
@@ -11185,7 +11398,7 @@ impl Ctx<'_, '_> {
                     let m = if self.me.input.stick()[1] < 0.0 { 8 } else { 9 };
                     self.request_anim(m, 0.15);
                 }
-            } else if !self.data.can_fly() && !self.flag(0x11) && !self.flag(0xF) {
+            } else if !self.data.can_fly(self.me) && !self.flag(0x11) && !self.flag(0xF) {
                 self.request_anim(0x18B, 0.15);
             }
         }
@@ -11270,10 +11483,14 @@ impl Ctx<'_, '_> {
             }
             let ascend = self.test(0xA);
             if ascend {
-                let id = if self.data.can_fly() { 0x14 } else { 0x16 };
+                let id = if self.data.can_fly(self.me) {
+                    0x14
+                } else {
+                    0x16
+                };
                 self.request(id);
             }
-            if self.data.can_fly() && self.test(0xC) {
+            if self.data.can_fly(self.me) && self.test(0xC) {
                 self.request(0x15);
             }
             let mask = if self.anim_id() != 0x22 {
@@ -11810,7 +12027,11 @@ impl Ctx<'_, '_> {
                 if self.me.is_free() && !self.flag(0x1E) {
                     self.add_action_bit(0x25);
                     if self.me.input.is_held(DIR_MASK) {
-                        self.request(if self.data.can_fly() { 0x27 } else { 0x25 });
+                        self.request(if self.data.can_fly(self.me) {
+                            0x27
+                        } else {
+                            0x25
+                        });
                     }
                 }
                 // Fallen below the stage floor: the next member takes over.

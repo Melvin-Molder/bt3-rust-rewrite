@@ -313,6 +313,8 @@ pub struct SideSetup {
     pub costume: i32,
     pub cpu_level: i32,
     pub items: [u16; 8],
+    /// The team members' item sets (1-based ids).
+    pub team_items: [[u16; 8]; 4],
     /// The team after the lead (`BattleSide.members[1..]`): character and costume, `team_count` of them.
     pub team: [(i32, i32); 4],
     pub team_count: i32,
@@ -873,6 +875,7 @@ impl CharSelScreen {
                 costume: self.side[i].pick.color_plate,
                 cpu_level,
                 items: self.side[i].pick.items,
+                team_items: [[0; 8]; 4],
                 team: [(0, 0); 4],
                 team_count: 0,
                 switch_enabled: 1,

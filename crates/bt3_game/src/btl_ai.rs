@@ -6,7 +6,7 @@
 //!
 //! Every random number is a `Rand_Range` of the shared generator, in the original order.
 //!
-//! Not ported: the story-mode override (`BtlCharApi_GetStoryAiForce`) and the abilities the conditions test.
+//! Not ported: the story-mode override (`BtlCharApi_GetStoryAiForce`).
 
 use bt3_data::ai_data::{AiData, AiRule, AiTables};
 use bt3_data::stage_col::StageNav;
@@ -698,9 +698,9 @@ impl Ai<'_, '_, '_, '_> {
             .map_or(0, |r| r.flags())
     }
 
-    /// `BtlParam_GetBlastLimitA` (no abilities are ported).
+    /// `BtlParam_GetBlastLimitA`.
     fn blast_limit_a(&self, i: usize) -> i32 {
-        i32::from(self.c.data[i].tables.params.u16_at(0x80) as i16)
+        crate::btl_blast::blast_limit_a(self.chr(i), self.c.data[i])
     }
 
     /// `BtlCharApi_GetBlastRoom` / `B`: the shots left, or the room for live blasts of the class if smaller.
@@ -714,7 +714,9 @@ impl Ai<'_, '_, '_, '_> {
         left.min(room)
     }
 
-    /// `BtlCharApi_GetArmorBreakLevel` without skills or abilities.
+    /// `BtlCharApi_GetArmorBreakLevel`: the opponent's armour against this fighter's attacks (the parameters'
+    /// flags 4 / 8, the powered skills 0x40 / 0x100, skill timer C, abilities 0x46 / 0x47 / 0x70), as the first
+    /// attack record whose armour ignore beats it.
     fn armor_break_level(&self, i: usize) -> i32 {
         let (me, opp) = (&self.c.data[i].tables, &self.c.data[i ^ 1].tables);
         let mut level = 0;
@@ -730,7 +732,20 @@ impl Ai<'_, '_, '_, '_> {
         if me.params.flags() & 8 != 0 {
             level += 1;
         }
-        level += i32::from(self.chr(i ^ 1).skill_timer_c > 0);
+        let (c, o) = (self.chr(i), self.chr(i ^ 1));
+        if o.flags.test(6) && opp.params.flags3() & 0x40 != 0 {
+            level += 1;
+        }
+        level += i32::from(o.skill_timer_c > 0);
+        if o.has_ability(0x46) {
+            level += 1;
+        }
+        if c.flags.test(6) && me.params.flags3() & 0x100 != 0 {
+            level -= 1;
+        }
+        if c.has_ability(0x47) || (c.has_ability(0x70) && c.flags.test(6)) {
+            level -= 1;
+        }
         for k in 0..5 {
             let ignore = me.attacks.get(k).map_or(0, |r| i32::from(r.s8_at(0x2C)));
             if level - ignore <= 0 {

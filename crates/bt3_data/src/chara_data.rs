@@ -967,3 +967,52 @@ impl CommonTables {
         })
     }
 }
+
+/// `ITEMTBL_TYPE_AI`: an item that sets the AI type to its id less `ITEM_AI_FIRST`.
+const ITEM_TYPE_AI: u8 = 2;
+const ITEM_AI_FIRST: i32 = 0x87;
+const ITEM_SIZE: usize = 0x28;
+
+/// What a member's items add up to in a battle (`ItemSet_GetStats`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ItemSetStats {
+    /// The four stat changes.
+    pub stat: [i32; 4],
+    /// The AI type: an AI item's, else the character table's entry.
+    pub ai_type: i32,
+    /// The ability bits.
+    pub ability: [u32; 4],
+}
+
+/// `ItemSet_GetStats` on common file 4 (`ChrTblFile`: header word 1 the character table, word 2 the 0x28-byte
+/// item entries) for the 1-based item `ids`, as `BtlMember_ApplyItems` calls it: before the member's character is
+/// set, so without an AI item the AI type is character 0's. Ids outside the table count as nothing.
+pub fn item_set_stats(table: &[u8], ids: &[u16; 8]) -> ItemSetStats {
+    let section = |n: usize| (u32_at(table, n * 4) & !3) as usize;
+    let s16 = |o: usize| {
+        table
+            .get(o..o + 2)
+            .map_or(0, |b| i32::from(i16::from_le_bytes([b[0], b[1]])))
+    };
+    let items = section(2);
+    let mut out = ItemSetStats::default();
+    for &id in ids.iter().filter(|&&id| id != 0) {
+        let e = items + (usize::from(id) - 1) * ITEM_SIZE;
+        let Some(&kind) = table.get(e) else {
+            continue;
+        };
+        if kind == ITEM_TYPE_AI {
+            out.ai_type = i32::from(id) - ITEM_AI_FIRST;
+        } else {
+            for k in 0..4 {
+                out.stat[k] += s16(e + 0xC + k * 2);
+                out.ability[k] |= u32_at(table, e + 0x18 + k * 4);
+            }
+        }
+    }
+    if out.ai_type == 0 {
+        // ChrTblEntry.aiType: the first word of entry 0.
+        out.ai_type = u32_at(table, section(1)) as i32;
+    }
+    out
+}

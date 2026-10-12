@@ -200,10 +200,39 @@ fn hit_windows(me: &Chr, data: &SideData) -> i32 {
     me.obj.query_event(&data.obj, 1, 0, 3)
 }
 
-/// `BtlAtk_GetDamage`: record damage times curve row 4, divided by the motion's hits.
+/// `BtlAtk_ApplyAbilities`: attacks 0..9 +10 % (ability 4) / -10 % (5), 0x13..0x21 +10 % (6) / -10 % (7), the
+/// throws 0x55 / 0x56 doubled (8) / halved (9).
+fn apply_atk_abilities(me: &Chr, mut v: i32, id: usize) -> i32 {
+    let mut step = |up: i32, down: i32| {
+        if me.has_ability(up) {
+            v += v / 10;
+        }
+        if me.has_ability(down) {
+            v -= v / 10;
+        }
+    };
+    if id < 10 {
+        step(4, 5);
+    }
+    if (0x13..0x22).contains(&id) {
+        step(6, 7);
+    }
+    if (0x55..0x57).contains(&id) {
+        if me.has_ability(8) {
+            v *= 2;
+        }
+        if me.has_ability(9) {
+            v -= v / 2;
+        }
+    }
+    v
+}
+
+/// `BtlAtk_GetDamage`: record damage times curve row 4, the abilities' changes, divided by the motion's hits.
 pub(crate) fn damage(me: &Chr, data: &SideData, env: &Env) -> i32 {
-    let (r, _) = record(me, data, env);
-    let mut v = (i32::from(r.u16_at(4)) as f32 * me.curve(env, 4)) as i32;
+    let (r, id) = record(me, data, env);
+    let v = (i32::from(r.u16_at(4)) as f32 * me.curve(env, 4)) as i32;
+    let mut v = apply_atk_abilities(me, v, id);
     let hits = hit_windows(me, data);
     if hits >= 2 {
         v /= hits;
@@ -211,10 +240,58 @@ pub(crate) fn damage(me: &Chr, data: &SideData, env: &Env) -> i32 {
     v
 }
 
-/// `BtlAtk_GetKiGain`.
+/// `BtlAtk_GetGuardDamage`: the same on record +6, 30 % less for attacks 0..10 under powered skill 0x10.
+fn guard_damage(me: &Chr, data: &SideData, env: &Env) -> i32 {
+    let (r, id) = record(me, data, env);
+    let mut v = (i32::from(r.u16_at(6)) as f32 * me.curve(env, 4)) as i32;
+    // BtlAct_TestPoweredSkill(0x10).
+    if me.flags.test(6) && data.tables.params.flags3() & 0x10 != 0 && id < 0xB {
+        v -= v * 3 / 10;
+    }
+    let mut v = apply_atk_abilities(me, v, id);
+    let hits = hit_windows(me, data);
+    if hits >= 2 {
+        v /= hits;
+    }
+    v
+}
+
+/// `BtlAtk_GetGuardKiCost`: record +8 times curve row 5, doubled (ability 0x44) or +50 % (0x6D).
+fn guard_ki_cost(me: &Chr, data: &SideData, env: &Env) -> i32 {
+    let (r, _) = record(me, data, env);
+    let v = (i32::from(r.u16_at(8)) as f32 * me.curve(env, 5)) as i32;
+    if me.has_ability(0x44) {
+        v * 2
+    } else if me.has_ability(0x6D) {
+        v + v / 2
+    } else {
+        v
+    }
+}
+
+/// `BtlAtk_GetGuardKindA` (record +0x29) / `B` (+0x27) / `C` (+0x28): result 1 becomes 0 when the defender has
+/// ability 0x40 (for B and C only on attacks 0x13..0x21).
+fn guard_result(rec: &AttackRecord, id: usize, def: &Chr, o: usize) -> i8 {
+    let v = rec.s8_at(o);
+    if v != 1 || !def.has_ability(0x40) {
+        return v;
+    }
+    if o == 0x29 {
+        0
+    } else {
+        i8::from(!(0x13..0x22).contains(&id))
+    }
+}
+
+/// `BtlAtk_GetKiGain`: +50 % (ability 0x6E) or +25 % (0x20), divided by the motion's hits.
 fn ki_gain(me: &Chr, data: &SideData, env: &Env) -> i32 {
     let (r, _) = record(me, data, env);
     let mut v = i32::from(r.u16_at(0xA));
+    if me.has_ability(0x6E) {
+        v += (v as u32 / 2) as i32;
+    } else if me.has_ability(0x20) {
+        v += v / 4;
+    }
     let hits = hit_windows(me, data);
     if hits > 0 {
         v /= hits;
@@ -507,7 +584,8 @@ impl Pair<'_, '_> {
     /// `BtlHit_CheckClash`: two touching fighters both in a clashing motion (flags 0x47 / 0x48).
     /// `BtlHit_CheckRush`: a rushing technique (flag 0x49) touching its opponent misses (0x63) one that cannot be
     /// caught, bounces (0x64) off a giant, is broken or dodged, is guarded from the front (0x6F; 20000 ki), or
-    /// starts its sequence, which ends the collision step. Sounds, voices and ability 0x22 are not ported.
+    /// starts its sequence, which ends the collision step (a rush break fills the blast stocks by one with
+    /// ability 0x22). Sounds and voices are not ported.
     fn check_rush(&mut self) -> bool {
         let (env, frame) = (self.env, self.frame);
         for a in 0..2 {
@@ -545,6 +623,9 @@ impl Pair<'_, '_> {
                 } else if anim & 0xB1 != 0 && !opp.flags.test(0x5A) {
                     me.flags.set(0x63);
                     opp.flags.set(if frame % 2 != 0 { 0x74 } else { 0x75 });
+                    if opp.has_ability(0x22) {
+                        opp.add_blast(100_000);
+                    }
                     continue;
                 }
             }
@@ -651,12 +732,7 @@ impl Pair<'_, '_> {
                     me.flags.set_held(0x5C);
                 } else if let Some(full) = check_guard(me, opp, data, env) {
                     if full {
-                        let mut guard = (i32::from(record(me, data, env).0.u16_at(6)) as f32
-                            * me.curve(env, 4)) as i32;
-                        let hits = hit_windows(me, data);
-                        if hits >= 2 {
-                            guard /= hits;
-                        }
+                        let guard = guard_damage(me, data, env);
                         opp.damage(env, opp_data, guard, 0xC);
                     }
                 } else {
@@ -734,8 +810,22 @@ impl Pair<'_, '_> {
             if atk_param & 8 != 0 {
                 armor += 1;
             }
+            // BtlAct_TestPoweredSkill(def, 0x40) / (atk, 0x100), ability 0x46 of the defender, 0x47 (or 0x70 in
+            // the powered-up mode) of the attacker.
+            if def.flags.test(6) && opp_data.tables.params.flags3() & 0x40 != 0 {
+                armor += 1;
+            }
             if def.skill_timer_c > 0 {
                 armor += 1;
+            }
+            if def.has_ability(0x46) {
+                armor += 1;
+            }
+            if atk.flags.test(6) && data.tables.params.flags3() & 0x100 != 0 {
+                armor -= 1;
+            }
+            if atk.has_ability(0x47) || (atk.has_ability(0x70) && atk.flags.test(6)) {
+                armor -= 1;
             }
             armor -= i32::from(rec.s8_at(0x2C));
             if armor > 0 && atk_flags & 4 != 0 {
@@ -1060,9 +1150,11 @@ fn check_dodge(atk: &Chr, def: &mut Chr, data: &SideData, env: &Env, frame: u32)
         let flags = record(atk, data, env).0.flags();
         let (mut done, mut strike, mut counted) = (false, false, false);
         let window = def.dodge_window - i32::from(flags & 0x400_0000 != 0);
+        let mut free = false;
         if window > 0 && flags & 1 != 0 && hit_no(atk) == 0 {
             def.flags.set(0x12C);
             done = true;
+            free = true;
             // A paid evasion (attack flag 0x100000) needs 20000 ki: its attack (flag 0x7C) is not ported.
         }
         if !done {
@@ -1108,6 +1200,10 @@ fn check_dodge(atk: &Chr, def: &mut Chr, data: &SideData, env: &Env, frame: u32)
                     def.flags.set(0x78);
                 }
             }
+            // A timed evasion fills the blast stocks by one with ability 0x21.
+            if free && def.has_ability(0x21) {
+                def.add_blast(100_000);
+            }
             if counted {
                 def.flags.set(if def.skill_slot == 0 { 0xDE } else { 0xDF });
             }
@@ -1137,29 +1233,31 @@ fn check_guard(atk: &mut Chr, def: &mut Chr, data: &SideData, env: &Env) -> Opti
         return None;
     }
     let guard = guard_kind(def);
-    let rec = *record(atk, data, env).0;
+    let (rec, id) = record(atk, data, env);
+    let rec = *rec;
+    let ki_cost = guard_ki_cost(atk, data, env);
     if atk.obj.hit.index == 0 && env.anim_flags(def.anim.cur) & 0x31 != 0 && def.counter_window > 0
     {
-        apply_guard(atk, def, &rec, 8);
+        apply_guard(atk, def, &rec, 8, ki_cost);
         return Some(false);
     }
     if is_from_behind(atk, def) {
         return None;
     }
     if def.flags.test(0x40) && (attack_id(atk, data, env) as u32) < 0xB {
-        apply_guard(atk, def, &rec, 1);
+        apply_guard(atk, def, &rec, 1, ki_cost);
         return Some(true);
     }
     if def.flags.test(0x41) && rec.flags() & 0x10 != 0 && def.input.is_cmd_held(0x10) {
         let (kind, result) = if def.input.is_held(0x10) {
-            (rec.s8_at(0x27), 2)
+            (guard_result(&rec, id, def, 0x27), 2)
         } else if def.input.is_held(0x20) {
-            (rec.s8_at(0x28), 3)
+            (guard_result(&rec, id, def, 0x28), 3)
         } else {
-            (rec.s8_at(0x29), 4)
+            (guard_result(&rec, id, def, 0x29), 4)
         };
         if matches!(kind, 0 | 2) {
-            apply_guard(atk, def, &rec, result);
+            apply_guard(atk, def, &rec, result, ki_cost);
             return Some(true);
         }
     }
@@ -1167,9 +1265,9 @@ fn check_guard(atk: &mut Chr, def: &mut Chr, data: &SideData, env: &Env) -> Opti
         return None;
     }
     let res = match guard {
-        1 => rec.s8_at(0x29),
-        2 => rec.s8_at(0x27),
-        3 => rec.s8_at(0x28),
+        1 => guard_result(&rec, id, def, 0x29),
+        2 => guard_result(&rec, id, def, 0x27),
+        3 => guard_result(&rec, id, def, 0x28),
         5 => rec.s8_at(0x2A),
         // BtlAtk_GetBestGuardKind mixes the kinds: guard kind 4 comes from a guard action, not ported.
         _ => 0,
@@ -1183,12 +1281,12 @@ fn check_guard(atk: &mut Chr, def: &mut Chr, data: &SideData, env: &Env) -> Opti
         4 => 7,
         _ => 0,
     };
-    apply_guard(atk, def, &rec, result);
+    apply_guard(atk, def, &rec, result, ki_cost);
     Some(true)
 }
 
 /// `BtlHit_ApplyGuard`: the effects of a guarded hit on both fighters (no health is touched).
-fn apply_guard(atk: &mut Chr, def: &mut Chr, rec: &AttackRecord, result: u32) {
+fn apply_guard(atk: &mut Chr, def: &mut Chr, rec: &AttackRecord, result: u32, ki_cost: i32) {
     let flags = rec.flags();
     for (bit, fx) in [(0x1_0000, 0x25), (0x2_0000, 0x26), (0x4_0000, 0x27)] {
         if flags & bit != 0 {
@@ -1225,8 +1323,7 @@ fn apply_guard(atk: &mut Chr, def: &mut Chr, rec: &AttackRecord, result: u32) {
         5 => {
             def.set_fx(0x20);
             def.flags.set(0x6D);
-            // BtlAtk_GetGuardKiCost: record +8 times curve row 5 (1 at level 0).
-            def.spend_ki(i32::from(rec.u16_at(8)), false);
+            def.spend_ki(ki_cost, false);
             if def.is_ki_empty() {
                 def.flags.set_held(0xBE);
             }

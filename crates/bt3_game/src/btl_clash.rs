@@ -221,9 +221,12 @@ impl Clash {
                         chars[w].flags.set_held(0xA0);
                         self.struggle_end = Some(w as i32);
                     } else {
-                        let mut dmg =
-                            tech_damage(&chars[w], data[w], data[l], env, cls, false, true);
-                        dmg += tech_damage(&chars[l], data[l], data[w], env, lcls, false, true) / 2;
+                        let mut dmg = tech_damage(
+                            &chars[w], &chars[l], data[w], data[l], env, cls, false, true,
+                        );
+                        dmg += tech_damage(
+                            &chars[l], &chars[w], data[l], data[w], env, lcls, false, true,
+                        ) / 2;
                         let flags = match cls {
                             2 => 0x80_0000,
                             3 => 0x100_0000,

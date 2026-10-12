@@ -216,6 +216,35 @@ pub(crate) struct Member {
     pub costume: i32,
     pub present: bool,
     pub gauge: Gauge,
+    pub items: MemberItems,
+}
+
+/// What a member's items give it (`BtlMgrMember.bonus` / `.ability`, from the battle setup's member).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MemberItems {
+    /// The bonus levels the stat levels 0..6 start from.
+    pub bonus: [i32; 7],
+    /// The ability bits.
+    pub ability: [u32; 4],
+}
+
+impl MemberItems {
+    /// Ability bit `n` is set.
+    pub(crate) fn has(&self, n: i32) -> bool {
+        self.ability[((n >> 5) & 3) as usize] & (1 << (n & 0x1F)) != 0
+    }
+
+    /// `BtlMember_LoadParams`' health maximum from the table's: + 30000 / 20000 / 10000 with ability 100 / 99 /
+    /// 98, less 30000 / 20000 / 10000 with 103 / 102 / 101, at least 10000.
+    pub(crate) fn health_max(&self, base: i32) -> i32 {
+        let pick = |a: [i32; 3]| {
+            a.iter()
+                .zip([30000, 20000, 10000])
+                .find(|&(&n, _)| self.has(n))
+                .map_or(0, |(_, v)| v)
+        };
+        (base + pick([100, 99, 98]) - pick([103, 102, 101])).max(10000)
+    }
 }
 
 /// The member a switch brings in (`switchChara` .. `switchVoiceChara`).
@@ -392,9 +421,9 @@ impl<'a> SideData<'a> {
         self.obj.model.header.size[3]
     }
 
-    /// `BtlParam_CanFly`: parameter flag 0x1000 grounds the character (no abilities are ported).
-    pub(crate) fn can_fly(&self) -> bool {
-        self.tables.params.flags() & 0x1000 == 0
+    /// `BtlParam_CanFly`: parameter flag 0x1000 grounds the character, unless the member has ability 0x36.
+    pub(crate) fn can_fly(&self, me: &Chr) -> bool {
+        self.tables.params.flags() & 0x1000 == 0 || me.has_ability(0x36)
     }
 }
 
@@ -423,6 +452,10 @@ pub(crate) struct Env<'a> {
     pub switch_enabled: [bool; 2],
     /// `BattleSide.charaBits` by player (`BattleSide_IsCharaUsable`).
     pub chara_bits: [[u64; 3]; 2],
+    /// The members' items by player (`BattleSide.members[n]`).
+    pub items: [[MemberItems; 5]; 2],
+    /// `Battle_GetStage`.
+    pub stage_id: i32,
 }
 
 impl Env<'_> {
@@ -558,6 +591,10 @@ pub(crate) struct Chr {
     /// `members` (+0x9A4), `active` (+0x994): the team and who fights.
     pub members: Vec<Member>,
     pub active: usize,
+    /// `Battle_GetStage`, for the abilities that depend on it.
+    pub stage_id: i32,
+    /// The opponent's active member's ability bits (`BtlOpp_HasAbility`), kept by the roster.
+    pub opp_ability: [u32; 4],
     /// `switchGauge` (+0x99C, 100000 full) and `switchTarget` (+0x9A0): the member a switch would bring in.
     pub switch_gauge: i32,
     pub switch_target: usize,
@@ -729,6 +766,8 @@ impl Chr {
             form: Form::default(),
             members: Vec::new(),
             active: 0,
+            stage_id: 0,
+            opp_ability: [0; 4],
             switch_gauge: 0,
             switch_target: 0,
             switch_member: 0,
@@ -812,11 +851,15 @@ impl Chr {
         chr.obj.sample_pose(&data.obj);
         chr.obj.calc_matrices(&data.obj);
         chr.form.allowed = env.change_allowed[player];
-        // Every member, BtlMember_LoadParams(chr, n, 1, 100 %, variant 0) with no abilities; member 0 fights.
+        // Every member, BtlMember_LoadParams(chr, n, 1, 100 %, variant 0) with its bonuses and abilities
+        // (BtlChar_CopyAllBonus / CopyAllAbility): the health maximum, the starting ki (none with ability 0x18,
+        // full with 0x19, + 40000 / 20000 with 0x17 / 0x16) and blast stocks (full with 0x1A); member 0 fights.
+        chr.stage_id = env.stage_id;
         let count = env.team_count[player].max(1);
         chr.members = env.team[player][..count]
             .iter()
-            .map(|&(chara, costume)| {
+            .zip(env.items[player])
+            .map(|(&(chara, costume), items)| {
                 let entry = env
                     .common
                     .charas
@@ -824,24 +867,68 @@ impl Chr {
                     .copied()
                     .unwrap_or_default();
                 let mut g = Gauge {
-                    health_max: entry.health_max.max(10000),
+                    health_max: items.health_max(entry.health_max),
                     ki_max: 100_000,
                     blast_max: entry.blast_stocks * 100_000,
                     ..Gauge::default()
                 };
                 g.health = ((g.health_max as f32 * 100.0 / 100.0) as i32).max(1);
                 g.health_max = g.health_max.max(g.health);
-                g.ki = entry.ki_start.min(g.ki_max);
+                g.ki = if items.has(0x18) {
+                    0
+                } else if items.has(0x19) {
+                    g.ki_max
+                } else if items.has(0x17) {
+                    entry.ki_start + 40000
+                } else if items.has(0x16) {
+                    entry.ki_start + 20000
+                } else {
+                    entry.ki_start
+                }
+                .min(g.ki_max);
+                if items.has(0x1A) {
+                    g.blast = g.blast_max;
+                }
                 Member {
                     chara,
                     costume,
                     present: true,
                     gauge: g,
+                    items,
                 }
             })
             .collect();
         chr.gauge = chr.members[0].gauge;
+        if chr.has_ability(0x1B) {
+            chr.switch_gauge = 100_000;
+        }
         chr
+    }
+
+    /// `BtlMember_HasAbility`: the active member has ability bit `n`.
+    pub(crate) fn has_ability(&self, n: i32) -> bool {
+        self.has_ability_of(self.active, n)
+    }
+
+    /// `BtlMember_HasAbilityOf`: member `m` has ability bit `n`.
+    pub(crate) fn has_ability_of(&self, m: usize, n: i32) -> bool {
+        self.members.get(m).is_some_and(|m| m.items.has(n))
+    }
+
+    /// `BtlOpp_HasAbility`.
+    pub(crate) fn opp_has_ability(&self, n: i32) -> bool {
+        MemberItems {
+            bonus: [0; 7],
+            ability: self.opp_ability,
+        }
+        .has(n)
+    }
+
+    /// The active member's ability bits.
+    pub(crate) fn ability_bits(&self) -> [u32; 4] {
+        self.members
+            .get(self.active)
+            .map_or([0; 4], |m| m.items.ability)
     }
 
     /// `BtlMember_GetGauge`: member `n`'s gauges (the active one's are `gauge`).
@@ -1442,7 +1529,7 @@ impl Chr {
     /// `BtlChar_OnModelLoaded` after a character change swapped the side's files in: the object set up again from
     /// the new model where it stood (`BtlObj_Rebind`, `BtlChar_BindObject`), the requested motion started on it,
     /// and for a transformation (0xEC..0xF0) the member's gauges reloaded for the new character keeping the health
-    /// ratio (parameter form flags 1 / 2: + 5000 / + 10000 health, 4: full ki). Abilities are not ported.
+    /// ratio (parameter form flags 1 / 2: + 5000 / + 10000 health, 4: full ki).
     pub(crate) fn on_model_loaded(&mut self, data: &SideData, opp: &SideData, env: &Env) {
         let radius = data.tables.params.radius();
         let old = std::mem::replace(&mut self.obj, Obj::new(&data.obj, radius));
@@ -1489,23 +1576,41 @@ impl Chr {
             }
         }
         if matches!(self.act.current, 0xF3..=0xF8) {
-            // The member switch: the new member fights with its own gauges; the powered-up mode ends (abilities
-            // 0x43 / 0x61 are not ported).
+            // The member switch: the new member fights with its own gauges; the powered-up mode ends unless it has
+            // ability 0x43 (powered up with full ki), and ability 0x61 fills its blast stocks.
             let m = self.switch_member;
             self.set_active(m);
             self.switch_target();
             self.switch_gauge = 0;
-            self.flags.clear(6);
-            self.gauge.max_power = 0;
+            if self.has_ability(0x43) {
+                self.flags.set_held(6);
+                self.gauge.max_power = 30000;
+                self.gauge.ki = self.gauge.ki_max;
+            } else {
+                self.flags.clear(6);
+                self.gauge.max_power = 0;
+            }
+            if self.has_ability(0x61) {
+                self.gauge.blast = self.gauge.blast_max;
+            }
         }
         if matches!(self.act.current, 0xF1 | 0xF2) {
-            // The fusion: the partner joins the active member (health, health maximum; bonuses and abilities are
-            // not ported) and leaves the team.
+            // The fusion: the partner joins the active member (its bonuses added, -20..40, its abilities, health
+            // and health maximum) and leaves the team.
             let form_flags = data.tables.params.form_flags();
             let p = usize::try_from(self.form.partner)
                 .ok()
                 .filter(|&p| p < self.members.len() && p != self.active);
             if let Some(p) = p {
+                let other = self.members[p].items;
+                let a = self.active;
+                let items = &mut self.members[a].items;
+                for (b, o) in items.bonus.iter_mut().zip(other.bonus) {
+                    *b = (*b + o).clamp(-20, 40);
+                }
+                for (b, o) in items.ability.iter_mut().zip(other.ability) {
+                    *b |= o;
+                }
                 let og = self.members[p].gauge;
                 let g = &mut self.gauge;
                 g.health += og.health;
@@ -1554,8 +1659,10 @@ impl Chr {
                 0.0
             };
             // BtlMember_LoadParams(chr, active, 0, 0, 0).
+            let items = self.members.get(a).map(|m| m.items).unwrap_or_default();
+            let g = &mut self.gauge;
             if !g.fused {
-                g.health_max = data.entry.health_max.max(10000);
+                g.health_max = items.health_max(data.entry.health_max);
             }
             g.ki_max = 100_000;
             g.blast_max = data.entry.blast_stocks * 100_000;
@@ -1786,8 +1893,9 @@ impl Chr {
         }
     }
 
-    /// `BtlStat_GetMod`: stat `stat`'s modifiers added up (the penalties not in the powered-up mode), -20..20. The
-    /// abilities' extras (lost health, stages) are not ported.
+    /// `BtlStat_GetMod`: stat `stat`'s modifiers added up (the penalties not in the powered-up mode), with the
+    /// abilities' extras: 3 per 10000 health lost (abilities 0x58 / 0x71..0x73 by stat) and the stage's (0x59 on
+    /// stages 2 / 3, 0x5B on the six listed ones, 0x5A elsewhere); -20..20.
     pub(crate) fn stat_mod(&self, stat: usize) -> i32 {
         let m = &self.stat[stat];
         let mut sum: i32 = (0..2)
@@ -1797,13 +1905,28 @@ impl Chr {
             sum += m.penalty[0] + m.penalty[1];
         }
         sum += m.frame;
+        let lost = (self.gauge.health_max - self.gauge.health) / 10000 * 3;
+        if self.has_ability([0x58, 0x71, 0x72, 0x73][stat]) {
+            sum += lost;
+        }
+        sum += match self.stage_id {
+            2 | 3 if self.has_ability(0x59) => 15,
+            7 | 8 | 13 | 16 | 18 | 34 if self.has_ability(0x5B) => 10,
+            2 | 3 | 7 | 8 | 13 | 16 | 18 | 34 => 0,
+            _ if self.has_ability(0x5A) => 5,
+            _ => 0,
+        };
         sum.clamp(-20, 20)
     }
 
-    /// `BtlStat_GetLevel0..6`: the member's bonus `n` (the items, 0 here) plus its stat's modifier, -20..80.
+    /// `BtlStat_GetLevel0..6`: the member's bonus `n` (its items) plus its stat's modifier, -20..80.
     pub(crate) fn stat_level(&self, n: usize) -> i32 {
         const STAT: [usize; 7] = [2, 0, 1, 2, 3, 3, 3];
-        self.stat_mod(STAT[n]).clamp(-20, 80)
+        let bonus = self
+            .members
+            .get(self.active)
+            .map_or(0, |m| m.items.bonus[n]);
+        (bonus + self.stat_mod(STAT[n])).clamp(-20, 80)
     }
 
     /// `BtlStat_GetKiChargeBonus` .. `GetMaxPowerExtraTime`: curve row `row` at this fighter's level.
@@ -1951,6 +2074,7 @@ impl Chr {
         const NO_SCALING: u32 = 0x100;
         const FORCE: u32 = 0x200;
         const NO_KILL: u32 = 0x400;
+        const GUARD_MASK: u32 = 0x380_0000;
         let before = self.gauge.health;
         let mut amount = amount;
         if flags & NO_HALVE == 0 && env.anim_flags(self.anim.cur) & 0x800 != 0 {
@@ -1959,15 +2083,36 @@ impl Chr {
         if flags & NO_SCALING == 0 {
             let extra = self.combo.hits - 4;
             if extra > 0 {
-                let pct = (100 - extra * 3).max(50);
+                // 2 % a hit down to 70 % against an attacker with ability 0x5D.
+                let pct = if self.opp_has_ability(0x5D) {
+                    (100 - extra * 2).max(70)
+                } else {
+                    (100 - extra * 3).max(50)
+                };
                 amount = amount * pct / 100;
             }
         }
         if flags & NO_DEFENSE == 0 {
             let scaled = (amount as f32 * data.tables.params.f32_at(0x7C)) as i32;
             amount = if scaled <= 0 && amount > 0 { 1 } else { scaled };
-            let scaled = (amount as f32 * self.curve(env, 7)) as i32;
-            amount = if scaled <= 0 && amount > 0 { 1 } else { scaled };
+            // A guarded hit (BTL_DMG_GUARD_MASK) skips the defence level against ability 0x4C.
+            if flags & GUARD_MASK == 0 || !self.opp_has_ability(0x4C) {
+                let scaled = (amount as f32 * self.curve(env, 7)) as i32;
+                amount = if scaled <= 0 && amount > 0 { 1 } else { scaled };
+            }
+        }
+        // A drain: none with ability 0x3F, halved with 0x3E; ability 0x76 takes nothing.
+        if flags & DRAIN != 0 {
+            if self.has_ability(0x3F) {
+                amount = 0;
+            } else if self.has_ability(0x3E) {
+                amount /= 2;
+            }
+        }
+        let mut flags = flags;
+        if self.has_ability(0x76) {
+            amount = 0;
+            flags |= FORCE;
         }
         if amount <= 0 {
             if flags & FORCE == 0 {

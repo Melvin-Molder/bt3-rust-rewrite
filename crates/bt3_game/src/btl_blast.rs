@@ -510,14 +510,63 @@ fn flags_of(me: &Chr, rec: &KiBlastRecord) -> u16 {
     }
 }
 
-/// `BtlKiBlast_GetKiCostOf` (no abilities).
-pub(crate) fn ki_cost_of(data: &SideData, kind: i32) -> i32 {
-    record(data, kind).ki()
+/// `BtlKiBlast_ScaleDamageByAbility`: +50 % (ability 0xA), then halved (0xB).
+fn scale_damage(me: &Chr, mut d: i32) -> i32 {
+    if me.has_ability(0xA) {
+        d += d / 2;
+    }
+    if me.has_ability(0xB) {
+        d /= 2;
+    }
+    d
+}
+
+/// `BtlKiBlast_ScaleSpeedByAbility`: the uncharged kinds 0, 4, 8 x1.6 (ability 0xE), x1.4 (0xD) or x1.2 (0xC).
+fn scale_speed(me: &Chr, kind: i32, speed: f32) -> f32 {
+    if !matches!(kind, 0 | 4 | 8) {
+        speed
+    } else if me.has_ability(0xE) {
+        speed * 1.6
+    } else if me.has_ability(0xD) {
+        speed * 1.4
+    } else if me.has_ability(0xC) {
+        speed * 1.2
+    } else {
+        speed
+    }
+}
+
+/// `BtlKiBlast_ScaleKiByAbility`: doubled (ability 0x2A), then halved (0x29).
+fn scale_ki(me: &Chr, mut ki: i32) -> i32 {
+    if me.has_ability(0x2A) {
+        ki *= 2;
+    }
+    if me.has_ability(0x29) {
+        ki /= 2;
+    }
+    ki
+}
+
+/// `BtlKiBlast_MapReact` / `MapReactS800` (`second`): with ability 0x4B, a charged kind (charge level 1..3) of
+/// record type 0 or 1 gives reaction 0x17 / 0x1A plus the level less one.
+fn map_react(me: &Chr, rec: &KiBlastRecord, react: i32, kind: i32, second: bool) -> i32 {
+    if !me.has_ability(0x4B) || !matches!(rec.kind_type(), 0 | 1) || !(0..12).contains(&kind) {
+        return react;
+    }
+    match kind & 3 {
+        0 => react,
+        level => (if second { 0x1A } else { 0x17 }) + level - 1,
+    }
+}
+
+/// `BtlKiBlast_GetKiCostOf`.
+pub(crate) fn ki_cost_of(me: &Chr, data: &SideData, kind: i32) -> i32 {
+    scale_ki(me, record(data, kind).ki())
 }
 
 /// `BtlKiBlast_GetKiCost`.
 pub(crate) fn ki_cost(me: &Chr, data: &SideData) -> i32 {
-    current(me, data).ki()
+    scale_ki(me, current(me, data).ki())
 }
 
 /// `BtlKiBlast_GetHitsOf`.
@@ -525,15 +574,15 @@ pub(crate) fn hits_of(data: &SideData, kind: i32) -> i32 {
     i32::from(record(data, kind).hits())
 }
 
-/// `BtlKiBlast_GetDamageOf` / `GetGuardDamageOf`: times the owner's curve row 6 (`scale`), divided by the hits (2
-/// or more for the plain damage, any for the guarded one).
-fn damage_of(rec: &KiBlastRecord, scale: f32, guard: bool) -> i32 {
+/// `BtlKiBlast_GetDamageOf` / `GetGuardDamageOf`: times the owner's curve row 6, its abilities, divided by the
+/// hits (2 or more for the plain damage, any for the guarded one).
+fn damage_of(owner: &Chr, env: &Env, rec: &KiBlastRecord, guard: bool) -> i32 {
     let base = if guard {
         rec.guard_damage()
     } else {
         rec.damage()
     };
-    let mut d = (base as f32 * scale) as i32;
+    let mut d = scale_damage(owner, (base as f32 * owner.curve(env, 6)) as i32);
     let hits = i32::from(rec.hits());
     if (guard && hits > 0) || hits >= 2 {
         d /= hits;
@@ -552,9 +601,19 @@ fn push_of(rec: &KiBlastRecord, guard: bool) -> f32 {
     p
 }
 
-/// `BtlParam_GetBlastLimitA` (no abilities).
-pub(crate) fn blast_limit_a(data: &SideData) -> i32 {
-    i32::from(data.tables.params.u16_at(0x80) as i16)
+/// `BtlParam_GetBlastLimitA`: parameter +0x80 less 3 / 2 / 1 by ability 0x11 / 0x10 / 0xF, at least 1 while the
+/// parameter's is positive.
+pub(crate) fn blast_limit_a(me: &Chr, data: &SideData) -> i32 {
+    let base = i32::from(data.tables.params.u16_at(0x80) as i16);
+    let mut v = base;
+    if me.has_ability(0x11) {
+        v -= 3;
+    } else if me.has_ability(0x10) {
+        v -= 2;
+    } else if me.has_ability(0xF) {
+        v -= 1;
+    }
+    if base > 0 && v <= 0 { 1 } else { v }
 }
 
 /// `BtlParam_GetBlastLimitB`.
@@ -570,7 +629,7 @@ fn kind_class(kind: i32) -> usize {
 /// `BtlMove_CanFireBlast`: fewer live blasts of the class than the character's limit.
 pub(crate) fn can_fire(me: &Chr, data: &SideData, class: usize) -> bool {
     let limit = if class == 0 {
-        blast_limit_a(data)
+        blast_limit_a(me, data)
     } else {
         blast_limit_b(data)
     };
@@ -630,8 +689,7 @@ impl Scene {
             kind_type: rec.kind_type(),
             unk1b: rec.unk3(),
             life: (rec.time() * 30.0) as i32,
-            // BtlKiBlast_ScaleSpeedByAbility: no abilities.
-            speed: rec.speed() * 10.0 * kmh(1.0),
+            speed: scale_speed(me, kind, rec.speed() * 10.0 * kmh(1.0)),
             turn: rec.turn() / 30.0 * PI / 180.0,
             radius: rec.radius(),
             unk2c: rec.unk2c(),
@@ -2277,7 +2335,7 @@ fn try_absorb(w: &mut World, target: usize, rec: &HitRec) -> bool {
         if hit_flags(w, rec) & 2 != 0 || matches!(blast.kind_type(), 2 | 3) {
             return false;
         }
-        blast.ki() * 3
+        scale_ki(&w.chars[rec.atk.src], blast.ki()) * 3
     };
     let chr = &mut w.chars[target];
     // BtlMember_AddKi: the overflow feeds the max power gauge outside the powered-up mode.
@@ -2326,9 +2384,8 @@ fn guard_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if kind != 6 && (flags & 1 != 0 || is_facing(chr, yaw)) {
         return false;
     }
-    let scale = w.chars[rec.atk.src].curve(env, 6);
+    let mut dmg = damage_of(&w.chars[rec.atk.src], env, &blast, true);
     let chr = &mut w.chars[target];
-    let mut dmg = damage_of(&blast, scale, true);
     if rec.atk.hits >= 2 {
         dmg /= rec.atk.hits;
     }
@@ -2375,7 +2432,17 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let env = w.env;
     let (data, atk_data) = (w.data[target], w.data[rec.atk.src]);
     let atk_powered = w.chars[rec.atk.src].flags.test(6);
+    // Ability 0x47, or 0x70 in the powered-up mode.
+    let a = &w.chars[rec.atk.src];
+    let atk_armor_break = a.has_ability(0x47) || (a.has_ability(0x70) && atk_powered);
     let (yaw, dir) = hit_dir(w, target, rec);
+    let owner = &w.chars[rec.atk.src];
+    let plain = map_react(owner, &blast, i32::from(blast.react()), rec.atk.kind, false);
+    let s800 = match blast.react_s800() {
+        0 => blast.react(),
+        v => v,
+    };
+    let s800 = map_react(owner, &blast, i32::from(s800), rec.atk.kind, true);
     let chr = &mut w.chars[target];
     let st = env.anim_flags(chr.anim.cur);
     if chr.flags.test(0x44) {
@@ -2392,8 +2459,7 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     } else if st & 0x4000 != 0 || chr.act.current == 0xDF {
         or_plain(blast.react_s4000())
     } else if st & 0x800 != 0 {
-        // BtlKiBlast_MapReactS800: ability 0x4B is not ported.
-        or_plain(blast.react_s800())
+        s800
     } else if st & 0x200 != 0 {
         or_plain(blast.react_s200())
     } else {
@@ -2414,7 +2480,13 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
         if chr.skill_timer_c > 0 {
             n += 1;
         }
+        if chr.has_ability(0x45) {
+            n += 1;
+        }
         if atk_powered && atk_data.tables.params.flags3() & 0x100 != 0 {
+            n -= 1;
+        }
+        if atk_armor_break {
             n -= 1;
         }
         if n > 0 && flags & 0x10 != 0 {
@@ -2426,10 +2498,10 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
             {
                 REACT_NOFLINCH
             } else {
-                i32::from(blast.react())
+                plain
             }
         } else {
-            i32::from(blast.react())
+            plain
         }
     };
     if react == REACT_NOFLINCH {
@@ -2445,9 +2517,8 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
         chr.set_impulse_dir(dir, push_of(&blast, false));
     }
     chr.set_fx(0x1D);
-    let scale = w.chars[rec.atk.src].curve(env, 6);
+    let mut dmg = damage_of(&w.chars[rec.atk.src], env, &blast, false);
     let chr = &mut w.chars[target];
-    let mut dmg = damage_of(&blast, scale, false);
     if rec.atk.hits >= 2 {
         dmg /= rec.atk.hits;
     }

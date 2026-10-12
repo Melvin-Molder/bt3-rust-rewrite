@@ -1868,17 +1868,27 @@ fn round_up(n: i32, unit: i32) -> i32 {
     if r != 0 { n + unit - r } else { n }
 }
 
-/// `BtlParam_GetUnkC7Scale` (no abilities).
-fn unk_c7_scale(data: &SideData) -> f32 {
-    f32::from(data.tables.params.u8_at(0xC7)) * 0.01
+/// `BtlParam_GetUnkC7Scale`: parameter +0xC7 percent, halved with ability 0x48, x1.5 with 0x49.
+fn unk_c7_scale(me: &Chr, data: &SideData) -> f32 {
+    let mut v = f32::from(data.tables.params.u8_at(0xC7)) * 0.01;
+    if me.has_ability(0x48) {
+        v *= 0.5;
+    }
+    if me.has_ability(0x49) {
+        v *= 1.5;
+    }
+    v
 }
 
 /// `BtlSuper_GetDamage` of slot 2..4: of one hit (or all with `total`), plain or guarded; times curve row 9
 /// (slots 2, 3) or 10 (slot 4), then the modifiers, each rounded up to 10: flag 0xA4 3 / 10, the
 /// powered-up state + 1 / 5 (not slot 4), held flag 0x9C + 1 / 10, flag 0x98 + 3 / 10 with technique flag 0x8000,
-/// the charge, and the cases of techniques 0x268, 0x2CD and 0x2D5. The abilities are not ported.
+/// the charge, 1 against an opponent with ability 0x37 for technique flag 0x10, the cases of techniques 0x268,
+/// 0x2CD and 0x2D5, + 1 / 5 on slot 4 with ability 0x6F, and 999999 over the hits with ability 0x77.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn tech_damage(
     atk: &Chr,
+    opp: &Chr,
     data: &SideData,
     opp_data: &SideData,
     env: &Env,
@@ -1912,6 +1922,9 @@ pub(crate) fn tech_damage(
         d = round_up(d + d * 3 / 10, 10);
     }
     d = (d as f32 + d as f32 * (atk.charge * (t.charge_scale(slot) - 1.0))) as i32;
+    if flags & 0x10 != 0 && opp.has_ability(0x37) {
+        d = 1;
+    }
     match t.id(slot) {
         0x268 => {
             match atk.skill_count3 {
@@ -1923,8 +1936,14 @@ pub(crate) fn tech_damage(
             d = round_up(d, 10);
         }
         0x2CD => d = round_up(d + d * atk.boost_stock / 5, 10),
-        0x2D5 => d = round_up((d as f32 * unk_c7_scale(opp_data)) as i32, 10),
+        0x2D5 => d = round_up((d as f32 * unk_c7_scale(opp, opp_data)) as i32, 10),
         _ => {}
+    }
+    if slot == 4 && atk.has_ability(0x6F) {
+        d = round_up(d + d / 5, 10);
+    }
+    if atk.has_ability(0x77) {
+        d = 999_999 / t.hit_count(slot);
     }
     d
 }
@@ -1991,6 +2010,7 @@ pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool 
         return false;
     }
     let env = w.env;
+    let atk_long_stun = w.chars[side].has_ability(0x3B);
     let chr = &mut w.chars[target];
     if chr.no_flinch > 0 {
         react = REACT_NOFLINCH;
@@ -2005,7 +2025,14 @@ pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool 
         chr.react.turn_pitch = 0.0;
         chr.set_impulse_dir(dir, s.push(slot));
         if (0x17..=0x1C).contains(&react) {
+            // Halved with the victim's ability 0x3A, + 50 % with the attacker's 0x3B.
             chr.stun_timer = s.frames(slot);
+            if chr.has_ability(0x3A) {
+                chr.stun_timer /= 2;
+            }
+            if atk_long_stun {
+                chr.stun_timer += chr.stun_timer / 2;
+            }
         }
     }
     chr.set_fx(0x1D);
@@ -2037,7 +2064,7 @@ pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         }
         weak = true;
     }
-    if t.id(slot) == 0x2D5 && unk_c7_scale(w.data[target]) < 0.001 {
+    if t.id(slot) == 0x2D5 && unk_c7_scale(&w.chars[target], w.data[target]) < 0.001 {
         return true;
     }
     let (yaw, dir) = hit_dir(w, target, rec);
@@ -2060,6 +2087,7 @@ pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let env = w.env;
     let dmg = tech_damage(
         &w.chars[side],
+        &w.chars[target],
         w.data[side],
         w.data[target],
         env,
@@ -2148,6 +2176,7 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
     let dmg = tech_damage(
         &w.chars[side],
+        &w.chars[target],
         w.data[side],
         w.data[target],
         env,
@@ -2216,7 +2245,8 @@ pub(crate) fn try_dodge_tech(w: &mut World, target: usize, hit_count: i32, src: 
         return false;
     }
     let (mut ok, mut used) = (false, false);
-    if chr.dodge_window > 0 {
+    let free = chr.dodge_window > 0;
+    if free {
         ok = true;
     } else {
         if chr.dodges > 0 {
@@ -2249,7 +2279,10 @@ pub(crate) fn try_dodge_tech(w: &mut World, target: usize, hit_count: i32, src: 
     }
     chr.flags.set(if dir == 0 { 0x74 } else { 0x75 });
     if rush {
-        // Ability 0x22 (blast gauge on a free dodge) is not ported.
+        // A timed evasion of a technique fills the blast stocks by one with ability 0x22.
+        if !chr.flags.test(0x80) && free && chr.has_ability(0x22) {
+            chr.add_blast(100_000);
+        }
         chr.flags.set_held(0x80);
     }
     if used {
@@ -2277,7 +2310,11 @@ pub(crate) fn absorb_amount(w: &World, rec: &HitRec) -> Option<i32> {
     if !(2..5).contains(&src.slot) || t.flags(src.slot) & 4 == 0 {
         return None;
     }
+    // BtlSuper_GetKiCost: halved with ability 0x2B.
     let mut amount = t.ki(src.slot);
+    if w.chars[src.side].has_ability(0x2B) {
+        amount /= 2;
+    }
     let n = t.shots(src.slot) * t.hits_b(src.slot);
     if n >= 2 {
         amount /= n;
