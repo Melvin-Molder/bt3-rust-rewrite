@@ -8973,6 +8973,24 @@ mod tests {
     }
 
     #[test]
+    fn real_rush_swarm_models_hover_and_follow() {
+        // Character 94's rush shot (0x19D, definition flag 0x20000): seven model objects of the pack's model hover
+        // round the start node, each drawn from libc rand(), shown until the shot sits on the victim; gone with it.
+        let (mut objs, mut shown, mut last) = (0, 0, 1);
+        let Some((log, ..)) = run_technique_watched(94, 3, 400, false, &mut |b| {
+            let o = &b.roster.scene.eft_objs;
+            objs = objs.max(o.iter().count());
+            shown = shown.max(o.iter().filter(|o| o.obj.flags & 2 != 0).count());
+            last = o.iter().count();
+        }) else {
+            return;
+        };
+        assert_eq!(objs, 7, "{log:x?}");
+        assert_eq!(shown, 7, "{log:x?}");
+        assert_eq!(last, 0);
+    }
+
+    #[test]
     fn real_thrown_objects_show_their_models_and_rings() {
         // Definition flag 0x20000: characters 55's (0x162, held in the hand, mode 2) and 150's (0x1F3, mode 0)
         // thrown objects have a model object, shown while in use; flag 0x40000: characters 49's (0x167) and 115's

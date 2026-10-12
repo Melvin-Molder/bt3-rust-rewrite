@@ -1658,7 +1658,7 @@ impl TechFx {
                 let items = &mut self.rush_shots[side][slot as usize];
                 if items.len() < ITEMS {
                     *next_id += 1;
-                    items.push(RushShot::new(*next_id, src, data, set));
+                    items.push(RushShot::new(*next_id, src, data, set, &mut self.out));
                 }
             }
             7 => {
@@ -1899,6 +1899,7 @@ impl TechFx {
                         records.push(rec);
                     }
                     if r.dead() {
+                        r.term(&mut self.out);
                         // EftRushShot_Term: the stage tint back once attached.
                         if r.attached() {
                             self.tints.push(1);
@@ -2080,6 +2081,7 @@ impl TechFx {
             }
             for mut r in self.rush_shots[side][slot].drain(..) {
                 r.kill_parts(fx);
+                r.term(&mut self.out);
                 if r.src().def.kind != 0 {
                     held.set_held(0xA8);
                 }

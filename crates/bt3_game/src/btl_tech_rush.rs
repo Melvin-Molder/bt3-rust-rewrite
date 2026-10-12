@@ -50,12 +50,23 @@ const FLIGHT: u32 = 0x4_0000;
 /// `EftRushShot.count`: the swarm's models.
 const SWARM: usize = 7;
 
-/// A swarm model as far as its random draws go (`EftRushShotObj`).
+/// A swarm model (`EftRushShotObj`): its object, where it hovers (centre and offset), its spin, size, bob and
+/// sinking, and the delay before it follows the released shot.
 #[derive(Clone, Copy, Debug, Default)]
 struct Mote {
     /// `model.flags`: 1 placed, 2 released.
     flags: u32,
     delay: f32,
+    obj: Option<u32>,
+    center: [f32; 3],
+    offset: [f32; 3],
+    rot: [f32; 3],
+    rot_speed: [f32; 3],
+    scale: f32,
+    bob_amp: f32,
+    bob_phase: f32,
+    bob_speed: f32,
+    sink: f32,
 }
 
 /// `rand() / 2147483647.0f` (the draw's value is only kept where it matters).
@@ -109,12 +120,14 @@ pub(crate) struct RushShot {
 }
 
 impl RushShot {
-    /// `EftRushShot_Init` (the swarm's models are not made).
+    /// `EftRushShot_Init`, with the swarm's model objects (definition flag 0x20000, `EftRushShot_CreateModels`),
+    /// hidden.
     pub(crate) fn new(
         id: u32,
         src: TechSrc,
         data: &crate::btl_chr::SideData,
         set: &EmitSet,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) -> Self {
         let def = src.def;
         let head_set = set.head;
@@ -157,7 +170,32 @@ impl RushShot {
             s.speed = s.width2 * def.scale;
             s.flags |= SCALED;
         }
+        if let Some(swarm) = &mut s.swarm {
+            for m in swarm.iter_mut() {
+                let handle = out.handle();
+                out.reqs.push(crate::btl_tech_fx::TechReq::ObjCreate {
+                    handle,
+                    model: crate::eft_obj::ModelRef {
+                        side: src.side,
+                        slot: src.slot as usize,
+                    },
+                });
+                m.obj = Some(handle);
+            }
+        }
         s
+    }
+
+    /// `EftRushShot_FreeModels`.
+    pub(crate) fn term(&mut self, out: &mut crate::btl_tech_fx::TechOut) {
+        if let Some(swarm) = &mut self.swarm {
+            for m in swarm.iter_mut() {
+                if let Some(handle) = m.obj.take() {
+                    out.reqs
+                        .push(crate::btl_tech_fx::TechReq::ObjDestroy(handle));
+                }
+            }
+        }
     }
 
     pub(crate) fn id(&self) -> u32 {
@@ -179,43 +217,108 @@ impl RushShot {
         }
     }
 
-    /// `EftRushShot_UpdateModels` of technique 0x19D (mode 1): each model's placement draws from libc `rand()` the
-    /// first frame, and again when it follows the released shot after its delay.
-    fn update_swarm(&mut self, libc: &mut LibcRandom) {
+    /// `EftRushShot_UpdateModels` of technique 0x19D (mode 1): until the shot is released (flag 0x40000) each
+    /// model is placed once round the start node (an angle by its index, a height and a distance by libc `rand()`,
+    /// a random turn and spin, every fourth without delay, the even ones larger, a bob and a sinking) and sinks;
+    /// once released each follows the shot after its delay with three times the offset, faster spin and a stronger
+    /// bob. Each turns and bobs every frame and is shown, or hidden while the shot is attached.
+    fn update_swarm(
+        &mut self,
+        libc: &mut LibcRandom,
+        start: [f32; 3],
+        out: &mut crate::btl_tech_fx::TechOut,
+    ) {
+        use crate::btl_tech_volley::eft_wrap;
+        const TWO_PI: f32 = 6.283_185_3;
+        const PI_F: f32 = 3.141_592_7;
         let released = self.flags & FLIGHT != 0;
+        let hidden = self.flags & ATTACHED != 0;
+        let (scale, vel) = (self.draw_size, self.vel);
         let Some(swarm) = &mut self.swarm else {
             return;
         };
+        let count = swarm.len();
         for (i, o) in swarm.iter_mut().enumerate() {
             if !released {
                 if o.flags & 1 == 0 {
-                    // The offset (2), the rotation (2), the spin (4).
-                    for _ in 0..8 {
-                        libc.rand();
+                    let mut ang = i as f32 / count as f32 * TWO_PI;
+                    if ang > PI_F {
+                        ang -= TWO_PI;
                     }
+                    o.center = start;
+                    let y = (rand01(libc) * 8.0 + 3.0) * scale;
+                    let z = (rand01(libc) * 4.0 + 6.0) * scale;
+                    let (sn, cs) = ang.sin_cos();
+                    // Mtx_RotateY of (0, y, z).
+                    o.offset = [z * sn, y, z * cs];
+                    o.rot = [rand01(libc) * PI_F, rand01(libc) * PI_F, 0.0];
+                    let sx = rand01(libc) - rand01(libc);
+                    let sy = rand01(libc) - rand01(libc);
+                    o.rot_speed = [sx * 0.08 * PI_F, sy * 0.08 * PI_F, 0.0];
                     if i & 3 != 0 {
                         libc.rand();
                         o.delay = rand01(libc) * 3.0;
                     } else {
                         o.delay = 0.0;
                     }
-                    // The scale, the bob's amplitude, phase and speed, the sinking.
-                    for _ in 0..5 {
-                        libc.rand();
-                    }
+                    o.scale = if i & 1 == 0 {
+                        rand01(libc) * 0.4 + 0.5
+                    } else {
+                        rand01(libc) * 0.25 + 0.25
+                    };
+                    o.bob_amp = rand01(libc) * 0.2 + 0.3;
+                    o.bob_phase = rand01(libc) * PI_F;
+                    o.bob_speed = (rand01(libc) * 0.05 + 0.05) * PI_F;
+                    o.sink = (rand01(libc) * 0.5 + 1.0) * 0.2;
                     o.flags |= 1;
                 }
+                o.offset[1] -= o.sink;
             } else if o.delay <= 0.0 {
                 if o.flags & 2 == 0 {
-                    // The spin's two factors, the bob's amplitude and speed.
-                    for _ in 0..4 {
-                        libc.rand();
-                    }
+                    o.offset = scale3(o.offset, 3.0);
+                    o.rot_speed[0] *= rand01(libc) * 0.1 + 1.1;
+                    o.rot_speed[1] *= rand01(libc) * 0.1 + 1.1;
+                    o.rot_speed[2] = 0.0;
+                    o.bob_amp = rand01(libc) * 0.4 + 0.4;
+                    o.bob_speed = (rand01(libc) * 0.1 + 0.05) * PI_F;
                     o.flags |= 2;
                 }
+                o.center = add(o.center, vel);
             } else {
                 o.delay -= 1.0;
             }
+            let Some(handle) = o.obj else {
+                continue;
+            };
+            use crate::btl_tech_fx::TechReq;
+            if hidden {
+                out.reqs.push(TechReq::ObjVisible { handle, on: false });
+                continue;
+            }
+            let mut off = o.offset;
+            off[1] += o.bob_phase.sin() * o.bob_amp;
+            o.bob_phase = eft_wrap(o.bob_phase + o.bob_speed);
+            o.rot = add(o.rot, o.rot_speed).map(eft_wrap);
+            // Mtx_ScaleDiagUniform, Mtx_RotateXYZ, Mtx_Translate.
+            use crate::battle::mul;
+            use crate::btl_obj::{rot_x, rot_y, rot_z};
+            let k = o.scale;
+            let mut m: crate::battle::Mtx = [
+                [k, 0.0, 0.0, 0.0],
+                [0.0, k, 0.0, 0.0],
+                [0.0, 0.0, k, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ];
+            m = mul(
+                &mul(&mul(&m, &rot_x(o.rot[0])), &rot_y(o.rot[1])),
+                &rot_z(o.rot[2]),
+            );
+            let p = add(o.center, off);
+            for c in 0..3 {
+                m[3][c] += p[c];
+            }
+            out.reqs.push(TechReq::ObjMtx { handle, mtx: m });
+            out.reqs.push(TechReq::ObjVisible { handle, on: true });
         }
     }
 
@@ -323,7 +426,8 @@ impl RushShot {
         // the flash and the node sounds of the victim's events.
         if self.kind == 1 {
             if self.flags & SUB != 0 {
-                self.update_swarm(w.libc);
+                let start = self.nodes.pos(0);
+                self.update_swarm(w.libc, start, out);
             }
             if self.flags & ATTACHED != 0 {
                 self.pos = w.chars[side ^ 1].obj.node_pos(3);
