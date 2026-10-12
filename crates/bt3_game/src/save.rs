@@ -173,6 +173,10 @@ impl SaveData {
         self.word(OFS_SLOT + n * 0x10 + 4 + k * 4)
     }
 
+    pub fn set_slot_val(&mut self, n: usize, k: usize, v: i32) {
+        self.set_word(OFS_SLOT + n * 0x10 + 4 + k * 4, v);
+    }
+
     /// `ZSAVE->rec[slot] = rec`: a custom character with its items and extra slots (the record's other two
     /// fields 0).
     pub fn store_rec(&mut self, slot: usize, chara: i32, items: [u16; 8], level: u16) {

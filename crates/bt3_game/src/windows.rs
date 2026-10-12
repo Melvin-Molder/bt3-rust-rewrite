@@ -69,6 +69,12 @@ impl TextBox {
         self
     }
 
+    /// `TextBox_SetAlign`.
+    pub fn with_align(mut self, align: i32) -> Self {
+        self.align = align;
+        self
+    }
+
     /// `TextBox_AttachLine(flash, clip, 0, 0, line, box)`: hangs line `line` of `text` on the clip as `tag`. A negative
     /// line or a missing clip takes the text off the clip.
     pub fn attach_line(
@@ -78,6 +84,21 @@ impl TextBox {
         tag: u32,
         text: &[u8],
         line: i32,
+        font: &Font,
+    ) -> Option<TextDraw> {
+        self.attach_line_at(flash, clip, tag, text, line, (0, 0), font)
+    }
+
+    /// `TextBox_AttachLine(flash, clip, x, y, line, box)`: the same, `(x, y)` from the clip's position.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_line_at(
+        &self,
+        flash: &mut Flash,
+        clip: ClipRef,
+        tag: u32,
+        text: &[u8],
+        line: i32,
+        (dx, dy): (i32, i32),
         font: &Font,
     ) -> Option<TextDraw> {
         let text = (line >= 0 && clip.found())
@@ -110,8 +131,8 @@ impl TextBox {
         flash.clip_set_draw_over(clip, Some(tag));
         Some(TextDraw {
             tag,
-            x: self.x,
-            y: self.y + row_y,
+            x: self.x + dx,
+            y: self.y + row_y + dy,
             align: self.align,
             scale_x,
             color: color.map(i32::from),

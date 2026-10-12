@@ -94,6 +94,7 @@ mod main_menu;
 mod mcflow;
 mod memcard;
 mod menu_res;
+mod mode_menu;
 mod model_draw;
 mod movie;
 mod obj_shadow;
@@ -197,6 +198,8 @@ enum Scene {
     TeamSelect(Box<team_select::TeamSelScreen>),
     /// `HistSel_Run(1)`, progress mode 6: the story mode's saga select.
     HistSelect(Box<hist_select::HistSelScreen>),
+    /// `ModeMenu_Run(2)`, progress mode 7: a saga's episode list.
+    ModeMenu(Box<mode_menu::ModeMenuScreen>),
     Black,
     Loading(LoadingScreen),
     /// `Battle_Load`: the loading screen while the battle's files are read.
@@ -230,6 +233,7 @@ impl Scene {
             | Scene::CharSelect(_)
             | Scene::TeamSelect(_)
             | Scene::HistSelect(_)
+            | Scene::ModeMenu(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
                 2.0 * VBLANK_SECONDS
@@ -333,6 +337,9 @@ struct Game {
     hist_select: Option<hist_select::HistSelData>,
     /// The story mode's fields of `gProgress`.
     hist: hist_select::HistProgress,
+    /// The episode list's own section and the first texture of each of its files; the sagas' packs, by saga.
+    mode_menu: Option<(mode_menu::ModeMenuData, HashMap<menu_res::FileKey, usize>)>,
+    sagas: HashMap<usize, mode_menu::SagaData>,
     char_select: Option<CharSelData>,
     /// The character select's fields of `gProgress`.
     char_progress: CharSelProgress,
@@ -671,6 +678,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             duel: DuelProgress::default(),
             hist_select: None,
             hist: hist_select::HistProgress::default(),
+            mode_menu: None,
+            sagas: HashMap::new(),
             char_select: None,
             char_progress: CharSelProgress::default(),
             chr_table,
@@ -1559,14 +1568,40 @@ fn run_frames(
                         hist_select::HistSelResult::Back => {
                             start_main_menu(game, &mut commands, &mut audio)
                         }
-                        hist_select::HistSelResult::Saga => {
-                            info!(
-                                "progress mode 7 (the story mode's episode list) is not ported yet"
-                            );
-                            game.scene = Scene::Black;
-                        }
+                        hist_select::HistSelResult::Saga => start_mode_menu(game, &mut commands, 6),
                         hist_select::HistSelResult::Ending => {
                             info!("progress mode 3 (the ending movie) is not ported yet");
+                            game.scene = Scene::Black;
+                        }
+                    }
+                }
+            }
+            Scene::ModeMenu(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut loader,
+                    &mut game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                game.hist.sub_menu_item = screen.item();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    stop_all(game, &mut commands);
+                    match result {
+                        mode_menu::ModeMenuResult::Back => start_hist_select(game, &mut commands),
+                        mode_menu::ModeMenuResult::Battle(script) => {
+                            info!("story battle script {script} is not ported yet");
                             game.scene = Scene::Black;
                         }
                     }
@@ -2629,6 +2664,88 @@ fn start_hist_select(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the saga select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Hist_Main` mode 7: `ModeMenu_Run(2)` for the saga `game.hist.sub_menu`, from `gMenuArc2` and the saga's pack
+/// (it starts its own music); `prev_mode` is the mode it comes from.
+fn start_mode_menu(game: &mut Game, commands: &mut Commands, prev_mode: i32) {
+    let saga = game.hist.sub_menu.clamp(0, 7) as usize;
+    let load = |game: &Game, id: u32, section: Option<usize>| {
+        Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, id))
+            .and_then(|file| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+                Ok(match section {
+                    Some(n) => bpe::decode(pack_section(&file, n)?)?,
+                    None => bpe::decode(&file)?,
+                })
+            })
+    };
+    if game.mode_menu.is_none() {
+        let loaded = load(
+            game,
+            hist_select::ARCHIVE_FILE_ID,
+            Some(mode_menu::ARCHIVE_SECTION),
+        )
+        .and_then(|res| mode_menu::ModeMenuAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let firsts = register_files(game, assets.files);
+                data.msg = mode_menu::ModeMenuAssets::msg_layout(|key| firsts[&key]);
+                game.mode_menu = Some((data, firsts));
+            }
+            Err(error) => {
+                error!("cannot load the episode list: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    if !game.sagas.contains_key(&saga) {
+        let loaded = load(game, mode_menu::SAGA_FILE + saga as u32, None)
+            .and_then(|res| mode_menu::SagaAssets::parse(saga, &res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let own = register_files(game, assets.files);
+                let screen = &game.mode_menu.as_ref().expect("episode list is loaded").1;
+                data.layout = mode_menu::SagaLayout::new(saga, background, |key| {
+                    own.get(&key)
+                        .or_else(|| screen.get(&key))
+                        .copied()
+                        .unwrap_or(0)
+                });
+                game.sagas.insert(saga, data);
+            }
+            Err(error) => {
+                error!("cannot load saga {saga}'s pack: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let (data, _) = game.mode_menu.as_ref().expect("episode list is loaded");
+    let mut sounds = Vec::new();
+    match mode_menu::ModeMenuScreen::new(
+        data,
+        &game.sagas[&saga],
+        game.hist.sub_menu_item,
+        prev_mode,
+        &game.save,
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            game.scene = Scene::ModeMenu(Box::new(screen));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start the episode list: {error}");
             game.scene = Scene::Black;
         }
     }
