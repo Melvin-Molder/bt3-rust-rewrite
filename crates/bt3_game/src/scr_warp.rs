@@ -1,8 +1,10 @@
-//! The screen shock waves (`ScrWarp_*`, src/battle/stg_ambient.c): rings that grow from a projected point. Their
-//! state is kept (the ten objects, the VU0 draws of a spawn, the growth, the frees); the frame redrawn through the
-//! ring's displaced coordinates is not drawn yet.
+//! The screen shock waves (`ScrWarp_*`, src/battle/stg_ambient.c): rings that grow from a projected point. The frame
+//! is copied at half size into a work buffer and drawn back through each ring: a strip from its inner edge to a
+//! jittered middle and one from there to its outer edge, the middle vertices displaced from where their texels
+//! come from, so the picture warps; opaque at the middle, an eighth at the edges.
 
 use crate::eft::{DrawCtx, V3};
+use crate::post::{PostBuf, PostOp, PostVertex};
 use crate::rng::Vu0Random;
 
 /// `SCRWARP_MAX`.
@@ -29,6 +31,25 @@ struct Wave {
     speed: f32,
     speed_acc: f32,
     jitter: [f32; DIRS],
+    /// Per direction: the inner, middle and outer vertex in frame pixels, and their texels in the half-size copy.
+    xy: [[[f32; 2]; 3]; DIRS],
+    uv: [[[f32; 2]; 3]; DIRS],
+}
+
+/// `gScrWarp->dir`: sine and cosine of -pi + i * pi / 10 (`Mathf_Sin` / `Mathf_Cos`).
+fn dirs() -> [[f32; 2]; DIRS] {
+    let mut a = -3.141_592_7f32;
+    std::array::from_fn(|_| {
+        let d = [
+            crate::btl_tech_volley::mathf_sin(a),
+            crate::btl_tech_volley::mathf_cos(a),
+        ];
+        a += 0.314_159_27;
+        if 3.141_592_7 <= a {
+            a -= 6.283_185_5;
+        }
+        d
+    })
 }
 
 /// `gScrWarp`.
@@ -77,14 +98,18 @@ impl ScrWarps {
             speed,
             speed_acc: -(speed * 0.3 / life),
             jitter: std::array::from_fn(|_| base + vu0.float01() * jitter),
+            xy: [[[0.0; 2]; 3]; DIRS],
+            uv: [[[0.0; 2]; 3]; DIRS],
         });
         true
     }
 
     /// `ScrWarp_UpdateAll` (not while paused): a new wave is placed by its view's camera, dropped when off the
     /// 512 x 448 frame; each grows by its speed, which slows, its ring widening, and fades over its last six
-    /// frames; it ends with its life or past a radius of 600.
+    /// frames; it ends with its life or past a radius of 600. `ScrWarp_Step` rebuilds its vertices (texels kept
+    /// at least 2 across and 0 down).
     pub(crate) fn update(&mut self, ctx: &DrawCtx) {
+        let dirs = dirs();
         for slot in &mut self.objs {
             let Some(o) = slot else {
                 continue;
@@ -105,12 +130,70 @@ impl ScrWarps {
                 continue;
             }
             o.radius += o.speed;
+            let r0 = o.radius;
+            let r2 = r0 + o.width;
+            let r1 = r0 + o.width * 0.5;
+            let [sx, sy] = o.screen;
+            for (i, d) in dirs.iter().enumerate() {
+                let at = |r: f32| [d[0] * r, d[1] * r];
+                let rj = r0 + o.width * o.jitter[i];
+                for (k, r) in [r0, r1, r2].into_iter().enumerate() {
+                    let p = at(r);
+                    o.uv[i][k] = [((sx + p[0]) * 0.5).max(2.0), ((sy + p[1]) * 0.5).max(0.0)];
+                }
+                for (k, r) in [r0, rj, r2].into_iter().enumerate() {
+                    let p = at(r);
+                    o.xy[i][k] = [sx + p[0], sy + p[1]];
+                }
+            }
             o.speed += o.speed_acc;
             o.width += o.width_vel;
             if o.life <= 6.0 {
                 o.alpha = (o.alpha + o.alpha_vel).max(0.0);
             }
         }
+    }
+
+    /// `ScrWarp_Update`'s `ScrWarp_DrawAll` (one view): with any wave in use, the frame copied at half size (half
+    /// a texel off) into work buffer 0, then each ring's two strips of 21 vertex pairs from it, the middle at the
+    /// wave's alpha and the edges at an eighth of it, the coordinates as integers.
+    pub(crate) fn draw(&self) -> Vec<PostOp> {
+        if self.objs.iter().all(Option::is_none) {
+            return Vec::new();
+        }
+        let copy = PostOp::sprite(
+            PostBuf::Frame,
+            PostBuf::Work(0),
+            false,
+            [0.0, 0.0, 256.0, 224.0],
+            [0.5, 0.5, 512.5, 448.5],
+            [0x80; 4],
+        );
+        let mut rings = PostOp {
+            source: PostBuf::Work(0),
+            target: PostBuf::Frame,
+            blend: true,
+            tris: Vec::new(),
+        };
+        for o in self.objs.iter().flatten() {
+            let mid = (o.alpha * 255.0) as i32;
+            let alpha = [mid / 8, mid, mid / 8];
+            for j in 0..2 {
+                let mut strip = Vec::with_capacity((DIRS + 1) * 2);
+                for k in 0..=DIRS {
+                    let m = k % DIRS;
+                    for e in [j, j + 1] {
+                        strip.push(PostVertex {
+                            xy: o.xy[m][e].map(|c| c as i32 as f32),
+                            uv: o.uv[m][e].map(|c| c as i32 as f32),
+                            rgba: [0x80, 0x80, 0x80, alpha[e] as u8],
+                        });
+                    }
+                }
+                rings.strip(&strip);
+            }
+        }
+        vec![copy, rings]
     }
 
     /// `ScrWarp_Reset`.
@@ -163,5 +246,46 @@ mod tests {
         assert!(!w.spawn(0, [0.0; 3], 1.0, 1.0, 1.0, 1.0, 0.4, &mut vu0));
         w.reset();
         assert_eq!(w.count(), 0);
+        assert!(w.draw().is_empty());
+    }
+
+    #[test]
+    fn a_ring_is_drawn_from_the_half_size_copy_with_its_middle_displaced() {
+        let mut w = ScrWarps::default();
+        let mut vu0 = Vu0Random::default();
+        let view = View::new([0.0; 3], [0.0; 3]);
+        let ctx = DrawCtx::new(view.world2screen, view.world2view);
+        w.spawn(0, [0.0, 0.0, 100.0], 0.8, 10.0, 50.0, 8.0, 0.4, &mut vu0);
+        w.update(&ctx);
+        let o = w.objs[0].unwrap();
+        // Straight ahead: the frame's centre. Inner radius 10 + 8, outer 18 + 50, the texels at half.
+        assert_eq!(o.screen, [256.0, 224.0]);
+        let d = dirs();
+        assert!((d[0][0] - 0.0).abs() < 1e-6 && d[0][1] == -1.0);
+        assert_eq!(o.xy[0][0], [256.0 + d[0][0] * 18.0, 224.0 - 18.0]);
+        assert_eq!(
+            o.uv[0][2],
+            [(256.0 + d[0][0] * 68.0) * 0.5, (224.0 - 68.0) * 0.5]
+        );
+        // The middle vertex where the jitter puts it; its texel half way.
+        let rj = 18.0 + 50.0 * o.jitter[0];
+        assert_eq!(o.xy[0][1][1], 224.0 - rj);
+        assert_eq!(o.uv[0][1][1], (224.0 - 43.0) * 0.5);
+        let ops = w.draw();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(
+            (ops[0].source, ops[0].target),
+            (PostBuf::Frame, PostBuf::Work(0))
+        );
+        let r = &ops[1];
+        assert_eq!(
+            (r.source, r.target, r.blend),
+            (PostBuf::Work(0), PostBuf::Frame, true)
+        );
+        // Two strips of 42 vertices: 80 triangles; the middle at alpha 128 / 255 * 255, the edges an eighth.
+        assert_eq!(r.tris.len(), 80);
+        assert_eq!(r.tris[0][0].rgba[3], 16);
+        assert_eq!(r.tris[0][1].rgba[3], 128);
+        assert_eq!(r.tris[0][0].xy, o.xy[0][0].map(|c| c as i32 as f32));
     }
 }

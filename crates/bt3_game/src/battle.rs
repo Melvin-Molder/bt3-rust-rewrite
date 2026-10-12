@@ -1303,7 +1303,7 @@ pub struct BattleFrame {
     /// `StgFx_DrawPre`: what is drawn over the stage before the fighters (the back tints).
     pub under: Vec<EffectTri>,
     /// `StgFx_DrawPost`: the frame redrawn through the work buffers after the effects, before the HUD (the
-    /// radial blur).
+    /// radial blur, the shock waves).
     pub post: Vec<crate::post::PostOp>,
     /// Effect textures whose texels changed this frame (the reflecting surface's lit palettes).
     pub texture_updates: Vec<(usize, RgbaTexture)>,
@@ -2581,7 +2581,7 @@ impl Battle {
         let effects = {
             let ctx = DrawCtx::new(view.world2screen, view.world2view);
             let mut ot = OrderTable::new();
-            // StgFx_DrawPost's ScrWarp_Update: the shock waves step (not while paused); they are not drawn.
+            // StgFx_DrawPost's ScrWarp_Update: the shock waves step (not while paused); they draw with the post pass.
             if !self.seq.paused {
                 self.roster.scene.warps.update(&ctx);
             }
@@ -2761,12 +2761,14 @@ impl Battle {
         }
         let (capture, xfade_alpha) = self.xfade.draw_pass();
         // StgFx_DrawPost (nothing while a stage loads): StgBlur_DrawAll, the view shown (view 0 under the demo
-        // camera).
+        // camera), then ScrWarp_DrawAll.
         let post = if self.loading {
             Vec::new()
         } else {
             let blur_view = if self.demo.is_active() { 0 } else { view_side };
-            self.roster.scene.blurs.draw(blur_view, &view.world2view)
+            let mut ops = self.roster.scene.blurs.draw(blur_view, &view.world2view);
+            ops.extend(self.roster.scene.warps.draw());
+            ops
         };
         // StgFx_DrawOverlay: slots 3 and 2 over everything, then the finished slots go off.
         let front = if self.loading {
@@ -3747,9 +3749,15 @@ mod tests {
             side: 0,
             list: crate::eft_shock::LIST,
         };
-        let (mut waves, mut parts) = (0, 0);
+        let (mut waves, mut parts, mut drawn) = (0, 0, 0);
         for _ in 0..120 {
-            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            let f = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            // The wave redraws the frame through its ring (the copy, then 80 triangles).
+            if let Some(r) = f.post.last()
+                && r.source == crate::post::PostBuf::Work(0)
+            {
+                drawn = drawn.max(r.tris.len());
+            }
             let scene = &battle.roster.scene;
             waves = waves.max(scene.warps.count());
             parts = parts.max(scene.fx.counts(Some(list))[0]);
@@ -3758,7 +3766,7 @@ mod tests {
             }
         }
         // One screen shock wave; the two animated parts of the pack's entry 6 together; then it ends.
-        assert_eq!((waves, parts), (1, 2));
+        assert_eq!((waves, parts, drawn), (1, 2, 80));
         assert_eq!(battle.roster.scene.shocks[0].count(), 0);
     }
 
