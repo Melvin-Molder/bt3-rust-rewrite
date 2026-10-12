@@ -193,6 +193,8 @@ pub struct BattleAssets {
     /// The five HUD sprite sheets, decoded one after the other (raw GS colours).
     pub hud_textures: Vec<RgbaTexture>,
     pub(crate) hud_sheets: Vec<HudSheet>,
+    /// The prompt part's icon definitions (the part's own tables and the font's).
+    pub(crate) prompt_defs: crate::hud_prompt::PromptDefs,
     hud_cpu: HudTextures,
     /// `Battle_GetAnnouncer`.
     announcer: i32,
@@ -371,7 +373,33 @@ pub fn load(
         [fade[4], fade[5], fade[6], fade[7]],
     ];
     let hud_file = read(HUD_FILE)?;
-    let (mut hud_textures, hud_sheets, hud_cpu) = load_hud(&hud_file).map_err(error)?;
+    let (mut hud_textures, mut hud_sheets, hud_cpu) = load_hud(&hud_file).map_err(error)?;
+    // FontIcon_GetRes: the icon file at boot file word 8, which the prompts draw from (HUD sheet 5 here).
+    let boot = read(crate::hud_prompt::BOOT_FILE)?;
+    let icons = boot
+        .get(8 * 4..8 * 4 + 4)
+        .map(|b| (u32::from_le_bytes(b.try_into().unwrap()) & !3) as usize)
+        .and_then(|o| boot.get(o..))
+        .ok_or("the boot file has no icon file")?;
+    let res = TextureResource::parse(icons).map_err(error)?;
+    let mut icon_sheet = HudSheet {
+        base: hud_textures.len(),
+        sizes: Vec::new(),
+        views: Vec::new(),
+    };
+    for entry in &res.entries {
+        let tex0 = entry.texture_register;
+        icon_sheet
+            .sizes
+            .push([1 << ((tex0 >> 26) & 0xF), 1 << ((tex0 >> 30) & 0xF)]);
+        hud_textures.push(decode_sprite_texture(entry).unwrap_or(RgbaTexture {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+        }));
+    }
+    hud_sheets.push(icon_sheet);
+    let prompt_defs = crate::hud_prompt::PromptDefs::read(elf).map_err(error)?;
     let menu_sheet = load_menu_sheet(&hud_file, &mut hud_textures).map_err(error)?;
     let menu_texts = MenuTexts::read(&hud_file, MENU_TEXT_COUNT);
     // PauseMenu_GetMenu: the versus trees without a replay; the other modes' menus are not ported.
@@ -457,6 +485,7 @@ pub fn load(
         mode: setup.mode,
         hud_textures,
         hud_sheets,
+        prompt_defs,
         hud_cpu,
         announcer: setup.announcer,
         time_limit,
@@ -1758,12 +1787,13 @@ impl Battle {
             AiMgr::new(&mut ctx, assets.cpu_level, assets.ai_type)
         };
         let roots = std::array::from_fn(|side| roster.chars[side].obj.mtx);
-        let hud = Hud::new(
+        let mut hud = Hud::new(
             &assets.hud_sheets,
             assets.hud_cpu.clone(),
             assets.announcer,
             assets.mode,
         );
+        hud.set_prompt_defs(assets.prompt_defs.clone());
         // PauseMenu_Init; BtlGame_Reset closes both trees.
         let menu = assets.menus.clone().map(|(pause, result)| {
             let mut menu = PauseMenu::new(pause, result);
@@ -2300,6 +2330,7 @@ impl Battle {
             self.assets.announcer,
             self.assets.mode,
         );
+        self.hud.set_prompt_defs(self.assets.prompt_defs.clone());
         self.seq = Seq::new(self.assets.mode, self.assets.time_limit);
         self.demo = DemoCam::default();
         self.eft_cam = crate::battle_seq::EftCam::default();
@@ -2424,11 +2455,17 @@ impl Battle {
         let fight = self.seq.state_id() == 3;
         let [c0, c1] = &self.roster.chars;
         let combos = [c0.hud_combo(c1, fight), c1.hud_combo(c0, fight)];
+        let prompts = [0, 1].map(|side| {
+            let data = side_data(&self.assets.fighters[side]);
+            let env = self.assets.env(self.seq.state_id(), self.gate());
+            self.roster.chars[side].hud_prompt(&data, &env, self.seq.paused)
+        });
         self.hud.pre_update(
             self.seq.time_left(),
             &sides,
             &teams,
             &combos,
+            &prompts,
             self.seq.paused,
         );
         self.seq_pre_update(&mut input);
@@ -8896,6 +8933,60 @@ mod tests {
             most = most.max((angle(rot(&battle)) - rest).abs());
         }
         assert!(most > 0.01, "{most}");
+    }
+
+    #[test]
+    fn real_prompts_show_the_buttons_to_press() {
+        let Some(mut battle) = fight_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        let icons = battle.assets.hud_sheets[5].clone();
+        assert!(icons.sizes.len() > 23);
+        let on_icons = |frame: &BattleFrame| {
+            frame
+                .hud
+                .prims
+                .iter()
+                .filter_map(|p| p.texture)
+                .filter(|&t| (icons.base..icons.base + icons.sizes.len()).contains(&t))
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..3 {
+            let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            assert!(on_icons(&frame).is_empty());
+        }
+        // The ki-exhausted mash prompt (flag 0xE7): the button of action 0, circle with the default keys, whose
+        // pressed-and-released icon is the font's 20.
+        battle.roster.chars[0].flags.set_held(0xE7);
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            seen.extend(on_icons(&frame));
+        }
+        assert!(seen.contains(&(icons.base + 20)), "{seen:?}");
+        // Gone: it fades out in 0.28 s.
+        battle.roster.chars[0].flags.clear(0xE7);
+        for _ in 0..12 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert!(on_icons(&frame).is_empty());
+        // Watching technique class 2: its row's direction, a plus and the button.
+        let mut last = Vec::new();
+        for _ in 0..6 {
+            battle.roster.chars[0].input.tech_class = 2;
+            let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            last = on_icons(&frame);
+        }
+        assert_eq!(last.len(), 3, "{last:?}");
+        assert!(last.contains(&icons.base));
+        // Side 1's prompts are not drawn outside split screen.
+        battle.roster.chars[1].flags.set_held(0xE7);
+        let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert!(!on_icons(&frame).contains(&(icons.base + 20)));
     }
 
     #[test]

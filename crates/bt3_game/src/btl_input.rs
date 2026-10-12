@@ -222,6 +222,8 @@ pub(crate) struct Input {
     raw_held: u32,
     raw_stick: [u8; 2],
     pad_status: i32,
+    /// `Pad.lastStatus`: the last status below 4 (the controller type the prompts show).
+    last_status: i32,
     mask: [u32; BUTTON_BITS],
     rec_count: Counters,
     rec_cmd_count: Counters,
@@ -264,6 +266,7 @@ impl Default for Input {
             raw_held: 0,
             raw_stick: [0; 2],
             pad_status: 0,
+            last_status: 0,
             mask: [0; BUTTON_BITS],
             rec_count: Counters::default(),
             rec_cmd_count: Counters::default(),
@@ -312,6 +315,26 @@ pub(crate) enum SwitchTest {
 pub(crate) const DEFAULT_KEYS: [u8; 8] = [2, 1, 0, 3, 4, 5, 6, 7];
 
 impl Input {
+    /// `Pad.lastStatus` of the fighter's pad.
+    pub(crate) fn last_status(&self) -> i32 {
+        self.last_status
+    }
+
+    /// `BtlCharApi_GetButtonIcon`: the face button (0 triangle, 1 square, 2 circle, 3 cross) the key config gives
+    /// input `bit`, the direction icons 0x10..0x13 for bits 4..7, -1 for none.
+    pub(crate) fn button_icon(&self, bit: usize) -> i32 {
+        if (4..8).contains(&bit) {
+            return 0x10 + bit as i32 - 4;
+        }
+        match self.mask.get(bit).copied().unwrap_or(0) {
+            pad::TRIANGLE => 0,
+            pad::CIRCLE => 2,
+            pad::CROSS => 3,
+            pad::SQUARE => 1,
+            _ => -1,
+        }
+    }
+
     /// `BtlInput_Init` (`BtlInput_BuildMaskTable`) with the save's key config.
     pub(crate) fn init(&mut self, keys: &[u8; 8]) {
         let key = |action: u8| {
@@ -552,6 +575,9 @@ impl Input {
     /// the record is neutral). The replay hook records nothing here.
     pub(crate) fn sample(&mut self, pad: &PadState, active: bool, time_stopped: bool) {
         self.pad_status = pad.status;
+        if pad.status < 4 {
+            self.last_status = pad.status;
+        }
         self.raw_held = pad.held;
         self.raw_stick = [stick_to_byte(pad.left[0]), stick_to_byte(pad.left[1])];
         let prev_buttons = self.rec_buttons;

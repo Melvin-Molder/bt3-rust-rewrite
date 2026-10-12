@@ -1100,6 +1100,117 @@ impl Chr {
         };
     }
 
+    /// `Hud_PreUpdate`'s prompts: the button prompt of flags 0xE7..0xEC (`BtlCtrl_GetChangePrompt`: the button the
+    /// key config gives the action, pressed and released for 0xE7 / 0xE8, held for the others) or the struggle's
+    /// mashing picture of flag 0xE6; the command row accepted with flag 0x9E raised, or the switch prompt of the
+    /// watched technique (`BtlCtrl_GetSwitchPrompt`: its direction, a plus and the button; one button with flags
+    /// 0xA2 / 0xA3), cleared otherwise (not while paused). The technique prompt of pad status 1 is not ported.
+    pub(crate) fn hud_prompt(
+        &self,
+        data: &SideData,
+        env: &Env,
+        paused: bool,
+    ) -> crate::hud_prompt::SidePrompt {
+        use crate::hud_prompt::{ButtonReq, CommandReq, SidePrompt};
+        let f = &self.flags;
+        let input = &self.input;
+        let last = input.last_status();
+        let mut button = ButtonReq::Clear;
+        let change = if input.inject_on {
+            None
+        } else {
+            let mut found = None;
+            for (flag, bit, kind) in [
+                (0xE7, 0, 1),
+                (0xE8, 2, 1),
+                (0xE9, 0x1B, 2),
+                (0xEA, 0x1C, 2),
+                (0xEB, 0x1D, 2),
+                (0xEC, 0x1E, 2),
+            ] {
+                if f.test(flag) {
+                    found = Some((input.button_icon(bit), kind));
+                }
+            }
+            found.filter(|&(b, _)| b >= 0)
+        };
+        if let Some((b, kind)) = change {
+            let ofs = [0, 0, 1, 2][kind as usize];
+            button = ButtonReq::Set(b % 4 + ofs * 4, b / 4);
+        } else if f.test(0xE6) {
+            button = ButtonReq::Set(12, last);
+        }
+        let command = if !self.is_frozen() && f.raised(0x9E) {
+            CommandReq::Accept
+        } else if let Some((buttons, kind)) = self.switch_prompt(data, env) {
+            // A row without buttons asks for an empty row, which HudPrompt_SetCommand ignores.
+            if buttons.is_empty() {
+                return SidePrompt {
+                    button,
+                    command: CommandReq::Keep,
+                };
+            }
+            let count = buttons.len();
+            let (mut icons, mut modes) = (Vec::new(), Vec::new());
+            for (i, &b) in buttons.iter().enumerate() {
+                if i > 0 {
+                    icons.push(0x20);
+                    modes.push(2);
+                }
+                if (0x10..0x14).contains(&b) {
+                    icons.push(b + last * 4);
+                    modes.push(2);
+                } else if b < 0x10 {
+                    icons.push(b);
+                    modes.push([3, 2, 1, 0][kind as usize]);
+                } else {
+                    icons.push(b);
+                    modes.push(2);
+                }
+            }
+            debug_assert_eq!(icons.len(), count * 2 - 1);
+            CommandReq::Set { icons, modes }
+        } else if !paused {
+            CommandReq::Clear
+        } else {
+            CommandReq::Keep
+        };
+        SidePrompt { button, command }
+    }
+
+    /// `BtlCtrl_GetSwitchPrompt` (pad status other than 1, no direction class held): the buttons of the watched
+    /// technique class's prompt row and the prompt's kind.
+    fn switch_prompt(&self, data: &SideData, env: &Env) -> Option<(Vec<i32>, i32)> {
+        let input = &self.input;
+        if input.inject_on || input.last_status() == 1 || self.dir_held >= 2 {
+            return None;
+        }
+        let n = input.tech_class;
+        if n < 2 || self.flags.test(0x9D) || self.flags.test(0x11F) {
+            return None;
+        }
+        let row = usize::try_from(data.tables.tech().prompt_row(n))
+            .ok()
+            .and_then(|r| env.common.prompt_rows.get(r))?;
+        let (buttons, kind) = if self.flags.test(0xA2) {
+            (vec![input.button_icon(2)], 2)
+        } else if self.flags.test(0xA3) {
+            (vec![input.button_icon(2)], 1)
+        } else {
+            match row[2] {
+                b @ 0..=3 => (
+                    vec![input.button_icon(4 + usize::from(b)), input.button_icon(3)],
+                    0,
+                ),
+                _ => (Vec::new(), 0),
+            }
+        };
+        if buttons.iter().any(|&b| b < 0) {
+            return None;
+        }
+        Some((buttons, kind))
+    }
+
     /// The HUD's view of the active member's gauges (`Hud_PreUpdate`).
     pub(crate) fn hud_gauge(&self) -> crate::hud_gauge::SideGauge {
         let g = &self.gauge;

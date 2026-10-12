@@ -1,8 +1,8 @@
 //! The battle HUD (src/battle/hud.c, hud_sprite.c, hud_notice_1.c, hud_notice_2.c): the manager's visibility
 //! bits, the team panel (hud_team.rs), the gauges and timer (hud_gauge.rs), the combo part (hud_combo.rs) and the
 //! notice part: the READY / FIGHT announcements, the finishes (K.O., the other K.O., the two spinning words of time
-//! up and the like), the winner's and the result's lower banners, with the announcer's lines; and the caption of the
-//! attract demo. The prompts are not ported yet.
+//! up and the like), the winner's and the result's lower banners, with the announcer's lines; the caption of the
+//! attract demo; and the button prompts (hud_prompt.rs).
 //!
 //! The notices lean on the GS destination alpha: a band written only into the alpha plane lets the word through
 //! where it covers (TEST_2 0x3C000: DATE with DATM 1), and the FIGHT streak is added in proportion to the alpha
@@ -21,6 +21,9 @@ pub(crate) const SHEET_WORDS: [usize; 5] = [1, 4, 5, 2, 3];
 const NOTICE_SHEET: usize = 1;
 const COMBO_SHEET: usize = 2;
 const CAPTION_SHEET: usize = 4;
+const PROMPT_SHEET: usize = 3;
+/// The font's icon sheet, appended after the HUD file's five.
+const ICON_SHEET: usize = 5;
 /// `HudNotice_GetVoiceBase` with `SAVE_FLAG_VOICE`, which a fresh save has.
 const ANNOUNCER_BASE: u32 = 0x10B6C;
 const ANNOUNCER_LINES: u32 = 7;
@@ -29,6 +32,7 @@ const SHOW_GAUGES: u32 = 1;
 const SHOW_TIMER: u32 = 2;
 const SHOW_NOTICE: u32 = 4;
 const SHOW_COMBO: u32 = 8;
+const SHOW_PROMPT: u32 = 0x10;
 
 const SPR_WORD: usize = 0;
 const SPR_PART: usize = 1;
@@ -191,6 +195,15 @@ impl Xf {
             m: [[1.0, 0.0], [0.0, 1.0]],
             t: [x, y],
         }
+    }
+
+    /// `HudNode_Draw`'s mirror (`Vu0Cur_MulMtxRev` of x' = 511 - x): applied after `self`.
+    pub(crate) fn mirrored(&self) -> Self {
+        let mut out = *self;
+        out.m[0][0] = -out.m[0][0];
+        out.m[1][0] = -out.m[1][0];
+        out.t[0] = 511.0 - out.t[0];
+        out
     }
 
     /// `Mtx_RotateZ` rows (c, s), (-s, c).
@@ -1182,6 +1195,7 @@ pub(crate) struct Hud {
     gauge: GaugePart,
     timer: TimerPart,
     notice: NoticePart,
+    prompt: crate::hud_prompt::PromptPart,
     caption: CaptionPart,
     /// `Battle_GetMode() == 7` (the attract demo): only the caption is drawn.
     caption_only: bool,
@@ -1233,6 +1247,11 @@ impl Hud {
             timer: TimerPart::new(&sheet0),
             gauge: GaugePart::new(sheet0),
             notice: NoticePart::new(sheets.get(NOTICE_SHEET).cloned().unwrap_or_default()),
+            prompt: crate::hud_prompt::PromptPart::new(
+                sheets.get(PROMPT_SHEET).cloned().unwrap_or_default(),
+                sheets.get(ICON_SHEET).cloned().unwrap_or_default(),
+                crate::hud_prompt::PromptDefs::default(),
+            ),
             caption: CaptionPart::new(sheets.get(CAPTION_SHEET).cloned().unwrap_or_default()),
             caption_only: mode == 7,
             textures,
@@ -1249,9 +1268,14 @@ impl Hud {
         sides: &[SideGauge; 2],
         teams: &[crate::hud_team::SideTeam; 2],
         combos: &[crate::hud_combo::SideCombo; 2],
+        prompts: &[crate::hud_prompt::SidePrompt; 2],
         paused: bool,
     ) {
         self.timer.set_time(time_left);
+        self.prompt.paused = paused;
+        for (side, p) in prompts.iter().enumerate() {
+            self.prompt.set_side(side, p);
+        }
         for (side, gauge) in sides.iter().enumerate() {
             self.gauge.set_side(side, gauge);
             let c = &combos[side];
@@ -1283,6 +1307,12 @@ impl Hud {
         self.team.paused = paused;
         self.combo.paused = paused;
         self.timer.paused = paused;
+        self.prompt.paused = paused;
+    }
+
+    /// The prompt part's icon definitions, read from the executable.
+    pub(crate) fn set_prompt_defs(&mut self, defs: crate::hud_prompt::PromptDefs) {
+        self.prompt.set_defs(defs);
     }
 
     /// `Hud_ShowAll`.
@@ -1378,6 +1408,10 @@ impl Hud {
             layer = (!self.layer.is_empty()).then(|| self.layer.to_rgba());
         }
         let mut prims = Vec::new();
+        // The prompts of side 0 (side 1's too only in split screen, which is not ported).
+        if self.flags & SHOW_PROMPT != 0 {
+            self.prompt.run(0, &mut prims);
+        }
         if self.flags & SHOW_COMBO != 0 {
             for side in 0..2 {
                 self.combo.run(side, libc, &mut prims);
