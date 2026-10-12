@@ -55,6 +55,7 @@ mod eft_geyser;
 mod eft_glow;
 mod eft_impact;
 mod eft_link;
+mod eft_orb_tail;
 mod eft_part10;
 mod eft_ptcl;
 mod eft_quad;

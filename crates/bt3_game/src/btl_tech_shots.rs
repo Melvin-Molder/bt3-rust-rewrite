@@ -78,6 +78,8 @@ pub(crate) struct ShotTech {
     pub(crate) blur_out: Option<([u8; 3], [f32; 3])>,
     /// The streak fields it started on the victim's events.
     victim: crate::btl_tech_fx::VictimFx,
+    /// `auraFx`: the orb tail it holds.
+    aura: Option<u32>,
 }
 
 impl ShotTech {
@@ -114,6 +116,7 @@ impl ShotTech {
             blur_dir: [0.0; 3],
             blur_out: None,
             victim: Default::default(),
+            aura: None,
         };
         if head_set.flags & 1 != 0 && head_set.move_kind == 2 {
             s.node = 0x15;
@@ -127,6 +130,19 @@ impl ShotTech {
 
     pub(crate) fn dead(&self) -> bool {
         self.dead
+    }
+
+    /// `EftShotTech_Term`'s requests: its streak fields stop, its orb dies and the glow goes.
+    pub(crate) fn term(&mut self, out: &mut crate::btl_tech_fx::TechOut) {
+        self.victim.stop_all(out);
+        if let Some(handle) = self.aura.take() {
+            use crate::btl_tech_fx::TechReq;
+            out.reqs.push(TechReq::OrbKill(handle));
+            out.reqs.push(TechReq::Glow {
+                side: self.src.side,
+                cmd: 2,
+            });
+        }
     }
 
     /// `EftShotTech_CalcDir`: the direction by the set's aim kind, and the point's velocity along it.
@@ -477,6 +493,38 @@ impl ShotTech {
             let alphas = crate::btl_tech_fx::blur_alphas(self.blur, [8.0, 32.0, 128.0]);
             self.blur_out = Some((alphas, self.blur_dir));
             self.victim.update_streaks(&def, side, opp_events, out);
+            // EftShotTech_UpdateAuraBall: the owner's event 0x100 makes the orb between the hands (nodes 10
+            // and 14) with a burst and starts the glow; 0x200 bursts it again, kills it and fades the glow.
+            use crate::btl_tech_fx::TechReq;
+            if test(0x100) && self.aura.is_none() {
+                let handle = out.handle();
+                out.reqs.push(TechReq::Orb { handle, side });
+                out.reqs.push(TechReq::OrbBurst(handle));
+                out.reqs.push(TechReq::Glow { side, cmd: 0 });
+                self.aura = Some(handle);
+            }
+            if let Some(handle) = self.aura {
+                let o = &w.chars[side].obj;
+                let pos = crate::eft::scale3(crate::eft::add(o.node_pos(10), o.node_pos(14)), 0.5);
+                out.reqs.push(TechReq::OrbPos { handle, pos });
+            }
+            if test(0x200)
+                && let Some(handle) = self.aura.take()
+            {
+                out.reqs.push(TechReq::OrbBurst(handle));
+                out.reqs.push(TechReq::OrbKill(handle));
+                out.reqs.push(TechReq::Glow { side, cmd: 1 });
+            }
+            // EftShotTech_UpdateTargetBurst: with definition flag 0x400 the victim's event 4 raises dust at its
+            // node 3, scaled by its height.
+            if def.flags & 0x400 != 0 && opp_events & 4 != 0 {
+                let opp = side ^ 1;
+                out.reqs.push(TechReq::Landing {
+                    side,
+                    pos: w.chars[opp].obj.node_pos(3),
+                    scale: w.data[opp].height() * 0.03,
+                });
+            }
             if options & 1 != 0 && test(0x20) {
                 (self.muzzle_pos, self.muzzle_dir) = muzzle(w, side);
             }

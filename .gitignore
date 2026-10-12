@@ -95,6 +95,7 @@
 !/crates/bt3_game/src/eft_chain.rs
 !/crates/bt3_game/src/eft_ptcl.rs
 !/crates/bt3_game/src/eft_link.rs
+!/crates/bt3_game/src/eft_orb_tail.rs
 !/crates/bt3_game/src/eft_part10.rs
 !/crates/bt3_game/src/eft_quad.rs
 !/crates/bt3_game/src/eft_ray.rs

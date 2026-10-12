@@ -744,6 +744,26 @@ pub(crate) fn quad_depth(
     uv: [f32; 4],
     rot: f32,
 ) {
+    quad_depth_scaled(
+        ot, ctx, pos, color, layer, front, texture, size, uv, rot, 1.0,
+    );
+}
+
+/// `EftPrim_DrawQuadDepthScaled`: `quad_depth` with the depth slot times `z_scale`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quad_depth_scaled(
+    ot: &mut OrderTable,
+    ctx: &DrawCtx,
+    pos: V3,
+    color: V4,
+    layer: u8,
+    front: bool,
+    texture: Option<usize>,
+    size: [f32; 2],
+    uv: [f32; 4],
+    rot: f32,
+    z_scale: f32,
+) {
     let (w, h) = (size[0], size[1]);
     let mut inv = inverse_rt(&ctx.world2view);
     inv[3] = [0.0, 0.0, 0.0, inv[3][3]];
@@ -770,7 +790,7 @@ pub(crate) fn quad_depth(
         let prim = Prim {
             texture,
             ot_layer: layer,
-            z: ZSort::Fixed(sz >> 8),
+            z: ZSort::Fixed(((sz >> 8) as f32 * z_scale) as i32),
             front,
             clamp: false,
             alpha_min: 0.01,
@@ -1002,7 +1022,10 @@ pub(crate) struct SetRef {
 
 /// `FxWorld::sets`' entries per side: the side's own eleven, then the impacts' and the transformation's common
 /// sets.
-pub(crate) const SET_LISTS: usize =
+pub(crate) const SET_LISTS: usize = ORB_LIST + 1;
+
+/// The list of the orb tail's burst emitters (`OrbCfg::burst_set`), after the transformation's.
+pub(crate) const ORB_LIST: usize =
     crate::eft_transform::FIRST_LIST + crate::eft_transform::SET_ENTRIES.len();
 
 /// The `SetRef::list` of technique slot `slot` (0..4).
@@ -1021,7 +1044,8 @@ impl SetRef {
     /// transformation's (all
     /// stopped by the pause alone).
     fn stop_kind(self) -> u8 {
-        if self.list < 2 {
+        // EftPtcl_Create without EftPtcl_SetType (the orb tail's bursts): kind 0.
+        if self.list < 2 || self.list == ORB_LIST {
             0
         } else if self.list < crate::eft_absorb::LIST {
             1
@@ -1695,6 +1719,53 @@ impl Modules {
 
     fn chain_mut(&mut self, h: u32) -> Option<&mut Chain> {
         self.chains.iter_mut().find(|c| c.id == h && c.alive())
+    }
+
+    /// `EftPtcl_Create` + `SetPos` / `SetDir` / `SetTexture` of an emitter outside an emitter set's parts (the
+    /// orb tail's bursts): its definition pair `pair` of the set list `set`; `None` when the 60 tasks run.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_ptcl(
+        &mut self,
+        set: SetRef,
+        pair: usize,
+        def: &PtclDef,
+        def2: &PtclDef2,
+        texture: Option<usize>,
+        pos: V3,
+        dir: V3,
+        life: f32,
+        size: f32,
+        libc: &mut LibcRandom,
+    ) -> Option<u32> {
+        if self.ptcls.len() >= EMITTERS {
+            return None;
+        }
+        self.next_id += 1;
+        let mut e = Emitter::new(
+            self.next_id,
+            set.side,
+            set,
+            pair,
+            texture,
+            pos,
+            dir,
+            life,
+            size,
+            def,
+            def2,
+            libc,
+        );
+        e.set_pos(pos);
+        e.set_dir(dir);
+        self.ptcls.push(e);
+        Some(self.next_id)
+    }
+
+    /// `EftPtcl_Stop` of an emitter by its handle.
+    pub(crate) fn stop_ptcl(&mut self, h: u32) {
+        if let Some(e) = self.ptcl_mut(h) {
+            e.stop();
+        }
     }
 
     fn ptcl_mut(&mut self, h: u32) -> Option<&mut Emitter> {

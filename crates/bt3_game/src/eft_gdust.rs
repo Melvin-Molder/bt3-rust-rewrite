@@ -607,12 +607,20 @@ impl GndDust {
         }
     }
 
-    /// `EftGndDust_SpawnLanding` (request 0x35): three low puffs round the point, eight particles thrown
-    /// outwards and one in the middle.
+    /// The landing tasks alive.
+    #[cfg(test)]
+    pub(crate) fn lands(&self) -> usize {
+        self.tasks.iter().filter(|t| t.kind == Kind::Land).count()
+    }
+
+    /// `EftGndDust_SpawnLanding` (request 0x35, scale 1) and `EftGndDust_SpawnLandingScaled` (a connected shot
+    /// technique's victim): three low puffs round the point, eight particles thrown outwards and one in the
+    /// middle.
     pub(crate) fn spawn_landing(
         &mut self,
         side: usize,
         pos: V3,
+        scale: f32,
         libc: &mut LibcRandom,
         vu0: &mut Vu0Random,
         coef: &[f32; 4],
@@ -633,7 +641,7 @@ impl GndDust {
             grow: 0.1,
             bright: 1.0,
             drag: 1.0,
-            scale: 1.0,
+            scale,
             ..DustArg::default()
         };
         let t = self.push(Kind::Land, arg);
@@ -1173,7 +1181,7 @@ mod tests {
         let mut d = GndDust::new(None, None);
         let (mut libc, mut vu0) = (LibcRandom::new(5), Vu0Random::default());
         let c = chr([0.0, 0.0, 300.0]);
-        d.spawn_landing(0, [0.0, 20.0, 300.0], &mut libc, &mut vu0, &COEF);
+        d.spawn_landing(0, [0.0, 20.0, 300.0], 1.0, &mut libc, &mut vu0, &COEF);
         // 3 low puffs, 8 thrown, 1 in the middle.
         assert_eq!(d.count(), 12);
         d.spawn_burst(0, &c, &mut libc, &mut vu0);

@@ -234,7 +234,7 @@ pub(crate) struct Emitter {
 }
 
 /// `Mtx_RotateX(m, identity, pitch)`, then `Mtx_RotateY(m, m, yaw)`.
-fn rot_xy(pitch: f32, yaw: f32) -> Mtx {
+pub(crate) fn rot_xy(pitch: f32, yaw: f32) -> Mtx {
     let (sx, cx) = pitch.sin_cos();
     let (sy, cy) = yaw.sin_cos();
     let rx: Mtx = [

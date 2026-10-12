@@ -156,6 +156,11 @@ pub struct BattleAssets {
     /// The streak fields' settings and their texture under each colour index's palette (`EftStreakMgr_Init`).
     pub(crate) streak_cfg: Option<crate::eft_streak::StreakCfg>,
     pub(crate) streak_textures: Vec<Option<usize>>,
+    /// The orb tail's settings, its streak image under each colour group's palette and the bursts' first images
+    /// (`EftOrbTailMgr_Init`).
+    pub(crate) orb_cfg: Option<crate::eft_orb_tail::OrbCfg>,
+    pub(crate) orb_textures: Vec<Option<usize>>,
+    pub(crate) orb_burst_textures: [Option<usize>; 3],
     pub(crate) glow_textures: crate::eft_glow::GlowTextures,
     /// `gEftStage->sprite`: the stage pack's entry 0x14 texture (the sun the transformation of kind 5 shows),
     /// among the effect textures, on a stage that has it.
@@ -507,6 +512,9 @@ pub fn load(
         glow_cfg: None,
         streak_cfg: None,
         streak_textures: Vec::new(),
+        orb_cfg: None,
+        orb_textures: Vec::new(),
+        orb_burst_textures: [None; 3],
         glow_textures: crate::eft_glow::GlowTextures::default(),
         stage_sun: None,
         stage_pack12: None,
@@ -755,6 +763,32 @@ pub fn load(
                 assets.effect_textures.push(t);
                 assets.effect_textures.len() - 1
             }));
+        }
+    }
+    // EftOrbTailMgr_Init: the parameters (0x25B), colours (0x25A), the streaks' texture set (0x259: its first
+    // image under each colour group's palette) and the bursts' sets and definitions.
+    assets.orb_cfg = crate::eft_orb_tail::OrbCfg::read(&common_fx);
+    if let Some(entry) =
+        bt3_data::eft_pack::common_entry(&common_fx, crate::eft_orb_tail::TEXTURE_ENTRY)
+        && let Ok(res) = TextureResource::parse(entry)
+        && let Some(img) = res.entries.first()
+    {
+        for clut in res.entries.iter().take(crate::eft_orb_tail::GROUPS) {
+            let t = bt3_data::gs::decode_sprite_texture_with_clut(img, clut).ok();
+            assets.orb_textures.push(t.map(|t| {
+                assets.effect_textures.push(t);
+                assets.effect_textures.len() - 1
+            }));
+        }
+    }
+    for (k, &n) in crate::eft_orb_tail::BURST_TEXTURES.iter().enumerate() {
+        if let Some(entry) = bt3_data::eft_pack::common_entry(&common_fx, n)
+            && let Ok(res) = TextureResource::parse(entry)
+            && let Some(e) = res.entries.first()
+            && let Ok(t) = bt3_data::gs::decode_sprite_texture(e)
+        {
+            assets.orb_burst_textures[k] = Some(assets.effect_textures.len());
+            assets.effect_textures.push(t);
         }
     }
     // EftTransformMgr_Init.
@@ -1722,6 +1756,7 @@ impl BattleAssets {
             transform: &self.transform_sets,
             glow: self.glow_cfg.as_ref(),
             streak: self.streak_cfg.as_ref(),
+            orb: self.orb_cfg.as_ref(),
             aura: self.aura_cfg.as_ref(),
             bolt: self.bolt_cfg.as_ref(),
             change_allowed: self.change_allowed,
@@ -2784,6 +2819,7 @@ impl Battle {
         let mut replay = std::mem::take(&mut self.replay);
         let menu_active = self.menu.as_ref().is_some_and(|m| m.active);
         let eft_cam_active = self.eft_cam.is_active();
+        let orb_burst_textures = self.assets.orb_burst_textures;
         self.with_roster(|roster, data, env| {
             // BtlChars_SampleInput, UpdateInput, UpdateMain and PostScene do nothing while paused or while a stage
             // loads; the effect scene runs with its time stopped.
@@ -2795,6 +2831,7 @@ impl Battle {
                 replay.update_viewer(viewer_pressed, paused, menu_active);
             }
             roster.scene.eft_cam_active = eft_cam_active;
+            roster.scene.orb_burst_textures = orb_burst_textures;
             roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
             if !paused && !loading {
                 roster.post_scene(data, env, &mut *input.libc);
@@ -3313,6 +3350,7 @@ impl Battle {
                         side_data(&self.assets.fighters[s]).fx_sets(),
                         &self.assets.impact_sets,
                         &self.assets.transform_sets,
+                        self.assets.orb_cfg.as_ref(),
                     )
                 }),
                 any_frozen: self.roster.chars.iter().any(|c| c.is_frozen()),
@@ -3435,6 +3473,12 @@ impl Battle {
                 scene
                     .streaks
                     .draw(cfg, &sc, &self.assets.streak_textures, &mut ot, &ctx);
+            }
+            if let Some(cfg) = &self.assets.orb_cfg {
+                self.roster
+                    .scene
+                    .orbs
+                    .draw(cfg, &self.assets.orb_textures, &mut ot, &ctx);
             }
             self.roster
                 .scene
@@ -9623,6 +9667,38 @@ mod tests {
             return;
         };
         assert!(connected && on > 0, "{on} {log:x?}");
+    }
+
+    #[test]
+    fn real_shot_techniques_hold_an_orb_and_raise_dust_at_the_victim() {
+        // Goku's 0x15F: once connected, the owner's event 0x100 makes the orb between his hands (its streaks
+        // flowing along the chain, its burst starting three emitters, the glow on), 0x200 bursts and kills it.
+        let (mut orbs, mut shown, mut glow, mut last) = (0, 0, false, 1);
+        let Some((log, ..)) = run_technique_watched(0, 3, 600, false, &mut |b| {
+            let s = &b.roster.scene;
+            orbs = orbs.max(s.orbs.count());
+            shown = shown.max(s.orbs.shown());
+            glow |= s.orbs.count() > 0 && s.glows.is_active(0);
+            last = s.orbs.count();
+        }) else {
+            return;
+        };
+        assert!(
+            orbs == 1 && shown > 0 && glow,
+            "{orbs} {shown} {glow} {log:x?}"
+        );
+        assert_eq!(last, 0);
+        let mut bursts = 0;
+        run_technique_watched(0, 3, 600, false, &mut |b| {
+            bursts = b.roster.scene.orb_bursts;
+        });
+        assert!(bursts >= 3 && bursts % 3 == 0, "{bursts}");
+        // Character 10's slot 4 (definition flag 0x400): the victim's event 4 raises dust at its node 3.
+        let mut target = 0;
+        run_technique_watched(0xA, 4, 600, false, &mut |b| {
+            target = b.roster.scene.target_bursts;
+        });
+        assert!(target > 0);
     }
 
     #[test]

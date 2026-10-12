@@ -360,13 +360,43 @@ pub(crate) enum TechReq {
         angle: f32,
     },
     StreakStop(u32),
+    /// `EftOrbTail_Create` under the handle the item keeps (with the fighter's aura type), `EftOrbTail_SetPos`,
+    /// `EftOrbTail_Burst`, `EftOrbTail_Kill`.
+    Orb {
+        handle: u32,
+        side: usize,
+    },
+    OrbPos {
+        handle: u32,
+        pos: [f32; 3],
+    },
+    OrbBurst(u32),
+    OrbKill(u32),
+    /// `EftGlow_Request(side, cmd)`: 0 start, 1 fade out, 2 remove.
+    Glow {
+        side: usize,
+        cmd: u8,
+    },
+    /// `EftGndDust_SpawnLandingScaled` for a fighter at a point.
+    Landing {
+        side: usize,
+        pos: [f32; 3],
+        scale: f32,
+    },
 }
 
-/// The requests of an update and the streak handles handed out.
+/// The requests of an update and the streak and orb handles handed out.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TechOut {
     pub(crate) reqs: Vec<TechReq>,
     next_handle: u32,
+}
+
+impl TechOut {
+    pub(crate) fn handle(&mut self) -> u32 {
+        self.next_handle = self.next_handle.wrapping_add(1).max(1);
+        self.next_handle
+    }
 }
 
 /// The sub-effects a connected rush runs on its victim's events (`EFT_RUSHSHOT_STAGE_FX` / flag 0x80000, `stage`
@@ -393,8 +423,7 @@ impl VictimFx {
             if let (Some(&kind), Some(&deg)) = (def.sub_kind.get(n), def.sub_angle.get(n)) {
                 let angle = crate::btl_tech_volley::eft_wrap(deg * 3.141_592_7 / 180.0);
                 if kind >= 0 {
-                    out.next_handle = out.next_handle.wrapping_add(1).max(1);
-                    let handle = out.next_handle;
+                    let handle = out.handle();
                     out.reqs.push(TechReq::Streak {
                         handle,
                         side,
@@ -416,6 +445,19 @@ impl VictimFx {
                 self.on = false;
             }
         }
+    }
+}
+
+impl VictimFx {
+    /// `EftShotTech_Term`'s part: every streak field started is stopped.
+    pub(crate) fn stop_all(&mut self, out: &mut TechOut) {
+        for h in &mut self.handles {
+            if *h != 0 {
+                out.reqs.push(TechReq::StreakStop(*h));
+                *h = 0;
+            }
+        }
+        self.on = false;
     }
 }
 
@@ -1793,6 +1835,7 @@ impl TechFx {
                     self.cam_stop |= std::mem::take(&mut s.cam_stop);
                     if s.dead() {
                         // EftShotTech_Term.
+                        s.term(&mut self.out);
                         w.chars[side].flags.set_held(0xA8);
                         self.shot_techs[side][slot].remove(k);
                     } else {
@@ -1875,7 +1918,9 @@ impl TechFx {
             // EftShotTech_Reset: the task dies without killing its emitters' objects (`EftEmit_TermState` does
             // nothing).
             if !self.shot_techs[side][slot].is_empty() {
-                self.shot_techs[side][slot].clear();
+                for mut s in self.shot_techs[side][slot].drain(..) {
+                    s.term(&mut self.out);
+                }
                 held.set_held(0xA8);
             }
             for mut r in self.rings[side][slot].drain(..) {

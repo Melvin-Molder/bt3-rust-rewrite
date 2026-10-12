@@ -333,6 +333,18 @@ pub(crate) struct Scene {
     pub se_out: Vec<i32>,
     /// `EftCam_IsActive`, set by the battle before the update.
     pub eft_cam_active: bool,
+    /// The orb tails of the shot techniques (`gEftOrbTail`, layer 3), and their burst emitters' handles in the
+    /// emitter module.
+    pub orbs: crate::eft_orb_tail::OrbTails,
+    orb_emitters: Vec<(u32, u32)>,
+    /// The connected shot techniques' target bursts, counted for the tests.
+    #[cfg(test)]
+    pub target_bursts: usize,
+    /// The orb bursts' emitters started, counted for the tests.
+    #[cfg(test)]
+    pub orb_bursts: usize,
+    /// The orb bursts' textures (set by the battle): each burst's texture set, first image.
+    pub orb_burst_textures: [Option<usize>; 3],
     /// The aura (`gEftAuraPool`, layer 3).
     pub auras: crate::eft_aura::Auras,
     /// The body lightning (`gEftBoltPool`, layer 3).
@@ -1026,6 +1038,9 @@ impl Scene {
     pub(crate) fn reset_untagged(&mut self) {
         self.streaks.reset();
         self.delay_se.clear();
+        self.orbs.reset();
+        self.orbs.emit.clear();
+        self.orb_emitters.clear();
     }
 
     /// `BtlScene_Reset(2 / 3)`: every effect task of a fighter is reset (its technique items end as their term
@@ -1141,6 +1156,46 @@ impl Scene {
                     }
                 }
                 TechReq::StreakStop(handle) => self.streaks.stop(handle),
+                TechReq::Orb { handle, side } => {
+                    if let Some(cfg) = w.env.orb {
+                        let c = &w.chars[side];
+                        let aura = crate::btl_fx::aura_type(c, w.data[side]);
+                        self.orbs.create(
+                            cfg,
+                            handle,
+                            side,
+                            aura,
+                            w.data[side].height(),
+                            c.pose.dir,
+                            w.libc,
+                        );
+                    }
+                }
+                TechReq::OrbPos { handle, pos } => {
+                    let (n2e, n3) = self.orbs.side_of(handle).map_or(([0.0; 3], [0.0; 3]), |s| {
+                        let o = &w.chars[s].obj;
+                        (o.node_pos(0x2E), o.node_pos(3))
+                    });
+                    self.orbs.set_pos(handle, pos, n2e, n3);
+                }
+                TechReq::OrbBurst(handle) => self.orbs.burst(handle),
+                TechReq::OrbKill(handle) => self.orbs.kill(handle),
+                TechReq::Glow { side, cmd } => {
+                    if let Some(cfg) = w.env.glow {
+                        let chars = &*w.chars;
+                        let node_pos = move |n: u32| chars[side].obj.node_pos(n);
+                        let gc = crate::btl_fx::glow_chr(&chars[side], w.data[side], &node_pos);
+                        self.glows.request(cfg, &gc, cmd, w.libc);
+                    }
+                }
+                TechReq::Landing { side, pos, scale } => {
+                    #[cfg(test)]
+                    {
+                        self.target_bursts += 1;
+                    }
+                    self.gdust
+                        .spawn_landing(side, pos, scale, w.libc, w.vu0, &w.env.fx.sin_coef);
+                }
             }
         }
         // The techniques' last setting of view 0's blur (EftBlast_UpdateBlur and the others).
@@ -1311,6 +1366,57 @@ impl Scene {
             self.streaks
                 .update(cfg, &sc, self.eft_cam_active, w.paused, w.vu0);
         }
+        // EftOrbTail_Update, then the burst emitters it starts and stops.
+        if let Some(cfg) = w.env.orb {
+            let oc = std::array::from_fn(|s| {
+                let c = &w.chars[s];
+                crate::eft_orb_tail::OrbChr {
+                    in_rush: crate::btl_tech_fx::in_rush_sequence(c),
+                    speed: c.pose.speed,
+                    fall_speed: c.pose.fall_speed,
+                }
+            });
+            self.orbs.update(cfg, &oc, w.paused, w.vu0);
+            for req in std::mem::take(&mut self.orbs.emit) {
+                match req {
+                    crate::eft_orb_tail::EmitReq::Start(b) => {
+                        let Some((def, def2)) =
+                            cfg.burst_set.ptcl.get(b.pair).and_then(Option::as_ref)
+                        else {
+                            continue;
+                        };
+                        let set = crate::eft::SetRef {
+                            side: b.side,
+                            list: crate::eft::ORB_LIST,
+                        };
+                        if let Some(id) = self.fx.spawn_ptcl(
+                            set,
+                            b.pair,
+                            def,
+                            def2,
+                            self.orb_burst_textures[b.burst],
+                            b.pos,
+                            b.dir,
+                            b.life,
+                            b.size,
+                            w.libc,
+                        ) {
+                            self.orb_emitters.push((b.handle, id));
+                            #[cfg(test)]
+                            {
+                                self.orb_bursts += 1;
+                            }
+                        }
+                    }
+                    crate::eft_orb_tail::EmitReq::Stop(h) => {
+                        if let Some(k) = self.orb_emitters.iter().position(|e| e.0 == h) {
+                            let (_, id) = self.orb_emitters.remove(k);
+                            self.fx.stop_ptcl(id);
+                        }
+                    }
+                }
+            }
+        }
         // EftDelaySe_Update: each counts down while its fighter is not stopped, then plays.
         let mut k = 0;
         while k < self.delay_se.len() {
@@ -1424,7 +1530,7 @@ impl Scene {
             .update_shots(w, &mut self.fx, &mut self.records, HIT_MAX);
         let fxw = FxWorld {
             sets: std::array::from_fn(|s| {
-                world_sets(w.data[s].fx_sets(), impact_sets, transform_sets)
+                world_sets(w.data[s].fx_sets(), impact_sets, transform_sets, w.env.orb)
             }),
             any_frozen: stopped,
             stopped: [0, 1].map(|s| crate::btl_tech_fx::stopped(w, s)),
@@ -2438,7 +2544,9 @@ pub(crate) fn world_sets<'a>(
     mut own: [Option<&'a SetAssets>; crate::eft::SET_LISTS],
     impact: &'a [crate::eft_impact::ImpactSet],
     transform: &'a [crate::eft_impact::ImpactSet],
+    orb: Option<&'a crate::eft_orb_tail::OrbCfg>,
 ) -> [Option<&'a SetAssets>; crate::eft::SET_LISTS] {
+    own[crate::eft::ORB_LIST] = orb.map(|o| &o.burst_set);
     for (k, s) in impact.iter().enumerate() {
         own[crate::eft_impact::FIRST_LIST + k] = Some(&s.assets);
     }

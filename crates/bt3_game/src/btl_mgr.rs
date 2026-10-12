@@ -950,7 +950,7 @@ fn ground_fx(
         if env.stage.water_level.is_some_and(|w| ground[1] > w) {
             dust.spawn_burst(side, &c, libc, vu0);
         } else {
-            dust.spawn_landing(side, ground, libc, vu0, coef);
+            dust.spawn_landing(side, ground, 1.0, libc, vu0, coef);
         }
     }
     if me.test_fx(0x32) {
