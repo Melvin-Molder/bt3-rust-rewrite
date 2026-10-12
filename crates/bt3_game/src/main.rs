@@ -46,6 +46,7 @@ mod eft_ribbon;
 mod eft_smoke;
 mod eft_storm;
 mod eft_water;
+mod eft_weather;
 mod fade;
 mod flash;
 mod font;

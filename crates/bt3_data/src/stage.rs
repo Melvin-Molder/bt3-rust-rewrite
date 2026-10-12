@@ -44,6 +44,20 @@ pub struct StageResource {
     pub smoke: Vec<StageSmoke>,
     /// The MEF0 block's list 0 (`BtlStage_GetFxResA2`): the geysers, used with stage flag 1.
     pub geysers: Vec<StageGeyser>,
+    /// `StgDataA.weather` (+0x60 / +0x64, `BtlStage_GetList60`): the first weather record.
+    pub weather: Option<StageWeather>,
+}
+
+/// `StgWeatherRec`: the weather particles' wind, size, flags and count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageWeather {
+    pub wind: [f32; 3],
+    pub size: f32,
+    /// Bit 0 of the record's flags: the weather is on.
+    pub on: bool,
+    /// Bit 0: fade near y = 0; bit 1: stay above the ground.
+    pub ptcl_flags: u16,
+    pub count: u16,
 }
 
 /// `EftGeyserRec`: a geyser's column (its y and z negated as `BtlStage_BindMef` does).
@@ -307,6 +321,28 @@ impl StageResource {
             })
             .collect::<io::Result<Vec<_>>>()?;
 
+        let weather = if read_count(bytes, data_offset + 0x60, "stage weather")? == 0 {
+            None
+        } else {
+            let o = resolve_relative(
+                bytes,
+                data_offset,
+                read_u32(bytes, data_offset + 0x64)?,
+                0x18,
+                "stage weather",
+            )?;
+            Some(StageWeather {
+                wind: [
+                    read_f32(bytes, o)?,
+                    read_f32(bytes, o + 4)?,
+                    read_f32(bytes, o + 8)?,
+                ],
+                size: read_f32(bytes, o + 0xC)?,
+                on: read_i32(bytes, o + 0x10)? & 1 != 0,
+                ptcl_flags: u16::from_le_bytes([bytes[o + 0x14], bytes[o + 0x15]]),
+                count: u16::from_le_bytes([bytes[o + 0x16], bytes[o + 0x17]]),
+            })
+        };
         let geysers = parse_mef_list(bytes, 0)?
             .into_iter()
             .map(|o| {
@@ -352,6 +388,7 @@ impl StageResource {
             water_fx,
             smoke,
             geysers,
+            weather,
         })
     }
 }
@@ -575,6 +612,7 @@ mod tests {
         assert!(stage.water_fx);
         assert_eq!(stage.smoke.len(), 1);
         assert!(stage.geysers.is_empty());
+        assert_eq!(stage.weather, None);
         let smoke = stage.smoke[0];
         assert_eq!((smoke.pos[1], smoke.damp), (-5.0, 0.9));
         assert_eq!(

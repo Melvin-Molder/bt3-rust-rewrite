@@ -13,6 +13,8 @@ use crate::rng::{LibcRandom, Vu0Random};
 pub(crate) struct StageFx {
     /// Kind 0.
     pub scroll: Option<crate::stg_scroll::Scroll>,
+    /// Kind 2.
+    pub weather: Option<crate::eft_weather::Weather>,
     /// Kind 3.
     pub storm: Option<crate::eft_storm::Storm>,
     /// Kind 4.
@@ -54,6 +56,9 @@ impl StageFx {
             if let Some(s) = &mut self.scroll {
                 s.load(libc);
             }
+            if let Some(w) = &mut self.weather {
+                w.reset(libc);
+            }
             if let Some(s) = &mut self.storm {
                 s.init(libc);
             }
@@ -67,6 +72,9 @@ impl StageFx {
         for _ in 0..std::mem::take(&mut self.resets_pending) {
             if let Some(s) = &mut self.scroll {
                 s.load(libc);
+            }
+            if let Some(w) = &mut self.weather {
+                w.reset(libc);
             }
             if let Some(s) = &mut self.storm {
                 s.reset(libc);
@@ -85,6 +93,9 @@ impl StageFx {
     ) {
         if let Some(s) = &mut self.scroll {
             s.update(paused);
+        }
+        if let Some(w) = &mut self.weather {
+            w.update(libc);
         }
         if let Some(s) = &mut self.storm {
             s.update(paused, libc);
@@ -121,16 +132,20 @@ impl StageFx {
         }
     }
 
-    /// The kinds' draws into the effect pass (the sheet is drawn with the stage; the storm's rain moves and
-    /// draws random numbers). `light`: the stage's light direction.
+    /// The kinds' draws into the effect pass (the sheet is drawn with the stage; the weather and the storm's rain
+    /// move while drawing and draw random numbers). `light`: the stage's light direction.
     pub(crate) fn draw(
         &mut self,
         ot: &mut OrderTable,
         ctx: &DrawCtx,
         chars: &[Chr; 2],
         light: V3,
+        paused: bool,
         libc: &mut LibcRandom,
     ) {
+        if let Some(w) = &mut self.weather {
+            w.draw(ot, ctx, paused, libc);
+        }
         if let Some(s) = &mut self.storm {
             s.draw(ot, ctx, libc);
         }

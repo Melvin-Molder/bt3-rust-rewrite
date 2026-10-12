@@ -130,6 +130,8 @@ pub struct BattleAssets {
     pub(crate) stage_pack12: Option<Vec<usize>>,
     /// Stage pack entry 0xE's textures (the storm's) among the effect textures.
     pub(crate) stage_pack14: Option<Vec<usize>>,
+    /// Stage pack entry 0xB's textures (the weather's) among the effect textures.
+    pub(crate) stage_pack11: Option<Vec<usize>>,
     /// The boundary wall's parameters and texture (stage pack entries 0x15..0x17), on a stage with them.
     pub(crate) bound: Option<(bt3_data::stage::StageBound, Option<usize>)>,
     /// The scrolling sheet (stage pack entry 7) and its first texture among the stage textures.
@@ -284,6 +286,7 @@ pub fn load(
         nav,
         pack12,
         pack14,
+        pack11,
         bound,
         scroll,
     } = load_stage(read, setup.stage)?;
@@ -351,6 +354,7 @@ pub fn load(
         dust_textures: Vec::new(),
         stage_pack12: None,
         stage_pack14: None,
+        stage_pack11: None,
         bound: None,
         scroll,
         fighters: Vec::new(),
@@ -442,6 +446,7 @@ pub fn load(
     }
     assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
     assets.stage_pack14 = pack14.map(|t| assets.push_effect_textures(t));
+    assets.stage_pack11 = pack11.map(|t| assets.push_effect_textures(t));
     assets.bound = bound.map(|(p, t)| (p, assets.push_effect_textures(t).first().copied()));
     for (index, side) in setup.sides.into_iter().enumerate() {
         let load = SideLoad {
@@ -764,6 +769,8 @@ pub(crate) struct LoadedStage {
     pack12: Option<Vec<RgbaTexture>>,
     /// Stage pack entry 0xE's textures (`EftStorm_Init`), when the entry is not empty.
     pack14: Option<Vec<RgbaTexture>>,
+    /// Stage pack entry 0xB's textures (`EftWeather_Init`), when the entry is not empty.
+    pack11: Option<Vec<RgbaTexture>>,
     /// `EftBoundMgr_Init`: the parameters (entry 23), colour (22) and textures (21), when all three are there.
     bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
     /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
@@ -820,6 +827,7 @@ fn load_stage(
         ))
     };
     let pack14 = entry_textures(0xE)?;
+    let pack11 = entry_textures(0xB)?;
     let pack12 = if entry_size(0x12) > 0 {
         let res = TextureResource::parse(pack_section(&stage_file, 0x12).map_err(error)?)
             .map_err(error)?;
@@ -870,6 +878,7 @@ fn load_stage(
         cuts,
         pack12,
         pack14,
+        pack11,
         bound,
         scroll,
         collision: StageCollision::parse(&stage_file).map_err(error)?,
@@ -1199,6 +1208,13 @@ impl BattleAssets {
     pub(crate) fn new_stage_fx(&self) -> crate::stage_fx::StageFx {
         let mut fx = crate::stage_fx::StageFx::default();
         fx.scroll = self.new_scroll();
+        // EftWeather_Init: the record on, the textures of pack entry 0xB.
+        fx.weather = self
+            .stage
+            .weather
+            .as_ref()
+            .zip(self.stage_pack11.clone())
+            .and_then(|(rec, t)| crate::eft_weather::Weather::new(rec, t));
         // EftStorm_Init: the textures of pack entry 0xE.
         fx.storm = self.stage_pack14.clone().map(crate::eft_storm::Storm::new);
         fx.smoke = self.new_smoke();
@@ -1242,6 +1258,7 @@ impl BattleAssets {
         self.nav = s.nav;
         self.stage_pack12 = s.pack12.map(|t| self.push_effect_textures(t));
         self.stage_pack14 = s.pack14.map(|t| self.push_effect_textures(t));
+        self.stage_pack11 = s.pack11.map(|t| self.push_effect_textures(t));
         self.bound = s
             .bound
             .map(|(p, t)| (p, self.push_effect_textures(t).first().copied()));
@@ -2228,10 +2245,14 @@ impl Battle {
             let demo = self.demo.is_active();
             // Layer 0's stage effects, then the others.
             let roster = &mut self.roster;
-            roster
-                .scene
-                .stage
-                .draw(&mut ot, &ctx, &roster.chars, self.light_dir, &mut *libc);
+            roster.scene.stage.draw(
+                &mut ot,
+                &ctx,
+                &roster.chars,
+                self.light_dir,
+                self.seq.paused,
+                &mut *libc,
+            );
             self.roster
                 .scene
                 .fx
@@ -5308,6 +5329,50 @@ mod tests {
         let states = battle.roster.scene.stage.geysers.as_ref().unwrap().states();
         assert!(states.iter().all(|&s| s != 0), "{states:?}");
         assert!(columns > 0);
+    }
+
+    #[test]
+    fn real_weather_drifts_on_its_stages() {
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let read = battle.loader.as_mut().unwrap();
+        let stages: Vec<i32> = (0..0x27)
+            .filter(|&s| {
+                load_stage(read, s)
+                    .ok()
+                    .is_some_and(|st| st.pack11.is_some() && st.stage.weather.is_some_and(|w| w.on))
+            })
+            .collect();
+        assert_eq!(stages, [1, 5, 8, 14, 19, 21, 25]);
+        let mut setup = BattleSetup::default();
+        setup.stage = stages[0];
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let textures = battle.assets.stage_pack11.clone().unwrap();
+        assert!(battle.roster.scene.stage.weather.is_some());
+        let mut libc = LibcRandom::new(7);
+        let mut random = GameRandom::from_key(&[7]);
+        let mut drawn = 0;
+        for _ in 0..60 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            drawn += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture.is_some_and(|i| textures.contains(&i)))
+                .count();
+        }
+        assert!(drawn > 0);
     }
 
     #[test]
