@@ -85,6 +85,8 @@ pub(crate) struct DemoCam {
     attached: Option<usize>,
     chr_base: bool,
     base: Option<Mtx>,
+    /// `scaleHeight` (`DemoCam_SetScaleHeight`): a body-changed fighter's cut has its height scaled.
+    pub(crate) scale_height: bool,
 }
 
 /// `gEftCam`: a technique's camera animation on the demo camera, timed by its fighter's rush sequence.
@@ -223,8 +225,9 @@ impl DemoCam {
     }
 
     /// `DemoCam_Update` for an animation: advance by 2.0 (holding the end, stopping there for a stage cut), take
-    /// the attached fighter's node 0 as the base, then the view: rotations X, Y, Z, the position, the base, inverted.
-    pub(crate) fn update(&mut self, base: Option<Mtx>, paused: bool) -> Option<View> {
+    /// the attached fighter's node 0 as the base, then the view: rotations X, Y, Z, the position (its height times
+    /// `y_scale`), the base, inverted.
+    pub(crate) fn update(&mut self, base: Option<Mtx>, paused: bool, y_scale: f32) -> Option<View> {
         let anim = self.anim.as_ref()?;
         if self.flags & DEMO_AUTO != 0 && !paused {
             let t = self.time + 2.0;
@@ -257,7 +260,7 @@ impl DemoCam {
             &mul(&rotate_x(rot[0]), &rotate_y(rot[1])),
             &rotate_z(rot[2]),
         );
-        camera[3] = [pose[0], pose[1], pose[2], 1.0];
+        camera[3] = [pose[0], pose[1] * y_scale, pose[2], 1.0];
         let camera = mul(&camera, &self.base.unwrap_or(IDENTITY));
         Some(View::from_world_to_view(inverse_rt(&camera)))
     }
@@ -574,6 +577,7 @@ impl Battle {
                 if self.demo.is_active() {
                     self.demo.stop();
                 }
+                self.demo.scale_height = false;
             }
             _ => {}
         }
@@ -858,6 +862,7 @@ impl Battle {
                     // BtlCtrl_StartWinPose: flag 0xF1 forces action 2.
                     self.roster.chars[side].flags.set(0xF1);
                     self.play_fighter_cut(side, 1);
+                    self.demo.scale_height = true;
                 } else {
                     // BtlCtrl_StartLosePose: flag 0xF2 forces action 3.
                     self.roster.chars[side].flags.set(0xF2);

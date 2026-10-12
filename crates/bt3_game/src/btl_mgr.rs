@@ -895,9 +895,84 @@ fn coll_update_ground(me: &mut Chr, data: &SideData, env: &Env) {
     }
 }
 
+/// `BtlCam_TraceStage` with `StgCol_TraceSphere`: a sphere of radius 2 swept from the target (started two radii
+/// behind it) to the eye through the target's zone, then the eye's when they differ; the camera stands where it
+/// first touches a triangle the camera may not pass (not `POLY_NO_SOLID` / `POLY_NO_CAMERA`), with the fraction of
+/// the way, else at the eye.
+pub(crate) fn trace_camera(env: &Env, eye: [f32; 3], target: [f32; 3]) -> ([f32; 3], Option<f32>) {
+    use bt3_data::stage_col::{POLY_NO_CAMERA, POLY_NO_SOLID};
+    const RADIUS: f32 = 2.0;
+    let (a, b) = (target, eye);
+    let d = sub(b, a);
+    let len = length(d);
+    let dir = if len > 0.0 { scale3(d, 1.0 / len) } else { d };
+    let start = sub(a, scale3(dir, RADIUS * 2.0));
+    let sweep = crate::btl_blast::Sweep::new(start, b, RADIUS);
+    let bounds = crate::btl_blast::capsule_bounds(a, b, RADIUS);
+    let broken = env.broken();
+    let zone_a = env.col.find_zone_near(-1, a);
+    let zone_b = env.col.find_zone_near(-1, b);
+    let zones = if zone_a != zone_b {
+        vec![zone_a, zone_b]
+    } else {
+        vec![zone_a]
+    };
+    for zone in zones {
+        let mut best = sweep.length;
+        let mut found = None;
+        let (hit, _) = env
+            .col
+            .query_zone(zone, &bounds, broken, false, &mut |poly, v| {
+                if poly.flags & (POLY_NO_SOLID | POLY_NO_CAMERA) != 0 {
+                    return false;
+                }
+                match sweep.test_tri(&v, poly.nrm) {
+                    Some((pos, dist)) if dist < best => {
+                        best = dist;
+                        found = Some(pos);
+                        true
+                    }
+                    _ => false,
+                }
+            });
+        if hit && let Some(pos) = found {
+            let frac = if sweep.length > 0.0 {
+                best / sweep.length
+            } else {
+                0.0
+            };
+            return (pos, Some(frac));
+        }
+    }
+    (eye, None)
+}
+
+/// `ChrCam_TurnToOpponent`: a camera the stage hid turns its yaw towards the opponent from where it stands, the
+/// more the nearer the opponent (fully within 50, not from 1000, eased) and the nearer the hit to the target.
+fn turn_to_opponent(me: &Chr, opp: &Chr, hit_frac: f32, rot: &mut [f32; 3]) {
+    let d = sub(opp.snap_pos(6), me.cam.pos);
+    let yaw = d[0].atan2(d[2]);
+    let dist = crate::btl_chr::opp_distance(me, opp);
+    let mut t = if dist < 50.0 {
+        1.0
+    } else if dist < 1000.0 {
+        1.0 - (dist - 50.0) / 950.0
+    } else {
+        0.0
+    };
+    t = t * 2.0 - 1.0;
+    t = -t * t.abs() + t * 2.0;
+    t = t * 0.5 + 0.5;
+    t *= 1.0 - hit_frac;
+    if 0.0 < t {
+        let w = crate::btl_input::wrap_angle;
+        rot[1] = w(rot[1] + w(yaw - rot[1]) * t);
+    }
+}
+
 /// `ChrCam_Update`: the wanted pose (last frame's with flag 0xCC, the cut, the fixed camera with flags 0xDC /
 /// 0xB8, the lock-on camera or the free one), the shake, the stage's horizontal limit, the smoothing by
-/// `ChrCam_GetRate`, the eye kept behind the head (follow cameras). No stage trace.
+/// `ChrCam_GetRate`, the eye kept behind the head (follow cameras), the stage trace (`BtlCam_TraceStage`).
 fn cam_update(
     me: &mut Chr,
     opp: &Chr,
@@ -909,7 +984,9 @@ fn cam_update(
     let height = data.height();
     let time_stopped = env.gate.time_stopped;
     let mut keep_behind = false;
-    let (mut eye, rot, mut target);
+    // The cameras that turn to the opponent when the stage hides the eye (ChrCam_TurnToOpponent).
+    let mut turn = false;
+    let (mut eye, mut rot, mut target);
     if me.flags.test(0xCC) {
         (eye, rot, target) = (me.cam.pos, me.cam.rot, me.cam.target);
         if me.flags.test_prev(0xD3) {
@@ -922,6 +999,7 @@ fn cam_update(
         (eye, rot, target, ofs) = crate::chr_cam::calc_fixed(me, opp, data, opp_data);
         me.cam.yaw_ofs = ofs;
         eye[1] += crate::chr_cam::bob(me, time_stopped);
+        turn = true;
     } else if me.flags.test(5) {
         (eye, rot, target) = crate::battle::lock_on_camera(&crate::battle::LockOn {
             pos: me.pose.pos,
@@ -932,12 +1010,14 @@ fn cam_update(
             stage_bottom: env.stage.bounds.bottom,
             yaw: me.cam.yaw,
             side: me.cam.side,
+            dist_mode: me.cam.dist_mode,
         });
         eye[1] += crate::chr_cam::bob(me, time_stopped);
         keep_behind = true;
+        turn = true;
     } else {
         // ChrCam_CalcFree.
-        let (ofs, pitch) = crate::battle::camera_offset(height);
+        let (ofs, pitch) = crate::battle::camera_offset(height, me.cam.dist_mode);
         let look = [0.0, -(height * 0.7), 0.0];
         let p = me.pose.pos;
         let (s, c) = me.cam.yaw.sin_cos();
@@ -990,8 +1070,13 @@ fn cam_update(
         let head = me.obj.node_pos(0x30);
         crate::battle::keep_behind_head(head, height, &mut me.cam.eye, rot);
     }
-    // BtlCam_TraceStage is not ported: the camera stands at its eye.
-    me.cam.pos = me.cam.eye;
+    let (pos, frac) = trace_camera(env, me.cam.eye, me.cam.target);
+    me.cam.pos = pos;
+    if let Some(frac) = frac
+        && turn
+    {
+        turn_to_opponent(me, opp, frac, &mut rot);
+    }
     if smooth {
         let d: [f32; 3] =
             std::array::from_fn(|k| crate::btl_input::wrap_angle(rot[k] - me.cam.rot[k]));

@@ -31,6 +31,8 @@ pub struct ColPoly {
 
 /// `STGCOL_POLY_NO_SOLID`: skipped by every query.
 pub const POLY_NO_SOLID: u32 = 0x0800_0000;
+/// `STGCOL_POLY_NO_CAMERA` with bits 0x40 and 0x20: also skipped by the camera sweep (`StgCol_SweepCb`).
+pub const POLY_NO_CAMERA: u32 = 0x0400_0000 | 0x40 | 0x20;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColMesh {

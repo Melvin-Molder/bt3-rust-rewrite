@@ -1714,8 +1714,36 @@ impl Battle {
                     self.roots[side]
                 }
             });
-            if let Some(demo) = self.demo.update(base, paused) {
+            // A body-changed fighter's cut with scaleHeight: the height times the parameter's height / 1.1.
+            let y_scale = self.demo.attached().map_or(1.0, |side| {
+                if self.demo.scale_height && self.roster.chars[side].gauge.body_changed {
+                    self.assets.fighters[side].tables.params.height() / 1.1
+                } else {
+                    1.0
+                }
+            });
+            if let Some(demo) = self.demo.update(base, paused, y_scale) {
                 view = demo;
+                // The camera stops where the stage hides the attached fighter's body from it (BtlCam_TraceStage
+                // from the body to the eye).
+                if let Some(side) = self.demo.attached()
+                    && !self.loading
+                {
+                    let to = self.roster.chars[side].obj.body_sphere().0;
+                    let eye = view.eye();
+                    let mut moved = None;
+                    self.with_roster(|_, _, env| {
+                        if let (pos, Some(_)) = crate::btl_mgr::trace_camera(env, eye, to) {
+                            moved = Some(pos);
+                        }
+                        false
+                    });
+                    if let Some(pos) = moved {
+                        let mut camera = inverse_rt(&view.world2view);
+                        camera[3] = [pos[0], pos[1], pos[2], 1.0];
+                        view = View::from_world_to_view(inverse_rt(&camera));
+                    }
+                }
             }
         }
         // BtlChars_EndFrame (not while a stage loads): BtlChange_Update runs even while paused.
@@ -1900,12 +1928,19 @@ pub(crate) struct LockOn {
     pub stage_bottom: f32,
     pub yaw: f32,
     pub side: f32,
+    /// The distance preset (`cam->distMode`).
+    pub dist_mode: i32,
 }
 
-/// `ChrCam_GetOffset` for distance preset 0: the offset behind the fighter and the pitch.
-pub(crate) fn camera_offset(height: f32) -> ([f32; 3], f32) {
+/// `ChrCam_GetOffset`: the offset behind the fighter and the pitch of distance preset `mode` (0..2, SELECT steps
+/// it).
+pub(crate) fn camera_offset(height: f32, mode: i32) -> ([f32; 3], f32) {
     let dist = (height * 0.5 + 1.0).max(10.0);
-    ([0.0, -dist * 1.2, -dist * 2.4], height * -0.001 + -0.05)
+    match mode {
+        1 => ([0.0, -dist * 1.5, -dist * 2.8], height * -0.001 + -0.06),
+        2 => ([0.0, -dist * 2.0, -dist * 3.3], height * -0.001 + -0.1),
+        _ => ([0.0, -dist * 1.2, -dist * 2.4], height * -0.001 + -0.05),
+    }
 }
 
 /// `ChrCam_CalcLockOn`: returns the eye, the rotation (pitch, yaw, 0) and the target.
@@ -1925,7 +1960,7 @@ pub(crate) fn lock_on_camera(cam: &LockOn) -> ([f32; 3], [f32; 3], [f32; 3]) {
         scale3(to_opp, 1.0 / len)
     };
     let mut target = [0.0, -(scale * 0.7), 0.0];
-    let (ofs, mut base) = camera_offset(scale);
+    let (ofs, mut base) = camera_offset(scale, cam.dist_mode);
     let mut ofs = sub(ofs, target);
     let mut u = if len < 0.0 {
         0.0
@@ -2268,9 +2303,17 @@ mod tests {
             stage_bottom: 1000.0,
             yaw: 0.0,
             side: 0.0,
+            dist_mode: 0,
         };
         let (eye, rot, target) = lock_on_camera(&cam);
         assert!(eye[2] < 0.0 && eye[1] < 0.0 && eye[0].abs() < 1e-5);
+        // The farther presets stand farther back.
+        let far = lock_on_camera(&LockOn {
+            dist_mode: 2,
+            ..cam
+        })
+        .0;
+        assert!(far[2] < eye[2] && far[1] < eye[1]);
         assert_eq!(target, [0.0, -14.0, 0.0]);
         assert_eq!(rot[1], 0.0);
         assert!(rot[0] < 0.0);
@@ -4693,6 +4736,27 @@ mod tests {
         battle.restart(&mut sounds);
         assert_eq!(battle.assets.stage_id, from);
         assert_eq!(battle.assets.stage.stage_id, from);
+    }
+
+    #[test]
+    fn real_camera_stops_at_the_stage() {
+        // An eye below the ground (+Y is down) is brought up to where a sphere swept from the target first meets
+        // the floor; one in the open stays where it is.
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        battle.with_roster(|_, _, env| {
+            let target = [0.0, -50.0, 0.0];
+            let (pos, frac) = crate::btl_mgr::trace_camera(env, [0.0, 500.0, 0.0], target);
+            let frac = frac.expect("the floor stops the camera");
+            assert!(pos[1] < 50.0 && 0.0 < frac && frac < 1.0, "{pos:?} {frac}");
+            let open = [0.0, -150.0, -60.0];
+            assert_eq!(
+                crate::btl_mgr::trace_camera(env, open, target),
+                (open, None)
+            );
+            false
+        });
     }
 
     #[test]

@@ -360,6 +360,8 @@ pub(crate) struct ChrCam {
     pub rot: [f32; 3],
     pub target: [f32; 3],
     pub rate: f32,
+    /// `distMode`: the follow distance preset (0..2; `BattleSide_GetOptionA`, the save's 0 by default).
+    pub dist_mode: i32,
     pub shake: crate::chr_cam::CamShake,
     /// `shakeOn`: the side's shake option is on (`BattleSide_GetOptionB == 0`); also the swing.
     pub shake_on: bool,
@@ -3322,6 +3324,10 @@ pub(crate) fn cam_side_limit(data: &SideData) -> f32 {
 
 /// `ChrCam_UpdateInput` with the lock-on (`ChrCam_UpdateLockOnYaw`) and free (`ChrCam_UpdateFreeYaw`) yaw.
 pub(crate) fn cam_update_input(me: &mut Chr, opp: &Chr, data: &SideData) {
+    // SELECT steps the distance preset.
+    if me.input.is_pressed(0x80_0000) {
+        me.cam.dist_mode = (me.cam.dist_mode + 1) % 3;
+    }
     if me.flags.test(5) {
         let mut step = wrap_angle(opp_yaw(me, opp) - me.cam.yaw);
         if !me.flags.test(0xCD) {

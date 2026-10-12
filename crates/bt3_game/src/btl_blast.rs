@@ -435,7 +435,7 @@ fn rotate_y(v: [f32; 3], angle: f32) -> [f32; 3] {
 }
 
 /// `ColBounds_OfCapsule`.
-fn capsule_bounds(a: [f32; 3], b: [f32; 3], r: f32) -> ColBox {
+pub(crate) fn capsule_bounds(a: [f32; 3], b: [f32; 3], r: f32) -> ColBox {
     let mut out = ColBox {
         min: [f32::MAX; 3],
         max: [-f32::MAX; 3],
@@ -1996,15 +1996,15 @@ fn spheres_vs_fighter(chr: &Chr, s: &Shape) -> Option<([f32; 3], [f32; 3], f32)>
 }
 
 /// `ColSweep`: a sphere moved along a unit direction (`ColSweep_FromCapsule`).
-struct Sweep {
+pub(crate) struct Sweep {
     start: [f32; 3],
     radius: f32,
     dir: [f32; 3],
-    length: f32,
+    pub length: f32,
 }
 
 impl Sweep {
-    fn new(a: [f32; 3], b: [f32; 3], radius: f32) -> Self {
+    pub(crate) fn new(a: [f32; 3], b: [f32; 3], radius: f32) -> Self {
         let delta = sub(b, a);
         let length = dot(delta, delta).sqrt();
         let dir = if length > 0.0 {
@@ -2022,7 +2022,7 @@ impl Sweep {
 
     /// `ColSweep_TestTri`: the distance travelled until the sphere first touches the triangle (face, then corners,
     /// then edges) and the centre there; back-facing or parallel triangles are ignored. Not limited to the length.
-    fn test_tri(&self, v: &[[f32; 3]; 3], nrm: [f32; 4]) -> Option<([f32; 3], f32)> {
+    pub(crate) fn test_tri(&self, v: &[[f32; 3]; 3], nrm: [f32; 4]) -> Option<([f32; 3], f32)> {
         let (c, r, dir) = (self.start, self.radius, self.dir);
         let n = [nrm[0], nrm[1], nrm[2]];
         if dot(dir, n) > -0.001 {
