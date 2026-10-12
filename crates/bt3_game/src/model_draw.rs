@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use bevy::asset::{RenderAssetUsages, load_internal_asset, uuid_handle};
-use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{ClearColorConfig, RenderTarget};
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::prelude::*;
@@ -607,6 +607,8 @@ pub fn add_to(app: &mut App) {
 
 /// The 2D layer shown on the window: the frame buffers and the quads.
 pub const DISPLAY_LAYER: usize = 1;
+/// The HUD's layer: drawn into the frame after the scene and the post pass.
+const HUD_LAYER: usize = 3;
 
 /// The two frame buffers the 3D passes draw into: one is drawn to, the other keeps the frame `ScrXfade_PostDraw`
 /// captured last.
@@ -618,6 +620,14 @@ pub struct FrameBuffers {
     swap: bool,
 }
 
+impl FrameBuffers {
+    /// The buffer the frame is drawn into.
+    pub fn current(&self) -> Handle<Image> {
+        self.images[self.current].clone()
+    }
+}
+
+/// A camera drawing into the current frame buffer: the scene's, then (after the post pass) the HUD's.
 #[derive(Component)]
 pub struct SceneCamera;
 
@@ -637,10 +647,22 @@ fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         ))
     });
     commands.spawn((Camera2d, SceneCamera, RenderTarget::from(images[0].clone())));
+    // The HUD after the post pass's cameras (orders 1..8), the window last.
     commands.spawn((
         Camera2d,
         Camera {
-            order: 1,
+            order: 20,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        SceneCamera,
+        RenderTarget::from(images[0].clone()),
+        RenderLayers::layer(HUD_LAYER),
+    ));
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: 30,
             ..default()
         },
         RenderLayers::layer(DISPLAY_LAYER),
@@ -934,6 +956,7 @@ pub fn sync_hud(
             Mesh2d(meshes.add(mesh)),
             MeshMaterial2d(material(index, prim, &mut textures)),
             Transform::default(),
+            RenderLayers::layer(HUD_LAYER),
         ));
     }
 }
@@ -1006,6 +1029,7 @@ fn sync_hud_layer(
         Mesh2d(meshes.add(mesh)),
         MeshMaterial2d(material),
         Transform::default(),
+        RenderLayers::layer(HUD_LAYER),
     ));
 }
 

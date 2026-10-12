@@ -77,6 +77,8 @@ mod mcflow;
 mod menu_res;
 mod model_draw;
 mod movie;
+mod post;
+mod post_draw;
 mod rng;
 mod save;
 mod scr_warp;
@@ -85,6 +87,7 @@ mod sound;
 mod stage_draw;
 mod stage_fx;
 mod stg_amb;
+mod stg_blur;
 mod stg_obj;
 mod stg_rigid;
 mod stg_scroll;
@@ -236,6 +239,8 @@ struct Game {
     effects: Vec<eft::EffectTri>,
     /// What `StgFx_DrawPre` draws between the stage and the fighters (the back tints).
     under_effects: Vec<eft::EffectTri>,
+    /// `StgFx_DrawPost`'s redraws of the frame (the radial blur).
+    post_ops: Vec<post::PostOp>,
     /// The effect textures whose texels changed this frame (the draw writes them again).
     effect_updates: Vec<usize>,
     /// The HUD sheets of the battle and this frame's HUD sprites.
@@ -444,6 +449,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             effect_textures: Vec::new(),
             effects: Vec::new(),
             under_effects: Vec::new(),
+            post_ops: Vec::new(),
             effect_updates: Vec::new(),
             hud_textures: Vec::new(),
             hud_prims: Vec::new(),
@@ -502,11 +508,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 model_draw::sync_effects,
                 model_draw::sync_hud,
                 model_draw::sync_frame_buffers,
+                post_draw::sync_post.after(model_draw::sync_frame_buffers),
                 apply_volumes,
             )
                 .chain(),
         );
     model_draw::add_to(&mut app);
+    post_draw::add_to(&mut app);
     if log_fps {
         app.add_plugins((
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
@@ -1082,6 +1090,7 @@ fn run_frames(
                 game.stage_batches = frame.stage;
                 game.effects = frame.effects;
                 game.under_effects = frame.under;
+                game.post_ops = frame.post;
                 game.effect_updates.clear();
                 for (i, t) in frame.texture_updates {
                     if let Some(slot) = game.effect_textures.get_mut(i) {
@@ -1142,6 +1151,7 @@ fn leave_battle(
     game.stage_batches.clear();
     game.effects.clear();
     game.under_effects.clear();
+    game.post_ops.clear();
     game.hud_prims.clear();
     game.hud_layer = None;
     game.xfade_alpha = 0;
@@ -1195,6 +1205,7 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
     game.stage_batches.clear();
     game.effects.clear();
     game.under_effects.clear();
+    game.post_ops.clear();
     game.hud_prims.clear();
     game.hud_layer = None;
     game.scene = Scene::BattleLoad(Box::new(BattleLoad {

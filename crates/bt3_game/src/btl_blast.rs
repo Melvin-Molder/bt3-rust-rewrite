@@ -352,6 +352,9 @@ pub(crate) struct Scene {
     pub tints: crate::stg_tint::Tints,
     /// The full-screen flash and the blinding overlay (`gEftFlash`, `gEftBlind`, layer 3).
     pub flashes: crate::eft_flash::Flashes,
+    /// The radial blur of the two views (`gStgBlur`; a member of the screen effects' group, kept here for the
+    /// fighters and techniques that set it).
+    pub blurs: crate::stg_blur::Blurs,
 }
 
 /// A generator draw made outside the scene update.

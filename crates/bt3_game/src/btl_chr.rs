@@ -672,6 +672,8 @@ pub(crate) struct Chr {
     pub unk_ff0: i32,
     pub blind_timer: i32,
     pub blind_level: i32,
+    /// `filter`: the screen filter's (radial blur's) strength 0..1, by requests 9 / 0xA.
+    pub filter: f32,
     pub recover_presses: i32,
     pub react_count: [u8; 0x32],
     pub react_timer: [i8; 0x32],
@@ -843,6 +845,7 @@ impl Chr {
             unk_ff0: 0,
             blind_timer: 0,
             blind_level: 0,
+            filter: 0.0,
             recover_presses: 0,
             react_count: [0; 0x32],
             react_timer: [0; 0x32],

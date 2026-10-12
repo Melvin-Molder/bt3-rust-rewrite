@@ -1302,6 +1302,9 @@ pub struct BattleFrame {
     pub effects: Vec<EffectTri>,
     /// `StgFx_DrawPre`: what is drawn over the stage before the fighters (the back tints).
     pub under: Vec<EffectTri>,
+    /// `StgFx_DrawPost`: the frame redrawn through the work buffers after the effects, before the HUD (the
+    /// radial blur).
+    pub post: Vec<crate::post::PostOp>,
     /// Effect textures whose texels changed this frame (the reflecting surface's lit palettes).
     pub texture_updates: Vec<(usize, RgbaTexture)>,
 }
@@ -2757,6 +2760,14 @@ impl Battle {
             );
         }
         let (capture, xfade_alpha) = self.xfade.draw_pass();
+        // StgFx_DrawPost (nothing while a stage loads): StgBlur_DrawAll, the view shown (view 0 under the demo
+        // camera).
+        let post = if self.loading {
+            Vec::new()
+        } else {
+            let blur_view = if self.demo.is_active() { 0 } else { view_side };
+            self.roster.scene.blurs.draw(blur_view, &view.world2view)
+        };
         // StgFx_DrawOverlay: slots 3 and 2 over everything, then the finished slots go off.
         let front = if self.loading {
             Vec::new()
@@ -2789,6 +2800,7 @@ impl Battle {
             exit: self.seq.left.then_some(self.seq.reason),
             effects,
             under,
+            post,
             texture_updates,
         }
     }
@@ -4421,10 +4433,18 @@ mod tests {
         let mut seen = run(&mut battle, L2, 2);
         seen.extend(run(&mut battle, L2 | CROSS, 2));
         let mut min = before;
+        // Its request 9 blurs P1's view while it flies (BtlFx_UpdateScreenFilter), a sixth more each frame.
+        let mut filter = 0.0f32;
         for _ in 0..150 {
             seen.extend(run(&mut battle, 0, 1));
             min = min.min(gap(&battle));
+            filter = filter.max(battle.roster.chars[0].filter);
+            if battle.roster.chars[0].filter > 0.0 {
+                assert!(battle.roster.scene.blurs.is_on(0));
+            }
         }
+        assert_eq!(filter, 1.0);
+        assert!(!battle.roster.scene.blurs.is_on(0));
         eprintln!(
             "homing: {seen:X?} gap {before} -> min {min}, ki {ki} -> {}",
             battle.roster.chars[0].gauge.ki

@@ -152,6 +152,31 @@ pub(crate) fn stage_fx_request(me: &mut Chr, data: &SideData) {
     }
 }
 
+/// `BtlFx_UpdateScreenFilter`: request 9 raises the fighter's filter by a sixth a frame (and aims its view's blur
+/// along its facing), 0xA sets it full, else it falls by a third; its view's blur is that strong (alphas 8, 32,
+/// 128 at full), three passes.
+pub(crate) fn screen_filter(me: &mut Chr, blurs: &mut crate::stg_blur::Blurs) {
+    if me.test_fx(9) {
+        me.filter = (me.filter + 0.166_666_68).min(1.0);
+    } else if me.test_fx(0xA) {
+        me.filter = 1.0;
+    } else {
+        me.filter = (me.filter - 0.333_333_35).max(0.0);
+    }
+    let a = (me.filter * 8.0) as u8;
+    let b = (me.filter * 32.0) as u8;
+    let c = (me.filter * 128.0) as u8;
+    let view = me.player;
+    blurs.set_passes(view, 3);
+    blurs.set_color(view, 3, [0x80, 0x80, 0x80, 0x40]);
+    blurs.set_color(view, 0, [0x80, 0x80, 0x80, a]);
+    blurs.set_color(view, 1, [0x80, 0x80, 0x80, b]);
+    blurs.set_color(view, 2, [0x80, 0x80, 0x80, c]);
+    if me.test_fx(9) {
+        blurs.set_center(view, me.pose.dir, false);
+    }
+}
+
 /// `BtlFx_UpdateObjFlag80`: with parameter flag 0x200000, ability 0x79 shows model part 4 (object flag 0x80, the
 /// geometry on node 0x6F); without either it is cleared, but only while the object is drawn (flag 2).
 pub(crate) fn update_obj_flag80(me: &mut Chr, data: &SideData) {

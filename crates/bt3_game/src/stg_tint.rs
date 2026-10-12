@@ -99,6 +99,7 @@ impl Tints {
     }
 
     /// `StgTint_GetColor0`: slot 0's colour as the last back pass drew it (0 when off).
+    #[cfg(test)]
     pub(crate) fn color0(&self) -> [i32; 4] {
         self.color0
     }

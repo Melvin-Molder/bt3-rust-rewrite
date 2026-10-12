@@ -114,6 +114,10 @@
 !/crates/bt3_game/src/btl_snd.rs
 !/crates/bt3_game/src/stg_rigid.rs
 !/crates/bt3_game/src/stg_tint.rs
+!/crates/bt3_game/src/stg_blur.rs
+!/crates/bt3_game/src/post.rs
+!/crates/bt3_game/src/post_draw.rs
+!/crates/bt3_game/src/gs_post.wgsl
 !/crates/bt3_game/src/stg_amb.rs
 !/crates/bt3_game/src/stage_fx.rs
 !/crates/bt3_game/src/stg_scroll.rs
