@@ -119,6 +119,35 @@ impl EftObjs {
         }
     }
 
+    /// `EftObj_PlayAnim` (`BtlObjAnim_PlayModel`): the model's animation `anim` from frame 0, once (1) or looping
+    /// (2); a missing one stops the animation.
+    pub(crate) fn play_anim(&mut self, id: u32, anim: usize, mode: u8, m: &EffectModel) {
+        if anim >= MODEL_ANIMS {
+            return;
+        }
+        if let Some(o) = self.get_mut(id) {
+            o.obj.play(&m.data(), 0, anim, true);
+            o.mode = if o.obj.layers[0].motion.is_some() {
+                mode
+            } else {
+                PLAY_NONE
+            };
+        }
+    }
+
+    /// Where an object's model is.
+    pub(crate) fn model_of(&self, id: u32) -> Option<ModelRef> {
+        self.objs.iter().find(|o| o.id == id).map(|o| o.model)
+    }
+
+    /// `EftObj_IsAnimPlaying`.
+    pub(crate) fn is_anim_playing(&self, id: u32) -> bool {
+        self.objs
+            .iter()
+            .find(|o| o.id == id)
+            .is_some_and(|o| o.mode != PLAY_NONE)
+    }
+
     /// The objects, for drawing.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &EftObj> {
         self.objs.iter()

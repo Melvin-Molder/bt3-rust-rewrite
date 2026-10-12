@@ -9,8 +9,10 @@
 //! The volley drives its technique set's emitters but those of the phases its shots fire in; each shot drives the
 //! emitters of its (phase, node slot) pairs, from a copy of the volley's node slots (`EftBlastObj_UpdateParts`).
 //!
-//! Not ported: the models (drawing only), and techniques 0x26E / 0x26F, whose shots wait for their model's
-//! animation (their volley is not started).
+//! With definition flag 0x20000 each shot carries the pack's model (`EftBlastObj_CreateWithModel`), placed
+//! along its flight. Techniques 0x26E / 0x26F fire from node 0x36 with spread kind 0xB, their shots driving the
+//! phase 5 emitters on node slot 4 as well; their model plays its animation steps, which release the frozen,
+//! harmless shots of the other phases (the FIRE event starts step 2; its end lets the shot move).
 
 use std::io;
 
@@ -508,6 +510,9 @@ fn aim_update(
 // ---- the blast object (eft_blast_obj.c) ---------------------------------------------------------------------
 
 // EFT_BLASTOBJ_*.
+const B_MODEL: u32 = 0x1000;
+const B_ANIM: u32 = 0x2000;
+const B_FIRED: u32 = 0x4000;
 const B_ALIVE: u32 = 0x1;
 const B_STOP: u32 = 0x2;
 const B_DYING: u32 = 0x4;
@@ -545,6 +550,11 @@ pub(crate) struct Shot {
     sel: [(u8, u8); 2],
     sel_count: usize,
     emit: Option<EmitState>,
+    /// `EftBlastObjModel`: its model object, the animation step (-1 before the first) and the frames since it
+    /// started.
+    model: Option<u32>,
+    model_step: i32,
+    model_time: f32,
 }
 
 impl Shot {
@@ -600,7 +610,115 @@ impl Shot {
             sel: [sel, (0, 0)],
             sel_count: 1,
             emit: emit_state(data, src.slot),
+            model: None,
+            model_step: -1,
+            model_time: 0.0,
         }
+    }
+
+    /// `EftBlastObj_UpdateModel`: the model along the direction of flight; with flag ANIM its steps: step 0 at
+    /// once, 1 (looping) when 0 is over, 2 at the owner's FIRE event (the shot starts to hit), 3 when 2 is over
+    /// (it starts to move), 4 (looping) when 3 is over. While frozen the model does not pitch nor lift by its
+    /// offset (5.5 up, 0x26E's scaled, 0x26F's 7 times the scale).
+    fn update_model(
+        &mut self,
+        objs: &crate::eft_obj::EftObjs,
+        out: &mut crate::btl_tech_fx::TechOut,
+    ) {
+        use crate::battle::{Mtx, mul};
+        use crate::btl_obj::{rot_x, rot_y};
+        use crate::btl_tech_fx::TechReq;
+        let Some(handle) = self.model else {
+            return;
+        };
+        let s = self.scale;
+        let mut m: Mtx = [
+            [s, 0.0, 0.0, 0.0],
+            [0.0, s, 0.0, 0.0],
+            [0.0, 0.0, s, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let d = self.dir.map(|c| c.clamp(-1.0, 1.0));
+        if self.flags & B_ANIM != 0 {
+            let playing = objs.is_anim_playing(handle);
+            let (mut change, mut mode) = (false, 1);
+            match self.model_step {
+                i32::MIN..=-1 => {
+                    if self.model_time >= 0.0 {
+                        change = true;
+                        self.model_step += 1;
+                    }
+                }
+                0 => {
+                    if !playing {
+                        change = true;
+                        self.model_time = 0.0;
+                        mode = 2;
+                        self.model_step += 1;
+                    }
+                }
+                1 => {
+                    if self.flags & B_FIRED != 0 {
+                        self.model_time = 0.0;
+                        self.model_step += 1;
+                        change = true;
+                        self.flags &= !B_NO_HIT;
+                    }
+                }
+                2 => {
+                    if !playing {
+                        self.model_step += 1;
+                        self.model_time = 0.0;
+                        change = true;
+                        self.flags &= !B_FROZEN;
+                    }
+                }
+                3 => {
+                    if !playing {
+                        change = true;
+                        self.model_time = 0.0;
+                        mode = 2;
+                        self.model_step += 1;
+                    }
+                }
+                _ => {}
+            }
+            if change {
+                out.reqs.push(TechReq::ObjPlay {
+                    handle,
+                    anim: self.model_step.max(0) as usize,
+                    mode,
+                });
+            }
+            let frozen = self.flags & B_FROZEN != 0;
+            if !frozen {
+                m = mul(&m, &rot_x(eft_wrap(asin_c(d[1]))));
+            }
+            m = mul(&m, &rot_y(eft_wrap(d[0].atan2(d[2]) + PI_F)));
+            let mut pos = self.pos;
+            if !frozen {
+                let y = match self.src.def.id {
+                    0x26E => s * 5.5,
+                    0x26F => s * 7.0,
+                    _ => 5.5,
+                };
+                let ofs = apply(&m, [0.0, y, 0.0, 1.0]);
+                pos = add(pos, [ofs[0], ofs[1], ofs[2]]);
+            }
+            for k in 0..3 {
+                m[3][k] += pos[k];
+            }
+        } else {
+            let pitch = eft_wrap(asin_c(d[1]));
+            let yaw = eft_wrap(d[0].atan2(d[2]) + PI_F);
+            m = mul(&mul(&m, &rot_y(yaw)), &rot_x(pitch));
+            for k in 0..3 {
+                m[3][k] += self.pos[k];
+            }
+        }
+        out.reqs.push(TechReq::ObjMtx { handle, mtx: m });
+        out.reqs.push(TechReq::ObjVisible { handle, on: true });
+        self.model_time += 1.0;
     }
 
     /// `EftBlastObj_Update`: moves (to the owner's target when placed, else homing and by its velocity) unless
@@ -612,12 +730,17 @@ impl Shot {
         fx: &mut Modules,
         events: u32,
         cur_slot: i32,
+        objs: &crate::eft_obj::EftObjs,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) -> Option<HitRec> {
         let side = self.src.side;
         if stopped(w, side) {
             return None;
         }
         let def = self.src.def;
+        if self.flags & B_ANIM != 0 && events & EV_FIRE != 0 {
+            self.flags |= B_FIRED;
+        }
         self.nodes
             .update(&w.chars[side], w.data[side], &def, cur_slot, events);
         if self.delay <= 0.0 && def.flags & 2 == 0 && self.flags & (B_STUCK | B_FROZEN) == 0 {
@@ -651,8 +774,10 @@ impl Shot {
         if events & EV_ABORT != 0 {
             self.flags |= B_STOP;
         }
-        // EftBlastObj_UpdateParts: the emitters of its (phase, node slot) pairs, or of its phases on slot 5 (the
-        // model is not ported).
+        if self.flags & B_MODEL != 0 {
+            self.update_model(objs, out);
+        }
+        // EftBlastObj_UpdateParts: the emitters of its (phase, node slot) pairs, or of its phases on slot 5.
         if let Some(st) = &mut self.emit {
             let sel = &self.sel[..self.sel_count];
             update_parts(
@@ -858,14 +983,23 @@ impl Shots {
         }
     }
 
-    /// A fighter's blast objects reset (`EftBlastObj_Reset`).
-    pub(crate) fn reset_side(&mut self, fx: &mut Modules, side: usize) {
+    /// A fighter's blast objects reset (`EftBlastObj_Reset`), their models gone.
+    pub(crate) fn reset_side(
+        &mut self,
+        fx: &mut Modules,
+        side: usize,
+        out: &mut crate::btl_tech_fx::TechOut,
+    ) {
         self.list.retain_mut(|s| {
             if s.src.side != side {
                 return true;
             }
             if let Some(st) = &mut s.emit {
                 st.kill_all(fx);
+            }
+            if let Some(handle) = s.model.take() {
+                out.reqs
+                    .push(crate::btl_tech_fx::TechReq::ObjDestroy(handle));
             }
             false
         });
@@ -887,7 +1021,8 @@ impl Shots {
             .map(|s| &mut s.tag)
     }
 
-    /// The blast objects' updates: each one's record; a dead one is removed.
+    /// The blast objects' updates: each one's record; a dead one is removed (`EftBlastObj_TermModel`).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn update(
         &mut self,
         w: &mut World,
@@ -895,17 +1030,23 @@ impl Shots {
         events: [u32; 2],
         records: &mut Vec<HitRec>,
         max: usize,
+        objs: &crate::eft_obj::EftObjs,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) {
         let mut i = 0;
         while i < self.list.len() {
             let s = &mut self.list[i];
             let side = s.src.side;
-            if let Some(rec) = s.update(w, fx, events[side], self.cur_slot[side])
+            if let Some(rec) = s.update(w, fx, events[side], self.cur_slot[side], objs, out)
                 && records.len() < max
             {
                 records.push(rec);
             }
             if s.flags & B_ALIVE == 0 {
+                if let Some(handle) = s.model.take() {
+                    out.reqs
+                        .push(crate::btl_tech_fx::TechReq::ObjDestroy(handle));
+                }
                 self.list.remove(i);
             } else {
                 i += 1;
@@ -941,6 +1082,9 @@ const V_AIMED2: u32 = 0x10;
 const V_AIMED: u32 = 0x40;
 const V_FIRED: u32 = 0x100;
 const V_ID1C6: u32 = 0x200;
+const V_EXTRA: u32 = 0x400;
+const V_800: u32 = 0x800;
+const V_1000: u32 = 0x1000;
 
 /// `EftVolleyShot`: a fired shot's entry.
 #[derive(Clone, Copy, Debug, Default)]
@@ -979,15 +1123,20 @@ pub(crate) struct Volley {
 }
 
 impl Volley {
-    /// `EftVolley_Init`; `None` for techniques 0x26E / 0x26F (their shots follow a model animation).
+    /// `EftVolley_Init`: technique 0x1C6's two firing nodes, the model shots of definition flag 0x20000, the model
+    /// animation shots of techniques 0x26E / 0x26F.
     pub(crate) fn new(src: TechSrc, data: &SideData, set: &EmitSet) -> Option<Self> {
         let def = src.def;
+        let mut flags = if def.id == 0x1C6 { V_ID1C6 } else { 0 };
+        if def.flags & 0x2_0000 != 0 {
+            flags |= V_EXTRA;
+        }
         if matches!(def.id, 0x26E | 0x26F) {
-            return None;
+            flags |= V_800 | V_1000;
         }
         Some(Self {
             src,
-            flags: if def.id == 0x1C6 { V_ID1C6 } else { 0 },
+            flags,
             state: 0,
             speed: def.speed,
             homing: def.homing,
@@ -1062,6 +1211,7 @@ impl Volley {
         shots: &mut Shots,
         next_id: &mut u32,
         rand: &mut u32,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) {
         let side = self.src.side;
         if stopped(w, side) {
@@ -1107,7 +1257,7 @@ impl Volley {
                 _ => {}
             }
         }
-        let alive = self.update_shots(w, tables, events, requests, shots, next_id, rand);
+        let alive = self.update_shots(w, tables, events, requests, shots, next_id, rand, out);
         if !alive && self.flags & V_FIRED != 0 && self.volleys >= def.shots {
             self.flags |= V_ENDING;
         }
@@ -1117,7 +1267,8 @@ impl Volley {
             }
             self.flags |= V_ENDING;
         }
-        // EftVolley_UpdateParts: the shots' emitters are theirs.
+        // EftVolley_UpdateParts: the shots' emitters are theirs (with techniques 0x26E / 0x26F phase 5's too).
+        let skip_5 = self.flags & V_800 != 0;
         if let Some(st) = &mut self.emit {
             let (ending, kill) = (self.flags & V_ENDING != 0, self.flags & V_4 != 0);
             update_parts(
@@ -1132,7 +1283,12 @@ impl Volley {
                 self.pos,
                 self.dir,
                 self.scale,
-                is_part_deferred,
+                |set, kind, sub| {
+                    is_part_deferred(set, kind, sub)
+                        || (skip_5
+                            && set.groups[usize::from(kind)]
+                                .is_some_and(|g| set.parts[g.first + sub].phase() == 5))
+                },
             );
         }
         if next {
@@ -1164,6 +1320,7 @@ impl Volley {
         shots: &mut Shots,
         next_id: &mut u32,
         rand: &mut u32,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) -> bool {
         let side = self.src.side;
         // The phase and the event slot whose emitters the shot drives.
@@ -1188,7 +1345,7 @@ impl Volley {
             ts: w.time_stopped,
         };
         if phase >= 0 && (self.head_set.phase_mask >> phase) & 1 != 0 {
-            self.fire(w, tables, &mut rng, phase, slot, shots, next_id);
+            self.fire(w, tables, &mut rng, phase, slot, shots, next_id, out);
         }
         for i in 0..VOLLEY_SHOTS {
             let shot = &mut self.shots[i];
@@ -1252,7 +1409,8 @@ impl Volley {
     /// `EftVolley_Fire`: one shot (the definition's volley of them in phase 1) at the firing node (technique 0x1C6:
     /// nodes 0x1F and 0x2D) along the aim; phase 1's shots live the definition's time, spread round the aim and
     /// steered (the last of the motion marked as the technique's last hit); the other phases' shots are frozen
-    /// and harmless.
+    /// and harmless. Techniques 0x26E / 0x26F fire from node 0x36, spread by kind 0xB first, with the model's
+    /// animation steps, the last of the count marked last.
     #[allow(clippy::too_many_arguments)]
     fn fire(
         &mut self,
@@ -1263,6 +1421,7 @@ impl Volley {
         slot: u8,
         shots: &mut Shots,
         next_id: &mut u32,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) {
         let side = self.src.side;
         let def = self.src.def;
@@ -1287,8 +1446,23 @@ impl Volley {
                 }
                 self.nodes.node(1)
             };
-            self.shots[k].aim.pos = chr.obj.node_pos(node as u32);
             self.shots[k].aim.dir = self.aim;
+            if self.flags & V_1000 != 0 {
+                self.shots[k].aim.pos = chr.obj.node_pos(0x36);
+                spread(
+                    w,
+                    &tables.sin_coef,
+                    rng,
+                    side,
+                    &mut self.shots[k].aim.dir,
+                    0xB,
+                    0,
+                    self.fired,
+                    count,
+                );
+            } else {
+                self.shots[k].aim.pos = chr.obj.node_pos(node as u32);
+            }
             let mut life = 0.0;
             if phase == 1 {
                 life = def.life as f32 / 30.0;
@@ -1339,8 +1513,31 @@ impl Volley {
                 self.scale,
                 self.speed,
             );
+            if self.flags & V_EXTRA != 0 {
+                // EftBlastObj_InitModel: hidden until its first placing.
+                let handle = out.handle();
+                out.reqs.push(crate::btl_tech_fx::TechReq::ObjCreate {
+                    handle,
+                    model: crate::eft_obj::ModelRef {
+                        side,
+                        slot: self.src.slot as usize,
+                    },
+                });
+                shot.model = Some(handle);
+                shot.flags |= B_MODEL;
+            }
             self.shots[k].handle = Some(shot.id);
             self.shots[k].flags |= 1;
+            if self.flags & V_800 != 0 {
+                shot.sel[1] = (5, 4);
+                shot.sel_count = 2;
+            }
+            if self.flags & V_1000 != 0 {
+                shot.flags |= B_ANIM;
+                if self.fired >= count - 1 {
+                    shot.flags |= B_LAST;
+                }
+            }
             if phase == 1 {
                 if self.shots[k].flags & 2 != 0 {
                     shot.flags |= B_LAST;

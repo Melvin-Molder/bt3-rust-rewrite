@@ -1096,6 +1096,14 @@ impl Scene {
                 TechReq::ObjMtx { handle, mtx } => self.eft_objs.set_mtx(handle, mtx),
                 TechReq::ObjVisible { handle, on } => self.eft_objs.set_visible(handle, on),
                 TechReq::ObjDestroy(handle) => self.eft_objs.destroy(handle),
+                TechReq::ObjPlay { handle, anim, mode } => {
+                    let model = self.eft_objs.model_of(handle);
+                    if let Some(m) = model.and_then(|r| {
+                        w.data[r.side].tech_packs[r.slot].and_then(|p| p.model.as_ref())
+                    }) {
+                        self.eft_objs.play_anim(handle, anim, mode, m);
+                    }
+                }
                 TechReq::Landing { side, pos, scale } => {
                     #[cfg(test)]
                     {
@@ -1544,7 +1552,7 @@ impl Scene {
             w.vu0,
         );
         self.tech
-            .update_shots(w, &mut self.fx, &mut self.records, HIT_MAX);
+            .update_shots(w, &mut self.fx, &mut self.records, HIT_MAX, &self.eft_objs);
         let fxw = FxWorld {
             sets: std::array::from_fn(|s| {
                 world_sets(w.data[s].fx_sets(), impact_sets, transform_sets, w.env.orb)

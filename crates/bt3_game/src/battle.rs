@@ -8991,6 +8991,37 @@ mod tests {
     }
 
     #[test]
+    fn real_model_volleys_play_their_steps_and_hit() {
+        // Techniques 0x26E (character 49's ultimate) and 0x26F (character 116's): each shot carries the pack's
+        // model, shown at once and playing its steps (the once animations 0, 2, 3 and the looping 1, 4); the
+        // shots freed by the FIRE event's step hit (49's all of them; some of 116's, low from node 0x36, strike the
+        // ground), and the models go with the shots.
+        for chara in [49, 116] {
+            let (mut objs, mut shown, mut looped, mut last) = (0, 0, false, 1);
+            let Some((log, dmg, table, ..)) =
+                run_technique_watched(chara, 4, 600, false, &mut |b| {
+                    let o = &b.roster.scene.eft_objs;
+                    objs = objs.max(o.iter().count());
+                    shown = shown.max(o.iter().filter(|o| o.obj.flags & 2 != 0).count());
+                    looped |= o.iter().any(|o| o.mode == 2);
+                    last = o.iter().count();
+                })
+            else {
+                return;
+            };
+            assert!(objs > 0, "{chara}: {log:x?}");
+            assert!(shown > 0, "{chara}");
+            assert!(looped, "{chara}");
+            assert_eq!(last, 0, "{chara}");
+            if chara == 49 {
+                assert!(dmg >= table, "{chara}: {dmg} {table} {log:x?}");
+            } else {
+                assert!(dmg > 0, "{chara}: {log:x?}");
+            }
+        }
+    }
+
+    #[test]
     fn real_thrown_objects_show_their_models_and_rings() {
         // Definition flag 0x20000: characters 55's (0x162, held in the hand, mode 2) and 150's (0x1F3, mode 0)
         // thrown objects have a model object, shown while in use; flag 0x40000: characters 49's (0x167) and 115's

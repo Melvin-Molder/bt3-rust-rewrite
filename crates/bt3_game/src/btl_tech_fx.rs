@@ -415,6 +415,12 @@ pub(crate) enum TechReq {
         on: bool,
     },
     ObjDestroy(u32),
+    /// `EftObj_PlayAnim`: the model's animation, once (1) or looping (2).
+    ObjPlay {
+        handle: u32,
+        anim: usize,
+        mode: u8,
+    },
     /// `EftGlow_Request(side, cmd)`: 0 start, 1 fade out, 2 remove.
     Glow {
         side: usize,
@@ -2029,6 +2035,7 @@ impl TechFx {
                         &mut self.shots,
                         next_id,
                         &mut self.rand,
+                        &mut self.out,
                     );
                     if v.dead() {
                         if v.src().def.kind != 0 {
@@ -2111,7 +2118,7 @@ impl TechFx {
                 }
             }
         }
-        self.shots.reset_side(fx, side);
+        self.shots.reset_side(fx, side, &mut self.out);
         self.discs.reset_side(fx, side);
         self.rand = 0;
     }
@@ -2134,9 +2141,11 @@ impl TechFx {
         fx: &mut Modules,
         records: &mut Vec<HitRec>,
         max: usize,
+        objs: &crate::eft_obj::EftObjs,
     ) {
         self.shots.cur_slot = self.cur_slot;
-        self.shots.update(w, fx, self.events, records, max);
+        self.shots
+            .update(w, fx, self.events, records, max, objs, &mut self.out);
     }
 
     /// Layer 3's post-update of the blast objects.
