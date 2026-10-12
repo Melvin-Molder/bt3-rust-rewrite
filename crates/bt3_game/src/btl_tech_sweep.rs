@@ -377,7 +377,7 @@ const F_STARTED: u32 = 0x40;
 /// An `EftFollow` item (technique effect type 7, the steered dashes): from the FIRE event a record of two spheres
 /// at the fighter's node 3 now and last frame, as wide as the technique's scale times the set's trail width; the
 /// stop (END) or ABORT events end it once the set's end frames are over, and its end raises flag 0xA8, which ends
-/// the dash. The stage light (parameter flag 0x200) is not ported.
+/// the dash. With definition flag 0x200 it sets view 0's stage blur between its blur events.
 #[derive(Clone, Debug)]
 pub(crate) struct Follow {
     id: u32,
@@ -399,6 +399,11 @@ pub(crate) struct Follow {
     trail_width: f32,
     trail_time: f32,
     dead: bool,
+    /// `light` (flag `EFT_FOLLOW_LIGHT` while it rises): the stage blur's strength; this update's setting of view
+    /// 0's blur.
+    light: f32,
+    light_on: bool,
+    pub(crate) blur_out: Option<([u8; 3], [f32; 3])>,
 }
 
 impl Follow {
@@ -424,6 +429,9 @@ impl Follow {
             trail_width: head_set.width[0],
             trail_time: 0.0,
             dead: false,
+            light: 0.0,
+            light_on: false,
+            blur_out: None,
         }
     }
 
@@ -451,6 +459,7 @@ impl Follow {
         cur_slot: i32,
     ) -> Option<HitRec> {
         let side = self.src.side;
+        self.blur_out = None;
         if stopped(w, side) {
             return None;
         }
@@ -513,6 +522,31 @@ impl Follow {
                 self.width,
                 |_, _, _| false,
             );
+        }
+        // EftFollow_UpdateLight: the blur's on event (an index into 2, 4, .. 0x40; on 2 none) aims it from node
+        // 0x11 and starts its rise by tenths, its off event drops it; view 0's blur is set every frame.
+        if def.flags & 0x200 != 0 && def.blur_on != 2 {
+            const BITS: [u32; 6] = [2, 4, 8, 0x10, 0x20, 0x40];
+            let bit = |i: i32| {
+                usize::try_from(i)
+                    .ok()
+                    .and_then(|i| BITS.get(i))
+                    .copied()
+                    .unwrap_or(0)
+            };
+            if test(bit(def.blur_on)) {
+                self.light_on = true;
+                self.dir = aim_dir(w, side, w.chars[side].obj.node_pos(0x11));
+            }
+            if test(bit(def.blur_off)) {
+                self.light = 0.0;
+                self.light_on = false;
+            }
+            if self.light_on {
+                self.light = (self.light + 0.1).min(1.0);
+            }
+            let alphas = crate::btl_tech_fx::blur_alphas(self.light, [32.0, 64.0, 128.0]);
+            self.blur_out = Some((alphas, self.dir));
         }
         if next {
             self.state += 1;

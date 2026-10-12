@@ -1688,6 +1688,9 @@ impl TechFx {
                     {
                         records.push(rec);
                     }
+                    if f.blur_out.is_some() {
+                        self.blur = f.blur_out;
+                    }
                     if f.dead() {
                         // EftFollow_Term.
                         w.chars[side].flags.set_held(0xA8);

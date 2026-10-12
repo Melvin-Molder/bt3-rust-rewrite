@@ -6885,12 +6885,25 @@ mod tests {
         near: bool,
         watch: &mut dyn FnMut(&Battle),
     ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3], [i32; 4])> {
+        run_technique_prepared(chara, slot, frames, near, &mut |_| {}, watch)
+    }
+
+    /// `run_technique_watched` with `prepare` run on the battle once it is loaded.
+    fn run_technique_prepared(
+        chara: i32,
+        slot: i32,
+        frames: usize,
+        near: bool,
+        prepare: &mut dyn FnMut(&mut Battle),
+        watch: &mut dyn FnMut(&Battle),
+    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3], [i32; 4])> {
         use crate::btl_input::pad::{DOWN, L2, START, TRIANGLE, UP};
         let mut setup = BattleSetup::default();
         setup.sides[0].chara = chara;
         setup.sides[1].chara = if chara == 0 { 1 } else { 0 };
         setup.sides[1].pad = 1;
         let mut battle = real_battle(&setup)?;
+        prepare(&mut battle);
         let mut libc = LibcRandom::new(1);
         let mut random = GameRandom::from_key(&[1]);
         let pads = |a: u32| {
@@ -9787,6 +9800,36 @@ mod tests {
             target = b.roster.scene.target_bursts;
         });
         assert!(target > 0);
+    }
+
+    #[test]
+    fn real_follow_lights_the_stage_with_its_flag() {
+        // No follow technique (type 7) of the game has definition flag 0x200; character 61's 0x171 given it, with
+        // the blur on the fire event (index 1, 4) and off on the end event (index 2, 8), sets view 0's blur in
+        // between, as EftFollow_UpdateLight does.
+        let mut on = 0;
+        let Some((log, ..)) = run_technique_prepared(
+            0x3D,
+            2,
+            600,
+            false,
+            &mut |b| {
+                let t = &mut b.assets.fighters[0].tables.super_table;
+                t[1] |= 2;
+                t[0x15C] = 1;
+                t[0x15F] = 2;
+            },
+            &mut |b| on += usize::from(b.roster.scene.blurs.is_on(0)),
+        ) else {
+            return;
+        };
+        assert!(on > 0, "{log:x?}");
+        // Unpatched, nothing sets it.
+        let mut on = 0;
+        run_technique_watched(0x3D, 2, 600, false, &mut |b| {
+            on += usize::from(b.roster.scene.blurs.is_on(0))
+        });
+        assert_eq!(on, 0);
     }
 
     #[test]
