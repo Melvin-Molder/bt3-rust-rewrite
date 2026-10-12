@@ -14,6 +14,7 @@ mod btl_ki_obj;
 mod btl_menu;
 mod btl_mgr;
 mod btl_obj;
+mod btl_snd;
 mod btl_tech_disc;
 mod btl_tech_fx;
 mod btl_tech_ring;
@@ -715,6 +716,15 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 }
             }
             TitleSound::Effect(bank, id) => game.se.play_se(bank, id),
+            TitleSound::SeEx {
+                mask,
+                id,
+                volume,
+                pan,
+                handle,
+            } => game.se.play_se_ex(mask, id, volume, pan, 0, handle),
+            TitleSound::SeStop(handle) => game.se.stop_handle(handle),
+            TitleSound::SeStopBanks(mask) => game.se.stop_banks(mask),
             TitleSound::StreamSe(file_id) => {
                 stop_player(&mut game.stream_se, commands);
                 game.pending_stream_se = Some(decode_adx_file(game.iso_path.clone(), file_id));
@@ -966,6 +976,15 @@ fn run_frames(
                         have.extend_from_slice(&all[have.len()..]);
                     }
                 }
+                // The banks the battle loads (Snd_LoadBank / Snd_ReloadBank).
+                for (mask, file) in std::mem::take(&mut battle.assets.bank_requests) {
+                    match file.as_deref().map(se::LoadedBank::parse) {
+                        Some(Ok(bank)) => game.se.reload_bank(mask, bank),
+                        Some(Err(e)) => error!("sample bank {mask:#X}: {e}"),
+                        None => game.se.unload_bank(mask),
+                    }
+                }
+                let a = &battle.assets;
                 // A stage change's new stage textures.
                 if a.stage_rev != game.stage_rev {
                     game.stage_textures = a.stage_textures.clone();
@@ -1018,6 +1037,10 @@ fn leave_battle(
     stop_all(game, commands);
     if let Scene::Battle(battle) = &game.scene {
         game.vu0_random = battle.vu0;
+    }
+    // BtlLoad_Term: the battle's sample banks.
+    for mask in [4, 8, 0x10, 0x20] {
+        game.se.unload_bank(mask);
     }
     game.model_batches.clear();
     game.stage_batches.clear();

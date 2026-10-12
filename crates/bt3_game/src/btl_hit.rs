@@ -200,6 +200,11 @@ fn hit_windows(me: &Chr, data: &SideData) -> i32 {
     me.obj.query_event(&data.obj, 1, 0, 3)
 }
 
+/// `BtlAtk_GetHitSoundLevel`: record +0x24.
+pub(crate) fn hit_sound_level(me: &Chr, data: &SideData, env: &Env) -> i32 {
+    i32::from(record(me, data, env).0.s8_at(0x24))
+}
+
 /// `BtlAtk_ApplyAbilities`: attacks 0..9 +10 % (ability 4) / -10 % (5), 0x13..0x21 +10 % (6) / -10 % (7), the
 /// throws 0x55 / 0x56 doubled (8) / halved (9).
 fn apply_atk_abilities(me: &Chr, mut v: i32, id: usize) -> i32 {
@@ -508,8 +513,7 @@ fn hit_no(me: &Chr) -> i32 {
     }
 }
 
-/// `BtlHit_GetVoiceKind`: the voice a hit reaction plays (`BtlChar_PlayVoice`; the hit voices are not ported yet).
-#[allow(dead_code)]
+/// `BtlHit_GetVoiceKind`: the voice a hit reaction plays (`BtlChar_PlayVoice`).
 pub(crate) fn voice_kind(reaction: i32) -> i32 {
     match reaction {
         5..=10 | 29 | 30 | 35 | 36 | 42 | 47 | 48 => 1,
@@ -568,7 +572,7 @@ impl Pair<'_, '_> {
             let (data, opp_data) = (self.data[a], self.data[a ^ 1]);
             let (me, opp) = split(self.chars, a);
             check_near(me, opp, data);
-            check_grab(me, opp, data, opp_data, self.env);
+            check_grab(me, opp, data, opp_data, self.env, self.frame);
             check_touch(me, opp, data, opp_data);
         }
         for a in 0..2 {
@@ -585,7 +589,7 @@ impl Pair<'_, '_> {
     /// `BtlHit_CheckRush`: a rushing technique (flag 0x49) touching its opponent misses (0x63) one that cannot be
     /// caught, bounces (0x64) off a giant, is broken or dodged, is guarded from the front (0x6F; 20000 ki), or
     /// starts its sequence, which ends the collision step (a rush break fills the blast stocks by one with
-    /// ability 0x22). Sounds and voices are not ported.
+    /// ability 0x22). A rush broken by a counter plays sound 0x44 and voices 0 / 0x11, a guarded one 0x42.
     fn check_rush(&mut self) -> bool {
         let (env, frame) = (self.env, self.frame);
         for a in 0..2 {
@@ -618,6 +622,9 @@ impl Pair<'_, '_> {
                     if anim & 0x31 != 0 && !is_from_behind(me, opp) {
                         me.flags.set(0x7A);
                         opp.flags.set(0x79);
+                        opp.play_common(&mut env.snd(), 0x44);
+                        me.voice(env, frame, 0);
+                        opp.voice(env, frame, 0x11);
                         continue;
                     }
                 } else if anim & 0xB1 != 0 && !opp.flags.test(0x5A) {
@@ -658,6 +665,7 @@ impl Pair<'_, '_> {
                 me.flags.set(0x129);
                 opp.set_fx(0x20);
                 opp.flags.set(0x6D);
+                me.play_common(&mut env.snd(), 0x42);
                 opp.flags.set(0x94);
                 opp.react.turn_yaw = wrap_angle(me.pose.yaw + PI);
                 opp.react.turn_pitch = 0.0;
@@ -704,6 +712,8 @@ impl Pair<'_, '_> {
                 if !same {
                     me.set_fx(0x2C);
                 }
+                me.play_common(&mut self.env.snd(), 0x4F);
+                opp.play_common(&mut self.env.snd(), 0x4B);
                 return true;
             }
         }
@@ -730,7 +740,7 @@ impl Pair<'_, '_> {
                     || check_repel(me, opp)
                 {
                     me.flags.set_held(0x5C);
-                } else if let Some(full) = check_guard(me, opp, data, env) {
+                } else if let Some(full) = check_guard(me, opp, data, env, frame) {
                     if full {
                         let guard = guard_damage(me, data, env);
                         opp.damage(env, opp_data, guard, 0xC);
@@ -878,7 +888,9 @@ impl Pair<'_, '_> {
             if atk_flags & 0x40_0000 != 0 {
                 def.flags.set_held(0x1E);
             }
-            // The hurt voice (BtlChar_PlayVoice with BtlHit_GetVoiceKind) is not ported.
+            if !def.react.silent {
+                def.voice(env, self.frame, voice_kind(react) as usize);
+            }
         } else {
             def.shake_timer = 3;
             if drain {
@@ -1050,7 +1062,14 @@ fn check_near(a: &mut Chr, b: &Chr, data: &SideData) {
 /// of its node 3, unless it is untouchable (0x42), its form is immune (parameter bit 0x1000000 << form), it has flag
 /// 0x137, or the attacker is behind it (lying down: with motion flag 0x8000): reaction 9 (0xE lying down), blinded
 /// for the skill's frames, lock-on lost. The voice is not ported.
-fn check_grab(a: &mut Chr, b: &mut Chr, data: &SideData, opp_data: &SideData, env: &Env) -> bool {
+fn check_grab(
+    a: &mut Chr,
+    b: &mut Chr,
+    data: &SideData,
+    opp_data: &SideData,
+    env: &Env,
+    frame: u32,
+) -> bool {
     if b.flags.test(0x42) {
         return false;
     }
@@ -1092,6 +1111,7 @@ fn check_grab(a: &mut Chr, b: &mut Chr, data: &SideData, opp_data: &SideData, en
     b.react.back = false;
     b.blind_timer = data.tables.skill().frames(slot);
     b.react.yaw = a.pose.yaw;
+    b.voice(env, frame, 0);
     b.react.reaction = if lying { 0xE } else { 9 };
     b.flags.clear(5);
     true
@@ -1228,7 +1248,13 @@ fn check_repel(atk: &mut Chr, def: &Chr) -> bool {
 }
 
 /// `BtlHit_CheckGuard`: `Some(full)` when the hit was guarded (the guard effects applied; `full` = chip damage).
-fn check_guard(atk: &mut Chr, def: &mut Chr, data: &SideData, env: &Env) -> Option<bool> {
+fn check_guard(
+    atk: &mut Chr,
+    def: &mut Chr,
+    data: &SideData,
+    env: &Env,
+    frame: u32,
+) -> Option<bool> {
     if !def.is_free() {
         return None;
     }
@@ -1238,14 +1264,14 @@ fn check_guard(atk: &mut Chr, def: &mut Chr, data: &SideData, env: &Env) -> Opti
     let ki_cost = guard_ki_cost(atk, data, env);
     if atk.obj.hit.index == 0 && env.anim_flags(def.anim.cur) & 0x31 != 0 && def.counter_window > 0
     {
-        apply_guard(atk, def, &rec, 8, ki_cost);
+        apply_guard(atk, def, &rec, 8, ki_cost, env, frame);
         return Some(false);
     }
     if is_from_behind(atk, def) {
         return None;
     }
     if def.flags.test(0x40) && (attack_id(atk, data, env) as u32) < 0xB {
-        apply_guard(atk, def, &rec, 1, ki_cost);
+        apply_guard(atk, def, &rec, 1, ki_cost, env, frame);
         return Some(true);
     }
     if def.flags.test(0x41) && rec.flags() & 0x10 != 0 && def.input.is_cmd_held(0x10) {
@@ -1257,7 +1283,7 @@ fn check_guard(atk: &mut Chr, def: &mut Chr, data: &SideData, env: &Env) -> Opti
             (guard_result(&rec, id, def, 0x29), 4)
         };
         if matches!(kind, 0 | 2) {
-            apply_guard(atk, def, &rec, result, ki_cost);
+            apply_guard(atk, def, &rec, result, ki_cost, env, frame);
             return Some(true);
         }
     }
@@ -1281,12 +1307,20 @@ fn check_guard(atk: &mut Chr, def: &mut Chr, data: &SideData, env: &Env) -> Opti
         4 => 7,
         _ => 0,
     };
-    apply_guard(atk, def, &rec, result, ki_cost);
+    apply_guard(atk, def, &rec, result, ki_cost, env, frame);
     Some(true)
 }
 
 /// `BtlHit_ApplyGuard`: the effects of a guarded hit on both fighters (no health is touched).
-fn apply_guard(atk: &mut Chr, def: &mut Chr, rec: &AttackRecord, result: u32, ki_cost: i32) {
+fn apply_guard(
+    atk: &mut Chr,
+    def: &mut Chr,
+    rec: &AttackRecord,
+    result: u32,
+    ki_cost: i32,
+    env: &Env,
+    frame: u32,
+) {
     let flags = rec.flags();
     for (bit, fx) in [(0x1_0000, 0x25), (0x2_0000, 0x26), (0x4_0000, 0x27)] {
         if flags & bit != 0 {
@@ -1335,6 +1369,9 @@ fn apply_guard(atk: &mut Chr, def: &mut Chr, rec: &AttackRecord, result: u32, ki
             scale = 0.5;
         }
         7 | 8 => {
+            if result == 7 {
+                def.voice(env, frame, 0x12);
+            }
             def.flags.set(if result == 7 { 0x70 } else { 0x7B });
             def.freeze_next = 3;
             def.freeze_delay = 0;

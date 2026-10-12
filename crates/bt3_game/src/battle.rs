@@ -72,6 +72,11 @@ const STAT_CURVE: u32 = 0x2E_E7C0;
 const STAGE_CUT_SECTION: usize = 3;
 /// `BTL_FILE_STAGE`: `0x171 + stage`.
 pub const STAGE_FILE: u32 = 0x171;
+/// `BTL_FILE_SND_COMMON`, `BTL_FILE_SND_STAGE` (+ stage) and `BTL_FILE_VOICE` (+ character): the battle's sample
+/// banks 4, 8 and the sides' 0x10 / 0x20.
+const SND_COMMON_FILE: u32 = 0x14A;
+const SND_STAGE_FILE: u32 = 0x14E;
+const SND_CHARA_FILE: u32 = 0xBDA;
 /// `BTL_FILE_TRANSITION` / `BTL_FILE_TRANSITION_3`: the stage change's transition pack (a change to stage 3 has
 /// its own).
 const TRANSITION_FILE: u32 = 0x1C0;
@@ -130,6 +135,10 @@ pub struct BattleAssets {
     stage_model: StageModel,
     /// The stage's destructible objects (`gBtlStage->objs`).
     pub(crate) stage_objs: std::sync::Mutex<crate::stg_obj::StageObjs>,
+    /// The fighters' sound requests and handles (`gBtlChars->snd`).
+    pub(crate) snd: std::sync::Mutex<crate::btl_snd::CharSound>,
+    /// Sample banks to load (`Snd_LoadBank` / `Snd_ReloadBank` by mask; `None` unloads), taken by the game.
+    pub bank_requests: Vec<(u32, Option<Vec<u8>>)>,
     stage_id: i32,
     /// `Battle_GetStartStage`: the stage a rematch loads back.
     start_stage: i32,
@@ -264,6 +273,21 @@ pub fn load(
         collision,
         nav,
     } = load_stage(read, setup.stage)?;
+    // BtlLoad_StepInitial: the common, stage and both sides' sample banks.
+    let mut snd = crate::btl_snd::CharSound::default();
+    let mut bank_requests = Vec::new();
+    for (mask, file) in [
+        (4, SND_COMMON_FILE),
+        (8, SND_STAGE_FILE + setup.stage.max(0) as u32),
+        (0x10, SND_CHARA_FILE + setup.sides[0].chara.max(0) as u32),
+        (0x20, SND_CHARA_FILE + setup.sides[1].chara.max(0) as u32),
+    ] {
+        let data = read(file)?;
+        if let Some(kind) = crate::btl_snd::CharSound::kind_of_mask(mask) {
+            snd.set_bank(kind, Some(&data));
+        }
+        bank_requests.push((mask, Some(data)));
+    }
     let fade = elf.f32s(FADE_COLORS_SLOT2, 8).map_err(error)?;
     let fade_colors = [
         [fade[0], fade[1], fade[2], fade[3]],
@@ -324,6 +348,8 @@ pub fn load(
             &stage.objects,
             &stage_model,
         )),
+        snd: std::sync::Mutex::new(snd),
+        bank_requests,
         stage,
         stage_model,
         stage_id: setup.stage,
@@ -961,6 +987,7 @@ impl BattleAssets {
             stage: &self.stage,
             col: &self.collision,
             stage_objs: &self.stage_objs,
+            snd: &self.snd,
             mode: self.mode,
             stage_4_or_27: matches!(self.stage_id, 4 | 27),
             seq_state,
@@ -984,6 +1011,18 @@ impl BattleAssets {
 }
 
 impl BattleAssets {
+    /// `Snd_ReloadBank(mask, ..)` of a file: the battle's loop flags and the game's bank.
+    fn reload_bank(&mut self, read: &mut Loader, mask: u32, file: u32) {
+        let data = read(file).ok();
+        if let Some(kind) = crate::btl_snd::CharSound::kind_of_mask(mask) {
+            self.snd
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_bank(kind, data.as_deref());
+        }
+        self.bank_requests.push((mask, data));
+    }
+
     /// `BtlLoad_EndStageSwap`'s stage half (`StgModel_InitStage`, `StgNav_Rebind`): the stage's resources, its
     /// objects whole, its textures to upload again.
     fn install_stage(&mut self, s: LoadedStage, stage_id: i32) {
@@ -1215,7 +1254,12 @@ impl Battle {
             }
             _ => {
                 if job.state == 5 {
+                    // Snd_ReloadBank(8): the new stage's bank.
                     job.state = 6;
+                    let file = SND_STAGE_FILE + self.assets.stage_id.max(0) as u32;
+                    if let Some(read) = self.loader.as_mut() {
+                        self.assets.reload_bank(read, 8, file);
+                    }
                 }
                 match job.state {
                     6 => {
@@ -1361,6 +1405,12 @@ impl Battle {
     /// set up again (`BtlChars_OnModelLoaded`), the side's AI reset (`BtlAiMgr_ResetSide`), its face and skill
     /// list. The voice bank is not ported.
     fn swap_side(&mut self, side: usize, model: FighterModel, model_only: bool) {
+        // Snd_ReloadBank(0x10 / 0x20): the side's bank of its new character.
+        if !model_only && let Some(read) = self.loader.as_mut() {
+            let chara = model.chara.max(0) as u32;
+            let mask = if side == 0 { 0x10 } else { 0x20 };
+            self.assets.reload_bank(read, mask, SND_CHARA_FILE + chara);
+        }
         self.hud
             .set_face(side, self.assets.hud_cpu.faces[side].clone());
         if let Some(menu) = &mut self.menu {
@@ -1460,6 +1510,8 @@ impl Battle {
     /// cleared), `StgFx_Reset` (the cross-fade), `BtlGame_Reset` (the menus, the HUD, the sequence),
     /// `BtlChar_ResetAll` and the 1 s fade-in. The AI is not reset, as in the original.
     fn restart(&mut self, sounds: &mut Vec<TitleSound>) {
+        // Snd_StopBankAndResume(0x3C): the battle banks' sounds.
+        sounds.push(TitleSound::SeStopBanks(0x3C));
         sounds.push(TitleSound::VoiceStop);
         sounds.push(TitleSound::Bgm(BGM_FIRST + self.assets.bgm.max(0) as u32));
         self.xfade = ScrXfade::default();
@@ -1476,6 +1528,8 @@ impl Battle {
             match load_stage(read, start) {
                 Ok(loaded) => {
                     self.assets.install_stage(loaded, start);
+                    self.assets
+                        .reload_bank(read, 8, SND_STAGE_FILE + start.max(0) as u32);
                     self.light_dir =
                         normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                 }
@@ -1510,6 +1564,9 @@ impl Battle {
                         menu.scripts[side] = model.skill_text.clone();
                     }
                     self.assets.fighters[side] = model;
+                    let mask = if side == 0 { 0x10 } else { 0x20 };
+                    let file = SND_CHARA_FILE + start.chara.max(0) as u32;
+                    self.assets.reload_bank(read, mask, file);
                 }
                 Err(e) => bevy::log::error!("cannot load side {side} back: {e}"),
             }
@@ -1751,6 +1808,12 @@ impl Battle {
             self.roster.change.update();
             if !paused {
                 self.roster.end_frame();
+                // BtlCharSnd_PlayRequests, from this frame's camera.
+                self.assets
+                    .snd
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .play_requests(&view.world2view, self.assets.screen_mode == 1, input.sounds);
             }
         }
         self.step_change_job(paused);
@@ -4909,6 +4972,34 @@ mod tests {
             return;
         }
         panic!("no stage has a destructible object");
+    }
+
+    #[test]
+    fn real_combat_sounds_play_from_the_loaded_banks() {
+        let Some(battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let voices = &battle.assets.common.voices;
+        // BTL_VOICE_KINDS kinds, each with at least one line; the file pads the table with empty entries.
+        let (used, pad) = voices.split_at(crate::btl_snd::VOICE_KINDS);
+        assert!(used.iter().all(|v| v.count >= 1), "{used:?}");
+        assert!(used.iter().any(|v| v.count >= 2), "{used:?}");
+        assert!(pad.iter().all(|v| v.count == 0), "{pad:?}");
+        let mut snd = battle.assets.snd.lock().unwrap_or_else(|e| e.into_inner());
+        let chr = &battle.roster.chars[0];
+        chr.play_common(&mut snd, 0x44);
+        chr.play_own(&mut snd, 0);
+        let mut out = Vec::new();
+        snd.play_requests(&IDENTITY, true, &mut out);
+        let plays: Vec<_> = out
+            .iter()
+            .filter_map(|s| match s {
+                TitleSound::SeEx { mask, id, .. } => Some((*mask, *id)),
+                _ => None,
+            })
+            .collect();
+        // Bank 4 is the common one, 0x10 side 0's own (the first player's character bank).
+        assert_eq!(plays, vec![(4, 0x44), (0x10, 0)], "{out:?}");
     }
 
     #[test]

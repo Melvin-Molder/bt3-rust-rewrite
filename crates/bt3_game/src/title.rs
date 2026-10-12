@@ -196,6 +196,18 @@ pub enum TitleSound {
     FadeOutStep,
     /// `Snd_PlaySe(bank, id)`.
     Effect(u32, u32),
+    /// `Snd_PlaySeEx(mask, id, volume, pan, 0)`, the sound known by `handle`.
+    SeEx {
+        mask: u32,
+        id: u32,
+        volume: i32,
+        pan: i32,
+        handle: u32,
+    },
+    /// `Snd_StopHandle`.
+    SeStop(u32),
+    /// `Snd_StopBank(mask)`.
+    SeStopBanks(u32),
     /// `StreamSe_PlayDefault(0, id)`.
     StreamSe(u32),
     /// `Adx_PauseSeVoice` (true) / `Adx_ResumeSeVoice` (false): the streamed SE and voice players.

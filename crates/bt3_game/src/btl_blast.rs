@@ -492,6 +492,49 @@ pub(crate) fn current_kind(me: &Chr) -> i32 {
     }
 }
 
+/// `BtlColl_PlayContactSound`: a record that hit the stage: a ki blast's by its type (2: 0x42, 3: 0xC / 0xD,
+/// others 0x1B / 0x11 by the frame), a skill's or technique's its hit sound (the technique's second variant).
+fn contact_sound(rec: &HitRec, env: &Env, data: [&SideData; 2], frame: u32) {
+    match rec.tech {
+        None => {
+            let sound = match record(data[rec.atk.src], rec.atk.kind).kind_type() {
+                2 => 0x42,
+                3 => {
+                    if frame % 2 != 0 {
+                        0xC
+                    } else {
+                        0xD
+                    }
+                }
+                _ => {
+                    if frame % 2 != 0 {
+                        0x1B
+                    } else {
+                        0x11
+                    }
+                }
+            };
+            env.snd().request(
+                rec.pos,
+                -1,
+                crate::btl_snd::KIND_COMMON,
+                200.0,
+                1500.0,
+                sound,
+            );
+        }
+        Some(src) => {
+            let t = &data[src.side].tables;
+            let kind = if src.slot < 2 {
+                t.skill().hit_sound(src.slot)
+            } else {
+                t.tech().hit_sound(src.slot, true)
+            };
+            crate::btl_snd::hit_sound(None, Some(rec.pos), kind as u32, env, frame);
+        }
+    }
+}
+
 /// `BtlKiBlast_Get`: kind 0 when out of range.
 fn record<'a>(data: &'a SideData, kind: i32) -> &'a KiBlastRecord {
     let k = usize::try_from(kind)
@@ -1029,7 +1072,7 @@ impl Scene {
         if !w.paused {
             self.prepare(w.env);
             self.clash_pass(w);
-            self.stage_pass(w.env);
+            self.stage_pass(w.env, w.data, w.frame);
             self.fighter_pass(w);
         }
         // BtlScene_PostUpdate: EftHit_UpdateResults, then layer 1's and layer 2's post-updates; the impacts are not
@@ -1291,7 +1334,7 @@ impl Scene {
     /// (`EftHit_IsStoppedByHit`); a technique's stop shakes the cameras near it. A rush technique's record meets
     /// only the standing stage objects (its sphere not scaled). A standing object the walk met takes damage (1 from
     /// a ki blast, 999999 from a technique); when that breaks it, the record goes on as if nothing was hit.
-    fn stage_pass(&mut self, env: &Env) {
+    fn stage_pass(&mut self, env: &Env, data: [&SideData; 2], frame: u32) {
         for i in 0..self.records.len() {
             if !self.can_hit(i, 0) {
                 continue;
@@ -1360,8 +1403,8 @@ impl Scene {
             s.hit_flags |= D_STAGE;
             let from = if s.kind == 0 { s.b.pos } else { s.a_start };
             s.stage_dist = length(sub(from, hit));
-            // EftHit_IsStoppedByHit and EftHit_NotifyBlastTask (a bomb keeps the triangle's normal); the contact sound
-            // and a technique's camera shake and vibration are not ported.
+            // EftHit_IsStoppedByHit and EftHit_NotifyBlastTask (a bomb keeps the triangle's normal), the contact
+            // sound (BtlColl_PlayContactSound) and a technique's camera shake; the vibration is not ported.
             let stops = tech.is_none_or(|t| {
                 if t.def.kind == 0 {
                     t.def.sub != 4
@@ -1370,6 +1413,17 @@ impl Scene {
                 }
             });
             if stops {
+                let rec = self.records[i];
+                contact_sound(&rec, env, data, frame);
+                if rec.tech.is_some() {
+                    env.objs().shakes.push(crate::stg_obj::Shake {
+                        pos: rec.pos,
+                        near: 100.0,
+                        far: 1500.0,
+                        strength: 3.0,
+                        time: 0.5,
+                    });
+                }
                 self.set_task_flag(i, T_HIT_STAGE, contact);
                 let id = self.records[i].task;
                 if let Some(o) = self

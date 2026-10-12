@@ -127,6 +127,8 @@ impl Roster {
         }
         self.check_round_reset(data, env);
         self.update_freeze();
+        // BtlCharSnd_ClearRequests.
+        env.snd().clear();
         for (chr, data) in self.chars.iter_mut().zip(data) {
             begin_frame(chr, data, env);
         }
@@ -332,6 +334,7 @@ impl Roster {
                 .request_technique(me, opp, data[i], env.gate.time_stopped);
             self.scene
                 .fire(me, opp, data[i], &mut self.rand, env.gate.time_stopped);
+            crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             self.scene.spawn_held_disc(me, data[i]);
             me.obj.build_volumes(&data[i].obj);
         }
@@ -589,6 +592,7 @@ fn begin_frame(chr: &mut Chr, data: &SideData, env: &Env) {
         return;
     }
     chr.flags.set_stage(3);
+    chr.tick_voice_timers();
     chr.obj_to_pose();
     chr.pose.lean_x = 0.0;
     chr.pose.lean_z = 0.0;

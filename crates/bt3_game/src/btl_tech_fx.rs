@@ -1975,6 +1975,14 @@ pub(crate) fn guard_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let chr = &mut w.chars[target];
     chr.flags.set(0x66);
     chr.damage(env, w.data[target], dmg, 0xC);
+    crate::btl_snd::hit_sound(
+        None,
+        Some(rec.pos),
+        s.hit_sound(src.slot) as u32,
+        env,
+        w.frame,
+    );
+    let chr = &mut w.chars[target];
     chr.set_impulse_dir(dir, s.guard_push(src.slot));
     true
 }
@@ -2036,6 +2044,8 @@ pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool 
         }
     }
     chr.set_fx(0x1D);
+    let sound = s.hit_sound(slot) as u32;
+    crate::btl_snd::hit_sound(Some(&mut *chr), Some(rec.pos), sound, env, w.frame);
     let flags = if slot == 0 { 0x20_0000 } else { 0x40_0000 };
     chr.damage(env, w.data[target], s.damage(slot), flags);
     true
@@ -2060,11 +2070,25 @@ pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let mut weak = false;
     if matches!(t.react(slot), 0x1D | 0x1E | 0x22) {
         if w.data[target].tables.params.size_class() == 4 && t.flags(slot) & 0x800_0000 == 0 {
+            crate::btl_snd::hit_sound(
+                None,
+                Some(rec.pos),
+                t.hit_sound(slot, alt) as u32,
+                w.env,
+                w.frame,
+            );
             return true;
         }
         weak = true;
     }
     if t.id(slot) == 0x2D5 && unk_c7_scale(&w.chars[target], w.data[target]) < 0.001 {
+        crate::btl_snd::hit_sound(
+            None,
+            Some(rec.pos),
+            t.hit_sound(slot, alt) as u32,
+            w.env,
+            w.frame,
+        );
         return true;
     }
     let (yaw, dir) = hit_dir(w, target, rec);
@@ -2102,6 +2126,14 @@ pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         _ => {}
     }
     chr.damage(env, w.data[target], dmg, 0xC);
+    crate::btl_snd::hit_sound(
+        None,
+        Some(rec.pos),
+        t.hit_sound(slot, alt) as u32,
+        env,
+        w.frame,
+    );
+    let chr = &mut w.chars[target];
     if alt {
         chr.set_impulse_dir(dir, t.guard_push(slot) * 10.0 * kmh(1.0));
     }
@@ -2171,7 +2203,13 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         return if react == 0x22 {
             crate::btl_hit::start_throw(atk, def, w.data[side], env, slot, t.flags(slot), w.frame)
         } else {
-            crate::btl_hit::start_rush_catch(def, atk, w.data[side], env, slot, react, yaw)
+            let caught =
+                crate::btl_hit::start_rush_catch(def, atk, w.data[side], env, slot, react, yaw);
+            if caught {
+                let sound = t.hit_sound(slot, alt) as u32;
+                crate::btl_snd::hit_sound(None, Some(rec.pos), sound, env, w.frame);
+            }
+            caught
         };
     }
     let dmg = tech_damage(
@@ -2191,6 +2229,8 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         chr.react.yaw = yaw;
         chr.react.reaction = REACT_NOFLINCH;
         chr.set_fx(0x1D);
+        let sound = t.hit_sound(slot, alt) as u32;
+        crate::btl_snd::hit_sound(Some(&mut *chr), Some(rec.pos), sound, env, w.frame);
         chr.damage(env, w.data[target], dmg, hit_damage_flags(slot));
         recoil(w, side, slot);
         return true;
@@ -2209,6 +2249,8 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         chr.set_impulse_dir(dir, t.push(slot) * 10.0 * kmh(1.0));
     }
     chr.set_fx(0x1D);
+    let sound = t.hit_sound(slot, alt) as u32;
+    crate::btl_snd::hit_sound(Some(&mut *chr), Some(rec.pos), sound, env, w.frame);
     chr.damage(env, w.data[target], dmg, hit_damage_flags(slot));
     chr.flags.set_held(0x1D);
     chr.flags.set_held(0x1E);

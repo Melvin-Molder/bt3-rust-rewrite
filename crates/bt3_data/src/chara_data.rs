@@ -524,6 +524,10 @@ impl TechTable<'_> {
     pub fn guard_kind(&self, slot: i32) -> i32 {
         self.s8_of(0x150, slot)
     }
+    /// `BtlSuper_GetHitSound` (+0x153): the hit sound kind of the first / second (`alt`) hit variant.
+    pub fn hit_sound(&self, slot: i32, alt: bool) -> i32 {
+        self.s8_of(0x153 + usize::from(alt) * 3, slot)
+    }
     /// The shot count and the shots per firing as stored (`EftShot_BuildParam`'s `shots` / `volley`).
     pub fn shots_raw(&self, slot: i32) -> i32 {
         self.s8_of(0x93, slot)
@@ -695,6 +699,10 @@ impl SkillTable<'_> {
     fn s8_of(&self, base: usize, slot: i32) -> i32 {
         self.at::<1>(base, slot)
             .map_or(0, |b| i32::from(b[0] as i8))
+    }
+    /// `BtlSkill_GetHitSound` (+0x6C).
+    pub fn hit_sound(&self, slot: i32) -> i32 {
+        self.s8_of(0x6C, slot)
     }
     /// `BtlSkill_GetFlagsA` (+0x00): the effect definition's flags (`EftShot_BuildParam`).
     pub fn flags_a(&self, slot: i32) -> u32 {
@@ -921,6 +929,16 @@ pub struct CommonTables {
     pub prompt_rows: Vec<[u8; 0x14]>,
     /// `tbl[1]` (word 5, roster + 0x24): the common camera cuts (`ChrCam_RequestCut(chr, 1, n)`).
     pub cam_cuts: Vec<CamCutDef>,
+    /// `tbl[2]` (word 6, roster + 0x28, `voiceTbl`): per voice kind its lines and cooldown.
+    pub voices: Vec<VoiceEntry>,
+}
+
+/// `BtlVoiceEntry`: a voice kind's first line, line count and cooldown in seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VoiceEntry {
+    pub first: i16,
+    pub count: i16,
+    pub interval: f32,
 }
 
 impl CommonTables {
@@ -958,12 +976,21 @@ impl CommonTables {
             .map(|c| c.try_into().unwrap())
             .collect();
         let cam_cuts = CamCutDef::parse_table(table(5)?);
+        let voices = table(6)?
+            .chunks_exact(8)
+            .map(|v| VoiceEntry {
+                first: i16::from_le_bytes([v[0], v[1]]),
+                count: i16::from_le_bytes([v[2], v[3]]),
+                interval: f32::from_le_bytes(v[4..8].try_into().unwrap()),
+            })
+            .collect();
         Ok(Self {
             motion_flags,
             attack_actions,
             charas,
             prompt_rows,
             cam_cuts,
+            voices,
         })
     }
 }

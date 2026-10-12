@@ -438,6 +438,8 @@ pub(crate) struct Env<'a> {
     pub col: &'a StageCollision,
     /// The stage's destructible objects.
     pub stage_objs: &'a std::sync::Mutex<crate::stg_obj::StageObjs>,
+    /// The fighters' sound requests (`gBtlChars->snd`).
+    pub snd: &'a std::sync::Mutex<crate::btl_snd::CharSound>,
     /// `Battle_GetMode`.
     pub mode: i32,
     /// `BtlChar_IsStage4Or27`.
@@ -486,6 +488,11 @@ impl Env<'_> {
     /// The stage's destructible objects.
     pub(crate) fn objs(&self) -> std::sync::MutexGuard<'_, crate::stg_obj::StageObjs> {
         self.stage_objs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The fighters' sound requests.
+    pub(crate) fn snd(&self) -> std::sync::MutexGuard<'_, crate::btl_snd::CharSound> {
+        self.snd.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The broken stage objects, as the collision queries take them.
@@ -700,6 +707,9 @@ pub(crate) struct Chr {
     pub took_damage: bool,
     /// Effect / sound request bits of this frame (`fxBits`, fighter + 0x1262); nothing draws them yet.
     pub fx_bits: [u8; 0x10],
+    /// `voice` (+0x1370): per voice kind the line played last and the frames until it may play again.
+    pub voice_last: [i32; crate::btl_snd::VOICE_KINDS],
+    pub voice_timer: [i32; crate::btl_snd::VOICE_KINDS],
 }
 
 /// Which snapshot `BtlChar_Snapshot` writes besides the one asked for.
@@ -849,6 +859,8 @@ impl Chr {
             first_hit: false,
             took_damage: false,
             fx_bits: [0; 0x10],
+            voice_last: [0; crate::btl_snd::VOICE_KINDS],
+            voice_timer: [0; crate::btl_snd::VOICE_KINDS],
         };
         // BtlChar_BindObject.
         chr.flags.clear(0xBE);

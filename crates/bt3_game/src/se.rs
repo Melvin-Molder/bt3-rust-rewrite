@@ -55,13 +55,24 @@ pub struct Play {
     pub volume: u8,
     pub pan: u8,
     pub pitch: i16,
+    /// The game's handle of the sound (`Snd_PlaySeEx`'s result), 0 for none.
+    pub handle: u32,
+}
+
+/// A `SndCmd` of the per-frame queue.
+enum Cmd {
+    Play(Play),
+    /// Type 2: stop by handle.
+    Stop(u32),
+    /// RPC 0xA (`Snd_StopBank`): the voices of the banks in the mask.
+    StopBanks(u32),
 }
 
 /// The EE side of `snd.c`: bank slots and the per-frame queue.
 pub struct SoundEffects {
     engine: Arc<Mutex<Engine>>,
     loaded: [bool; BANKS],
-    queue: Vec<Play>,
+    queue: Vec<Cmd>,
 }
 
 impl SoundEffects {
@@ -83,13 +94,53 @@ impl SoundEffects {
         self.engine.lock().unwrap().banks[slot] = Some(Arc::new(bank));
     }
 
-    /// `Snd_PlaySe(mask, id)` = `Snd_PlaySeEx(mask, id, 0x40, 0, 0)`.
-    pub fn play_se(&mut self, mask: u32, id: u32) {
-        self.play_se_ex(mask, id, 0x40, 0, 0);
+    /// `Snd_ReloadBank`: the slot's bank replaced, its sounds stopped.
+    pub fn reload_bank(&mut self, mask: u32, bank: LoadedBank) {
+        let slot = bank_index(mask);
+        self.loaded[slot] = true;
+        let mut engine = self.engine.lock().unwrap();
+        engine.stop_banks(1 << slot);
+        engine.banks[slot] = Some(Arc::new(bank));
     }
 
-    /// `Snd_PlaySeEx` + `Snd_QueuePlay`.
-    pub fn play_se_ex(&mut self, mask: u32, id: u32, volume: i32, pan: i32, pitch: i32) {
+    /// `Snd_UnloadBank`: the slot emptied, its sounds stopped.
+    pub fn unload_bank(&mut self, mask: u32) {
+        let slot = bank_index(mask);
+        self.loaded[slot] = false;
+        let mut engine = self.engine.lock().unwrap();
+        engine.stop_banks(1 << slot);
+        engine.banks[slot] = None;
+    }
+
+    /// `Snd_StopHandle`: queues a stop of the sound `Snd_PlaySeEx` gave this handle.
+    pub fn stop_handle(&mut self, handle: u32) {
+        if self.queue.len() < 32 {
+            self.queue.push(Cmd::Stop(handle));
+        }
+    }
+
+    /// `Snd_StopBank`: queues a stop of the voices of the banks in `mask`.
+    pub fn stop_banks(&mut self, mask: u32) {
+        if self.queue.len() < 32 {
+            self.queue.push(Cmd::StopBanks(mask));
+        }
+    }
+
+    /// `Snd_PlaySe(mask, id)` = `Snd_PlaySeEx(mask, id, 0x40, 0, 0)`.
+    pub fn play_se(&mut self, mask: u32, id: u32) {
+        self.play_se_ex(mask, id, 0x40, 0, 0, 0);
+    }
+
+    /// `Snd_PlaySeEx` + `Snd_QueuePlay`, the sound known by `handle` (0: none).
+    pub fn play_se_ex(
+        &mut self,
+        mask: u32,
+        id: u32,
+        volume: i32,
+        pan: i32,
+        pitch: i32,
+        handle: u32,
+    ) {
         let slot = bank_index(mask);
         if !self.loaded[slot] || self.queue.len() >= 32 || id >= 0x100 {
             return;
@@ -97,13 +148,14 @@ impl SoundEffects {
         let volume = (volume * BANK_VOLUME[slot] * SE_OPTION_VOLUME / 0x480).clamp(0, 0x7F);
         let pan = (pan + 0x40).clamp(0, 0x7F);
         let pitch = ((pitch as f32 * 18.75) as i32).clamp(-1200, 1200);
-        self.queue.push(Play {
+        self.queue.push(Cmd::Play(Play {
             slot,
             id: id as u8,
             volume: volume as u8,
             pan: pan as u8,
             pitch: pitch as i16,
-        });
+            handle,
+        }));
     }
 
     /// `Snd_Update`: sends the frame's queue.
@@ -112,8 +164,12 @@ impl SoundEffects {
             return;
         }
         let mut engine = self.engine.lock().unwrap();
-        for play in self.queue.drain(..) {
-            engine.play(play);
+        for cmd in self.queue.drain(..) {
+            match cmd {
+                Cmd::Play(play) => engine.play(play),
+                Cmd::Stop(handle) => engine.stop_handle(handle),
+                Cmd::StopBanks(mask) => engine.stop_banks(mask),
+            }
         }
     }
 }
@@ -169,6 +225,8 @@ const PORT_RATE: u64 = 1000;
 
 pub struct Engine {
     banks: [Option<Arc<LoadedBank>>; BANKS],
+    /// The game's handles of the latest plays and their sequences' ids.
+    handles: Vec<(u32, u32)>,
     tracks: Vec<Track>,
     stream: Vec<NoteMessage>,
     voices: Vec<Voice>,
@@ -180,6 +238,7 @@ impl Default for Engine {
     fn default() -> Self {
         Self {
             banks: Default::default(),
+            handles: Vec::new(),
             tracks: Vec::new(),
             stream: Vec::new(),
             voices: (0..VOICES).map(|_| Voice::default()).collect(),
@@ -254,7 +313,41 @@ impl Engine {
             Some(delta) => track.next = delta,
             None => return,
         }
+        if play.handle != 0 {
+            if self.handles.len() >= 64 {
+                self.handles.remove(0);
+            }
+            self.handles.push((play.handle, track.id));
+        }
         self.tracks.push(track);
+    }
+
+    /// A stop by handle: the sound's sequence ends and its voices are released (a looping sample keeps sounding
+    /// until then). How SOUNDS.IRX does it is not documented; this is the plain reading of the command.
+    fn stop_handle(&mut self, handle: u32) {
+        let Some(i) = self.handles.iter().position(|&(h, _)| h == handle) else {
+            return;
+        };
+        let (_, id) = self.handles.remove(i);
+        self.tracks.retain(|t| t.id != id);
+        self.stream.retain(|m| m.id != id);
+        for voice in &mut self.voices {
+            if voice.owner.is_some_and(|o| o.id == id) {
+                voice.spu.key_off();
+            }
+        }
+    }
+
+    /// The sounds of the banks in `mask` (a bit per slot) end: their sequences and voices.
+    fn stop_banks(&mut self, mask: u32) {
+        let in_mask = |id: u32| mask >> ((id >> 16) & 0xFF) & 1 != 0;
+        self.tracks.retain(|t| mask >> t.port & 1 == 0);
+        self.stream.retain(|m| mask >> m.port & 1 == 0);
+        for voice in &mut self.voices {
+            if voice.owner.is_some_and(|o| in_mask(o.id)) {
+                voice.spu.key_off();
+            }
+        }
     }
 
     /// One SOUNDS.IRX wakeup: the synthesizer reads what the sequencer wrote last time, then the sequencer runs.
