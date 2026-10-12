@@ -287,7 +287,8 @@ impl Obj {
             mtx: IDENTITY,
             root_pos: [0.0; 3],
             lean: [0.0, 0.0, 0.0, 1.0],
-            flags: 0,
+            // BtlObj_InitFlags for a fighter (type 0): visible (2) among others.
+            flags: 0x1200_0016,
             area: -1,
             // BtlObjBody_Init: curRadius 4.1, then BtlObjBody_Reset (index 1, prev 0, cur 1).
             body: Body {

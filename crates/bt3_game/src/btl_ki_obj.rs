@@ -6,8 +6,8 @@
 //! it explodes then, after 300 frames, below the stage, within 28 of the opponent or when it hits a fighter: a
 //! 15-frame record of radius 28. Both publish blast records of their ki blast's parameters.
 //!
-//! Not ported: the models, the fragments' and the explosion's drawing and sounds (their libc `rand()` draws are
-//! kept).
+//! Not ported: the models, the fragments' and the explosion's drawing (their libc `rand()` draws are kept; the
+//! explosion's draw picks its sound).
 
 use crate::btl_blast::{Arg, HitRec, Tag};
 use crate::btl_chr::{Chr, add, dot, length, scale3, sub};
@@ -108,16 +108,17 @@ impl KiObj {
     }
 
     /// `EftKiObj_Step` / `EftKiBomb_Move` and the record. `opp_pos` is the opponent's position
-    /// (`BtlCharApi_GetPos`), `bottom` the stage's bottom.
+    /// (`BtlCharApi_GetPos`), `bottom` the stage's bottom; `snd` takes the explosion's sound.
     pub(crate) fn update(
         &mut self,
         opp_pos: [f32; 3],
         bottom: f32,
         libc: &mut LibcRandom,
         paused: bool,
+        snd: &mut crate::btl_snd::CharSound,
     ) -> Option<HitRec> {
         if self.bomb {
-            self.step_bomb(opp_pos, bottom, libc);
+            self.step_bomb(opp_pos, bottom, libc, snd);
         } else {
             self.step_obj();
         }
@@ -165,7 +166,13 @@ impl KiObj {
         }
     }
 
-    fn step_bomb(&mut self, opp_pos: [f32; 3], bottom: f32, libc: &mut LibcRandom) {
+    fn step_bomb(
+        &mut self,
+        opp_pos: [f32; 3],
+        bottom: f32,
+        libc: &mut LibcRandom,
+        snd: &mut crate::btl_snd::CharSound,
+    ) {
         if self.flags & K_MOVED != 0 {
             self.prev = self.pos;
         }
@@ -187,8 +194,9 @@ impl KiObj {
         }
         if self.flags & K_EXPLODED == 0 && (self.life <= 0.0 || self.flags & K_EXPLODE != 0) {
             self.life = 0.0;
-            // The explosion effect and its sound (libc rand()).
-            libc.rand();
+            // The explosion effect (not drawn) and its sound, 0x1B or 0x11 by libc rand().
+            let id = if libc.rand() & 2 != 0 { 0x1B } else { 0x11 };
+            snd.request(self.pos, -1, crate::btl_snd::KIND_COMMON, 200.0, 1500.0, id);
             self.radius = 28.0;
             self.flags |= K_EXPLODED;
         }

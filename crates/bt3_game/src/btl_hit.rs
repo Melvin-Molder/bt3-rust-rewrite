@@ -200,6 +200,21 @@ fn hit_windows(me: &Chr, data: &SideData) -> i32 {
     me.obj.query_event(&data.obj, 1, 0, 3)
 }
 
+/// `BtlAtk_GetVoiceKind`: record +0x25 1, 2, 3 as voice kinds 5, 6, 7.
+pub(crate) fn atk_voice_kind(me: &Chr, data: &SideData, env: &Env) -> Option<usize> {
+    match record(me, data, env).0.s8_at(0x25) {
+        1 => Some(5),
+        2 => Some(6),
+        3 => Some(7),
+        _ => None,
+    }
+}
+
+/// `BtlAtk_GetHitFxKind`: record +0x23.
+pub(crate) fn hit_fx_kind(me: &Chr, data: &SideData, env: &Env) -> i32 {
+    i32::from(record(me, data, env).0.s8_at(0x23))
+}
+
 /// `BtlAtk_GetHitSoundLevel`: record +0x24.
 pub(crate) fn hit_sound_level(me: &Chr, data: &SideData, env: &Env) -> i32 {
     i32::from(record(me, data, env).0.s8_at(0x24))
@@ -427,7 +442,7 @@ pub(crate) fn start_throw(
 }
 
 /// `BtlColl_StartRushCatch`: a technique's catch reaction (0x1D, 0x1E looping) lands: the attacker's block (flag
-/// 0x73) without a sequence, copied to the victim. The hit sound is not ported.
+/// 0x73) without a sequence, copied to the victim (its hit sound is the caller's).
 pub(crate) fn start_rush_catch(
     def: &mut Chr,
     atk: &mut Chr,
@@ -1061,7 +1076,7 @@ fn check_near(a: &mut Chr, b: &Chr, data: &SideData) {
 /// `BtlHit_CheckGrab`: attacker flag 0x4C / 0x4D (the blinding skill of slot 0 / 1) catches the opponent within 100
 /// of its node 3, unless it is untouchable (0x42), its form is immune (parameter bit 0x1000000 << form), it has flag
 /// 0x137, or the attacker is behind it (lying down: with motion flag 0x8000): reaction 9 (0xE lying down), blinded
-/// for the skill's frames, lock-on lost. The voice is not ported.
+/// for the skill's frames, lock-on lost, voice kind 0.
 fn check_grab(
     a: &mut Chr,
     b: &mut Chr,

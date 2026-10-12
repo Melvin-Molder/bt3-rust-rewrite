@@ -82,6 +82,30 @@ pub(crate) const T_MULTI: u32 = 0x4000;
 /// `BTL_REACT_NOFLINCH`.
 const REACT_NOFLINCH: i32 = 2;
 
+/// `EftShot_PlayFireSound` (a skill's shot): sound 0 on START (not shot 0x27), 1 on FIRE, 2 on the motion's
+/// attribute 0x40000, the last that applies, as `BtlCharApi_PlayTechniqueSound`: the own bank's 0x25.. for the
+/// first skill, 0x29.. for the second.
+fn fire_sound(chr: &Chr, env: &Env, events: u32, id: i32) {
+    let mut n = None;
+    if events & EV_START != 0 && id != 0x27 {
+        n = Some(0);
+    }
+    if events & EV_FIRE != 0 {
+        n = Some(1);
+    }
+    if chr.anim_test_attr(0x4_0000) {
+        n = Some(2);
+    }
+    let base = match crate::btl_act::id_class(chr.act.current) {
+        0 => 0x25,
+        1 => 0x29,
+        _ => return,
+    };
+    if let Some(n) = n {
+        chr.play_own(&mut env.snd(), base + n);
+    }
+}
+
 /// `EftShotParam` of a technique slot (2..4), `EftShot_BuildParam` with the start's overrides.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct TechDef {
@@ -867,7 +891,9 @@ impl Beam {
         }
         let def = self.src.def;
         let test = |b: u32| events & b != 0;
-        // EftShot_PlayFireSound concerns skills only.
+        if def.kind == 0 {
+            fire_sound(&w.chars[side], w.env, events, def.id);
+        }
         self.nodes
             .update(&w.chars[side], w.data[side], &def, cur_slot, events);
         if self.flags & 0x40 == 0 {
@@ -1123,12 +1149,6 @@ impl TechFx {
     #[cfg(test)]
     pub(crate) fn shots_of(&self, side: usize) -> usize {
         self.shots.of(side).len()
-    }
-
-    /// `EftTechEvt_GetEvents`.
-    #[cfg(test)]
-    pub(crate) fn events(&self, side: usize) -> u32 {
-        self.events[side]
     }
 
     /// `BtlChar_SpawnFxBits3C` and `EftShot_Start`: effect bit 0x3C..0x40 (the highest wins) starts the shot of
@@ -1989,7 +2009,8 @@ pub(crate) fn guard_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
 
 /// `BtlColl_HitByStrike`: a skill's record hits (one not of hit direction kind 4 only from in front of its user):
 /// the reaction by the victim's state (0x800), 0 meaning 3 and 1 nothing; the push, the stun of reactions
-/// 0x17..0x1C, the damage. Flag 0x45 lets it through. The sound, shake, vibration and events are not ported.
+/// 0x17..0x1C, the hit sound, the damage. Flag 0x45 lets it through. The shake, vibration and events are not
+/// ported.
 pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let Some(src) = rec.tech else {
         return false;
@@ -2320,6 +2341,7 @@ pub(crate) fn try_dodge_tech(w: &mut World, target: usize, hit_count: i32, src: 
         dir = 1;
     }
     chr.flags.set(if dir == 0 { 0x74 } else { 0x75 });
+    chr.voice(w.env, frame, 0x1F);
     if rush {
         // A timed evasion of a technique fills the blast stocks by one with ability 0x22.
         if !chr.flags.test(0x80) && free && chr.has_ability(0x22) {

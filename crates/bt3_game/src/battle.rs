@@ -940,6 +940,10 @@ pub struct Battle {
     fade2: Fade,
     /// `gEftBurst->frame`: the transition's frame while it runs (its particles and sounds are not ported).
     burst: Option<i32>,
+    /// `gStgAmb`: the stage's looping sound and thunder.
+    amb: crate::stg_amb::StgAmb,
+    /// The camera's position of the last frame (`gBtlCamView` when the stage updates).
+    amb_cam: Option<[f32; 3]>,
 }
 
 /// What reads the files of a character change.
@@ -1119,7 +1123,16 @@ impl Battle {
             loading: false,
             fade2: Fade::default(),
             burst: None,
+            amb: crate::stg_amb::StgAmb::default(),
+            amb_cam: None,
         }
+        .with_ambience()
+    }
+
+    /// `Battle_Restart`'s `BtlStage_Reset` at the first start: `StgAmb_Start`.
+    fn with_ambience(mut self) -> Self {
+        self.amb.start(self.assets.stage_id);
+        self
     }
 
     /// `BtlScene_CheckStageChange` (while fighting, outside modes 4..7, without a time limit under 10 seconds): the
@@ -1218,6 +1231,8 @@ impl Battle {
                 job.state = 1;
             }
             1 => {
+                // BtlLoad_BeginStageSwap: BtlStage_Term (StgAmb_Stop).
+                self.amb.stop();
                 let id = if self.assets.stage_id == 3 {
                     TRANSITION_FILE_3
                 } else {
@@ -1294,6 +1309,8 @@ impl Battle {
                                 false
                             });
                         }
+                        // BtlLoad_EndStageSwap: the new stage's BtlStage_Reset (StgAmb_Start).
+                        self.amb.start(self.assets.stage_id);
                         if let Some(job) = &mut self.stage_job {
                             job.transition = None;
                             job.state = 9;
@@ -1536,9 +1553,10 @@ impl Battle {
                 Err(e) => bevy::log::error!("cannot load stage {start} back: {e}"),
             }
         }
-        // BtlStage_Reset: every stage object whole again.
+        // BtlStage_Reset: every stage object whole again, the ambience started again.
         let objs = self.assets.stage_objs.get_mut();
         objs.unwrap_or_else(|e| e.into_inner()).reset_stage();
+        self.amb.start(self.assets.stage_id);
         if let Some(menu) = &mut self.menu {
             menu.reset();
         }
@@ -1742,7 +1760,15 @@ impl Battle {
         });
         self.check_stage_change();
         if !paused && !self.loading {
-            // BtlStage_Update: BtlStage_UpdateObjs and StgRigid_Update (not while paused or loading).
+            // BtlStage_Update: StgAmb_Update, then the objects' animations and StgRigid_Update (not while paused or
+            // loading).
+            let water = self.assets.stage.water_level.unwrap_or(0.0);
+            self.amb.update(
+                self.amb_cam,
+                water,
+                &mut *input.libc,
+                &mut self.assets.snd.lock().unwrap_or_else(|e| e.into_inner()),
+            );
             self.with_roster(|_, _, env| {
                 env.objs()
                     .update(env.inner_radius(), &mut vu0, &mut *input.libc);
@@ -1831,6 +1857,8 @@ impl Battle {
                     );
             }
         }
+        self.amb_cam = Some(view.eye());
+        input.sounds.append(&mut self.amb.out);
         self.step_change_job(paused);
         // The transition's task counts its frames (EftBurst_Update, not while paused).
         if !paused && let Some(f) = &mut self.burst {
@@ -5018,6 +5046,59 @@ mod tests {
     }
 
     #[test]
+    fn real_actions_request_their_sounds_and_voices() {
+        use crate::btl_input::pad::{L2, START};
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut reqs = Vec::new();
+        let mut sounds = Vec::new();
+        for i in 0..400 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let held = if skip && i % 2 == 0 {
+                START
+            } else if battle.seq.state == SeqState::Fight {
+                L2
+            } else {
+                0
+            };
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            let frame = battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
+            sounds.extend(frame.sounds);
+            let snd = battle.assets.snd.lock().unwrap_or_else(|e| e.into_inner());
+            reqs.extend(snd.requests());
+        }
+        // The ki charge (action 0x37): the start sound 0x15 with voice kind 0xD (an own-bank line, request kind 2
+        // for side 0), then the looping 0x16 every frame of the loop.
+        assert!(reqs.contains(&(0, 0, 0x15)), "{reqs:x?}");
+        assert!(reqs.iter().any(|&(o, k, _)| o == 0 && k == 2), "{reqs:x?}");
+        assert!(
+            reqs.iter().filter(|r| **r == (0, 0, 0x16)).count() > 30,
+            "{reqs:x?}"
+        );
+        // The stage's looping ambience on the second music player.
+        let stage = battle.assets.stage_id as u32;
+        assert!(
+            sounds.contains(&TitleSound::MapBgm(0x10BA4 + stage)),
+            "{sounds:x?}"
+        );
+        assert!(
+            sounds
+                .iter()
+                .any(|s| matches!(s, TitleSound::MapBgmVolume(v) if *v > 0))
+        );
+    }
+
+    #[test]
     fn real_technique_requests_its_voice_line_and_sounds() {
         // Goku's first blast 2 (slot 2): its motion raises event 0x8000 for voice line 0x57 (streamed, request kind
         // 5 for side 0) and events 0x10000.. for sounds 0x2D.. of the character's own bank (kind 2).
@@ -5751,7 +5832,7 @@ mod tests {
             (0, 3, false, 0x11F),
             (133, 3, true, 0x122),
         ] {
-            let Some((log, dmg, table, parts, _)) = run_technique(chara, slot, 700, near) else {
+            let Some((log, dmg, table, _, _)) = run_technique(chara, slot, 700, near) else {
                 return;
             };
             assert!(has(&log, dash, None), "{chara}: {log:x?}");

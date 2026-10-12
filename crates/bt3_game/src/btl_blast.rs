@@ -14,8 +14,9 @@
 //! The ki blasts of types 4 / 5 are discs (`btl_tech_disc`), those of types 2 / 3 thrown objects and bombs
 //! (`btl_ki_obj`).
 //!
-//! Not ported: the struggle's spark; the particles, impact effects, sounds, voices, camera shake, pad vibration and
-//! battle events.
+//! The fighters' answers play their sounds and voices (`BtlColl_*`), the shots their fire and stage-contact sounds.
+//!
+//! Not ported: the struggle's spark; the particles, impact effects, camera shake, pad vibration and battle events.
 
 use std::f32::consts::PI;
 
@@ -710,7 +711,8 @@ fn node_side(node: u32) -> i32 {
 }
 
 impl Scene {
-    /// `BtlFx_FireKiBlast`: animation event 4 launches the record's hits along the aim from the event's node.
+    /// `BtlFx_FireKiBlast`: animation event 4 launches the record's hits along the aim from the event's node, with
+    /// sound 1 (types 2, 3) or 0xF / 0x10 by the frame.
     pub(crate) fn fire(
         &mut self,
         me: &mut Chr,
@@ -718,6 +720,8 @@ impl Scene {
         data: &SideData,
         rand: &mut u32,
         time_stopped: bool,
+        snd: &mut crate::btl_snd::CharSound,
+        frame: u32,
     ) {
         if !me.anim_test_attr(EV_FIRE) {
             return;
@@ -806,6 +810,11 @@ impl Scene {
             }
             self.defer_disc_draws();
         }
+        let sound = match arg.kind_type {
+            2 | 3 => 1,
+            _ => (frame % 2) as i32 + 0xF,
+        };
+        me.play_common(snd, sound);
     }
 
     /// The disc's libc draws, in order with the others.
@@ -1035,7 +1044,8 @@ impl Scene {
                     let mut i = 0;
                     while i < self.ki_objs[side][list].len() {
                         let o = &mut self.ki_objs[side][list][i];
-                        if let Some(rec) = o.update(opp_pos, bottom, w.libc, w.paused)
+                        let rec = o.update(opp_pos, bottom, w.libc, w.paused, &mut w.env.snd());
+                        if let Some(rec) = rec
                             && self.records.len() < HIT_MAX
                         {
                             self.records.push(rec);
@@ -2315,8 +2325,19 @@ fn try_dodge(w: &mut World, target: usize, rec: &HitRec, hit_count: i32) -> bool
     }
 }
 
+/// The sound of a ki blast knocked away: 0xC / 0xD by the frame for types 2 and 3, else `other`.
+fn deflect_sound(w: &World, target: usize, rec: &HitRec, other: i32) {
+    let sound = if matches!(hit_record(w, rec).kind_type(), 2 | 3) {
+        if w.frame % 2 != 0 { 0xC } else { 0xD }
+    } else {
+        other
+    };
+    w.chars[target].play_common(&mut w.env.snd(), sound);
+}
+
 /// `BtlColl_TryDeflect`: a free fighter facing a ki blast knocks it away with flag 0x50 (kinds 0, 4, 8) or 0x51,
-/// or perfectly inside its deflect window; the powered-up skill 0x80 always does.
+/// or perfectly inside its deflect window, with its sound and voice kind 0xB; the powered-up skill 0x80 always
+/// does (the sound alone).
 fn try_deflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if rec.tech.is_some() || rec.unk54 {
         return false;
@@ -2332,6 +2353,7 @@ fn try_deflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
         && chr.flags.test(6)
         && w.data[target].tables.params.flags3() & 0x80 != 0
     {
+        deflect_sound(w, target, rec, 0x13);
         return true;
     }
     if is_facing(chr, yaw) {
@@ -2348,6 +2370,9 @@ fn try_deflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
             return false;
         }
     }
+    deflect_sound(w, target, rec, 0x13);
+    let chr = &mut w.chars[target];
+    chr.voice(w.env, w.frame, 0xB);
     chr.add_blast(5000);
     if perfect {
         chr.flags.set(0x6B);
@@ -2367,7 +2392,8 @@ fn deflect_dir_of(chr: &Chr, rec: &HitRec) -> [f32; 3] {
     }
 }
 
-/// `BtlColl_TryReflect`: a free fighter with flag 0x52 facing a ki blast sends it back.
+/// `BtlColl_TryReflect`: a free fighter with flag 0x52 facing a ki blast sends it back, with its sound (0x14
+/// for types other than 2 and 3) and voice kind 0xB.
 fn try_reflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if rec.tech.is_some() || rec.unk54 || hit_flags(w, rec) & 2 != 0 {
         return false;
@@ -2377,6 +2403,9 @@ fn try_reflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if !chr.flags.test(0x52) || !chr.is_free() || is_facing(chr, yaw) {
         return false;
     }
+    deflect_sound(w, target, rec, 0x14);
+    let chr = &mut w.chars[target];
+    chr.voice(w.env, w.frame, 0xB);
     chr.deflect_dir = deflect_dir_of(chr, rec);
     chr.set_fx(0x2E);
     true
@@ -2384,7 +2413,7 @@ fn try_reflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
 
 /// `BtlColl_TryAbsorb`: a free fighter with flag 0x54 (or, for a ki blast, a perfect guard with parameter flag 2)
 /// facing the record takes ki: three times a type 0 / 1 blast's cost, or a technique's cost over its shots
-/// (technique flag 4 only).
+/// (technique flag 4 only); sound 0x37.
 fn try_absorb(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if rec.unk54 {
         return false;
@@ -2414,6 +2443,7 @@ fn try_absorb(w: &mut World, target: usize, rec: &HitRec) -> bool {
         scale_ki(&w.chars[rec.atk.src], blast.ki()) * 3
     };
     let chr = &mut w.chars[target];
+    chr.play_common(&mut w.env.snd(), 0x37);
     // BtlMember_AddKi: the overflow feeds the max power gauge outside the powered-up mode.
     if amount > 0 {
         let g = &mut chr.gauge;
@@ -2444,8 +2474,9 @@ fn try_guard(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
 }
 
-/// `BtlColl_GuardBlast`: a fighter in a guard motion takes the guarded damage and a push from a blast it faces
-/// (any unblockable blast goes through).
+/// `BtlColl_GuardBlast`: a fighter in a guard motion takes the guarded damage, the blast's sound at the record
+/// (0x42 for type 2, 0xC / 0xD for type 3, else 0x1B / 0x11) and a push from a blast it faces (any unblockable
+/// blast goes through).
 fn guard_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let flags = hit_flags(w, rec);
     let blast = *hit_record(w, rec);
@@ -2470,6 +2501,33 @@ fn guard_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
     chr.flags.set(0x66);
     chr.damage(env, data, dmg, 0xC);
+    let odd = w.frame % 2 != 0;
+    let sound = match blast.kind_type() {
+        2 => 0x42,
+        3 => {
+            if odd {
+                0xC
+            } else {
+                0xD
+            }
+        }
+        _ => {
+            if odd {
+                0x1B
+            } else {
+                0x11
+            }
+        }
+    };
+    env.snd().request(
+        rec.pos,
+        -1,
+        crate::btl_snd::KIND_COMMON,
+        200.0,
+        1500.0,
+        sound,
+    );
+    let chr = &mut w.chars[target];
     chr.set_impulse_dir(dir, push_of(&blast, true));
     true
 }
@@ -2501,7 +2559,8 @@ fn hit(w: &mut World, target: usize, rec: &HitRec) -> bool {
     ret
 }
 
-/// `BtlColl_HitByBlast`: the reaction by the victim's state, the damage and the push, and the victim locks on.
+/// `BtlColl_HitByBlast`: the reaction by the victim's state (voice kind 0 when it flinches), the sound at the
+/// record (0x42 for type 2, else 0x1B / 0x11), the damage and the push, and the victim locks on.
 fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let flags = hit_flags(w, rec);
     let blast = *hit_record(w, rec);
@@ -2591,8 +2650,24 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
         chr.react.yaw = yaw;
         chr.react.back = front;
         chr.set_impulse_dir(dir, push_of(&blast, false));
+        chr.voice(env, w.frame, 0);
     }
     chr.set_fx(0x1D);
+    let sound = if blast.kind_type() == 2 {
+        0x42
+    } else if w.frame % 2 != 0 {
+        0x1B
+    } else {
+        0x11
+    };
+    env.snd().request(
+        rec.pos,
+        -1,
+        crate::btl_snd::KIND_COMMON,
+        200.0,
+        1500.0,
+        sound,
+    );
     let mut dmg = damage_of(&w.chars[rec.atk.src], env, &blast, false);
     let chr = &mut w.chars[target];
     if rec.atk.hits >= 2 {

@@ -94,6 +94,8 @@ pub(crate) struct Gauge {
     pub blast_max: i32,
     pub max_power: i32,
     pub variant: i32,
+    /// `variantVoiced` (+0x2C): the damaged variant's get-up voice was played.
+    pub variant_voiced: bool,
     pub low_health: bool,
     pub low_health_idle: bool,
     pub body_changed: bool,

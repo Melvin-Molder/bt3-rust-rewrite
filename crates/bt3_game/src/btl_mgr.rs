@@ -332,8 +332,15 @@ impl Roster {
             // BtlFx_UpdateAll: only the technique shots and the ki blasts it starts are ported.
             self.scene
                 .request_technique(me, opp, data[i], env.gate.time_stopped);
-            self.scene
-                .fire(me, opp, data[i], &mut self.rand, env.gate.time_stopped);
+            self.scene.fire(
+                me,
+                opp,
+                data[i],
+                &mut self.rand,
+                env.gate.time_stopped,
+                &mut env.snd(),
+                self.frame,
+            );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             self.scene.spawn_held_disc(me, data[i]);
             me.obj.build_volumes(&data[i].obj);
@@ -353,9 +360,10 @@ impl Roster {
                 chr.status.target = -1;
             }
         }
-        for chr in &mut self.chars {
+        for (i, chr) in self.chars.iter_mut().enumerate() {
             if !chr.is_frozen() {
                 chr.flags.set_stage(10);
+                crate::btl_snd::after_hit_sounds(chr, data[i], env, frame);
             }
         }
         let powers = self.scene.struggle.as_ref().map(|s| s.powers());

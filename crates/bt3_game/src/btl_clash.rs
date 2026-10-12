@@ -242,7 +242,7 @@ impl Clash {
                     self.state = 0;
                 }
             }
-            6..=8 => self.state = self.update_b(chars, frame),
+            6..=8 => self.state = self.update_b(chars, env, frame),
             9..=11 => self.state = self.update_c(chars, env, rand_state),
             _ => {}
         }
@@ -250,7 +250,8 @@ impl Clash {
 
     /// `BtlClash_UpdateA` with its one-frame cuts: each fighter in turn from afar for 30 frames, then by the
     /// balance (a fighter far behind from the side, else the middle cut); the leader close up, the middle while the
-    /// lead grows, the loser from afar. The voices and streamed sounds are not ported.
+    /// lead grows, the loser from afar. Streamed sound 0x8D30 starts it; voice kind 0x14 for each fighter as its
+    /// cut comes, 0x15 for the leader, 0x16 and streamed sound 0x8D31 for a loser hurt by the beams.
     fn update_a(
         &mut self,
         chars: &mut [Chr; 2],
@@ -267,8 +268,15 @@ impl Clash {
                 a.timer = 0;
                 a.lead = 0;
                 state += 1;
+                chars[0].play_stream(&mut env.snd(), 0x8D30);
             }
             2 => {
+                if a.timer == 0 {
+                    chars[0].voice(env, frame, 0x14);
+                }
+                if a.timer == 0x1E {
+                    chars[1].voice(env, frame, 0x14);
+                }
                 if a.timer < 0x1E {
                     set_orbit_cut(chars, data, 0, 0, powers);
                 } else if a.timer < 0x3C {
@@ -295,8 +303,12 @@ impl Clash {
                 }
             }
             3 => {
-                if a.timer == 0 && a.lead == 0 {
-                    a.lead = if frame % 2 != 0 { 1 } else { -1 };
+                if a.timer == 0 {
+                    if a.lead == 0 {
+                        a.lead = if frame % 2 != 0 { 1 } else { -1 };
+                    }
+                    let leader = if a.lead > 0 { 0 } else { 1 };
+                    chars[leader].voice(env, frame, 0x15);
                 }
                 set_orbit_cut(chars, data, if a.lead > 0 { 0 } else { 1 }, 2, powers);
                 a.timer += 1;
@@ -347,6 +359,8 @@ impl Clash {
                             _ => 0,
                         };
                         chars[l].damage(env, data[l], dmg, flags);
+                        chars[l].voice(env, frame, 0x16);
+                        chars[l].play_stream(&mut env.snd(), 0x8D31);
                         self.struggle_end = Some(-1);
                     }
                     let (lo, hi) = chars.split_at_mut(1);
@@ -372,8 +386,8 @@ impl Clash {
         state
     }
 
-    /// `BtlClash_UpdateB`.
-    fn update_b(&mut self, chars: &mut [Chr; 2], frame: u32) -> i32 {
+    /// `BtlClash_UpdateB`: voice kind 0x18 for each fighter in turn, 0x19 for the winner.
+    fn update_b(&mut self, chars: &mut [Chr; 2], env: &Env, frame: u32) -> i32 {
         let mut state = self.state;
         match state {
             6 => {
@@ -382,6 +396,12 @@ impl Clash {
                 crate::chr_cam::request_cut(&mut chars[0], 1, 6);
             }
             7 => {
+                if self.b_timer == 0 {
+                    chars[0].voice(env, frame, 0x18);
+                }
+                if self.b_timer == 0xF {
+                    chars[1].voice(env, frame, 0x18);
+                }
                 self.b_timer += 1;
                 if self.b_timer >= 0x4C {
                     self.b_timer = 0;
@@ -412,6 +432,7 @@ impl Clash {
                     };
                     winner.flags.set(0xBF);
                     loser.flags.set(0xC0);
+                    winner.voice(env, frame, 0x19);
                     raise_first_clash(winner, loser);
                     crate::chr_cam::end_cut(&mut chars[0]);
                     self.b_winner = win as i32;

@@ -92,6 +92,8 @@ pub(crate) struct CharSound {
     next_handle: u32,
     /// `Voice_Stop(player)` asked for this frame (`BtlChar_StopVoiceOnFlag`).
     stop_voice: [bool; 2],
+    /// `Snd_StopHandle` calls of this frame (`BtlCharSnd_Stop`).
+    stops: Vec<u32>,
 }
 
 impl CharSound {
@@ -154,7 +156,8 @@ impl CharSound {
     }
 
     /// `Snd_PlaySeEx`'s handle: -1 when the bank is not loaded or the id is out of range.
-    fn play_se(
+    /// `Snd_PlaySeEx` of request kind `kind`'s bank with a new handle (-1 when the bank is not loaded).
+    pub(crate) fn play_se(
         &mut self,
         kind: usize,
         id: i32,
@@ -192,6 +195,7 @@ impl CharSound {
                 out.push(TitleSound::VoiceStopEx(player as u32));
             }
         }
+        out.extend(self.stops.drain(..).map(TitleSound::SeStop));
         let reqs = self.reqs.clone();
         for req in reqs {
             let owner = req.owner.max(0) as usize & 1;
@@ -252,18 +256,17 @@ impl CharSound {
         }
     }
 
-    /// `BtlCharSnd_Stop`: cuts short side `side`'s one-shot sound of that kind and id (unless requested again
-    /// this frame). Used by the action handlers' sounds, not ported yet.
-    #[allow(dead_code)]
-    pub(crate) fn stop(&mut self, side: usize, kind: i32, id: i32, out: &mut Vec<TitleSound>) {
+    /// `BtlCharSnd_Stop`: cuts short side `side`'s one-shot sound of that kind and id (unless requested already
+    /// this frame); `Snd_StopHandle` goes out with this frame's sounds.
+    pub(crate) fn stop(&mut self, side: usize, kind: i32, id: i32) {
         for i in 0..4 {
             let s = self.sets[side & 1].slot[i];
             if s.handle >= 0
                 && !self.is_requested(side as i32, s.kind, s.id)
                 && s.kind == kind
-                && s.id == id
+                && s.id == id & 0xFF
             {
-                out.push(TitleSound::SeStop(s.handle as u32));
+                self.stops.push(s.handle as u32);
                 self.sets[side & 1].slot[i].handle = -1;
             }
         }
@@ -308,17 +311,24 @@ fn hit_sound_line(level: i32, frame: u32) -> i32 {
 /// `BtlFxObj_PlayEventSounds`): a light (0x100) or heavy (0x80) impact event's sound at node 3 and voice kind 1 for
 /// the fighter taking the blow (the attacker's opponent, or itself in a motion with flag 0x10; not when the other
 /// has flag 0x13B or the speaker is frozen); event 2's swing sound of the attack (not with flag 0x91, nor with
-/// 0x60 unless 0x5C); the object's sound events at its node 3. The impacts' flash and shake and the weapon
-/// variant of the impact sounds are not ported.
+/// 0x60 unless 0x5C); the object's sound events at its node 3. A shown weapon outside a rush sequence turns the
+/// impact sounds into 0x4D / 0x36; a visible fighter's camera shakes (5 for 0.1 s, 10 for 0.2 s). The impacts'
+/// effects are not drawn.
 pub(crate) fn fx_event_sounds(me: &mut Chr, opp: &mut Chr, data: &SideData, env: &Env, frame: u32) {
-    let mut sound = None;
+    let mut impact = None;
     if me.anim_test_attr(0x100) {
-        sound = Some((frame % 2) as i32 + 2);
+        impact = Some(((frame % 2) as i32 + 2, 0x4D, 5.0, 0.1));
     }
     if me.anim_test_attr(0x80) {
-        sound = Some(0x49);
+        impact = Some((0x49, 0x36, 10.0, 0.2));
     }
-    if let Some(sound) = sound {
+    if let Some((mut sound, weapon, strength, time)) = impact {
+        if !crate::btl_tech_fx::in_rush_sequence(me) && has_weapon_out(me, data) {
+            sound = weapon;
+        }
+        if me.obj.flags & 2 != 0 {
+            crate::chr_cam::add_shake(me, strength, time);
+        }
         me.play_common(&mut env.snd(), sound);
         let (speaker, other) = if env.anim_flags(me.anim.cur) & 0x10 != 0 {
             (&mut *me, &*opp)
@@ -335,6 +345,22 @@ pub(crate) fn fx_event_sounds(me: &mut Chr, opp: &mut Chr, data: &SideData, env:
         let line = hit_sound_line(level, frame);
         if line >= 0 {
             me.play_common(&mut env.snd(), line);
+        }
+    }
+    // BtlFxObj_HandleFlagEvents: events 0x20 / 0x40 and bits 43 / 44 show and hide the weapons (object flags 0x20,
+    // 0x40); bit 42's effect is not ported.
+    for (mask, set, bit) in [
+        (0x20, true, 0x20),
+        (0x40, false, 0x20),
+        (0x800_0000_0000, true, 0x40),
+        (0x1000_0000_0000, false, 0x40),
+    ] {
+        if me.obj.test_event(mask) {
+            if set {
+                me.obj.flags |= bit;
+            } else {
+                me.obj.flags &= !bit;
+            }
         }
     }
     let pos = me.obj.node_pos(3);
@@ -370,6 +396,71 @@ pub(crate) fn fx_event_sounds(me: &mut Chr, opp: &mut Chr, data: &SideData, env:
         if mask != 0 && me.obj.test_event(mask) {
             snd.request(pos, -1, kind, 200.0, 1500.0, id);
         }
+    }
+}
+
+/// `BtlCharApi_HasWeaponOut`: a shown weapon of parameter flag 0x40 (object flags 0x22) or 0x80 (0x42).
+pub(crate) fn has_weapon_out(me: &Chr, data: &SideData) -> bool {
+    let (p, o) = (data.tables.params.flags(), me.obj.flags);
+    (p & 0x40 != 0 && o & 0x22 == 0x22) || (p & 0x80 != 0 && o & 0x42 == 0x42)
+}
+
+/// The sounds of `BtlFx_UpdateAfterHits` (`BtlChar_SpawnHitFx`, `BtlFx_SpawnFlashReq20`): a landed blow (effect
+/// bit 0x1B) by the attack's hit sound level (0x4D / 0x36 when a shown weapon strikes, unless attack flag
+/// 0x2000), a guarded one (0x1C) 4 / 5 or 0xC / 0xD, 0x21 and 0x22's 0x24, 0x24's 0x42, a guarding fighter's
+/// (0x20) 0x46. The hit effects themselves are not drawn.
+pub(crate) fn after_hit_sounds(me: &Chr, data: &SideData, env: &Env, frame: u32) {
+    let odd = (frame % 2) as i32;
+    let mut sound = -1;
+    if me.test_fx(0x1B) {
+        let level = crate::btl_hit::hit_sound_level(me, data, env);
+        let weapon =
+            has_weapon_out(me, data) && crate::btl_hit::attack_flags(me, data, env) & 0x2000 == 0;
+        sound = if weapon {
+            if level < 5 { 0x4D } else { 0x36 }
+        } else {
+            match level {
+                1 => odd + 2,
+                2 => 0x19,
+                3 => 0x22,
+                4 => 0x45,
+                5 => odd + 9,
+                6 => 0x25,
+                7 => 0x26,
+                8 => 0x27,
+                9 => 0x49,
+                10 => 0x4E,
+                11 => 0x50,
+                12 => 0x4F,
+                13 => 0x4B,
+                14 => 0xE,
+                _ => -1,
+            }
+        };
+    }
+    if me.test_fx(0x1C) {
+        let level = crate::btl_hit::hit_sound_level(me, data, env);
+        sound = if level < 5 { odd + 4 } else { odd + 0xC };
+    }
+    if me.test_fx(0x21) {
+        sound = 0x24;
+    }
+    if me.test_fx(0x24) {
+        sound = 0x42;
+    }
+    if me.test_fx(0x22) {
+        sound = if crate::btl_hit::hit_fx_kind(me, data, env) < 4 {
+            odd + 0xC
+        } else {
+            0x24
+        };
+    }
+    let mut snd = env.snd();
+    if sound >= 0 {
+        me.play_common(&mut snd, sound);
+    }
+    if me.test_fx(0x20) {
+        me.play_common(&mut snd, 0x46);
     }
 }
 
@@ -437,6 +528,16 @@ impl Chr {
         self.voice_timer[kind] = (e.interval * 30.0) as i32;
     }
 
+    /// `BtlChar_PlayVoiceSingle`: cuts short the own-bank line of a voice kind that has only one.
+    pub(crate) fn voice_stop_single(&self, env: &Env, kind: usize) {
+        if let Some(e) = env.common.voices.get(kind) {
+            if e.count < 2 {
+                let bank = self.player as i32 + 2;
+                env.snd().stop(self.player, bank, i32::from(e.first));
+            }
+        }
+    }
+
     /// `BtlChar_TickVoiceTimers`.
     pub(crate) fn tick_voice_timers(&mut self) {
         for t in &mut self.voice_timer {
@@ -459,7 +560,6 @@ impl Chr {
     }
 
     /// `BtlCharSnd_PlayCommonFar`: the same, heard everywhere at full volume.
-    #[allow(dead_code)]
     pub(crate) fn play_common_far(&self, snd: &mut CharSound, id: i32) {
         snd.request(
             at(self, 3),
@@ -472,7 +572,6 @@ impl Chr {
     }
 
     /// `BtlCharSnd_PlayBank8`: a sound of the stage's bank (8) at node 3.
-    #[allow(dead_code)]
     pub(crate) fn play_bank8(&self, snd: &mut CharSound, id: i32) {
         snd.request(
             at(self, 3),

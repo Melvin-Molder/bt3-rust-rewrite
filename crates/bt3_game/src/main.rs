@@ -58,6 +58,7 @@ mod save;
 mod se;
 mod sound;
 mod stage_draw;
+mod stg_amb;
 mod stg_obj;
 mod stg_rigid;
 mod title;
@@ -243,6 +244,10 @@ struct Game {
     /// `gProgress->mainMenuItem`.
     main_menu_item: i32,
     bgm: Option<Player>,
+    /// The second music player ("MAP", the stage's ambience), the file being decoded for it, and its volume.
+    map_bgm: Option<Player>,
+    pending_map: Option<Decoding>,
+    map_volume: i32,
     /// Voice players 0 and 1.
     voice: [Option<Player>; 2],
     /// Streamed-SE players 0 and 1 and the files being decoded for them, with their volumes.
@@ -432,6 +437,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save_loaded: false,
             main_menu_item: 0,
             bgm: None,
+            map_bgm: None,
+            pending_map: None,
+            map_volume: 0x40,
             voice: [None; 2],
             stream_se: [None; 2],
             pending_stream_se: [None, None],
@@ -679,6 +687,8 @@ fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
 fn stop_all(game: &mut Game, commands: &mut Commands) {
     game.se_voice_paused = false;
     stop_player(&mut game.bgm, commands);
+    stop_player(&mut game.map_bgm, commands);
+    game.pending_map = None;
     for i in 0..2 {
         stop_player(&mut game.voice[i], commands);
         stop_player(&mut game.stream_se[i], commands);
@@ -736,6 +746,21 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
             } => game.se.play_se_ex(mask, id, volume, pan, 0, handle),
             TitleSound::SeStop(handle) => game.se.stop_handle(handle),
             TitleSound::SeStopBanks(mask) => game.se.stop_banks(mask),
+            TitleSound::MapBgm(id) => {
+                stop_player(&mut game.map_bgm, commands);
+                game.map_volume = 0x40;
+                game.pending_map = Some(decode_adx_file(game.iso_path.clone(), id));
+            }
+            TitleSound::MapBgmVolume(volume) => {
+                game.map_volume = volume;
+                if let Some(p) = &mut game.map_bgm {
+                    p.level = sound::out_volume(sound::CH_MAP, volume);
+                }
+            }
+            TitleSound::MapBgmStop => {
+                stop_player(&mut game.map_bgm, commands);
+                game.pending_map = None;
+            }
             TitleSound::StreamSe(id) => play_stream_se(game, commands, 0, id, 0x40),
             TitleSound::StreamSeEx {
                 player, id, volume, ..
@@ -813,6 +838,7 @@ fn run_frames(
     game.voice_fresh = false;
     start_pending_voice(&mut game, &mut commands, &mut audio);
     start_pending_stream_se(&mut game, &mut commands, &mut audio);
+    start_pending_map(&mut game, &mut commands, &mut audio);
     start_pending_bgm(&mut game, &mut commands, &mut audio);
     let pad2 = gamepads.iter().count() >= 2;
     if std::mem::take(&mut game.skip_to_title) {
@@ -1226,6 +1252,30 @@ fn start_pending(
     let settings = PlaybackSettings::DESPAWN.with_volume(sound::volume(level));
     let entity = commands.spawn((AudioPlayer(source?), settings)).id();
     Some(Player { entity, level })
+}
+
+/// The "MAP" player's file once decoded, looping at the volume last set.
+fn start_pending_map(game: &mut Game, commands: &mut Commands, audio: &mut Assets<AudioSource>) {
+    if !game
+        .pending_map
+        .as_ref()
+        .is_some_and(JoinHandle::is_finished)
+    {
+        return;
+    }
+    let mut source = None;
+    finish_decoding(
+        &mut game.pending_map,
+        &mut source,
+        audio,
+        "a stage ambience",
+    );
+    if let Some(source) = source {
+        let level = sound::out_volume(sound::CH_MAP, game.map_volume);
+        let settings = PlaybackSettings::LOOP.with_volume(sound::volume(level));
+        let entity = commands.spawn((AudioPlayer(source), settings)).id();
+        game.map_bgm = Some(Player { entity, level });
+    }
 }
 
 /// The streamed-SE players' files once decoded.
@@ -1869,7 +1919,7 @@ fn write_quad_mesh(mesh: &mut Mesh, quad: &ScreenQuad, texture_size: Option<(u32
 
 /// ADXT output volumes changed by fade steps, and the pause of the voice and streamed-SE players.
 fn apply_volumes(game: Res<Game>, mut sinks: Query<&mut AudioSink>) {
-    for player in [game.bgm, game.voice[0], game.voice[1]]
+    for player in [game.bgm, game.map_bgm, game.voice[0], game.voice[1]]
         .into_iter()
         .flatten()
     {

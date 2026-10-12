@@ -190,6 +190,12 @@ pub enum TitleSound {
     VoiceStop,
     /// `Voice_Stop(player)` (players 0 and 1).
     VoiceStopEx(u32),
+    /// `MapBgm_Play(id)`: the second music player, looping (volume 0x40 until set).
+    MapBgm(u32),
+    /// `MapBgm_SetVolume`.
+    MapBgmVolume(i32),
+    /// `MapBgm_Stop`.
+    MapBgmStop,
     /// `Bgm_Play(id)`.
     Bgm(u32),
     /// `Bgm_FadeOutStep()` alone.
