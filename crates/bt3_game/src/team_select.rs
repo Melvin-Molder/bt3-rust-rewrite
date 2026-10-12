@@ -782,6 +782,7 @@ impl TeamSelScreen {
                     }),
                     team_count: count as i32 - 1,
                     switch_enabled: 1,
+                    members: None,
                 }
             }),
             pool: Vec::new(),

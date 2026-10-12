@@ -2560,6 +2560,10 @@ pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool 
     chr.damage(env, w.data[target], s.damage(slot), flags);
     crate::chr_cam::add_shake(chr, 3.0, 0.2);
     chr.vibrate(1.0, 0.2);
+    // The skill landing: event 0x29 / 0x2A for the attacker.
+    if slot <= 1 {
+        chr.raise(side, 0x29 + slot as u32);
+    }
     true
 }
 
@@ -2651,6 +2655,8 @@ pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
     crate::chr_cam::add_shake(chr, 5.0, 0.3);
     chr.vibrate(1.0, 0.3);
+    let guard_side = chr.player;
+    crate::btl_hit::raise_slot(chr, guard_side, slot as i32, 0x2E);
     recoil(w, side, slot);
     true
 }
@@ -2802,6 +2808,7 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         8 => recoil(w, side, slot),
         _ => {}
     }
+    crate::btl_hit::raise_slot(&mut w.chars[target], side, slot as i32, 0x2B);
     true
 }
 

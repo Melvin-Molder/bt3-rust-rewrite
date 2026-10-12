@@ -279,13 +279,13 @@ impl Roster {
             me.anim_apply_blend();
             // BtlObj_SaveNodePositions: relative to node 0's translation with flag 0x2B.
             me.obj.save_node_positions(me.flags.test(0x2B));
-            // The placement requests in the original's order (0xF3, the restart's, and the warps 0xFC / 0xFD of
-            // the story's actions are not ported).
+            // The placement requests in the original's order (0xF3, the restart's, is not ported).
             me.place_center(data[i], env);
             me.place_relative(data[i], env);
             place_on_path(me, data[i], env, clash);
             me.place_center_high(data[i], env);
             me.place_saved(data[i]);
+            me.place_warp(data[i], env);
             me.pose_to_obj(true);
             me.obj.sample_pose(&data[i].obj);
             me.obj.update_events(&data[i].obj);
@@ -725,7 +725,9 @@ impl Roster {
                 chr.set_stat_frame_mods();
             }
         }
-        for chr in &mut self.chars {
+        for i in 0..2 {
+            let opp_alive = self.chars[i ^ 1].count_alive();
+            let chr = &mut self.chars[i];
             if chr.is_frozen() {
                 continue;
             }
@@ -737,6 +739,7 @@ impl Roster {
                 chr.pose.vel = [0.0; 3];
                 chr.pose.moved = [0.0; 3];
             }
+            chr.raise_events(data[i], env, opp_alive);
             // BtlChar_UpdateVibration to the fighter's pad.
             chr.update_vibration(&mut self.pad_vib[chr.player], replay);
             chr.flags.set_stage(12);

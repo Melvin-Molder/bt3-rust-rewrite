@@ -97,6 +97,8 @@ const TRANSITION_FILE: u32 = 0x1C0;
 const TRANSITION_FILE_3: u32 = 0x1BF;
 /// `gFadeColors[2]`: the stage change's fade, clear then opaque (four floats each).
 const FADE_COLORS_SLOT2: u32 = 0x2C_6E60 + 2 * 0x20;
+/// `gFadeColors[1]`: the story script's white fades (command 1001 / 1002 -W).
+const FADE_COLORS_SLOT1: u32 = 0x2C_6E60 + 0x20;
 /// `Battle_ResetWork`: `Bgm_Play(Battle_GetBgm() + 0x10B16)`.
 pub const BGM_FIRST: u32 = 0x10B16;
 /// `BtlObjLight_Init`: section 1 of common file 2 is the light's texture file.
@@ -193,7 +195,7 @@ pub struct BattleAssets {
     pub(crate) common_file: Vec<u8>,
     /// The sides' starting characters (`BattleSide.startForm`), which a rematch loads back.
     pub(crate) start: [SideLoad; 2],
-    stage: StageResource,
+    pub(crate) stage: StageResource,
     stage_model: StageModel,
     /// The stage's destructible objects (`gBtlStage->objs`).
     pub(crate) stage_objs: std::sync::Mutex<crate::stg_obj::StageObjs>,
@@ -213,6 +215,10 @@ pub struct BattleAssets {
     time_limit_off: bool,
     /// `gFadeColors[2]` (clear, opaque): the stage change's fade.
     fade_colors: [[f32; 4]; 2],
+    /// `gFadeColors[1]`.
+    pub(crate) fade1_colors: [[f32; 4]; 2],
+    /// Common file 4 (`ChrTblFile`): the item entries the story script's item changes read.
+    pub(crate) chara_table: Vec<u8>,
     /// Counts the stage swaps: the stage's textures are uploaded again when it changes.
     pub stage_rev: u32,
     pub(crate) stage_cuts: Vec<Option<CamAnim>>,
@@ -248,8 +254,9 @@ pub struct BattleAssets {
     pub(crate) ai: AiData,
     pub(crate) ai_tables: AiTables,
     pub(crate) nav: StageNav,
-    /// The active members' `cpuLevel` and `aiType`.
+    /// The active members' `cpuLevel` and `aiType`, and what each member starts with.
     pub(crate) cpu_level: [i32; 2],
+    pub(crate) member_start: [[crate::char_select::MemberStart; 5]; 2],
     pub(crate) ai_type: [usize; 2],
     /// The members' item bonuses and abilities, and AI types.
     pub(crate) member_items: [[MemberItems; 5]; 2],
@@ -418,6 +425,11 @@ pub fn load(
         [fade[0], fade[1], fade[2], fade[3]],
         [fade[4], fade[5], fade[6], fade[7]],
     ];
+    let fade = elf.f32s(FADE_COLORS_SLOT1, 8).map_err(error)?;
+    let fade1_colors = [
+        [fade[0], fade[1], fade[2], fade[3]],
+        [fade[4], fade[5], fade[6], fade[7]],
+    ];
     let hud_file = read(HUD_FILE)?;
     let (mut hud_textures, mut hud_sheets, hud_cpu) = load_hud(&hud_file).map_err(error)?;
     // FontIcon_GetRes: the icon file at boot file word 8, which the prompts draw from (HUD sheet 5 here).
@@ -448,13 +460,16 @@ pub fn load(
     let prompt_defs = crate::hud_prompt::PromptDefs::read(elf).map_err(error)?;
     let menu_sheet = load_menu_sheet(&hud_file, &mut hud_textures).map_err(error)?;
     let menu_texts = MenuTexts::read(&hud_file, MENU_TEXT_COUNT);
-    // PauseMenu_GetMenu: the versus trees without a replay, else the mode's pause menu. Modes 2..7 have no result
-    // menu (the sequence never opens one), so their pause tree stands in that slot too. Story mode's are not
-    // ported.
+    // PauseMenu_GetMenu: the versus trees without a replay, story mode's, else the mode's pause menu. Modes 2..7
+    // have no result menu (the sequence never opens one), so their pause tree stands in that slot too.
     let menus = match setup.mode {
         0 => Some((
             Tree::read(elf, crate::btl_menu::PAUSE_VERSUS).map_err(error)?,
             Tree::read(elf, crate::btl_menu::RESULT_VERSUS).map_err(error)?,
+        )),
+        1 => Some((
+            Tree::read(elf, crate::btl_menu::PAUSE_MODE1).map_err(error)?,
+            Tree::read(elf, crate::btl_menu::RESULT_MODE1).map_err(error)?,
         )),
         2..=7 => {
             let pause = Tree::read(elf, crate::btl_menu::PAUSE_MODES[setup.mode as usize - 2])
@@ -538,7 +553,7 @@ pub fn load(
         start: setup.sides.map(|s| SideLoad {
             chara: s.chara,
             costume: s.costume,
-            variant: 0,
+            variant: s.members.map_or(0, |m| m[0].variant),
             anim_chara: s.chara,
             anim1_chara: s.chara,
         }),
@@ -556,6 +571,7 @@ pub fn load(
         stage_change: setup.stage_change != 0,
         time_limit_off: setup.time_limit == 0,
         fade_colors,
+        fade1_colors,
         stage_rev: 0,
         stage_cuts,
         mode: setup.mode,
@@ -583,6 +599,15 @@ pub fn load(
         ai_tables,
         nav,
         cpu_level: setup.sides.map(|side| side.cpu_level),
+        member_start: setup.sides.map(|side| {
+            side.members.unwrap_or(
+                [crate::char_select::MemberStart {
+                    cpu_level: side.cpu_level,
+                    health: 100.0,
+                    variant: 0,
+                }; 5],
+            )
+        }),
         ai_type,
         member_items,
         member_ai_type,
@@ -597,6 +622,8 @@ pub fn load(
                     cpu_level: m.cpu_level,
                     ai_type: stats.ai_type.max(0) as usize,
                     items: crate::battle::member_items(&stats, true),
+                    health: 100.0,
+                    variant: 0,
                 }
             })
             .collect(),
@@ -608,6 +635,7 @@ pub fn load(
         replay_play_menus,
         menu_sheet,
         menu_texts,
+        chara_table,
     };
     // BtlLoad: every member's block (BattleMember.data).
     for side in 0..2 {
@@ -836,7 +864,7 @@ pub fn load(
         let load = SideLoad {
             chara: side.chara,
             costume: side.costume,
-            variant: 0,
+            variant: side.members.map_or(0, |m| m[0].variant),
             anim_chara: side.chara,
             anim1_chara: side.chara,
         };
@@ -1852,6 +1880,18 @@ pub struct Battle {
     amb: crate::stg_amb::StgAmb,
     /// The camera's position of the last frame (`gBtlCamView` when the stage updates).
     amb_cam: Option<[f32; 3]>,
+    /// `BattleEvents`: the battle events of both sides.
+    pub(crate) events: crate::btl_event::BattleEvents,
+    /// The story battle's script (mode 1).
+    pub script: Option<Box<crate::btl_script::BtlScript>>,
+    /// `gProgress->difficulty`: the story's level (the script's CPU levels go up by it).
+    pub story_difficulty: i32,
+    /// Fade slot 1, the story script's white fades.
+    pub(crate) fade1: Fade,
+    /// The voice and music streams as the sound system reported them before the frame.
+    pub stream_stat: crate::btl_script::StreamStat,
+    /// A voice asked for this frame (the reported status does not know it yet).
+    pub(crate) voice_req: [bool; 2],
 }
 
 /// What reads the files of a character change.
@@ -1928,7 +1968,7 @@ impl BattleAssets {
             team_count: self.team_count,
             switch_enabled: self.switch_enabled,
             items: self.member_items,
-            cpu_level: self.cpu_level,
+            member_start: self.member_start,
             ai_type: self.member_ai_type,
             pool: &self.pool,
             stage_id: self.stage_id,
@@ -2227,6 +2267,12 @@ impl Battle {
             streak_angle: 0.0,
             amb: crate::stg_amb::StgAmb::default(),
             amb_cam: None,
+            events: Default::default(),
+            script: None,
+            story_difficulty: 0,
+            fade1: Fade::default(),
+            stream_stat: Default::default(),
+            voice_req: [false; 2],
         }
         .with_ambience()
     }
@@ -2903,12 +2949,14 @@ impl Battle {
         self.replay.rewind();
         self.replay.reset_viewer();
         self.fade = Fade::start_in(1.0);
+        // BtlEvent_Reset.
+        self.events.clear();
         self.started = false;
     }
 
     /// The fighter phases with both sides' data and the shared state.
     /// The input gate of the sequence, with the change queue's time-stop word (`BtlChars_IsTimeStopped`).
-    fn gate(&self) -> InputGate {
+    pub(crate) fn gate(&self) -> InputGate {
         let mut gate = self.seq.input_gate(self.assets.stage_id);
         gate.time_stopped = self.roster.change.time_stop;
         gate
@@ -2939,6 +2987,7 @@ impl Battle {
         shown: bool,
     ) -> BattleFrame {
         let mut sounds = Vec::new();
+        self.voice_req = [false; 2];
         // Battle_Loop: a restart asked for last frame happens first.
         if std::mem::take(&mut self.seq.restart) {
             self.restart(&mut sounds);
@@ -3002,9 +3051,16 @@ impl Battle {
         };
         if !std::mem::replace(&mut self.started, true) {
             self.seq_start(&mut input);
+            // Battle_ResetWork in mode 1: the script's main action.
+            self.script_start(input.sounds);
         }
         self.fade.update();
+        self.fade1.update();
         self.fade2.update();
+        // Gsc_Update and BtlScript_Update (not while paused).
+        if !self.seq.paused {
+            self.script_step(&mut *input.sounds, &mut *input.libc);
+        }
         if self.with_roster(|roster, data, env| roster.check_start(data, env)) {
             self.seq.started = true;
             // BtlChar_ResetAll: the fighters' replay tracks rewound, the viewer reset.
@@ -3047,6 +3103,8 @@ impl Battle {
         // BATTLE_FLAG_PAUSE as the sequence left it last frame.
         let paused = self.seq.paused;
         if !paused {
+            // Battle_UpdateWork: BtlEvent_Update.
+            self.update_events();
             // BtlAiMgr_Update, after Battle_UpdateWork and before the fighters sample their input.
             let data = [
                 side_data(&self.assets.fighters[0]),
@@ -3149,7 +3207,11 @@ impl Battle {
         let mut view = View::new(cam.pos, cam.rot);
         // Whether this frame's view is the demo camera's (its update may end the cut on its last frame).
         let mut demo_on = false;
-        if self.demo.is_active() {
+        if self.demo.fixed {
+            // The story script's fixed pose (`DemoCam_Update`'s first branch: no stage trace).
+            view = self.demo.update_fixed(&mut *input.libc);
+            demo_on = true;
+        } else if self.demo.is_active() {
             let base = self.demo.attached().map(|side| {
                 if self.demo.chr_base() {
                     self.roster.chars[side].obj.mtx
@@ -3165,7 +3227,7 @@ impl Battle {
                     1.0
                 }
             });
-            if let Some(demo) = self.demo.update(base, paused, y_scale) {
+            if let Some(demo) = self.demo.update(base, paused, y_scale, &mut *input.libc) {
                 view = demo;
                 demo_on = true;
                 // The camera stops where the stage hides the attached fighter's body from it (BtlCam_TraceStage
@@ -3199,6 +3261,8 @@ impl Battle {
                     roster.end_frame(data, env, &mut *input.libc, replay_active);
                     true
                 });
+                // The fighters' battle events of the frame.
+                self.take_events(input.sounds);
                 // BtlCharSnd_PlayRequests, from this frame's camera.
                 let charas = [0, 1].map(|i| {
                     if self.roster.chars[i].gauge.body_changed {
@@ -3427,6 +3491,8 @@ impl Battle {
             let scripts = [0, 1].map(|s| self.assets.fighters[s].skill_text.as_deref());
             self.hud.draw_combo_text(font, scripts);
         }
+        // BtlScript_UpdateView: the script's camera move and text.
+        self.script_update_view(font.as_deref_mut());
         // BtlGame_Draw: the menu over the HUD.
         if let Some(menu) = &self.menu {
             menu.draw(
@@ -3506,6 +3572,7 @@ impl Battle {
                     rgba,
                 }))
                 .chain(self.fade.quad())
+                .chain(self.fade1.quad())
                 .collect(),
             hud,
             sounds,
@@ -5057,6 +5124,97 @@ mod tests {
         assert_eq!(battle.roster.chars[1].pool_cur, 1);
         assert_eq!(battle.seq.state, SeqState::Finish);
         assert_eq!((battle.seq.winner, battle.seq.reason), (WIN_P1, REASON_KO));
+    }
+
+    #[test]
+    fn real_story_battle_runs_its_script() {
+        use crate::btl_script::{BtlScript, SCRIPT_FILE, ScriptSetup};
+        // Story script 0: Goku and Piccolo against Raditz.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
+            return;
+        };
+        let file = crate::read_file(&mut image, SCRIPT_FILE).unwrap();
+        let gsc = bt3_data::gsc::GscScript::parse(&file).unwrap();
+        let mut reward = crate::hist_select::HistReward::default();
+        let mut libc = LibcRandom::new(1);
+        let ScriptSetup { setup, mut script } =
+            BtlScript::setup(gsc, 0, true, &mut reward, &mut libc);
+        let text = crate::read_file(&mut image, script.text_file.unwrap()).unwrap();
+        script.set_text_file(text);
+        let lips = crate::read_file(&mut image, script.lip_file.unwrap()).unwrap();
+        script.set_lip_file(lips);
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        battle.script = Some(Box::new(script));
+        assert_eq!(battle.seq.state, SeqState::IntroTalk);
+        let mut random = GameRandom::from_key(&[1]);
+        let (mut fixed, mut text, mut voices, mut fight) = (0, 0, 0, None);
+        for frame in 0..6000 {
+            let out = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            fixed += i32::from(battle.demo.fixed);
+            text += i32::from(battle.script_text_shown());
+            voices += out
+                .sounds
+                .iter()
+                .filter(|s| matches!(s, TitleSound::VoiceEx { .. }))
+                .count();
+            if battle.seq.state == SeqState::Fight {
+                fight = Some(frame);
+                break;
+            }
+        }
+        // The opening scene: the fixed camera, voiced lines with their text, then the script ends the intro.
+        assert!(fight.is_some(), "state {:?}", battle.seq.state);
+        assert!(
+            fixed > 30 && text > 30 && voices > 0,
+            "{fixed} {text} {voices}"
+        );
+        // Raditz down (BtlMember_Damage's K.O. events): the script's event ends the battle, won.
+        for _ in 0..60 {
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+        }
+        let c = &mut battle.roster.chars[1];
+        c.gauge.health = 0;
+        c.raise(1, 0x4A);
+        c.raise(0, 0x48);
+        for _ in 0..6000 {
+            battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            if battle.seq.left {
+                break;
+            }
+        }
+        assert!(battle.seq.left, "state {:?}", battle.seq.state);
+        assert_eq!(
+            battle.seq.winner & crate::battle_seq::WIN_P1,
+            crate::battle_seq::WIN_P1
+        );
     }
 
     #[test]

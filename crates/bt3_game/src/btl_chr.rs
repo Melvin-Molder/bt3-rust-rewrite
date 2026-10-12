@@ -232,6 +232,9 @@ pub(crate) struct PoolEntry {
     pub cpu_level: i32,
     pub ai_type: usize,
     pub items: MemberItems,
+    /// `health` (percent) and `variant` of the setup's member.
+    pub health: f32,
+    pub variant: i32,
 }
 
 impl Member {
@@ -252,7 +255,8 @@ impl Member {
             blast_max: entry.blast_stocks * 100_000,
             ..Gauge::default()
         };
-        g.health = ((g.health_max as f32 * 100.0 / 100.0) as i32).max(1);
+        g.health = ((g.health_max as f32 * src.health / 100.0) as i32).max(1);
+        g.variant = src.variant;
         g.health_max = g.health_max.max(g.health);
         g.ki = if items.has(0x18) {
             0
@@ -553,8 +557,8 @@ pub(crate) struct Env<'a> {
     pub chara_bits: [[u64; 3]; 2],
     /// The members' items by player (`BattleSide.members[n]`).
     pub items: [[MemberItems; 5]; 2],
-    /// The members' `cpuLevel` and `aiType` by player.
-    pub cpu_level: [i32; 2],
+    /// What the setup gives each member to start with (its `cpuLevel` among it) and its `aiType`, by player.
+    pub member_start: [[crate::char_select::MemberStart; 5]; 2],
     pub ai_type: [[usize; 5]; 2],
     /// `Battle_GetWork5A8()`: mode 3's opponents.
     pub pool: &'a [PoolEntry],
@@ -803,6 +807,14 @@ pub(crate) struct Chr {
     pub no_flinch: i32,
     pub sec_timer: i32,
     pub input_off_timer: i32,
+    /// `motion` / `motionBlend` / `motionLoop` (`BtlCtrl_PlayMotion`): what action 4 plays for the story's script.
+    pub script_motion: i32,
+    pub script_motion_blend: f32,
+    pub script_motion_loop: i32,
+    /// `warpPos` / `warpRot` (`BtlCtrl_SetPos` / `SetRot`): where flags 0xFC / 0xFD put the fighter in actions 4
+    /// and 7..10.
+    pub warp_pos: [f32; 3],
+    pub warp_rot: [f32; 3],
     /// Hit-stop: frames left, the pending length and its delay.
     pub freeze: i32,
     pub freeze_next: i32,
@@ -818,6 +830,8 @@ pub(crate) struct Chr {
     pub first_hit: bool,
     /// Battle event 0x59: this fighter lost health.
     pub took_damage: bool,
+    /// The battle events this fighter raised this frame (`BtlEvent_Raise`): side and event.
+    pub events: Vec<(usize, u32)>,
     /// Effect / sound request bits of this frame (`fxBits`, fighter + 0x1262) and of the frame before
     /// (`prevFxBits`, + 0x126B).
     pub fx_bits: [u8; 0x10],
@@ -968,6 +982,12 @@ impl Chr {
             no_flinch: 0,
             sec_timer: 0,
             input_off_timer: 0,
+            events: Vec::new(),
+            script_motion: 0,
+            script_motion_blend: 0.0,
+            script_motion_loop: 0,
+            warp_pos: [0.0; 3],
+            warp_rot: [0.0; 3],
             freeze: 0,
             freeze_next: 0,
             freeze_delay: 0,
@@ -1013,15 +1033,18 @@ impl Chr {
             .iter()
             .zip(env.items[player])
             .zip(env.ai_type[player])
-            .map(|((&(chara, costume), items), ai_type)| {
+            .zip(env.member_start[player])
+            .map(|(((&(chara, costume), items), ai_type), start)| {
                 Member::load(
                     env,
                     &PoolEntry {
                         chara,
                         costume,
-                        cpu_level: env.cpu_level[player],
+                        cpu_level: start.cpu_level,
                         ai_type,
                         items,
+                        health: start.health,
+                        variant: start.variant,
                     },
                 )
             })
@@ -2077,6 +2100,165 @@ impl Chr {
         }
     }
 
+    /// `BtlEvent_Raise(side, ev)` from this fighter's code.
+    pub(crate) fn raise(&mut self, side: usize, ev: u32) {
+        self.events.push((side, ev));
+    }
+
+    /// `BtlCtrl_CanAct`: not frozen, not stunned, no reaction of 3 or more pending, flags 0xAF and 0xB9 clear,
+    /// and standing (actions 0xB, 0xD, 0xE, 0x36) or, down, lying (0xD8, 0xEB).
+    pub(crate) fn can_act(&self) -> bool {
+        if self.is_frozen()
+            || self.stun_timer > 0
+            || self.react.reaction >= 3
+            || self.flags.test(0xAF)
+            || self.flags.test(0xB9)
+        {
+            return false;
+        }
+        match self.act.current {
+            0xB | 0xD | 0xE | 0x36 => true,
+            0xD8 | 0xEB => self.is_dead(),
+            _ => false,
+        }
+    }
+
+    /// `BtlCtrl_IsInterruptible`: not in a throw, clash, move, technique, form change or member switch action.
+    pub(crate) fn is_interruptible(&self) -> bool {
+        let a = self.act.current;
+        !(matches!(
+            a,
+            0xB7..=0xBC | 0xBE | 0xBF | 0xFA..=0xFC | 0x104 | 0x105 | 0x130..=0x132
+        ) || (0xFD..0xFD + 6).contains(&a)
+            || (0x106..0x106 + 0x36).contains(&a)
+            || (0xEC..0xEC + 0xE).contains(&a))
+    }
+
+    /// `BtlChar_RaiseEvents`: this frame's events of the fighter (damage taken by tenths, full gauges, powered up,
+    /// a technique or skill started, the actions and attacks that have one, and the rest of the fighter's states).
+    /// The frame bits it also sets are not ported.
+    pub(crate) fn raise_events(&mut self, data: &SideData, env: &Env, opp_alive: usize) {
+        let side = self.player;
+        let g = self.gauge;
+        let lost = g.health_max - g.health;
+        if lost >= 10000 {
+            self.raise(side, 0x15 + (lost / 10000).min(7) as u32);
+        }
+        if g.ki == g.ki_max {
+            self.raise(side, 0x1D);
+        }
+        if g.blast == g.blast_max {
+            self.raise(side, 0x1E);
+        }
+        if self.flags.raised(6) {
+            self.raise(side, 0x1F);
+        }
+        let current = self.act.current;
+        let class = crate::btl_act::id_class(current);
+        // BtlCharApi_EnteredTechnique.
+        if crate::btl_act::is_technique_id(current)
+            && !crate::btl_act::is_technique_id(self.act.prev)
+        {
+            match class {
+                2 => self.raise(side, 0x26),
+                3 => self.raise(side, 0x27),
+                4 => self.raise(side, 0x28),
+                _ => {}
+            }
+        }
+        // BtlCharApi_IsSkillStart.
+        if (0xFD..0xFD + 6).contains(&current) && self.flags.test(8) {
+            match class {
+                0 => self.raise(side, 0x24),
+                1 => self.raise(side, 0x25),
+                _ => {}
+            }
+        }
+        if self.flags.test(8) {
+            match current {
+                0x130..=0x132 => self.raise(side, 0x14),
+                0x89..=0x8C => self.raise(side, 0x42),
+                0x41 => self.raise(side, 0x44),
+                0x42 => self.raise(side, 0x45),
+                0x19 if self.dash_count > 0 => self.raise(side, 0x31),
+                0xFA | 0xFC => self.raise(side, 0x15),
+                0x43 => self.raise(side, 0x21),
+                _ => {}
+            }
+        }
+        if self.flags.raised(0x5B) {
+            let tech = crate::btl_hit::attack_id(self, data, env);
+            match tech {
+                0x00..=0x0A => self.raise(side, 0x3D),
+                0x67..=0x6B => self.raise(side, 0x34),
+                0x3E..=0x42 => self.raise(side, 0x3E),
+                0x43..=0x46 => self.raise(side, 0x32),
+                0x55 => self.raise(side, 0x33),
+                0x23 | 0x25 | 0x27 => self.raise(side, 0x40),
+                0x29 | 0x2B | 0x2D => self.raise(side, 0x56),
+                0x8A => self.raise(side, 0x3F),
+                0x53 | 0x10 | 0x52 | 0x58 | 0x60 | 0x65 | 0x6F | 0x72 | 0x74 | 0x7B | 0x7D
+                | 0x90 | 0x92 => self.raise(side, 0x4B),
+                _ => {}
+            }
+            match tech {
+                0x1D | 0x3E | 0x67 => self.raise(side, 0x37),
+                0x1E | 0x3F | 0x68 => self.raise(side, 0x38),
+                0x1F | 0x40 | 0x69 => self.raise(side, 0x39),
+                0x20 | 0x41 | 0x6A => self.raise(side, 0x3A),
+                0x21 | 0x42 | 0x6B => self.raise(side, 0x3B),
+                _ => {}
+            }
+        }
+        for (flag, ev) in [(0x70, 0x43)] {
+            if self.flags.test(flag) {
+                self.raise(side, ev);
+            }
+        }
+        if self.flags.raised(0xBE) {
+            self.raise(side, 0x23);
+        }
+        for (flag, ev) in [(0xBF, 0x47), (0xC1, 0x46), (0x6C, 0x57)] {
+            if self.flags.test(flag) {
+                self.raise(side, ev);
+            }
+        }
+        // The last hit that leaves the fighter at 1 health while the opponent's team is down.
+        if self.flags.test(3) && g.health == 1 && opp_alive == 0 {
+            self.raise(side, 0x54);
+        }
+        if self.input.is_pressed(0x2000) && self.can_act() {
+            self.raise(side, 0x50);
+        }
+        if self.flags.test(7) {
+            self.raise(side, 0x49);
+        }
+    }
+
+    /// `BtlChar_PlaceWarp`: in actions 4 and 7..10, flags 0xFC / 0xFD replace the position / rotation by the
+    /// script's warp (the position's area looked up again), and are cleared.
+    pub(crate) fn place_warp(&mut self, data: &SideData, env: &Env) {
+        if !matches!(self.act.current, 4 | 7..=10) {
+            return;
+        }
+        let (mut pos, mut rot, mut area) = (self.pose.pos, self.pose.rot, self.obj.area);
+        let mut changed = false;
+        if self.flags.test(0xFC) {
+            self.flags.clear(0xFC);
+            changed = true;
+            pos = self.warp_pos;
+            area = env.col.find_zone_near(-1, pos) as i32;
+        }
+        if self.flags.test(0xFD) {
+            self.flags.clear(0xFD);
+            changed = true;
+            rot = self.warp_rot;
+        }
+        if changed {
+            self.place(data, pos, rot, area);
+        }
+    }
+
     /// `BtlChar_PlaceRelative` (flag 0xF6): the stage's place plus the offsets `BtlChar_RequestPlaceRelative`
     /// stored.
     pub(crate) fn place_relative(&mut self, data: &SideData, env: &Env) {
@@ -2499,8 +2681,26 @@ impl Chr {
         if self.gauge.health < 0 {
             self.gauge.health = 0;
         }
+        // The KO's events: 0x4A for this side, 0x48 (and 0x51..0x53 by the damage's kind) for the other.
+        if before > 0 && self.gauge.health == 0 {
+            let other = self.player ^ 1;
+            self.raise(self.player, 0x4A);
+            self.raise(other, 0x48);
+            for (bit, ev) in [
+                (0x20_0000, 0x53),
+                (0x40_0000, 0x53),
+                (0x80_0000, 0x52),
+                (0x100_0000, 0x52),
+                (0x200_0000, 0x51),
+            ] {
+                if flags & bit != 0 {
+                    self.raise(other, ev);
+                }
+            }
+        }
         if amount > 0 {
             self.took_damage = true;
+            self.raise(self.player, 0x59);
         }
         if self.gauge.health == 0 {
             self.gauge.ki = 0;

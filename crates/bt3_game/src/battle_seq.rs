@@ -93,6 +93,12 @@ pub(crate) struct DemoCam {
     base: Option<Mtx>,
     /// `scaleHeight` (`DemoCam_SetScaleHeight`): a body-changed fighter's cut has its height scaled.
     pub(crate) scale_height: bool,
+    /// `shake`: the story script's shakes (`DemoCam_AddShake`).
+    pub(crate) shake: crate::chr_cam::CamShake,
+    /// `fixed`, `fixedPos`, `fixedRot`: the story script's fixed pose, shown instead of an animation.
+    pub(crate) fixed: bool,
+    fixed_pos: [f32; 3],
+    fixed_rot: [f32; 3],
 }
 
 /// `gEftCam`: a technique's camera animation on the demo camera, timed by its fighter's rush sequence.
@@ -212,8 +218,11 @@ impl DemoCam {
         self.chr_base
     }
 
-    /// `DemoCam_IsActive`: a pending stop resets the camera and gives false.
+    /// `DemoCam_IsActive`: the fixed pose, or a playing animation; a pending stop resets the camera and gives false.
     pub(crate) fn is_active(&mut self) -> bool {
+        if self.fixed {
+            return true;
+        }
         if self.anim.is_some() {
             if self.flags & DEMO_STOP != 0 {
                 self.reset();
@@ -235,10 +244,45 @@ impl DemoCam {
         self.attached
     }
 
+    /// `DemoCam_AddShake`: a shake of strength 1 for `time` seconds.
+    pub(crate) fn add_shake(&mut self, time: f32) {
+        self.shake.add(1.0, time);
+    }
+
+    /// `DemoCam_SetFixedPose`: the pose from now on (a running animation is asked to stop).
+    pub(crate) fn set_fixed(&mut self, pos: [f32; 3], rot: [f32; 3]) {
+        if self.anim.is_some() {
+            self.flags |= DEMO_STOP;
+        }
+        self.fixed = true;
+        self.fixed_pos = pos;
+        self.fixed_rot = rot;
+    }
+
+    /// `DemoCam_GetFixedPose`.
+    pub(crate) fn fixed_pose(&self) -> ([f32; 3], [f32; 3]) {
+        (self.fixed_pos, self.fixed_rot)
+    }
+
+    /// `DemoCam_Update` for the fixed pose: the pose plus the shake's offsets.
+    pub(crate) fn update_fixed(&mut self, libc: &mut LibcRandom) -> View {
+        let (dp, dr) = self.shake.calc(libc);
+        let pos = std::array::from_fn(|i| self.fixed_pos[i] + dp[i]);
+        let rot = std::array::from_fn(|i| self.fixed_rot[i] + dr[i]);
+        self.shake.tick();
+        View::new(pos, rot)
+    }
+
     /// `DemoCam_Update` for an animation: advance by 2.0 (holding the end, stopping there for a stage cut), take
-    /// the attached fighter's node 0 as the base, then the view: rotations X, Y, Z, the position (its height times
-    /// `y_scale`), the base, inverted.
-    pub(crate) fn update(&mut self, base: Option<Mtx>, paused: bool, y_scale: f32) -> Option<View> {
+    /// the attached fighter's node 0 as the base, then the view: rotations X, Y, Z (with the shake's), the position
+    /// (its height times `y_scale`, with the shake's), the base, inverted.
+    pub(crate) fn update(
+        &mut self,
+        base: Option<Mtx>,
+        paused: bool,
+        y_scale: f32,
+        libc: &mut LibcRandom,
+    ) -> Option<View> {
         let anim = self.anim.as_ref()?;
         if self.flags & DEMO_AUTO != 0 && !paused {
             let t = self.time + 2.0;
@@ -255,8 +299,10 @@ impl DemoCam {
             self.base = base;
         }
         let pose = anim.eval(self.time);
+        let (dp, dr) = self.shake.calc(libc);
+        self.shake.tick();
         let rot: [f32; 3] = std::array::from_fn(|i| {
-            let mut a = pose[3 + i];
+            let mut a = pose[3 + i] + dr[i];
             for _ in 0..2 {
                 if a > std::f32::consts::PI {
                     a -= std::f32::consts::TAU;
@@ -271,7 +317,12 @@ impl DemoCam {
             &mul(&rotate_x(rot[0]), &rotate_y(rot[1])),
             &rotate_z(rot[2]),
         );
-        camera[3] = [pose[0], pose[1] * y_scale, pose[2], 1.0];
+        camera[3] = [
+            pose[0] + dp[0],
+            pose[1] * y_scale + dp[1],
+            pose[2] + dp[2],
+            1.0,
+        ];
         let camera = mul(&camera, &self.base.unwrap_or(IDENTITY));
         Some(View::from_world_to_view(inverse_rt(&camera)))
     }
@@ -380,10 +431,15 @@ pub(crate) struct Seq {
     /// `BTL_CHARS_STARTED`: the roster was reset on the first Ready / Fight frame.
     pub(crate) started: bool,
     clock: Clock,
+    /// `subClock`: the second clock, restarted by the story script (`BtlSeq_ResetSubClock`); its seconds raise the
+    /// time events.
+    sub_clock: Clock,
     /// `Battle_GetTimeLimit` in seconds, -1 for none.
     time_limit: i32,
     /// `BATTLE_FLAG_DEMO`: the fighters' input is neutral.
-    demo_flag: bool,
+    pub(crate) demo_flag: bool,
+    /// `ctx.skip`: in mode 1 the script ends the talk states (`BtlSeq_CallExtra`).
+    skip: bool,
     /// `BATTLE_FLAG_READY`: the fighters' input is masked.
     ready_flag: bool,
     /// `BattleResult`: the winner bits and the reason bits.
@@ -437,13 +493,14 @@ impl Clock {
 }
 
 impl Seq {
-    /// `BtlSeq_Reset`: the default table starts at the stage intro; modes 5..7 have no intro or talk.
+    /// `BtlSeq_Reset`: the default table starts at the stage intro; modes 5..7 have no intro or talk, mode 1 (story)
+    /// no stage intro.
     pub(crate) fn new(mode: i32, time_limit: i32) -> Self {
         Self {
-            state: if (5..=7).contains(&mode) {
-                SeqState::Ready
-            } else {
-                SeqState::StageIntro
+            state: match mode {
+                1 => SeqState::IntroTalk,
+                5..=7 => SeqState::Ready,
+                _ => SeqState::StageIntro,
             },
             step: 0,
             timer: Ramp::default(),
@@ -456,8 +513,10 @@ impl Seq {
                 time_left: time_limit,
                 ..Clock::default()
             },
+            sub_clock: Clock::default(),
             time_limit,
             demo_flag: false,
+            skip: false,
             ready_flag: false,
             winner: 0,
             reason: 0,
@@ -507,8 +566,20 @@ impl Seq {
         }
     }
 
-    /// `BtlSeq_TickClocks` (from `BtlSeq_CheckBattleEnd`): whether the time limit was reached.
+    /// `BtlSeq_ResetSubClock`.
+    pub(crate) fn reset_sub_clock(&mut self) {
+        self.sub_clock = Clock::default();
+    }
+
+    /// `BtlClock_ToSeconds(BtlSeq_GetSubClock())`.
+    pub(crate) fn sub_seconds(&self) -> i32 {
+        let c = &self.sub_clock;
+        c.hours * 3600 + c.minutes * 60 + c.seconds
+    }
+
+    /// `BtlSeq_TickClocks` (from `BtlSeq_CheckBattleEnd`): both clocks ticked; whether the time limit was reached.
     fn tick_clock(&mut self) -> bool {
+        self.sub_clock.tick();
         self.clock.tick();
         if self.time_limit < 0 {
             return false;
@@ -546,8 +617,23 @@ impl Battle {
 
     fn seq_enter(&mut self, input: &mut SeqInput) {
         match self.seq.state {
-            SeqState::StageIntro => self.seq.step = 0,
-            SeqState::IntroTalk => self.intro_talk_setup(input),
+            SeqState::StageIntro => {
+                self.seq.step = 0;
+                self.seq.demo_flag = true;
+            }
+            SeqState::IntroTalk => {
+                if self.assets.mode == 1 {
+                    // BtlFacade_SetCtrl10D on both sides; the script ends the state (BtlSeqIntroTalk_Skip).
+                    for c in &mut self.roster.chars {
+                        c.flags.set_held(0x10D);
+                    }
+                    self.seq.skip = false;
+                    self.seq.step = 99;
+                } else {
+                    self.intro_talk_setup(input);
+                }
+                self.seq.demo_flag = true;
+            }
             SeqState::Ready => {
                 self.seq.demo_flag = true;
                 self.seq.step = 0;
@@ -573,7 +659,7 @@ impl Battle {
                 }
                 self.xfade.capture_and_start();
             }
-            SeqState::IntroTalk => {
+            SeqState::IntroTalk if self.assets.mode != 1 => {
                 self.demo.stop();
                 // BtlCtrl_EndEntrance: flag 0xF0 sends action 1 to the neutral state.
                 let sides = self.seq.side;
@@ -674,10 +760,13 @@ impl Battle {
                     self.seq.winner = ABORT;
                     self.seq.reason = 0;
                 } else {
-                    // Mode 1's running script events are not ported.
-                    self.seq.pause_menu = true;
-                    self.seq.paused = true;
-                    input.sounds.push(TitleSound::PauseSeVoice(true));
+                    if self.assets.mode == 1 && self.script_event_running() {
+                        self.abort_script_events();
+                    } else {
+                        self.seq.pause_menu = true;
+                        self.seq.paused = true;
+                        input.sounds.push(TitleSound::PauseSeVoice(true));
+                    }
                 }
             }
             let mut set_level = None;
@@ -858,6 +947,15 @@ impl Battle {
     fn win_talk_enter(&mut self, input: &mut SeqInput) {
         self.seq.demo_flag = true;
         self.xfade.capture_and_start();
+        // Mode 1: after an event with a camera command the script ends the state (BtlSeqWinTalk_Skip).
+        if self.assets.mode == 1 && self.script_event().is_some_and(|e| e.cmd4b1) {
+            self.seq.skip = false;
+            self.seq.step = 99;
+            self.hud.show_gauges(false);
+            self.hud.show_timer(false);
+            self.hud.show_combo(false);
+            return;
+        }
         let winner = self.seq.winner_side();
         let loser = usize::from(winner == 0);
         if self.player_won() {
@@ -939,6 +1037,12 @@ impl Battle {
                 }
             }
             4 => return SeqState::End,
+            99 => {
+                if self.seq.skip {
+                    self.stop_talk(input);
+                    return SeqState::End;
+                }
+            }
             _ => {}
         }
         if input.start {
@@ -946,6 +1050,15 @@ impl Battle {
             return SeqState::End;
         }
         SeqState::WinTalk
+    }
+
+    /// `BtlSeq_CallExtra`: mode 1's talk states end (`BtlSeqIntroTalk_Skip` / `BtlSeqWinTalk_Skip`).
+    pub(crate) fn seq_call_extra(&mut self) {
+        if self.assets.mode == 1
+            && matches!(self.seq.state, SeqState::IntroTalk | SeqState::WinTalk)
+        {
+            self.seq.skip = true;
+        }
     }
 
     /// `BtlSeq_StopTalk`: both mouths rest, both voices stop.
@@ -1111,11 +1224,21 @@ impl Battle {
                 }
             }
             4 => return SeqState::Ready,
+            99 => {
+                if self.seq.skip {
+                    self.xfade.capture_and_start();
+                    self.stop_talk(input);
+                    return SeqState::Ready;
+                }
+            }
             _ => {}
         }
         if input.start {
             if self.seq.step != 4 {
                 self.xfade.capture_and_start();
+                if self.script_event_running() {
+                    self.abort_script_events();
+                }
             }
             self.stop_talk(input);
             return SeqState::Ready;

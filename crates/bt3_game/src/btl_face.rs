@@ -114,6 +114,14 @@ pub(crate) enum FaceTex {
     Mouth(usize),
 }
 
+/// Where the lip track being played comes from: the model's track by line (mode 2), or one handed in (mode 14,
+/// the story script's lip file).
+#[derive(Clone, Debug)]
+enum LipTrack {
+    Model(usize),
+    Own(Arc<[LipKey]>),
+}
+
 /// `BObjFace`.
 #[derive(Clone, Debug)]
 pub(crate) struct Face {
@@ -135,7 +143,7 @@ pub(crate) struct Face {
     /// 7 or 5 for the talk pattern in use, 0 for none.
     talk_count: usize,
     /// The lip track being played (`lipArg`).
-    lip: Option<usize>,
+    lip: Option<LipTrack>,
     lip_index: u16,
     lip_count: u16,
     lip_time: f32,
@@ -272,7 +280,7 @@ impl Face {
                 self.lip_index = 0;
                 self.lip_count = keys.len() as u16;
                 self.lip_end = f32::from(keys.last().map_or(0, |k| k.frame));
-                self.lip = Some(arg as usize);
+                self.lip = Some(LipTrack::Model(arg as usize));
                 self.lip_time = 0.0;
                 self.pick_jaw(libc);
             }
@@ -287,6 +295,20 @@ impl Face {
             }
             _ => {}
         }
+    }
+
+    /// `BtlObj_SetSubState(obj, BOBJ_MOUTH_LIP_PTR, keys)`: mode 14 plays the lip track handed in.
+    pub(crate) fn play_lip(&mut self, keys: Arc<[LipKey]>, libc: &mut LibcRandom) {
+        if self.flags & FACE_MOUTH == 0 || !self.can_start(14) {
+            return;
+        }
+        self.mode = 14;
+        self.lip_index = 0;
+        self.lip_count = keys.len() as u16;
+        self.lip_end = f32::from(keys.last().map_or(0, |k| k.frame));
+        self.lip = Some(LipTrack::Own(keys));
+        self.lip_time = 0.0;
+        self.pick_jaw(libc);
     }
 
     /// `BtlObj_SetSubState` with a mode that draws no random number (0, 1, 5..12).
@@ -357,11 +379,14 @@ impl Face {
     /// `BObjFace_StepLipData`: the record the track's time falls in opens (talk) or shuts the mouth; past the
     /// end (or outside every record) the mouth rests.
     fn step_lip(&mut self, libc: &mut LibcRandom) {
-        let Some(track) = self.lip else {
+        let Some(track) = self.lip.clone() else {
             return;
         };
         let model = Arc::clone(&self.model);
-        let keys = model.lips[track].as_deref().unwrap_or(&[]);
+        let keys = match &track {
+            LipTrack::Model(i) => model.lips[*i].as_deref().unwrap_or(&[]),
+            LipTrack::Own(keys) => keys,
+        };
         let time = self.lip_time;
         if 0.0 <= time {
             let mut found = None;

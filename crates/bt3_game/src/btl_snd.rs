@@ -94,6 +94,9 @@ pub(crate) struct CharSound {
     stop_voice: [bool; 2],
     /// `Snd_StopHandle` calls of this frame (`BtlCharSnd_Stop`).
     stops: Vec<u32>,
+    /// `BtlScript_IsTextShown` in mode 1: the story script shows a line's text (the fighters' sounds are quieter and
+    /// their voices are not cut).
+    pub(crate) script_text: bool,
 }
 
 impl CharSound {
@@ -201,7 +204,10 @@ impl CharSound {
         let reqs = self.reqs.clone();
         for req in reqs {
             let owner = req.owner.max(0) as usize & 1;
-            let (vol, pan) = vol_pan(view, req.pos, req.near, req.far, split);
+            let (mut vol, pan) = vol_pan(view, req.pos, req.near, req.far, split);
+            if self.script_text {
+                vol = (vol - 0x20).max(0);
+            }
             match req.kind {
                 KIND_STREAM => out.push(TitleSound::StreamSeEx {
                     player: owner as u32,
@@ -638,9 +644,8 @@ impl Chr {
         );
     }
 
-    /// The voice parts of `BtlChar_UpdateLate`: `BtlChar_StopVoiceOnFlag` (flag 0x129 cuts the side's voice line;
-    /// story mode's script text, which would keep it, is not ported), `BtlCharSnd_PlayTechSounds` and
-    /// `BtlMove_UpdateAnimVoice`.
+    /// The voice parts of `BtlChar_UpdateLate`: `BtlChar_StopVoiceOnFlag` (flag 0x129 cuts the side's voice line,
+    /// not while story mode's script shows a text), `BtlCharSnd_PlayTechSounds` and `BtlMove_UpdateAnimVoice`.
     pub(crate) fn late_voice(
         &mut self,
         data: &SideData,
@@ -650,7 +655,10 @@ impl Chr {
         libc: &mut crate::rng::LibcRandom,
     ) {
         if self.flags.test(0x129) {
-            env.snd().stop_voice(self.player);
+            let mut snd = env.snd();
+            if !snd.script_text {
+                snd.stop_voice(self.player);
+            }
         }
         self.play_tech_sounds(&mut env.snd(), data, opp_data, libc);
         self.update_anim_voice(env, frame, libc);

@@ -18,6 +18,7 @@
 !/crates/bt3_data/src/bpe.rs
 !/crates/bt3_data/src/tex.rs
 !/crates/bt3_data/src/gs.rs
+!/crates/bt3_data/src/gsc.rs
 !/crates/bt3_data/src/stage.rs
 !/crates/bt3_data/src/stage_col.rs
 !/crates/bt3_data/src/ai_data.rs
@@ -143,6 +144,9 @@
 !/crates/bt3_game/src/hist_result.rs
 !/crates/bt3_game/src/hist_save.rs
 !/crates/bt3_game/src/hist_outro.rs
+!/crates/bt3_game/src/gsc.rs
+!/crates/bt3_game/src/btl_event.rs
+!/crates/bt3_game/src/btl_script.rs
 !/crates/bt3_game/src/get_win.rs
 !/crates/bt3_game/src/stg_blur.rs
 !/crates/bt3_game/src/post.rs

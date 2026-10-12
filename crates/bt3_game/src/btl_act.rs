@@ -268,7 +268,7 @@ pub(crate) struct Ctx<'a, 'd> {
 /// Whether action `id` has a handler here.
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
-        1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
+        1..=0xA | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
         | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xFC | 0xFD..=0x102
         | 0x103 | 0x104 | 0x105..=0x13B)
 }
@@ -1014,6 +1014,9 @@ impl Ctx<'_, '_> {
     fn handler(&mut self, phase: u32) {
         match self.current() {
             1 => self.entrance(phase),
+            4 => self.script_motion(phase),
+            5 | 6 => self.script_dash(phase),
+            7..=10 => self.script_wait(phase),
             2 | 3 => self.result_pose(phase),
             0xB => self.neutral(phase),
             0xC => self.idle_once(phase),
@@ -1272,6 +1275,274 @@ impl Ctx<'_, '_> {
                 self.request(action);
             }
         }
+        if self.check_story_forced() {
+            let q = self.queued();
+            self.request(q);
+        }
+    }
+
+    /// `BtlAct_CheckStoryForced`: in story mode the script's flags as actions. 0xFA queues action 4; outside a
+    /// technique 0x116..0x119 transformation 0..3, 0x11A..0x11C fusion 0..2 and 0x11D the member switch (no cost
+    /// or availability check); always 0x110..0x115 actions 5..10. The flag is consumed (but 0xFA).
+    fn check_story_forced(&mut self) -> bool {
+        if self.env.mode != 1 {
+            return false;
+        }
+        if self.flag(0xFA) {
+            self.set_queue(0, 4);
+            return true;
+        }
+        if !is_technique_id(self.current()) {
+            for i in 0..4 {
+                if self.flag(0x116 + i) {
+                    self.clear(0x116 + i);
+                    self.queue_transform(i as i32);
+                    return true;
+                }
+            }
+            for i in 0..3 {
+                if self.flag(0x11A + i) {
+                    self.clear(0x11A + i);
+                    // BtlAct_QueueFusion(chr, i, -1): the partner looked up among the present members.
+                    match fusion_partner(self.me, self.data, i as usize) {
+                        Some(partner) => {
+                            self.queue_fusion(i as usize, partner);
+                        }
+                        None => {}
+                    }
+                    return true;
+                }
+            }
+            if self.flag(0x11D) {
+                self.clear(0x11D);
+                self.me.prepare_switch();
+                self.set_queue(0, 0xF3);
+                return true;
+            }
+        }
+        for i in 0..6 {
+            if self.flag(0x110 + i) {
+                self.clear(0x110 + i);
+                self.set_queue(0, 5 + i as i32);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Action 4 (`BtlAct_Action04`): the script's motion (`BtlCtrl_PlayMotion`: motion, blend, looping or once),
+    /// held against forced actions; flag 0xFA restarts it and 0xFB ends it. While it runs the script's control
+    /// flags show the aura (0xFE / 0xFF), hide the model (0x100), keep the charge (0x101) or burst it (0x102).
+    fn script_motion(&mut self, phase: u32) {
+        if phase == ENTER {
+            let motion = self.me.script_motion;
+            let blend = if self.me.act.prev != 4 {
+                0.0
+            } else {
+                self.me.script_motion_blend
+            };
+            self.play(motion, blend);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.set(0x29);
+            self.end_flag98();
+            self.clear(0xBE);
+            self.me.stun_timer = 0;
+            self.clear(0xFA);
+        }
+        if phase == RUN {
+            match self.me.script_motion_loop {
+                0 => {
+                    self.me.anim_advance(0);
+                }
+                1 => self.me.anim_advance_loop(0),
+                _ => {}
+            }
+            self.me.pose.impulse = [0.0; 3];
+            self.me.hold_action = true;
+            for f in [0x3F, 0x128, 0x42, 0x43, 0x44, 0x45, 0x46] {
+                self.set(f);
+            }
+            if self.flag(0xFE) {
+                self.me.set_fx(0x13);
+            }
+            if self.flag(0xFF) {
+                self.me.set_fx(0x14);
+            }
+            if self.flag(0x100) {
+                self.set(0x30);
+            }
+            if self.flag(0x101) {
+                self.me.set_fx(7);
+                let sound = self.charge_loop_sound();
+                self.snd(sound);
+            }
+            if self.flag(0x102) {
+                self.clear(0x102);
+                self.clear(0x101);
+                self.me.set_fx(7);
+                self.me.set_fx(8);
+                let sound = self.max_power_sound();
+                self.snd(sound);
+            }
+            if self.me.height_above_ground() > 5.0 {
+                self.me.set_fx(0x3A);
+            } else {
+                self.me.set_fx(0x3B);
+            }
+            self.me.input_off_timer = 3;
+        }
+        if phase == DECIDE {
+            if self.flag(0xFA) {
+                self.request(4);
+            }
+            if self.flag(0xFB) {
+                let id = if self.anim_flags(self.me.script_motion) & 0x800 != 0 {
+                    0xD8
+                } else {
+                    0xB
+                };
+                self.request(id);
+                if self.check_story_forced() {
+                    let q = self.queued();
+                    self.request(q);
+                }
+            }
+        }
+        if phase == LEAVE && self.requested() != 4 {
+            if self.me.height_above_ground() < 5.0 {
+                self.held(0xF);
+                self.me.pose.pos[1] = self.me.ground_y();
+                self.clear(0xE);
+            } else {
+                self.held(0xE);
+            }
+            for f in [0xFE, 0xFF, 0x101, 0x102, 0x100] {
+                self.clear(f);
+            }
+            self.set(0x37);
+        }
+    }
+
+    /// Actions 5 and 6 (`BtlAct_Action05`, flags 0x110 / 0x111): motions 0x18 -> 0x19 (dashing at speed 6) ->
+    /// 0x1A (stopping, then action 0xB), raising flag 0x47 or 0x48 every frame: the two of them dashing at each
+    /// other start clash C.
+    fn script_dash(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x18, 0.15);
+            self.voice(0x24);
+            self.held(0xE);
+        }
+        if phase == RUN {
+            let mut rate = 0.0;
+            let mut moving = true;
+            let mut braking = true;
+            match self.anim_id() {
+                0x18 => {
+                    self.me.anim_advance_then(0x19, 0.2, 0);
+                    rate = self.me.anim_progress();
+                    moving = false;
+                }
+                0x19 => {
+                    self.me.anim_advance_loop(0);
+                    if self.me.anim_is_new() {
+                        let sound = self.dash_sound();
+                        self.snd(sound);
+                        self.set(0xD1);
+                        if self.me.height_above_ground() < 20.0 {
+                            self.me.set_fx(0x35);
+                        }
+                    }
+                    rate = 1.0;
+                    moving = true;
+                }
+                0x1A => {
+                    if self.me.anim_advance(0) {
+                        self.request(0xB);
+                        self.me.pose.speed = rate;
+                    }
+                    moving = false;
+                    rate = 1.0 - self.me.anim_progress();
+                    braking = false;
+                }
+                _ => {}
+            }
+            if moving {
+                let speed = self.me.move_speed(self.data, self.env, 6);
+                self.step(2, 1, 3, speed, 10000.0);
+                self.me.apply_gravity();
+                for f in [9, 0x50, 0x51] {
+                    self.set(f);
+                }
+                for fx in [4, 9, 0x3A] {
+                    self.me.set_fx(fx);
+                }
+            } else {
+                self.step(if braking { 2 } else { 6 }, 6, 7, 0.0, 0.925_925_8);
+                self.me.apply_gravity();
+            }
+            let lean = self.me.pose.pitch * rate;
+            self.me.set_lean_x(lean);
+            for f in [0x42, 0x43, 0x44, 0x45, 0x46] {
+                self.set(f);
+            }
+            match self.current() {
+                5 => self.set(0x47),
+                6 => self.set(0x48),
+                _ => {}
+            }
+        }
+    }
+
+    /// Actions 7..0xA (`BtlAct_WaitHandler`, flags 0x112..0x115): standing (motions 0 / 0x26, 1 / 0x27, 0x196,
+    /// 0x17B) facing the opponent until flag 0xAF or 0xB0 drops.
+    fn script_wait(&mut self, phase: u32) {
+        if phase == ENTER {
+            let air = self.me.height_above_ground() > 5.0;
+            let anim = match self.current() {
+                7 => {
+                    if air {
+                        0x26
+                    } else {
+                        0
+                    }
+                }
+                8 => {
+                    if air {
+                        0x27
+                    } else {
+                        1
+                    }
+                }
+                9 => 0x196,
+                10 => 0x17B,
+                _ => 0,
+            };
+            let turn = std::f32::consts::PI;
+            self.play(anim, 0.15);
+            self.held(5);
+            self.set(0x29);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.me.turn_yaw(self.opp, 2, turn);
+            self.me
+                .turn_pitch(self.data, self.opp, self.opp_data, 5, turn);
+            self.me.turn_model_yaw(turn, 1.0);
+        }
+        if phase == RUN {
+            self.me.anim_advance_loop(0);
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.brake_vertical();
+            self.set(0x5A);
+            if self.me.height_above_ground() > 5.0 {
+                self.me.set_fx(0x3A);
+            } else {
+                self.me.set_fx(0x3B);
+            }
+        }
+        if phase == DECIDE && (self.me.flags.dropped(0xAF) || self.me.flags.dropped(0xB0)) {
+            self.request(0xB);
+        }
     }
 
     /// `BtlAct_QueueReaction`: the damage action of a pending hit reaction.
@@ -1354,6 +1625,11 @@ impl Ctx<'_, '_> {
             41 => self.me.react.slot + 0x134,
             _ => 0xC0,
         };
+        // A reaction in a motion with any table flag: event 0x55 for the opponent.
+        if self.anim_flags(self.anim_id()) != 0 {
+            let opp = self.me.player ^ 1;
+            self.me.raise(opp, 0x55);
+        }
         self.set(0x129);
         self.set_queue(0, action);
         true
@@ -3165,6 +3441,8 @@ impl Ctx<'_, '_> {
             if self.flag(0x74) || self.flag(0x75) || self.flag(0x76) {
                 self.me.work[0] |= 1;
                 self.set(0x12C);
+                let side = self.me.player;
+                self.me.raise(side, 0x41);
             }
             self.me.work[2] = 7;
             self.me.set_fx(0xC);
@@ -9480,13 +9758,19 @@ impl Ctx<'_, '_> {
         self.me.hold_action = true;
     }
 
-    /// `BtlActChange_Finish` (`BtlAct_CheckStoryForced` concerns story mode only, which is not ported).
+    /// `BtlActChange_Finish`: action 0xB, or the action the story's script forced.
     fn change_finish(&mut self) {
         self.request(0xB);
+        if self.check_story_forced() {
+            let q = self.queued();
+            self.request(q);
+        }
     }
 
     /// The enter phase every transformation shares: stopped, facing as it stands, the placement saved.
     fn change_enter(&mut self, motion: i32, sub: Option<i32>) {
+        let side = self.me.player;
+        self.me.raise(side, 0x20);
         self.play(motion, 0.0);
         if let Some(s) = sub {
             self.me.anim_play_sub(self.data, s);
@@ -9607,10 +9891,15 @@ impl Ctx<'_, '_> {
             }
         }
         if phase == DECIDE && self.me.work[1] != 0 {
+            // BtlEvent_Raise(0x5A) where the closing ends (the run phase of the same frame).
+            let side = self.me.player;
+            self.me.raise(side, 0x5A);
             self.change_finish();
         }
         if phase == LEAVE {
             self.set(0x37);
+            let side = self.me.player;
+            self.me.raise(side, 0x4D);
         }
     }
 
@@ -9662,10 +9951,15 @@ impl Ctx<'_, '_> {
             self.me.set_fx(0x14);
         }
         if phase == DECIDE && self.me.work[1] != 0 {
+            // BtlEvent_Raise(0x5A) where the closing ends (the run phase of the same frame).
+            let side = self.me.player;
+            self.me.raise(side, 0x5A);
             self.change_finish();
         }
         if phase == LEAVE {
             self.set(0x37);
+            let side = self.me.player;
+            self.me.raise(side, 0x4D);
         }
     }
 
@@ -9720,10 +10014,15 @@ impl Ctx<'_, '_> {
             }
         }
         if phase == DECIDE && self.me.work[1] != 0 {
+            // BtlEvent_Raise(0x5A) where the closing ends (the run phase of the same frame).
+            let side = self.me.player;
+            self.me.raise(side, 0x5A);
             self.change_finish();
         }
         if phase == LEAVE {
             self.set(0x37);
+            let side = self.me.player;
+            self.me.raise(side, 0x4D);
             if !self.flag(0xFC) && !self.flag(0xFD) {
                 self.set(0xF5);
                 self.set(0x55);
@@ -9814,10 +10113,15 @@ impl Ctx<'_, '_> {
             self.set(0x12D);
         }
         if phase == DECIDE && self.me.work[1] != 0 {
+            // BtlEvent_Raise(0x5A) where the closing ends (the run phase of the same frame).
+            let side = self.me.player;
+            self.me.raise(side, 0x5A);
             self.change_finish();
         }
         if phase == LEAVE {
             self.set(0x37);
+            let side = self.me.player;
+            self.me.raise(side, 0x4D);
             if !self.flag(0xFC) && !self.flag(0xFD) {
                 self.set(0xF5);
                 self.set(0x55);
@@ -10015,6 +10319,8 @@ impl Ctx<'_, '_> {
                     self.me.anim_advance(0);
                     if self.me.anim_progress() > 0.2 {
                         self.me.work[1] = 1;
+                        let side = self.me.player;
+                        self.me.raise(side, 0x5B);
                         self.set(0xCD);
                     }
                 }
@@ -10033,6 +10339,8 @@ impl Ctx<'_, '_> {
                 self.set(0xF5);
                 self.set(0x55);
             }
+            let side = self.me.player;
+            self.me.raise(side, 0x4E);
         }
     }
 
@@ -10257,8 +10565,13 @@ impl Ctx<'_, '_> {
                 }
                 0 => {
                     self.me.work[2] += 1;
+                    let side = self.me.player;
+                    if self.me.work[2] == 0x1E {
+                        self.me.raise(side, 0x5B);
+                    }
                     if self.me.work[2] > 0x1E {
                         self.set(0xF9);
+                        self.me.raise(side, 0x4E);
                     }
                 }
                 _ => {}
@@ -10815,10 +11128,15 @@ impl Ctx<'_, '_> {
             self.set(0x12D);
         }
         if phase == DECIDE && self.me.work[1] != 0 {
+            // BtlEvent_Raise(0x5A) where the closing ends (the run phase of the same frame).
+            let side = self.me.player;
+            self.me.raise(side, 0x5A);
             self.change_finish();
         }
         if phase == LEAVE {
             self.set(0x37);
+            let side = self.me.player;
+            self.me.raise(side, 0x4D);
             if !self.flag(0xFC) && !self.flag(0xFD) {
                 self.set(0xF5);
                 self.set(0x55);
@@ -12667,6 +12985,8 @@ impl Ctx<'_, '_> {
             } else {
                 self.clear(0xE);
             }
+            let side = self.me.player;
+            self.me.raise(side, 0x22);
         }
         if phase == RUN {
             let mut accel = kmh(100.0);
@@ -13085,11 +13405,11 @@ mod tests {
     fn the_slice_s_actions_are_ported_and_others_are_not() {
         for id in [
             0xB, 0xD, 0xF, 0x38, 0x44, 0x60, 0x7B, 0xAE, 0xB1, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB,
-            0xE1, 0xEA, 0xEC, 0xF0, 0xF1, 0xF6, 0xFD, 0x100, 0x102,
+            0xE1, 0xEA, 0xEC, 0xF0, 0xF1, 0xF6, 0xFD, 0x100, 0x102, 4, 0xA,
         ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [4, 0xA, 0x13C] {
+        for id in [0, 0x13C] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

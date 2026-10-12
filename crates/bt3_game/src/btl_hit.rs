@@ -450,6 +450,8 @@ pub(crate) fn start_throw(
     }
     raise_first_clash(atk, def);
     atk.flags.set(0x128);
+    let side = atk.player;
+    raise_slot(atk, side, slot, 0x2B);
     true
 }
 
@@ -551,11 +553,20 @@ pub(crate) fn voice_kind(reaction: i32) -> i32 {
     }
 }
 
-/// `BtlChar_RaiseFirstClash`: the first hit of the battle (flag 0xE3; battle event 0x3C is not ported).
+/// `BtlChar_RaiseFirstClash`: the first hit of the battle (flag 0xE3, battle event 0x3C).
 pub(crate) fn raise_first_clash(atk: &mut Chr, def: &Chr) {
     if !atk.first_hit && !def.first_hit {
         atk.first_hit = true;
         atk.flags.set(0xE3);
+        atk.raise(atk.player, 0x3C);
+    }
+}
+
+/// The battle event of a technique slot 2..4 landing (`BtlColl_StartThrow`, `BtlColl_HitByRush`: 0x2B..0x2D) or
+/// guarded (`BtlColl_GuardRush`: 0x2E..0x30).
+pub(crate) fn raise_slot(chr: &mut Chr, side: usize, slot: i32, first: u32) {
+    if (2..=4).contains(&slot) {
+        chr.raise(side, first + (slot - 2) as u32);
     }
 }
 

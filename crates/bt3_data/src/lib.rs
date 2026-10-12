@@ -16,6 +16,7 @@ pub mod face;
 pub mod fod;
 pub mod font;
 pub mod gs;
+pub mod gsc;
 pub mod model;
 pub mod motion;
 pub mod snd;

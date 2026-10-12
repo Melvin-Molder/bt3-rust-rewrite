@@ -373,6 +373,17 @@ impl Obj {
         }
     }
 
+    /// `BtlObj_SetSubState(obj, 14, lip)`: the lip track handed in.
+    pub(crate) fn play_lip(
+        &mut self,
+        keys: std::sync::Arc<[bt3_data::face::LipKey]>,
+        libc: &mut crate::rng::LibcRandom,
+    ) {
+        if let Some(f) = &mut self.face {
+            f.play_lip(keys, libc);
+        }
+    }
+
     /// `BtlObj_SetEyeFrame`.
     pub(crate) fn set_eye_frame(&mut self, frame: u32) {
         if let Some(f) = &mut self.face {

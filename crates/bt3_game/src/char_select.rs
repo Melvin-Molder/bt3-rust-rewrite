@@ -392,6 +392,18 @@ pub struct SideSetup {
     pub team_count: i32,
     /// `BattleSide.switchEnabled`: the switch gauge fills.
     pub switch_enabled: i32,
+    /// Per member (the lead first) as the story scripts set them: its own CPU level, the health it starts with
+    /// and its damaged variant; `None`: every member at `cpu_level`, full health, variant 0.
+    pub members: Option<[MemberStart; 5]>,
+}
+
+/// What `BtlMember_Init` keeps of a member beyond its character, costume and items.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MemberStart {
+    pub cpu_level: i32,
+    /// Percent of the health maximum.
+    pub health: f32,
+    pub variant: i32,
 }
 
 /// One opponent of mode 3's pool (`BattleSetup_SetPoolMember`).
@@ -1176,6 +1188,7 @@ impl CharSelScreen {
                 team: [(0, 0); 4],
                 team_count: 0,
                 switch_enabled: 1,
+                members: None,
             }),
             pool: Vec::new(),
             tutorial: 0,

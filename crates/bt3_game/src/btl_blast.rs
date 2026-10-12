@@ -3182,6 +3182,8 @@ fn try_deflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
     chr.deflect_dir = deflect_dir_of(chr, rec);
     chr.set_fx(0x2E);
+    let side = chr.player;
+    chr.raise(side, 0x58);
     true
 }
 
@@ -3211,6 +3213,8 @@ fn try_reflect(w: &mut World, target: usize, rec: &HitRec) -> bool {
     chr.voice(w.env, w.frame, 0xB, &mut *w.libc);
     chr.deflect_dir = deflect_dir_of(chr, rec);
     chr.set_fx(0x2E);
+    let side = chr.player;
+    chr.raise(side, 0x58);
     true
 }
 
@@ -3481,6 +3485,10 @@ fn hit_by_blast(w: &mut World, target: usize, rec: &HitRec) -> bool {
     chr.damage(env, data, dmg, 0);
     crate::chr_cam::add_shake(chr, 3.0, 0.1);
     chr.vibrate(1.0, 0.1);
+    // A blast of kind 1..3 landing: event 0x36 for its owner.
+    if (1..=3).contains(&rec.atk.kind) {
+        chr.raise(rec.atk.src & 1, 0x36);
+    }
     if !chr.flags.test(0x93) {
         chr.flags.set_held(5);
     }

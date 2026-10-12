@@ -8,6 +8,7 @@ mod btl_blast;
 mod btl_change;
 mod btl_chr;
 mod btl_clash;
+mod btl_event;
 mod btl_face;
 mod btl_flags;
 mod btl_fx;
@@ -21,6 +22,7 @@ mod btl_obj;
 mod btl_obj_chain;
 mod btl_partner;
 mod btl_replay;
+mod btl_script;
 mod btl_snd;
 mod btl_tech_disc;
 mod btl_tech_fx;
@@ -81,6 +83,7 @@ mod flash;
 mod font;
 mod get_win;
 mod gfx_water;
+mod gsc;
 mod hist_outro;
 mod hist_result;
 mod hist_save;
@@ -337,6 +340,10 @@ struct Game {
     demo: char_select::DemoProgress,
     /// `gProgress->mode` is the title's (1) while the attract battle runs: the title follows it.
     in_demo: bool,
+    /// `gProgress->mode` is 8 while a story battle runs: its result screen follows it.
+    story_battle: bool,
+    /// The story battle's script, set up and waiting for the battle to load.
+    pending_script: Option<btl_script::BtlScript>,
     movie_texture: Option<usize>,
     soundtrack: Option<Decoding>,
     soundtrack_source: Option<Handle<AudioSource>>,
@@ -701,6 +708,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hud_clamp_from: usize::MAX,
             demo: char_select::DemoProgress::default(),
             in_demo: false,
+            story_battle: false,
+            pending_script: None,
             movie_texture,
             soundtrack,
             soundtrack_source: None,
@@ -1058,6 +1067,17 @@ fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
     }
 }
 
+/// `Voice_GetStat(1)`: 2 while the file is decoded, 3 while it sounds, else 0.
+fn voice1_stat(game: &Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
+    if game.pending_voice[1].is_some() {
+        2
+    } else if game.voice[1].is_some_and(|p| players.contains(p.entity)) {
+        3
+    } else {
+        0
+    }
+}
+
 /// `StreamSe_GetStat(0)`, as `voice_stat`.
 fn stream_se_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
     if game.pending_stream_se[0].is_some() {
@@ -1335,6 +1355,12 @@ fn run_frames(
         let game = &mut *game;
         let stat = voice_stat(game, &players);
         let stream_stat = stream_se_stat(game, &players);
+        // The streams a story battle's script waits on.
+        let battle_streams = btl_script::StreamStat {
+            voice: [stat, voice1_stat(game, &players)],
+            bgm_playing: game.pending_bgm.is_some()
+                || game.bgm.is_some_and(|p| players.contains(p.entity)),
+        };
         // Gfx_EndFrame(vsyncs) of the screen this frame runs.
         let vsyncs = if game.scene.frame_seconds() > VBLANK_SECONDS {
             2
@@ -1663,8 +1689,7 @@ fn run_frames(
                     match result {
                         mode_menu::ModeMenuResult::Back => start_hist_select(game, &mut commands),
                         mode_menu::ModeMenuResult::Battle(script) => {
-                            info!("story battle script {script} is not ported yet");
-                            game.scene = Scene::Black;
+                            start_story_battle(game, script)
                         }
                     }
                 }
@@ -1775,6 +1800,8 @@ fn run_frames(
                         left: battle_stick[port],
                         status: 0,
                     });
+                battle.stream_stat = battle_streams;
+                let winner = battle.seq.winner;
                 let frame = battle.run_frame(
                     start,
                     pads,
@@ -1838,7 +1865,7 @@ fn run_frames(
                 game.rumble = frame.rumble;
                 play_sounds(game, &mut commands, frame.sounds);
                 if let Some(reason) = frame.exit {
-                    leave_battle(game, &mut commands, &mut audio, reason);
+                    leave_battle(game, &mut commands, &mut audio, reason, winner);
                 }
             }
         }
@@ -1865,6 +1892,7 @@ fn leave_battle(
     commands: &mut Commands,
     audio: &mut Assets<AudioSource>,
     reason: u32,
+    winner: u32,
 ) {
     stop_all(game, commands);
     if let Scene::Battle(battle) = &game.scene {
@@ -1890,7 +1918,17 @@ fn leave_battle(
     game.hud_layer = None;
     game.xfade_alpha = 0;
     game.hud_clamp_from = usize::MAX;
-    if reason & 0x1000 != 0 {
+    if std::mem::take(&mut game.story_battle) {
+        // Progress_Main after a story battle: an abort's reason 8 goes to the main menu, 0x800 to the saga select;
+        // else Hist_Main mode 8, the result (won with winner bit 1; the dragon balls are not ported).
+        if winner & 8 != 0 && reason & 8 != 0 {
+            start_main_menu(game, commands, audio);
+        } else if winner & 8 != 0 && reason & 0x800 != 0 {
+            start_hist_select(game, commands);
+        } else {
+            start_hist_result(game, winner & 1 != 0, 0);
+        }
+    } else if reason & 0x1000 != 0 {
         // Progress_Main: "Save Replay Data" goes to the replay list in its save mode.
         game.progress.replay_flags |= 1;
         game.dc.cursor = -1;
@@ -2055,6 +2093,10 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     let mut battle = battle::Battle::new(assets);
     if let Some(replay) = game.pending_replay.take() {
         battle.play_replay(replay);
+    }
+    if let Some(script) = game.pending_script.take() {
+        battle.script = Some(Box::new(script));
+        battle.story_difficulty = game.hist.level;
     }
     battle.vu0 = game.vu0_random;
     battle.chara_bits = game.save.chara_bits;
@@ -2877,6 +2919,45 @@ fn load_saga(game: &mut Game, saga: usize) -> bool {
             error!("cannot load saga {saga}'s pack: {error}");
             game.scene = Scene::Black;
             false
+        }
+    }
+}
+
+/// `ModeMenu_Run`'s battle (`BattleSetup_SetScript`): the episode's script sets the battle up (`BattleLoad_Step` 4:
+/// action 1000, then the text and lip files it asked for), then `Battle_Main`.
+fn start_story_battle(game: &mut Game, script: i32) {
+    let iso_path = game.iso_path.clone();
+    let voice_set = game.save.sound_options().alt_voice;
+    let level = game.hist.level;
+    let loaded = Iso9660::open(&iso_path)
+        .map_err(Box::<dyn std::error::Error>::from)
+        .and_then(|mut image| {
+            let file = read_file(&mut image, btl_script::SCRIPT_FILE + script.max(0) as u32)?;
+            let gsc = bt3_data::gsc::GscScript::parse(&file)?;
+            let mut s = btl_script::BtlScript::setup(
+                gsc,
+                level,
+                voice_set,
+                &mut game.hist.reward,
+                &mut game.libc_random,
+            );
+            if let Some(id) = s.script.text_file {
+                s.script.set_text_file(read_file(&mut image, id)?);
+            }
+            if let Some(id) = s.script.lip_file {
+                s.script.set_lip_file(read_file(&mut image, id)?);
+            }
+            Ok(s)
+        });
+    match loaded {
+        Ok(s) => {
+            game.pending_script = Some(s.script);
+            game.story_battle = true;
+            start_battle(game, s.setup);
+        }
+        Err(error) => {
+            error!("cannot set up story battle {script}: {error}");
+            game.scene = Scene::Black;
         }
     }
 }
