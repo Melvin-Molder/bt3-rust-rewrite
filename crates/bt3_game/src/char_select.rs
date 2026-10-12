@@ -313,6 +313,11 @@ pub struct SideSetup {
     pub costume: i32,
     pub cpu_level: i32,
     pub items: [u16; 8],
+    /// The team after the lead (`BattleSide.members[1..]`): character and costume, `team_count` of them.
+    pub team: [(i32, i32); 4],
+    pub team_count: i32,
+    /// `BattleSide.switchEnabled`: the switch gauge fills.
+    pub switch_enabled: i32,
 }
 
 /// What `CharSel_Run` hands to the battle (`BattleSetup_SetRule` and the two sides).
@@ -868,6 +873,9 @@ impl CharSelScreen {
                 costume: self.side[i].pick.color_plate,
                 cpu_level,
                 items: self.side[i].pick.items,
+                team: [(0, 0); 4],
+                team_count: 0,
+                switch_enabled: 1,
             }),
         }
     }

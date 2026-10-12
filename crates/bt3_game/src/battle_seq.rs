@@ -626,8 +626,8 @@ impl Battle {
             self.seq.reason = REASON_FLAG7;
             return true;
         }
-        // BtlCtrl_IsTeamDead: one member per side.
-        let dead = [0, 1].map(|i| self.roster.chars[i].gauge.health <= 0);
+        // BtlCtrl_IsTeamDead.
+        let dead = [0, 1].map(|i| self.roster.chars[i].team_dead());
         if dead[0] && dead[1] {
             self.seq.reason = REASON_KO;
             self.judge_by_health(input);
@@ -644,7 +644,8 @@ impl Battle {
     /// `BtlSeq_JudgeByHealth`: more health wins; a tie goes to the side that landed the battle's first hit
     /// (event 0x3C), a draw after a mode-0 time up, side 1 in mode 8, else `rand()`.
     fn judge_by_health(&mut self, input: &mut SeqInput) {
-        let health = [0, 1].map(|i| self.roster.chars[i].gauge.health);
+        // BattleResult.health: the team's health ratio in percent (`BtlMember_GetTeamHealthRatio`).
+        let health = [0, 1].map(|i| self.roster.chars[i].team_health_ratio() * 100.0);
         self.seq.winner = if health[0] == health[1] {
             if self.roster.chars[0].first_hit {
                 WIN_P1

@@ -121,6 +121,26 @@ impl CharaParams {
     pub fn form_flags(&self) -> u8 {
         self.u8_at(0xAD)
     }
+    /// `BtlParam_GetFusionResult` (+0xB4): fusion `i`'s character, 0xFF none.
+    pub fn fusion_result(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0xB4 + i))
+    }
+    /// `BtlParam_GetCostAE` (+0xAE): its blast cost (stocks * 100000).
+    pub fn fusion_cost(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0xAE + i)) * 100_000
+    }
+    /// `BtlParam_GetFusionSequence` (+0xB1): 1 / 2 (actions 0xF1 / 0xF2).
+    pub fn fusion_seq(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0xB1 + i))
+    }
+    /// `BtlParam_GetUnkB7` (+0xB7): its extra object.
+    pub fn fusion_object(&self, i: usize) -> i32 {
+        i32::from(self.u8_at(0xB7 + i))
+    }
+    /// `BtlParam_GetFusionPartner` (+0xBA): the four characters fusion `i` takes as a partner.
+    pub fn fusion_partner(&self, i: usize, n: usize) -> i32 {
+        i32::from(self.u8_at(0xBA + i * 4 + n))
+    }
     /// `BtlParam_CountSlots`: the transformations that are not 0xFF.
     pub fn trans_count(&self) -> usize {
         (0..4).filter(|&i| self.trans_target(i) != 0xFF).count()

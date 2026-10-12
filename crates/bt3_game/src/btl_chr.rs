@@ -97,6 +97,8 @@ pub(crate) struct Gauge {
     pub low_health: bool,
     pub low_health_idle: bool,
     pub body_changed: bool,
+    /// `fused`: the member is a fusion (its health maximum stays when it changes again).
+    pub fused: bool,
     /// By technique class: how many were started (`used`), and the self-destructs fired / the lock counters of
     /// the flag-0x2000 techniques (`fired` / `techLock`, the same words).
     pub used: [i32; 5],
@@ -179,6 +181,27 @@ pub(crate) struct Throw {
     pub raise_at_end: bool,
     pub turn_yaw: f32,
     pub turn_pitch: f32,
+}
+
+/// `BtlMember` (fighter + 0x9A4 + n * 0xA4): one team member. The active member's gauges live in `Chr::gauge`;
+/// its entry here holds them only while another member fights.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Member {
+    pub chara: i32,
+    pub costume: i32,
+    pub present: bool,
+    pub gauge: Gauge,
+}
+
+/// The member a switch brings in (`switchChara` .. `switchVoiceChara`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SwitchForm {
+    pub chara: i32,
+    pub costume: i32,
+    pub variant: i32,
+    pub anim_chara: i32,
+    pub anim1_chara: i32,
+    pub voice_chara: i32,
 }
 
 /// `form` (fighter + 0x12CC): the character change being made.
@@ -361,6 +384,10 @@ pub(crate) struct Env<'a> {
     pub fx: &'a crate::btl_tech_volley::FxTables,
     /// `BattleSide_GetChangeAllowed` by player.
     pub change_allowed: [i32; 2],
+    /// `BattleSide.members` (character, costume) by player, `memberCount` of them, and `switchEnabled`.
+    pub team: [[(i32, i32); 5]; 2],
+    pub team_count: [usize; 2],
+    pub switch_enabled: [bool; 2],
     /// `BattleSide.charaBits` by player (`BattleSide_IsCharaUsable`).
     pub chara_bits: [[u64; 3]; 2],
 }
@@ -489,6 +516,15 @@ pub(crate) struct Chr {
     pub rel_rot: [f32; 3],
     /// `form` (+0x12CC).
     pub form: Form,
+    /// `members` (+0x9A4), `active` (+0x994): the team and who fights.
+    pub members: Vec<Member>,
+    pub active: usize,
+    /// `switchGauge` (+0x99C, 100000 full) and `switchTarget` (+0x9A0): the member a switch would bring in.
+    pub switch_gauge: i32,
+    pub switch_target: usize,
+    /// `switchMember` / `nextMember` (+0xCD8) and its form (`switchChara` ..).
+    pub switch_member: usize,
+    pub switch_form: SwitchForm,
     /// `savedPos` / `savedRot` / `savedArea` / `savedFlagF` / `savedFlagE`: where flag 0xF5 puts the fighter back.
     pub saved_pos: [f32; 3],
     pub saved_rot: [f32; 3],
@@ -630,6 +666,12 @@ impl Chr {
             rel_rot: [0.0; 3],
             frames_left_override: -1,
             form: Form::default(),
+            members: Vec::new(),
+            active: 0,
+            switch_gauge: 0,
+            switch_target: 0,
+            switch_member: 0,
+            switch_form: SwitchForm::default(),
             saved_pos: [0.0; 3],
             saved_rot: [0.0; 3],
             saved_area: 0,
@@ -695,16 +737,136 @@ impl Chr {
         chr.obj.sample_pose(&data.obj);
         chr.obj.calc_matrices(&data.obj);
         chr.form.allowed = env.change_allowed[player];
-        // BtlMember_LoadParams(chr, 0, 1, 100 %, variant 0) with no abilities.
-        let entry = data.entry;
-        let g = &mut chr.gauge;
-        g.health_max = entry.health_max.max(10000);
-        g.ki_max = 100_000;
-        g.blast_max = entry.blast_stocks * 100_000;
-        g.health = ((g.health_max as f32 * 100.0 / 100.0) as i32).max(1);
-        g.health_max = g.health_max.max(g.health);
-        g.ki = entry.ki_start.min(g.ki_max);
+        // Every member, BtlMember_LoadParams(chr, n, 1, 100 %, variant 0) with no abilities; member 0 fights.
+        let count = env.team_count[player].max(1);
+        chr.members = env.team[player][..count]
+            .iter()
+            .map(|&(chara, costume)| {
+                let entry = env
+                    .common
+                    .charas
+                    .get(chara.max(0) as usize)
+                    .copied()
+                    .unwrap_or_default();
+                let mut g = Gauge {
+                    health_max: entry.health_max.max(10000),
+                    ki_max: 100_000,
+                    blast_max: entry.blast_stocks * 100_000,
+                    ..Gauge::default()
+                };
+                g.health = ((g.health_max as f32 * 100.0 / 100.0) as i32).max(1);
+                g.health_max = g.health_max.max(g.health);
+                g.ki = entry.ki_start.min(g.ki_max);
+                Member {
+                    chara,
+                    costume,
+                    present: true,
+                    gauge: g,
+                }
+            })
+            .collect();
+        chr.gauge = chr.members[0].gauge;
         chr
+    }
+
+    /// `BtlMember_GetGauge`: member `n`'s gauges (the active one's are `gauge`).
+    pub(crate) fn member_gauge(&self, n: usize) -> Gauge {
+        if n == self.active {
+            self.gauge
+        } else {
+            self.members.get(n).map(|m| m.gauge).unwrap_or_default()
+        }
+    }
+
+    /// `BtlMember_SetActiveIndex`: member `n` fights.
+    pub(crate) fn set_active(&mut self, n: usize) {
+        if n == self.active || n >= self.members.len() {
+            return;
+        }
+        let a = self.active;
+        self.members[a].gauge = self.gauge;
+        self.gauge = self.members[n].gauge;
+        self.active = n;
+    }
+
+    /// `BtlMember_CountAlive`: the present members with health.
+    pub(crate) fn count_alive(&self) -> usize {
+        (0..self.members.len())
+            .filter(|&i| self.members[i].present && self.member_gauge(i).health > 0)
+            .count()
+    }
+
+    /// `BtlMember_GetTeamHealthRatio`: the team's health over its health maximum.
+    pub(crate) fn team_health_ratio(&self) -> f32 {
+        let (mut cur, mut max) = (0, 0);
+        for i in 0..self.members.len() {
+            let g = self.member_gauge(i);
+            cur += g.health;
+            max += g.health_max;
+        }
+        if max > 0 {
+            cur as f32 / max as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// `BtlCtrl_IsTeamDead`: no member has health.
+    pub(crate) fn team_dead(&self) -> bool {
+        (0..self.members.len()).all(|i| self.member_gauge(i).health <= 0)
+    }
+
+    /// `BtlMember_PrevSwitchTarget`: the previous living member that is not fighting.
+    pub(crate) fn prev_switch_target(&mut self) {
+        let n = self.members.len();
+        for i in (0..n).rev() {
+            let m = (self.switch_target + i) % n;
+            if m != self.active && self.member_gauge(m).health > 0 {
+                self.switch_target = m;
+                return;
+            }
+        }
+    }
+
+    /// `BtlMember_NextSwitchTarget`: the next living member that is not fighting.
+    pub(crate) fn next_switch_target(&mut self) {
+        let n = self.members.len();
+        for i in 0..n {
+            let m = (self.switch_target + i + 1) % n;
+            if m != self.active && self.member_gauge(m).health > 0 {
+                self.switch_target = m;
+                return;
+            }
+        }
+    }
+
+    /// `BtlMember_GetSwitchTarget`: the candidate, moved on when it is dead or fighting.
+    pub(crate) fn switch_target(&mut self) -> usize {
+        if self.member_gauge(self.switch_target).health <= 0 {
+            self.next_switch_target();
+        }
+        if self.switch_target == self.active {
+            self.next_switch_target();
+        }
+        self.switch_target
+    }
+
+    /// `BtlAct_PrepareSwitch`: the member to bring in and its files (a changed body loads character 0x56's
+    /// animations and voice).
+    pub(crate) fn prepare_switch(&mut self) {
+        let m = self.switch_target();
+        self.switch_member = m;
+        let (chara, costume) = self.members.get(m).map_or((0, 0), |x| (x.chara, x.costume));
+        let g = self.member_gauge(m);
+        let anim = if g.body_changed { 0x56 } else { chara };
+        self.switch_form = SwitchForm {
+            chara,
+            costume,
+            variant: g.variant,
+            anim_chara: anim,
+            anim1_chara: anim,
+            voice_chara: anim,
+        };
     }
 
     /// The HUD's view of the active member's gauges (`Hud_PreUpdate`).
@@ -878,7 +1040,7 @@ impl Chr {
     }
 
     /// `BtlAnim_SetBlend`.
-    fn anim_set_blend(&mut self, blend: f32) {
+    pub(crate) fn anim_set_blend(&mut self, blend: f32) {
         self.flags.set_held(anim_flag::BLEND_REQ);
         self.blend_time = blend;
     }
@@ -1181,6 +1343,11 @@ impl Chr {
             // The damaged variant (or technique 0x280's character, flag 0xA6: the body changed, the member's
             // gauges reloaded at full health).
             self.gauge.variant = self.form.variant;
+            let a = self.active;
+            if let Some(m) = self.members.get_mut(a) {
+                m.chara = self.form.chara;
+                m.costume = self.form.costume;
+            }
             if self.flags.test(0xA6) {
                 let g = &mut self.gauge;
                 g.body_changed = true;
@@ -1190,17 +1357,75 @@ impl Chr {
                 g.health = g.health_max;
             }
         }
+        if matches!(self.act.current, 0xF3..=0xF8) {
+            // The member switch: the new member fights with its own gauges; the powered-up mode ends (abilities
+            // 0x43 / 0x61 are not ported).
+            let m = self.switch_member;
+            self.set_active(m);
+            self.switch_target();
+            self.switch_gauge = 0;
+            self.flags.clear(6);
+            self.gauge.max_power = 0;
+        }
+        if matches!(self.act.current, 0xF1 | 0xF2) {
+            // The fusion: the partner joins the active member (health, health maximum; bonuses and abilities are
+            // not ported) and leaves the team.
+            let form_flags = data.tables.params.form_flags();
+            let p = usize::try_from(self.form.partner)
+                .ok()
+                .filter(|&p| p < self.members.len() && p != self.active);
+            if let Some(p) = p {
+                let og = self.members[p].gauge;
+                let g = &mut self.gauge;
+                g.health += og.health;
+                g.health_max += og.health_max;
+                g.blast_max = data.entry.blast_stocks * 100_000;
+                if form_flags & 1 != 0 {
+                    g.health += 5000;
+                }
+                if form_flags & 2 != 0 {
+                    g.health += 10000;
+                }
+                if form_flags & 4 != 0 {
+                    g.ki = g.ki_max;
+                }
+                if form_flags & 8 != 0 {
+                    self.flags.set_held(6);
+                    let g = &mut self.gauge;
+                    g.max_power = 30000;
+                    g.ki = g.ki_max;
+                }
+                let g = &mut self.gauge;
+                g.health = g.health.clamp(1, g.health_max);
+                g.blast = g.blast.clamp(0, g.blast_max);
+                self.members[p].present = false;
+                self.members[p].gauge.health = 0;
+            }
+            self.gauge.fused = true;
+            self.gauge.variant = self.form.variant;
+            let a = self.active;
+            self.members[a].chara = self.form.chara;
+            self.members[a].costume = self.form.costume;
+        }
         if matches!(self.act.current, 0xEC..=0xF0) {
             let form_flags = data.tables.params.form_flags();
             let g = &mut self.gauge;
             g.variant = self.form.variant;
+            let a = self.active;
+            if let Some(m) = self.members.get_mut(a) {
+                m.chara = self.form.chara;
+                m.costume = self.form.costume;
+            }
+            let g = &mut self.gauge;
             let ratio = if g.health_max > 0 {
                 g.health as f32 / g.health_max as f32
             } else {
                 0.0
             };
             // BtlMember_LoadParams(chr, active, 0, 0, 0).
-            g.health_max = data.entry.health_max.max(10000);
+            if !g.fused {
+                g.health_max = data.entry.health_max.max(10000);
+            }
             g.ki_max = 100_000;
             g.blast_max = data.entry.blast_stocks * 100_000;
             g.health = (g.health_max as f32 * ratio + 0.5) as i32;

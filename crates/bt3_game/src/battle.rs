@@ -145,6 +145,10 @@ pub struct BattleAssets {
     pub(crate) cpu: [bool; 2],
     /// `BattleSide.changeAllowed`: the side may transform, fuse and switch.
     pub(crate) change_allowed: [i32; 2],
+    /// `BattleSide.members` (character, costume; the lead first) and `switchEnabled`.
+    pub(crate) team: [[(i32, i32); 5]; 2],
+    pub(crate) team_count: [usize; 2],
+    pub(crate) switch_enabled: [bool; 2],
     /// The save's unlocked characters (`BattleSetup_InitCharaBits`).
     pub(crate) chara_bits: [u64; 3],
     /// The CPU player's data and the executable's rule tables, the stage's way points.
@@ -295,6 +299,13 @@ pub fn load(
         collision,
         cpu: [setup.sides[0].control == 2, setup.sides[1].control == 2],
         change_allowed: setup.sides.map(|s| s.change_allowed),
+        team: setup.sides.map(|s| {
+            let mut t = [(s.chara, s.costume); 5];
+            t[1..].copy_from_slice(&s.team);
+            t
+        }),
+        team_count: setup.sides.map(|s| 1 + s.team_count.clamp(0, 4) as usize),
+        switch_enabled: setup.sides.map(|s| s.switch_enabled != 0),
         chara_bits: crate::save::SaveData::default().chara_bits,
         ai,
         ai_tables,
@@ -466,8 +477,27 @@ pub(crate) fn load_side(
         motion.hide_model_nodes(side.chara);
         fighter.motions.push(Some(motion));
     }
+    // BtlObjMdl_BindFiles: motions 0x19E.. are the model file's own eight (sections 0x1D..0x24, not packed; the
+    // fusions' two-fighter motions among them). The roster's flag table ends before them.
+    for k in 0..MODEL_MOTIONS {
+        let motion = pack_section(&file, MODEL_MOTION_SECTION + k)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Motion::parse)
+            .transpose()
+            .map_err(error)?
+            .map(|mut m| {
+                m.hide_model_nodes(side.chara);
+                m
+            });
+        fighter.motions.push(motion);
+    }
     Ok(fighter)
 }
+
+/// `modelAnims`: the model file's own motions, ids 0x19E.. (sections 0x1D..0x24).
+const MODEL_MOTIONS: usize = 8;
+const MODEL_MOTION_SECTION: usize = 0x1D;
 
 /// Entries of the HUD file's offset table read as menu texts (`BtlMenu_GetText`).
 const MENU_TEXT_COUNT: usize = 0x40;
@@ -828,6 +858,9 @@ impl BattleAssets {
             gate,
             fx: &self.fx_tables,
             change_allowed: self.change_allowed,
+            team: self.team,
+            team_count: self.team_count,
+            switch_enabled: self.switch_enabled,
             chara_bits: std::array::from_fn(|side| {
                 // BattleSetup_FixForMode: every character in mode 1, and for the computer's side in modes 2, 3,
                 // 4, 7 and 9.
@@ -3988,6 +4021,172 @@ mod tests {
             assert_eq!(log.last().map(|l| l.1), Some(0xB), "{chara}: {log:x?}");
             assert_eq!(parts[1], 0, "{chara}");
         }
+    }
+
+    /// A team battle run into the fight: side `team_side` has the extra members `team` (after the lead, Goku).
+    fn team_battle(team_side: usize, team: &[(i32, i32)]) -> Option<Battle> {
+        use crate::btl_input::pad::START;
+        let mut setup = BattleSetup::default();
+        for (i, &m) in team.iter().enumerate() {
+            setup.sides[team_side].team[i] = m;
+        }
+        setup.sides[team_side].team_count = team.len() as i32;
+        setup.sides[team_side].change_allowed = 1;
+        setup.sides[1].pad = 1;
+        let mut battle = real_battle(&setup)?;
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut fight = 0;
+        for i in 0..400 {
+            if battle.seq.state == SeqState::Fight {
+                fight += 1;
+                if fight > 40 {
+                    break;
+                }
+            }
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let held = if skip && i % 2 == 0 { START } else { 0 };
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
+        }
+        Some(battle)
+    }
+
+    #[test]
+    fn real_team_member_switches() {
+        use crate::btl_input::pad::{L3, R3, SQUARE, UP};
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        // L3 + R3 with a full switch gauge: the lead (Goku, 30000 health) leaves (0xF3), character 1 arrives (0xF4,
+        // 0xF5) with its own gauges, the lead's kept.
+        let Some(mut battle) = team_battle(0, &[(1, 0)]) else {
+            return;
+        };
+        battle.roster.chars[0].switch_gauge = 100_000;
+        battle.roster.chars[0].gauge.health = 30000;
+        let mut acts = Vec::new();
+        for i in 0..120 {
+            let held = if (2..4).contains(&i) { L3 | R3 } else { 0 };
+            battle.run_frame(false, pads(held), 0, &mut libc, &mut random, None, false);
+            let a = battle.roster.chars[0].act.current;
+            if acts.last() != Some(&a) {
+                acts.push(a);
+            }
+        }
+        assert_eq!(acts, [0xB, 0xF3, 0xF4, 0xF5, 0xB], "{acts:x?}");
+        let c = &battle.roster.chars[0];
+        assert_eq!((battle.assets.fighters[0].chara, c.active), (1, 1));
+        assert_eq!(c.gauge.health, c.gauge.health_max);
+        assert_eq!(c.members[0].gauge.health, 30000);
+        assert_eq!(c.switch_gauge, 0);
+        // Without a full gauge nothing happens.
+        battle.run_frame(false, pads(L3 | R3), 0, &mut libc, &mut random, None, false);
+        battle.run_frame(false, pads(0), 0, &mut libc, &mut random, None, false);
+        assert_eq!(battle.roster.chars[0].act.current, 0xB);
+        // A knocked-out member is replaced: the second side's lead lies down (0xD8), its next member loads (0xF6),
+        // appears (0xF7) and flies in (0xF8); both fighters reset the round and the battle goes on.
+        let mut battle = team_battle(1, &[(2, 0)]).unwrap();
+        battle.roster.chars[1].gauge.health = 100;
+        let (mut acts, mut hit) = (Vec::new(), false);
+        for i in 0..400 {
+            let near =
+                crate::btl_chr::opp_distance(&battle.roster.chars[0], &battle.roster.chars[1])
+                    < 25.0;
+            let held = if hit {
+                0
+            } else if near {
+                if i % 2 == 0 { SQUARE } else { 0 }
+            } else {
+                UP
+            };
+            battle.run_frame(false, pads(held), 0, &mut libc, &mut random, None, false);
+            hit |= battle.roster.chars[1].gauge.health <= 0;
+            let a = battle.roster.chars[1].act.current;
+            if acts.last() != Some(&a) {
+                acts.push(a);
+            }
+        }
+        let tail: Vec<i32> = acts.iter().copied().skip_while(|&a| a != 0xD8).collect();
+        assert_eq!(tail, [0xD8, 0xF6, 0xF7, 0xF8, 0xB], "{acts:x?}");
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        let c = &battle.roster.chars[1];
+        assert_eq!((battle.assets.fighters[1].chara, c.active), (2, 1));
+        assert_eq!(c.gauge.health, c.gauge.health_max);
+    }
+
+    #[test]
+    fn real_fusion() {
+        use crate::btl_input::pad::{LEFT, R3};
+        // Character 44 with character 46 on its team holds R3 with left: fusion 0 (character 48, two stocks,
+        // sequence 1: action 0xF1). The partner object and then the fused character load; the two-fighter motion
+        // 0x1A2 is the model file's own; the fused fighter has both members' health and the partner leaves.
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 44;
+        setup.sides[0].team[0] = (46, 0);
+        setup.sides[0].team_count = 1;
+        setup.sides[0].change_allowed = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        battle.assets.chara_bits = [u64::MAX; 3];
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |a: u32| {
+            [
+                PadState {
+                    held: a,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let mut fight = 0;
+        for i in 0..400 {
+            if battle.seq.state == SeqState::Fight {
+                fight += 1;
+                if fight > 40 {
+                    break;
+                }
+            }
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let start = skip && i % 2 == 0;
+            battle.run_frame(start, pads(0), 0, &mut libc, &mut random, None, false);
+        }
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let before = [0, 1].map(|i| battle.roster.chars[0].member_gauge(i).health);
+        let mut acts = Vec::new();
+        for i in 0..340 {
+            let held = if (2..20).contains(&i) { LEFT | R3 } else { 0 };
+            battle.run_frame(false, pads(held), 0, &mut libc, &mut random, None, false);
+            let a = battle.roster.chars[0].act.current;
+            if acts.last() != Some(&a) {
+                acts.push(a);
+            }
+        }
+        assert_eq!(acts[..3], [0xB, 0xF1, 0xB], "{acts:x?}");
+        let c = &battle.roster.chars[0];
+        assert_eq!(battle.assets.fighters[0].chara, 48);
+        assert_eq!(c.gauge.health, before[0] + before[1]);
+        assert!(c.gauge.fused);
+        assert!(!c.members[1].present);
+        assert!(c.gauge.blast < 300_000 - 190_000, "{}", c.gauge.blast);
     }
 
     #[test]

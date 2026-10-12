@@ -123,7 +123,7 @@ pub(crate) struct Ctx<'a, 'd> {
 pub(crate) fn ported(id: i32) -> bool {
     matches!(id,
         1..=3 | 0xB..=0x36 | 0x37..=0x6F | 0x70..=0xBC | 0xBE | 0xBF
-        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xEC..=0xF0 | 0xFA..=0xFC | 0x103
+        | 0xBD | 0xC0..=0xD9 | 0xDA..=0xDF | 0xE0..=0xE9 | 0xEB..=0xFC | 0x103
         | 0x104 | 0x105..=0x13B)
 }
 
@@ -484,11 +484,15 @@ impl Ctx<'_, '_> {
                 return 1;
             }
         }
-        // Mask 0x400000 (the member switch) is not ported.
+        if mask & 0x40_0000 != 0 && self.check_switch_input() {
+            return 1;
+        }
         if mask & 0x100 != 0 && self.check_transform_input() {
             return 1;
         }
-        // Mask 0x200 (fusion) is not ported.
+        if mask & 0x200 != 0 && self.check_fusion_input() {
+            return 1;
+        }
         if mask & 1 != 0 && self.test(1) {
             if self.flag(0x13) {
                 if self.current() != 0xE {
@@ -873,6 +877,15 @@ impl Ctx<'_, '_> {
             0xE8 | 0xE9 => self.wall_recover(phase),
             0xEC | 0xF0 => self.transform_a(phase),
             0x103 => self.change_random_chara(phase),
+            0xEB => self.wait_member_change(phase),
+            0xF1 | 0xF2 => self.fusion(phase),
+            0xF3 => self.switch_leave(phase),
+            0xF4 => self.switch_arrive_wait(phase),
+            0xF5 => self.switch_arrive_land(phase),
+            0xF6 => self.ko_switch_load(phase),
+            0xF7 => self.ko_switch_enter_wait(phase),
+            0xF8 => self.ko_switch_fly_in(phase),
+            0xF9 => self.round_reset(phase),
             0xED => self.transform_b(phase),
             0xEE => self.transform_c(phase),
             0xEF => self.transform_d(phase),
@@ -1181,6 +1194,17 @@ impl Ctx<'_, '_> {
             }
         }
         self.me.charge_gauge = (self.me.charge_gauge - 400).max(0);
+        // The switch gauge fills over the parameter's +0x64 seconds (`BtlParam_GetGauge99CTime`; its abilities are
+        // not ported).
+        if self.env.switch_enabled[self.me.player] {
+            let secs = p.f32_at(0x64);
+            let me = &mut *self.me;
+            me.switch_gauge += (100_000.0 / (secs * 30.0)) as i32;
+            if matches!(self.env.mode, 5 | 6) {
+                me.switch_gauge += 0x457;
+            }
+            me.switch_gauge = me.switch_gauge.min(100_000);
+        }
         if matches!(self.env.mode, 5 | 6) && !self.flag(0x95) {
             self.me.add_health(200);
         }
@@ -1285,6 +1309,21 @@ impl Ctx<'_, '_> {
         if mflags & 0x810 == 0 {
             self.clear(0x1D);
             self.clear(0x1E);
+        }
+        // The member a switch brings in, picked on the right stick (input bits 25 / 26) with three or more alive.
+        if self.env.switch_enabled[self.me.player]
+            && self.env.mode != 1
+            && !self.flag(0x134)
+            && self.me.count_alive() >= 3
+        {
+            if self.me.input.is_pressed(0x200_0000) {
+                self.me.prev_switch_target();
+                self.set(0xE4);
+            }
+            if self.me.input.is_pressed(0x400_0000) {
+                self.me.next_switch_target();
+                self.set(0xE5);
+            }
         }
         match self.current() {
             0x89..=0x8C => {
@@ -8651,6 +8690,565 @@ impl Ctx<'_, '_> {
         }
     }
 
+    // ---- the member switches (btl_act_decide.c, btl_act_change.c) ----------------------------------------------
+
+    /// `BtlAct_CanSwitch`: a full switch gauge (`need_gauge`), two members alive, the side allowed to change
+    /// (`need_allowed`), the opponent not in a technique (flag 0xAF).
+    fn can_switch(&self, need_gauge: bool, need_allowed: bool) -> bool {
+        if need_allowed && self.me.form.allowed == 0 {
+            return false;
+        }
+        if self.flag(0xAF) {
+            return false;
+        }
+        if need_gauge && self.me.switch_gauge < 100_000 {
+            return false;
+        }
+        self.me.count_alive() >= 2
+    }
+
+    /// `BtlAct_CheckSwitchInput`: L3 + R3 (input 107) switches to the next member (`BtlAct_QueueSwitch`: 0xF3).
+    fn check_switch_input(&mut self) -> bool {
+        if !self.test(0x6B) {
+            return false;
+        }
+        let allowed = !self.flag(0x10F);
+        if !self.can_switch(true, allowed) {
+            return false;
+        }
+        self.me.prepare_switch();
+        self.set_queue(0, 0xF3);
+        true
+    }
+
+    /// `BtlActB_TickMemberChange`: a dead fighter (with flag 3, the opponent not in a technique) whose team has a
+    /// member alive is replaced, after 30 more frames counted in `frames` (none: at once).
+    fn tick_member_change(&mut self, frames: Option<usize>) -> bool {
+        if self.env.mode == 1 && !self.flag(0x10E) {
+            return false;
+        }
+        if !self.flag(3) || !self.me.is_dead() || self.flag(0xAF) {
+            return false;
+        }
+        if self.me.count_alive() > 0 {
+            match frames {
+                None => return true,
+                Some(k) => {
+                    self.me.work[k] += 1;
+                    return self.me.work[k] > 30;
+                }
+            }
+        }
+        false
+    }
+
+    /// `BtlChange_RequestChara` of the member a switch brings in.
+    fn request_switch(&mut self) {
+        let f = self.me.switch_form;
+        self.change.request_chara(
+            self.me.player,
+            f.chara,
+            f.costume,
+            f.variant,
+            f.anim_chara,
+            f.anim1_chara,
+            f.voice_chara,
+        );
+    }
+
+    /// The run flags of the switch actions (`BtlActChange_SetFlags`, 0x12D, 0x134).
+    fn switch_flags(&mut self) {
+        self.change_flags();
+        self.set(0x12D);
+        self.set(0x134);
+    }
+
+    /// Action 0xEB (`BtlAct_ActionEB`): standing hidden (flag 0xB) until a dead member is replaced (0xF6).
+    fn wait_member_change(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0, 0.0);
+        }
+        if phase == RUN {
+            self.me.anim_advance_loop(0);
+            self.step(6, 6, 7, 0.0, kmh(100.0));
+            self.me.brake_vertical();
+            self.set(0xB);
+            if self.tick_member_change(Some(2)) {
+                self.request(0xF6);
+            }
+        }
+    }
+
+    /// Action 0xF3 (`BtlAct_SwitchLeave`): the member flies off (motion 0xEE, then 0x2F rising for 15 frames,
+    /// hidden from the 16th) while the next member's files load; from the 46th frame once they are in, 0xF4. The
+    /// camera cut, voice and sounds are not ported.
+    fn switch_leave(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0xEE, 0.0);
+            self.me.anim_play_sub(self.data, 0x2F);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            let yaw = self.me.pose.rot[1];
+            self.me.set_heading(yaw, 0.0);
+            self.me.save_placement();
+            self.set(0xF4);
+        }
+        if phase == RUN {
+            if self.me.action_frame == 1 {
+                self.request_switch();
+            }
+            match self.anim_id() {
+                0xEE => {
+                    if self.me.anim_advance(0) {
+                        self.set(0x33);
+                        self.me.flags.set_held(anim_flag::REQ_SUB);
+                        self.me.anim_set_blend(0.15);
+                    }
+                    self.me.fall();
+                }
+                0x2F => {
+                    self.me.anim_advance_loop(0);
+                    self.set(0x18);
+                    self.me.set_fx(4);
+                    self.me.set_fx(0x3A);
+                    self.me.work[2] += 1;
+                    let t = self.me.work[2];
+                    if t < 15 {
+                        self.me.move_vertical(-kmh(1000.0), 10000.0);
+                    } else {
+                        self.me.brake_vertical();
+                    }
+                    if t == 15 {
+                        self.me.set_fx(0xC);
+                    }
+                    if t >= 16 {
+                        self.set(0xB);
+                    }
+                    if t >= 46 && self.change.is_loaded_for(self.me.player) {
+                        self.request(0xF4);
+                        self.change.set_ready(self.me.player);
+                        self.me.set_fx(5);
+                        self.me.work[2] = 0;
+                    }
+                }
+                _ => {}
+            }
+            self.step(6, 5, 7, 0.0, kmh(100.0));
+            self.switch_flags();
+        }
+    }
+
+    /// Action 0xF4 (`BtlAct_SwitchArriveWait`): the first frame on the new member's model, hidden; then 0xF5.
+    fn switch_arrive_wait(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0, 0.0);
+            self.change.set_done(self.me.player);
+        }
+        if phase == RUN {
+            self.step(6, 5, 7, 0.0, kmh(100.0));
+            self.switch_flags();
+            self.set(0xB);
+            self.set(0xCC);
+        }
+        if phase == DECIDE {
+            self.request(0xF5);
+        }
+    }
+
+    /// Action 0xF5 (`BtlAct_SwitchArriveLand`): the new member lands where the old one stood (motion 0x2D held 8
+    /// frames, then 0); then the fight goes on, put back at the saved placement.
+    fn switch_arrive_land(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x2D, 0.0);
+            self.set(0xF4);
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0x2D => {
+                    self.me.work[2] += 1;
+                    if self.me.work[2] >= 8 && self.me.anim_advance_then(0, 0.15, 0) {
+                        self.me.set_fx(0xD);
+                    }
+                    if self.me.anim_progress() < 0.5 {
+                        self.set(0xB);
+                    }
+                }
+                0x26 | 0 => {
+                    self.me.anim_advance(0);
+                    if self.me.anim_progress() > 0.2 {
+                        self.me.work[1] = 1;
+                        self.set(0xCD);
+                    }
+                }
+                _ => {}
+            }
+            self.step(6, 5, 7, 0.0, kmh(100.0));
+            self.me.brake_vertical();
+            self.switch_flags();
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.change_finish();
+        }
+        if phase == LEAVE {
+            self.set(0x37);
+            if !self.flag(0xFC) && !self.flag(0xFD) {
+                self.set(0xF5);
+                self.set(0x55);
+            }
+        }
+    }
+
+    /// Action 0xF6 (`BtlAct_KoSwitchLoad`): the defeated member stays down while the next one's files load; then
+    /// 0xF7. Hidden when it lies below the stage floor or came from 0xEB.
+    fn ko_switch_load(&mut self, phase: u32) {
+        if phase == ENTER {
+            let m = if self.flag(0x11) { 0xD8 } else { 0xD6 };
+            self.play(m, 0.0);
+            self.me.pose.speed = 0.0;
+            self.me.pose.fall_speed = 0.0;
+            self.me.prepare_switch();
+            // BtlActSwitch_SetLeaveCut (the camera cut is not ported): hidden below the floor or after 0xEB.
+            if self.env.stage.bounds.bottom < self.me.pose.pos[1] || self.me.act.prev == 0xEB {
+                self.me.work[0] |= 1;
+            }
+            self.clear(0x10E);
+        }
+        if phase == RUN {
+            if self.me.action_frame == 1 {
+                self.request_switch();
+            } else if self.me.action_frame >= 2 && self.change.is_loaded_for(self.me.player) {
+                self.request(0xF7);
+                self.change.set_ready(self.me.player);
+            }
+            self.me.anim_advance_loop(0);
+            self.step(6, 5, 7, 0.0, kmh(100.0));
+            self.me.brake_vertical();
+            self.switch_flags();
+            if self.me.work[0] & 1 != 0 {
+                self.set(0xB);
+            }
+        }
+        if phase == LEAVE {
+            self.set(0x37);
+        }
+    }
+
+    /// `BtlActSwitch_SaveEntryPlacement`: where the next member appears: from the player's start placement, 40
+    /// degrees up away from the opponent's, up to the stage top or 300, pulled inside the stage radius.
+    fn save_entry_placement(&mut self) {
+        let starts = &self.env.stage.starting_placements;
+        let own = starts.get(self.me.player).map_or([0.0; 3], |p| p.position);
+        let opp = starts
+            .get(self.me.player ^ 1)
+            .map_or([0.0; 3], |p| p.position);
+        let limit = self.env.stage.bounds.top;
+        let mut dir = [own[0] - opp[0], 0.0, own[2] - opp[2]];
+        dir[1] = -deg(40.0).tan() * (dir[0] * dir[0] + dir[2] * dir[2]).sqrt();
+        if crate::btl_chr::length(dir) < 0.001 {
+            dir = [0.0, -deg(20.0).sin(), deg(20.0).cos()];
+        } else {
+            dir = normalize(dir);
+        }
+        let t = ((limit - own[1]) / dir[1]).min(300.0);
+        let mut pos = add(own, scale3(dir, t));
+        let rot = [0.0, dir[0].atan2(dir[2]), 0.0];
+        let r = self.env.stage.bounds.radius - 100.0 - self.data.radius();
+        let len = pos[0].hypot(pos[2]);
+        if r < len {
+            let k = r / len;
+            pos[0] *= k;
+            pos[2] *= k;
+        }
+        // BtlChar_SetSavedPlacement(pos, rot, pos, 0, 0).
+        self.me.saved_pos = pos;
+        self.me.saved_rot = rot;
+        self.me.body_warp_pos = pos;
+        self.me.saved_area = self.env.col.find_zone_near(-1, pos) as i32;
+        self.me.saved_flags = [false, false];
+    }
+
+    /// Action 0xF7 (`BtlAct_KoSwitchEnterWait`): the first frame on the next member's model, put at its entry point
+    /// and hidden; then 0xF8.
+    fn ko_switch_enter_wait(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0, 0.0);
+            self.change.set_done(self.me.player);
+            self.save_entry_placement();
+            self.set(0xF5);
+            self.set(0x55);
+        }
+        if phase == RUN {
+            self.step(6, 5, 7, 0.0, kmh(100.0));
+            self.switch_flags();
+            self.set(0xB);
+            self.set(0xCC);
+        }
+        if phase == DECIDE {
+            self.request(0xF8);
+        }
+    }
+
+    /// Action 0xF8 (`BtlAct_KoSwitchFlyIn`): the next member flies to its start placement at 2500 km/h (motion
+    /// 0x19), lands (0x2D), stands (0) 30 frames and asks for the round reset (flag 0xF9). The sounds, voice,
+    /// camera cut, shake and vibration are not ported.
+    fn ko_switch_fly_in(&mut self, phase: u32) {
+        if phase == ENTER {
+            self.play(0x19, 0.0);
+            let start = self
+                .env
+                .stage
+                .starting_placements
+                .get(self.me.player)
+                .map_or([0.0; 3], |p| p.position);
+            self.me.turn_to_point(start, PI, PI);
+            self.me.turn_model_yaw(PI, 1.0);
+        }
+        if phase == RUN {
+            match self.anim_id() {
+                0x19 => {
+                    self.me.anim_advance_loop(0);
+                    self.step(6, 6, 3, kmh(2500.0), kmh(100.0));
+                    self.me.brake_vertical();
+                    self.set(9);
+                    self.me.set_fx(4);
+                    self.me.set_fx(0xA);
+                    self.me.set_fx(0x3A);
+                }
+                0x2D => {
+                    self.me.anim_advance_then(0, 0.15, 1);
+                    self.step(6, 5, 3, 0.0, 10000.0);
+                    self.me.apply_gravity();
+                }
+                0 => {
+                    self.me.anim_advance_loop(0);
+                    self.step(6, 5, 3, 0.0, kmh(100.0));
+                    self.me.apply_gravity();
+                }
+                _ => {}
+            }
+            self.switch_flags();
+        }
+        if phase == DECIDE {
+            match self.anim_id() {
+                0x19 => {
+                    let landed = self.flag(0xF) || (self.flag(0x1F) && !self.flag(0x20));
+                    if landed {
+                        self.request_anim(0x2D, 0.15);
+                        self.me.set_fx(0x35);
+                        self.me.pose.speed = 0.0;
+                    }
+                }
+                0 => {
+                    self.me.work[2] += 1;
+                    if self.me.work[2] > 0x1E {
+                        self.set(0xF9);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Action 0xF9 (`BtlAct_RoundReset`): both fighters at their start placements after a member change; then 0xB.
+    fn round_reset(&mut self, phase: u32) {
+        if phase == DECIDE {
+            self.change_finish();
+        }
+        if phase == LEAVE {
+            self.me.set_fx(5);
+            self.set(0xD5);
+            self.set(0xCD);
+            self.set(0x37);
+        }
+    }
+
+    // ---- the fusions (btl_act_decide.c, btl_act_change.c) ------------------------------------------------------
+
+    /// `BtlMember_FindPresentIndex`: the present member of character `chara`.
+    fn find_member(&self, chara: i32) -> Option<usize> {
+        self.me
+            .members
+            .iter()
+            .position(|m| m.present && m.chara == chara)
+    }
+
+    /// The partner of fusion `index`: the first of its four characters present on the team.
+    fn fusion_partner(&self, index: usize) -> Option<usize> {
+        let p = &self.data.tables.params;
+        (0..4).find_map(|n| self.find_member(p.fusion_partner(index, n)))
+    }
+
+    /// `BtlAct_CanFuse`: fusion `index` (0..2) of the parameter names a character the side may use, with the stocks
+    /// it costs and a partner on the team, alive and not body-changed; refused as a transformation is (ability 0x5E
+    /// is not ported).
+    fn can_fuse(&self, index: usize, need_blast: bool, need_allowed: bool) -> Option<usize> {
+        if index >= 3 {
+            return None;
+        }
+        if need_allowed && self.me.form.allowed == 0 {
+            return None;
+        }
+        if self.flag(0xAF) || self.me.gauge.body_changed {
+            return None;
+        }
+        let p = &self.data.tables.params;
+        let chara = p.fusion_result(index);
+        if chara == 0xFF {
+            return None;
+        }
+        let bits = self.env.chara_bits[self.me.player];
+        let usable = usize::try_from(chara)
+            .ok()
+            .and_then(|c| bits.get(c / 64).map(|w| (w >> (c % 64)) & 1 != 0))
+            .unwrap_or(false);
+        if !usable {
+            return None;
+        }
+        if need_blast && self.me.gauge.blast < p.fusion_cost(index) {
+            return None;
+        }
+        let member = self.fusion_partner(index)?;
+        let g = self.me.member_gauge(member);
+        if g.body_changed || g.health <= 0 {
+            return None;
+        }
+        Some(member)
+    }
+
+    /// `BtlAct_CheckFusionInput`: R3 held 12 frames with left / up / right (inputs 104..106) is fusion 0..2.
+    fn check_fusion_input(&mut self) -> bool {
+        let mut index = None;
+        for (input, i) in [(0x68, 0), (0x69, 1), (0x6A, 2)] {
+            if self.test(input) {
+                index = Some(i);
+            }
+        }
+        let Some(index) = index else {
+            return false;
+        };
+        let allowed = !self.flag(0x10F);
+        match self.can_fuse(index, true, allowed) {
+            Some(partner) => self.queue_fusion(index, partner),
+            None => false,
+        }
+    }
+
+    /// `BtlAct_QueueFusion`: the fused character's form (costume 0, the partner's costume for the extra object)
+    /// and its action by the sequence: 0xF1 / 0xF2.
+    fn queue_fusion(&mut self, index: usize, partner: usize) -> bool {
+        let p = &self.data.tables.params;
+        let chara = p.fusion_result(index);
+        let action = match p.fusion_seq(index) {
+            1 => 0xF1,
+            2 => 0xF2,
+            _ => return false,
+        };
+        let form = crate::btl_chr::Form {
+            index: index as i32,
+            cost: p.fusion_cost(index),
+            kind: 5,
+            obj_id: p.fusion_object(index),
+            chara,
+            costume: 0,
+            partner: partner as i32,
+            obj_costume: self.me.members[partner].costume,
+            variant: self.me.gauge.variant,
+            anim_chara: chara,
+            anim1_chara: chara,
+            voice_chara: chara,
+            allowed: self.me.form.allowed,
+        };
+        self.me.form = form;
+        self.set_queue(0, action);
+        true
+    }
+
+    /// Actions 0xF1 / 0xF2 (`BtlAct_Fusion`): rising (motion 0x1F, then 0x20 held on its last frame) while the
+    /// partner object and then the fused character load; the two-fighter motion 0x1A2 / 0x1A3 at the stage's
+    /// place, held until the fused character is in; the closing 0x1A4; put back at the saved placement. The
+    /// partner object, the camera cut, sounds, voice and vibration are not ported.
+    fn fusion(&mut self, phase: u32) {
+        let first = self.current() == 0xF1;
+        if phase == ENTER {
+            self.change_enter(0x1F, None);
+        }
+        if phase == RUN {
+            if self.me.action_frame == 1 {
+                let f = self.me.form;
+                self.change
+                    .request_object(self.me.player, f.obj_id, f.obj_costume, 0, 2);
+                self.request_form();
+            }
+            match self.anim_id() {
+                0x1F => {
+                    self.me.anim_advance_then(0x20, 0.0, 0);
+                    let v = if self.me.anim_progress() < 0.5 {
+                        0.0
+                    } else {
+                        -kmh(1000.0)
+                    };
+                    self.me.move_vertical(v, 10000.0);
+                }
+                0x20 => {
+                    if self.me.anim_advance(0) {
+                        self.me.move_vertical(0.0, 10000.0);
+                        if self.change.is_loaded_for(self.me.player) {
+                            self.request_anim(if first { 0x1A2 } else { 0x1A3 }, 0.0);
+                            self.set(0xB);
+                            self.change.set_ready(self.me.player);
+                        }
+                    } else {
+                        self.me.move_vertical(-kmh(1000.0), 10000.0);
+                    }
+                    self.set(0x18);
+                }
+                0x1A2 | 0x1A3 => {
+                    if self.me.anim_is_new() {
+                        self.change.set_done(self.me.player);
+                        self.me.set_fx(0);
+                        self.set(0xF4);
+                        self.set(if first { 0xD7 } else { 0xD8 });
+                    }
+                    self.set(if first { 0x130 } else { 0x131 });
+                    if self.me.anim_advance(0) && self.change.is_loaded_for(self.me.player) {
+                        self.change_loaded(0x1A4);
+                    }
+                    self.me.brake_vertical();
+                    self.me.set_fx(0x14);
+                }
+                0x1A4 => {
+                    if self.me.anim_is_new() {
+                        self.set(0xF4);
+                        self.set(0xD9);
+                        self.me.set_fx(1);
+                    }
+                    if self.me.anim_advance(0) {
+                        self.change.set_done(self.me.player);
+                        self.me.set_fx(2);
+                        self.me.work[1] = 1;
+                    }
+                    self.me.brake_vertical();
+                }
+                _ => {}
+            }
+            self.step(6, 5, 7, 0.0, kmh(100.0));
+            self.change_flags();
+            self.set(0x12D);
+        }
+        if phase == DECIDE && self.me.work[1] != 0 {
+            self.change_finish();
+        }
+        if phase == LEAVE {
+            self.set(0x37);
+            if !self.flag(0xFC) && !self.flag(0xFD) {
+                self.set(0xF5);
+                self.set(0x55);
+            }
+            self.set(0xDA);
+            self.set(0xCD);
+        }
+    }
+
     // ---- the reactions a smash gives (btl_act_1.c) ---------------------------------------------------------------
 
     /// `BtlActB_UpdateMashRate`: each press of an action button (`ANY_FACE`) adds to the motion's step, kept in
@@ -10386,15 +10984,6 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// `BtlActB_TickMemberChange`: a knocked-out fighter with a member left alive is replaced after 30 frames.
-    fn tick_member_change(&mut self) -> bool {
-        if self.env.mode == 1 && !self.flag(0x10E) {
-            return false;
-        }
-        // One member per side: nobody is left to take over.
-        false
-    }
-
     /// Action 0xD8: lying down; getting up after 3 s or on an input; a knocked-out member is replaced.
     fn lie_down(&mut self, phase: u32) {
         if phase == ENTER {
@@ -10447,7 +11036,7 @@ impl Ctx<'_, '_> {
             if self.me.is_dead() {
                 self.set(0x137);
             }
-            if down && self.tick_member_change() {
+            if down && self.tick_member_change(Some(2)) {
                 self.request(0xF6);
             }
         }
@@ -10523,6 +11112,13 @@ impl Ctx<'_, '_> {
                     if self.me.input.is_held(DIR_MASK) {
                         self.request(if self.data.can_fly() { 0x27 } else { 0x25 });
                     }
+                }
+                // Fallen below the stage floor: the next member takes over.
+                if self.me.pose.ground_flags & 0x40 != 0
+                    && self.env.stage.bounds.bottom < self.me.pose.pos[1]
+                    && self.tick_member_change(None)
+                {
+                    self.request(0xF6);
                 }
             }
             if self.flag(0x11) {
@@ -10787,11 +11383,11 @@ mod tests {
     fn the_slice_s_actions_are_ported_and_others_are_not() {
         for id in [
             0xB, 0xD, 0xF, 0x38, 0x44, 0x60, 0x7B, 0xAE, 0xB1, 0xC0, 0xC6, 0xCF, 0xD2, 0xD8, 0xDB,
-            0xE1, 0xEC, 0xF0,
+            0xE1, 0xEC, 0xF0, 0xF1, 0xF6,
         ] {
             assert!(ported(id), "0x{id:X}");
         }
-        for id in [0xF1, 0xFD, 0xF6] {
+        for id in [0xEA, 0xFD, 0x13C] {
             assert!(!ported(id), "0x{id:X}");
         }
     }

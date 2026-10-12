@@ -114,7 +114,7 @@ impl Roster {
         if self.started && !env.gate.time_stopped {
             self.frame = (self.frame + 1) & 0x3FFF_FFFF;
         }
-        // BtlChars_CheckRoundReset: flag 0xF9 is raised only by the member change, not ported.
+        self.check_round_reset(data, env);
         self.update_freeze();
         for chr in &mut self.chars {
             begin_frame(chr, env);
@@ -123,6 +123,38 @@ impl Roster {
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
             update_seq_flags(me, opp, data[i], data[i ^ 1], env);
+        }
+    }
+
+    /// `BtlChars_CheckRoundReset`: a fighter's flag 0xF9 (the arriving member stands) puts both back at their start
+    /// placements in action 0xF9 (`BtlChar_ResetRound`) and resets the effect scene. The partners are not ported.
+    fn check_round_reset(&mut self, data: [&SideData; 2], env: &Env) {
+        if !self.chars.iter().any(|c| c.flags.test(0xF9)) {
+            return;
+        }
+        for (i, chr) in self.chars.iter_mut().enumerate() {
+            chr.flags.clear(0xE);
+            chr.flags.set_held(0xF);
+            chr.flags.set_held(5);
+            chr.flags.clear(0x125);
+            chr.place_at_start(data[i], env);
+            chr.prev_action = chr.act.current;
+            chr.act.current = 0xF9;
+            chr.act.request = -1;
+            chr.act.queue = [-1; 4];
+            chr.react.reaction = 1;
+            chr.search_angle = 0.5;
+            chr.search_range = 500.0;
+            chr.freeze_next = 0;
+            chr.freeze_delay = 0;
+            chr.freeze = 0;
+            if env.mode == 3 && i == 0 {
+                chr.add_health(10000);
+            }
+        }
+        // BtlScene_Reset(0x2000): every fighter's effects.
+        for side in 0..2 {
+            self.scene.reset_side(&mut self.chars, side);
         }
     }
 
