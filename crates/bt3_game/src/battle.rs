@@ -124,6 +124,8 @@ pub struct BattleAssets {
     pub effect_textures: Vec<RgbaTexture>,
     /// `gEftRay->tex[0]`: the ray bursts' texture among the effect textures.
     pub(crate) ray_texture: Option<usize>,
+    /// `gEftGndDust->tex`: the ground dust's texture set (common effect entry 0xB) among the effect textures.
+    pub(crate) dust_textures: Vec<usize>,
     pub(crate) fighters: Vec<FighterModel>,
     /// The light ramp the shading rows are looked up through, and common file 2 (`BtlLoad_StepChara` reloads a
     /// side with them).
@@ -334,6 +336,7 @@ pub fn load(
         stage_textures,
         effect_textures: Vec::new(),
         ray_texture: None,
+        dust_textures: Vec::new(),
         fighters: Vec::new(),
         ramp: Vec::new(),
         common_file: Vec::new(),
@@ -409,6 +412,17 @@ pub fn load(
         assets
             .effect_textures
             .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+    }
+    // EftGndDustMgr_Init: EftTexSet_Load8 of common effect entry 0xB.
+    if let Some(entry) = bt3_data::eft_pack::common_entry(&common_fx, 0xB)
+        && let Ok(res) = TextureResource::parse(entry)
+    {
+        for e in res.entries.iter().take(8) {
+            assets.dust_textures.push(assets.effect_textures.len());
+            assets
+                .effect_textures
+                .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+        }
     }
     for (index, side) in setup.sides.into_iter().enumerate() {
         let load = SideLoad {
@@ -1064,6 +1078,7 @@ impl Battle {
             Roster::new([&data[0], &data[1]], &env, assets.cpu)
         };
         let mut roster = roster;
+        roster.scene.gdust = crate::eft_gdust::GndDust::new(assets.stage.dust.as_ref());
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -1231,7 +1246,9 @@ impl Battle {
                 job.state = 1;
             }
             1 => {
-                // BtlLoad_BeginStageSwap: BtlStage_Term (StgAmb_Stop).
+                // BtlLoad_BeginStageSwap: EftStage_ResetAll (BtlScene_Reset(0): the dust puffs end), BtlStage_Term
+                // (StgAmb_Stop).
+                self.roster.scene.gdust.reset();
                 self.amb.stop();
                 let id = if self.assets.stage_id == 3 {
                     TRANSITION_FILE_3
@@ -1611,6 +1628,8 @@ impl Battle {
             );
             Roster::new([&data[0], &data[1]], &env, self.assets.cpu)
         };
+        // The scene's dust manager keeps the starting stage's template.
+        self.roster.scene.gdust = crate::eft_gdust::GndDust::new(self.assets.stage.dust.as_ref());
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         self.fade = Fade::start_in(1.0);
         self.started = false;
@@ -1769,9 +1788,13 @@ impl Battle {
                 &mut *input.libc,
                 &mut self.assets.snd.lock().unwrap_or_else(|e| e.into_inner()),
             );
-            self.with_roster(|_, _, env| {
-                env.objs()
-                    .update(env.inner_radius(), &mut vu0, &mut *input.libc);
+            self.with_roster(|roster, _, env| {
+                env.objs().update(
+                    env.inner_radius(),
+                    &mut vu0,
+                    &mut *input.libc,
+                    &mut roster.scene.gdust,
+                );
                 false
             });
         }
@@ -1967,6 +1990,10 @@ impl Battle {
                 .scene
                 .fx
                 .draw(&fxw, &mut ot, &ctx, |chr| demo || chr == 0);
+            self.roster
+                .scene
+                .gdust
+                .draw(&mut ot, &ctx, &self.assets.dust_textures);
             ot.into_list()
         };
         self.hud.set_paused(self.seq.paused);
@@ -2140,7 +2167,7 @@ pub(crate) struct View {
 }
 
 impl View {
-    fn new(pos: [f32; 3], rot: [f32; 3]) -> Self {
+    pub(crate) fn new(pos: [f32; 3], rot: [f32; 3]) -> Self {
         Self::from_world_to_view(view_matrix(pos, rot))
     }
 
@@ -4931,6 +4958,8 @@ mod tests {
             let mut libc = LibcRandom::new(1);
             let mut random = GameRandom::from_key(&[1]);
             let start = [center[0] + radius * 3.0 + 100.0, center[1], center[2]];
+            let mut break_sound = false;
+            let kind = battle.assets.stage_objs.lock().unwrap().kind(obj);
             for f in 0..40 {
                 let t = (f as f32 / 20.0).min(1.0);
                 let data = side_data(&battle.assets.fighters[1]);
@@ -4939,7 +4968,7 @@ mod tests {
                 c.pose.pos = std::array::from_fn(|k| start[k] + (center[k] - start[k]) * t);
                 c.pose_to_obj(false);
                 c.obj.calc_matrices(&data.obj);
-                battle.run_frame(
+                let frame = battle.run_frame(
                     false,
                     [PadState::default(); 2],
                     0,
@@ -4949,9 +4978,15 @@ mod tests {
                     false,
                 );
                 if battle.assets.stage_objs.lock().unwrap().is_broken(obj) {
+                    // The break sound: stage bank (8) sound 8.
+                    break_sound = frame
+                        .sounds
+                        .iter()
+                        .any(|s| matches!(s, TitleSound::SeEx { mask: 8, id: 8, .. }));
                     break;
                 }
             }
+            assert!(break_sound, "stage {stage}");
             assert!(
                 battle.assets.stage_objs.lock().unwrap().is_broken(obj),
                 "stage {stage}: object {obj} at {center:?} r {radius}"
@@ -4971,6 +5006,12 @@ mod tests {
             let (pieces, before) = falling(&battle);
             if !battle.assets.stage_model.objects[obj].pieces.is_empty() {
                 assert!(!pieces.is_empty(), "stage {stage}");
+                // An object of a material raises dust puffs as its pieces start falling.
+                assert_eq!(
+                    battle.roster.scene.gdust.count() > 0,
+                    kind & 7 != 0,
+                    "stage {stage}: kind {kind:x}"
+                );
                 for _ in 0..4 {
                     battle.run_frame(
                         false,

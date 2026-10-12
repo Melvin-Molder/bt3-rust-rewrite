@@ -31,6 +31,7 @@ mod duel_menu;
 mod eft;
 mod eft_bill;
 mod eft_chain;
+mod eft_gdust;
 mod eft_link;
 mod eft_part10;
 mod eft_ptcl;

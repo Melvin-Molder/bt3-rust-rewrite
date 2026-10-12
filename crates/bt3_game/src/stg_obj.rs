@@ -41,6 +41,8 @@ struct StgObj {
 /// A debris piece (`StgPart` with a node).
 #[derive(Clone, Copy, Debug)]
 struct Piece {
+    /// The piece's place among all of the object's pieces (those without a node too).
+    index: usize,
     part: usize,
     node: usize,
     radius: f32,
@@ -159,9 +161,11 @@ impl StageObjs {
                 pieces: o
                     .pieces
                     .iter()
-                    .filter_map(|&p| {
+                    .enumerate()
+                    .filter_map(|(index, &p)| {
                         let part = &model.parts[p];
                         part.node.map(|node| Piece {
+                            index,
                             part: p,
                             node,
                             radius: part.radius,
@@ -243,16 +247,38 @@ impl StageObjs {
         }
     }
 
-    /// `BtlStage_DestroyObj`: breaks object `i` and the objects under it. The break sound and the hidden item are
+    /// `BtlStage_DestroyObj`: breaks object `i` and the objects under it, with the break sound (stage sound 8 at
+    /// the part 0 of the last object broken, heard from its radius + 200 to + 1500). The hidden item of mode 1 is
     /// not ported.
-    pub(crate) fn destroy(&mut self, i: usize, hit_pos: [f32; 3]) {
-        self.break_obj(i, hit_pos);
+    pub(crate) fn destroy(
+        &mut self,
+        i: usize,
+        hit_pos: [f32; 3],
+        snd: &mut crate::btl_snd::CharSound,
+    ) {
+        let mut info = None;
+        self.break_obj(i, hit_pos, &mut info);
+        if let Some((pos, r)) = info {
+            snd.request(
+                pos,
+                -1,
+                crate::btl_snd::KIND_BANK8,
+                r + 200.0,
+                r + 1500.0,
+                8,
+            );
+        }
     }
 
     /// `BtlStage_BreakObj`: the broken model instead of the whole one, the pieces start falling, the cameras near
     /// part 0 shake by the type's size (large, medium, small: the last one listed wins); then every object that
     /// names it as parent. False when it was already broken.
-    fn break_obj(&mut self, i: usize, hit_pos: [f32; 3]) -> bool {
+    fn break_obj(
+        &mut self,
+        i: usize,
+        hit_pos: [f32; 3],
+        info: &mut Option<([f32; 3], f32)>,
+    ) -> bool {
         let Some(o) = self.objs.get_mut(i) else {
             return false;
         };
@@ -264,6 +290,9 @@ impl StageObjs {
         o.frame = 0;
         o.hit_pos = hit_pos;
         self.dirty = true;
+        if o.part.is_some() {
+            *info = o.part;
+        }
         if let Some((pos, r)) = o.part
             && o.kind & (SHAKE_S | SHAKE_M | SHAKE_L) != 0
         {
@@ -289,7 +318,7 @@ impl StageObjs {
         }
         for j in 0..self.objs.len() {
             if self.objs[j].parent == i as i32 {
-                self.break_obj(j, hit_pos);
+                self.break_obj(j, hit_pos, info);
             }
         }
         true
@@ -299,7 +328,13 @@ impl StageObjs {
     /// until their animation's end (0x94 when 0), which ends the fall and releases their bodies; on the first frame
     /// a rigid piece gets a body at its first key, thrown by the hit's direction and the object's material; a keyed
     /// piece follows its keys, a rigid one its body.
-    pub(crate) fn update(&mut self, inner_radius: f32, vu0: &mut Vu0Random, libc: &mut LibcRandom) {
+    pub(crate) fn update(
+        &mut self,
+        inner_radius: f32,
+        vu0: &mut Vu0Random,
+        libc: &mut LibcRandom,
+        dust: &mut crate::eft_gdust::GndDust,
+    ) {
         for i in 0..self.objs.len() {
             let o = &mut self.objs[i];
             if o.state & FALLING == 0 {
@@ -321,6 +356,7 @@ impl StageObjs {
                 continue;
             }
             let (frame, hit_pos, material) = (o.frame, o.hit_pos, material(o.kind));
+            let dust_bright = dust_scale(o.kind);
             if first {
                 // The pieces at frame 0 (their centre is worked out and never used).
                 for p in &o.pieces {
@@ -331,9 +367,10 @@ impl StageObjs {
             }
             for k in 0..self.objs[i].pieces.len() {
                 let p = self.objs[i].pieces[k];
+                let mut pos = [0.0; 3];
                 if self.nodes[p.node].is_rigid() {
                     if first {
-                        let pos = animate(&self.nodes[p.node], 0.0).map_or([0.0; 3], |m| {
+                        pos = animate(&self.nodes[p.node], 0.0).map_or([0.0; 3], |m| {
                             self.node_mtx[p.node] = m;
                             [m[3][0], m[3][1], m[3][2]]
                         });
@@ -350,7 +387,15 @@ impl StageObjs {
                     self.node_body[p.node] = 0;
                     if let Some(m) = animate(&self.nodes[p.node], frame as f32) {
                         self.node_mtx[p.node] = m;
+                        pos = [m[3][0], m[3][1], m[3][2]];
                     }
+                }
+                // The dust of the break, at every fourth piece (`EftGndDust_SpawnDebris`).
+                if first
+                    && p.index & 3 == 0
+                    && let Some(bright) = dust_bright
+                {
+                    dust.spawn_debris(pos, bright, vu0);
                 }
             }
         }
@@ -393,6 +438,18 @@ impl StageObjs {
 }
 
 /// `StgObj_GetMaterial`: 0, 1 or 2 by type bits 1, 2, 4.
+/// `StgObj_GetDust`: an object of a material (type bits 0..2) raises dust, of brightness 0.7 with type bit 0x200,
+/// else 1; `None` without a material.
+fn dust_scale(kind: i32) -> Option<f32> {
+    if kind & 7 == 0 {
+        None
+    } else if kind & 0x200 != 0 {
+        Some(0.7)
+    } else {
+        Some(1.0)
+    }
+}
+
 fn material(kind: i32) -> i32 {
     if kind & 1 != 0 {
         0
@@ -430,8 +487,11 @@ mod tests {
         let mut s = objs(&[-1, 0, 1, -1]);
         assert!(!s.damage(0, 2));
         assert!(s.damage(0, 1));
-        s.destroy(0, [0.0; 3]);
+        let mut snd = crate::btl_snd::CharSound::default();
+        s.destroy(0, [0.0; 3], &mut snd);
         assert_eq!(s.broken_mask(), 0b0111);
+        // The break sound of the last object broken.
+        assert_eq!(snd.requests(), [(-1, crate::btl_snd::KIND_BANK8, 8)]);
         assert_eq!(s.kind(0), 0);
         assert!(!s.damage(1, 10));
         assert_eq!(s.shakes.len(), 3);
@@ -439,7 +499,12 @@ mod tests {
         // The pieces fall for 0x94 frames, two a frame.
         let (mut vu0, mut libc) = (Vu0Random::default(), LibcRandom::new(1));
         for _ in 0..0x4A {
-            s.update(1000.0, &mut vu0, &mut libc);
+            s.update(
+                1000.0,
+                &mut vu0,
+                &mut libc,
+                &mut crate::eft_gdust::GndDust::default(),
+            );
         }
         assert!(s.objs.iter().all(|o| o.state & FALLING == 0));
         s.reset(false);

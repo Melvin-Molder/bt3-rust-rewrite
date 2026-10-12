@@ -317,6 +317,8 @@ pub(crate) struct Scene {
     pub ki_objs: [[Vec<KiObj>; 2]; 2],
     /// The effect generators' draws made in the fighters' pass, taken in order at the start of the scene update.
     deferred: Vec<Deferred>,
+    /// The ground dust (`gEftGndDust`).
+    pub gdust: crate::eft_gdust::GndDust,
 }
 
 /// A generator draw made outside the scene update.
@@ -1009,6 +1011,8 @@ impl Scene {
                 }
             }
         }
+        // The ground dust (BtlScene_IsTimeStopped: paused).
+        self.gdust.update(w.paused);
         // Layer 1: the technique effects.
         self.tech.update(
             w,
@@ -1406,7 +1410,7 @@ impl Scene {
                 let idx = mask.trailing_zeros() as usize;
                 let mut objs = env.objs();
                 if objs.damage(idx, if tech.is_none() { 1 } else { 999_999 }) {
-                    objs.destroy(idx, sub(s.a.pos, s.b.pos));
+                    objs.destroy(idx, sub(s.a.pos, s.b.pos), &mut env.snd());
                     continue;
                 }
             }

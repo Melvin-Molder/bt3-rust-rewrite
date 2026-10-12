@@ -827,7 +827,7 @@ fn fighter_break_obj(me: &mut Chr, data: &SideData, env: &Env, idx: usize, hit: 
         !me.flags.test(0x21) && !me.flags.test(0x22) && me.flags.test(0xA)
     };
     if breaks {
-        objs.destroy(idx, hit);
+        objs.destroy(idx, hit, &mut env.snd());
         me.obj.work.hit_flags |= 0x40;
     }
     if me.obj.work.hit_flags & 0x40 != 0 {

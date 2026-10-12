@@ -178,7 +178,7 @@ impl Sweep {
             let d = sub(hit.pos, self.pos);
             let len = length(d);
             let dir = if len > 0.0 { scale3(d, 1.0 / len) } else { d };
-            w.env.objs().destroy(obj, dir);
+            w.env.objs().destroy(obj, dir, &mut w.env.snd());
         }
     }
 

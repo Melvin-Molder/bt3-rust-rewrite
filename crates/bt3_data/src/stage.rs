@@ -34,6 +34,21 @@ pub struct StageResource {
     /// The stage paths (`StgPathTable`, file word 0x18; `BtlStage_GetPath`): the clash C exchanges are placed on
     /// them and its camera looks along them.
     pub paths: Vec<StagePath>,
+    /// `StgDataA.dust` (+0x68 / +0x6C, `BtlStage_GetList68`): the stage's dust look, `None` without a record.
+    pub dust: Option<StageDust>,
+}
+
+/// `EftGndDustStage`: the colours, speed and size of the debris' dust puffs when `enabled`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageDust {
+    pub enabled: bool,
+    pub col_a: [u8; 4],
+    pub col_b: [u8; 4],
+    pub speed: f32,
+    pub speed_rand: f32,
+    pub size: u16,
+    pub r_min: u8,
+    pub r_max: u8,
 }
 
 /// `StgPath`: points `first .. end` are the usable ones; each point is 12 floats (x, y, z, ?, then the angles at
@@ -151,6 +166,28 @@ impl StageResource {
         };
 
         let paths = parse_paths(bytes)?;
+        let dust = if read_count(bytes, data_offset + 0x68, "stage dust")? == 0 {
+            None
+        } else {
+            let o = resolve_relative(
+                bytes,
+                data_offset,
+                read_u32(bytes, data_offset + 0x6C)?,
+                0x18,
+                "stage dust",
+            )?;
+            let b = |k: usize| bytes[o + k];
+            Some(StageDust {
+                enabled: read_i32(bytes, o)? != 0,
+                col_a: [b(4), b(5), b(6), b(7)],
+                col_b: [b(8), b(9), b(10), b(11)],
+                speed: read_f32(bytes, o + 0xC)?,
+                speed_rand: read_f32(bytes, o + 0x10)?,
+                size: u16::from_le_bytes([b(0x14), b(0x15)]),
+                r_min: b(0x16),
+                r_max: b(0x17),
+            })
+        };
 
         Ok(Self {
             stage_id,
@@ -167,6 +204,7 @@ impl StageResource {
             places,
             light_dir,
             paths,
+            dust,
         })
     }
 }
