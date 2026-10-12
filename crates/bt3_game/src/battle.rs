@@ -1807,13 +1807,28 @@ impl Battle {
         if !self.loading {
             self.roster.change.update();
             if !paused {
-                self.roster.end_frame();
+                self.with_roster(|roster, data, env| {
+                    roster.end_frame(data, env);
+                    true
+                });
                 // BtlCharSnd_PlayRequests, from this frame's camera.
+                let charas = [0, 1].map(|i| {
+                    if self.roster.chars[i].gauge.body_changed {
+                        0x56
+                    } else {
+                        self.assets.fighters.get(i).map_or(0, |f| f.chara)
+                    }
+                });
                 self.assets
                     .snd
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .play_requests(&view.world2view, self.assets.screen_mode == 1, input.sounds);
+                    .play_requests(
+                        &view.world2view,
+                        self.assets.screen_mode == 1,
+                        charas,
+                        input.sounds,
+                    );
             }
         }
         self.step_change_job(paused);
@@ -4990,7 +5005,7 @@ mod tests {
         chr.play_common(&mut snd, 0x44);
         chr.play_own(&mut snd, 0);
         let mut out = Vec::new();
-        snd.play_requests(&IDENTITY, true, &mut out);
+        snd.play_requests(&IDENTITY, true, [0; 2], &mut out);
         let plays: Vec<_> = out
             .iter()
             .filter_map(|s| match s {
@@ -5000,6 +5015,33 @@ mod tests {
             .collect();
         // Bank 4 is the common one, 0x10 side 0's own (the first player's character bank).
         assert_eq!(plays, vec![(4, 0x44), (0x10, 0)], "{out:?}");
+    }
+
+    #[test]
+    fn real_technique_requests_its_voice_line_and_sounds() {
+        // Goku's first blast 2 (slot 2): its motion raises event 0x8000 for voice line 0x57 (streamed, request kind
+        // 5 for side 0) and events 0x10000.. for sounds 0x2D.. of the character's own bank (kind 2).
+        let mut reqs = Vec::new();
+        let watch = &mut |b: &Battle| {
+            let snd = b.assets.snd.lock().unwrap_or_else(|e| e.into_inner());
+            reqs.extend(snd.requests());
+        };
+        if run_technique_watched(0, 2, 300, false, watch).is_none() {
+            return;
+        }
+        assert!(reqs.contains(&(0, 5, 0x57)), "{reqs:x?}");
+        assert!(
+            reqs.iter()
+                .any(|&(o, k, id)| o == 0 && k == 2 && (0x2D..0x31).contains(&id)),
+            "{reqs:x?}"
+        );
+        let mut out = Vec::new();
+        let mut snd = crate::btl_snd::CharSound::default();
+        snd.request([0.0; 3], 0, 5, 200.0, 1500.0, 0x57);
+        snd.play_requests(&IDENTITY, true, [0, 1], &mut out);
+        assert!(
+            matches!(out[..], [TitleSound::VoiceEx { player: 0, id, .. }] if id == 0xCC32 + 0x57)
+        );
     }
 
     #[test]

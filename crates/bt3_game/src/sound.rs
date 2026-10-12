@@ -1,10 +1,10 @@
-/// `gAdxChannelGainTbl`: BGM, MAP, voice 0..1, streamed SE 0..1.
+/// `gAdxChannelGainTbl`, by player (`ADX_CH_*`): BGM, MAP, streamed SE 0..1, voice 0..1.
 const CHANNEL_GAIN: [i32; 6] = [0x3C, 0x58, 0x60, 0x80, 0x46, 0x46];
 /// Default sound option volume.
 const OPTION_VOLUME: i32 = 9;
 pub const CH_BGM: usize = 0;
-pub const CH_VOICE0: usize = 2;
-pub const CH_SE0: usize = 4;
+pub const CH_SE0: usize = 2;
+pub const CH_VOICE0: usize = 4;
 /// ADXT output volume of silence, in 0.1 dB.
 pub const OUTVOL_MUTE: i32 = -960;
 /// `ADX_FADE_STEP`: 12 dB.
@@ -40,12 +40,15 @@ pub fn volume(level: i32) -> bevy::audio::Volume {
 
 #[cfg(test)]
 mod tests {
-    use super::{CH_BGM, CH_VOICE0, OUTVOL_MUTE, fade_out_step, out_volume};
+    use super::{CH_BGM, CH_SE0, CH_VOICE0, OUTVOL_MUTE, fade_out_step, out_volume};
 
     #[test]
     fn music_and_menu_voice_levels() {
         assert_eq!(out_volume(CH_BGM, 0x40), -129);
-        assert_eq!(out_volume(CH_VOICE0, 0x80), -16);
+        // Voice players 4 / 5 have gain 0x46, streamed SE player 2 gain 0x60.
+        assert_eq!(out_volume(CH_VOICE0, 0x80), -51);
+        assert_eq!(out_volume(CH_VOICE0 + 1, 0x80), -51);
+        assert_eq!(out_volume(CH_SE0, 0x40), -92);
         assert_eq!(out_volume(CH_BGM, 0), OUTVOL_MUTE);
     }
 

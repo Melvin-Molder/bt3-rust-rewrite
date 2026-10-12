@@ -12,8 +12,8 @@ use crate::rng::LibcRandom;
 use crate::title::TitleSound;
 
 /// `VOICE_CHARA_BASE_ALT`: a fresh save has flag bit 0 set, so the battle lines come from the second set.
-const VOICE_CHARA_BASE: u32 = 0xCC32;
-const VOICE_CHARA_LINES: u32 = 100;
+pub(crate) const VOICE_CHARA_BASE: u32 = 0xCC32;
+pub(crate) const VOICE_CHARA_LINES: u32 = 100;
 
 /// `Ramp`: a linear value over `seconds * 30` steps.
 #[derive(Clone, Copy, Debug, Default)]

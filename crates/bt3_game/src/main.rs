@@ -243,17 +243,19 @@ struct Game {
     /// `gProgress->mainMenuItem`.
     main_menu_item: i32,
     bgm: Option<Player>,
-    voice: Option<Player>,
-    /// Streamed-SE player 0 (`StreamSe_PlayDefault(0, id)`) and the file being decoded for it.
-    stream_se: Option<Player>,
-    pending_stream_se: Option<Decoding>,
+    /// Voice players 0 and 1.
+    voice: [Option<Player>; 2],
+    /// Streamed-SE players 0 and 1 and the files being decoded for them, with their volumes.
+    stream_se: [Option<Player>; 2],
+    pending_stream_se: [Option<(Decoding, i32)>; 2],
     /// `Adx_PauseSeVoice`: the voice and streamed-SE players are paused.
     se_voice_paused: bool,
     /// The voice entity was spawned this update, so it is not in the world yet.
     voice_fresh: bool,
     /// The last voice played to its end (`ADXT_STAT_PLAYEND`).
     voice_ended: bool,
-    pending_voice: Option<Decoding>,
+    /// The files being decoded for the voice players, with their volumes.
+    pending_voice: [Option<(Decoding, i32)>; 2],
     picture: Option<Vec<u8>>,
     /// `--title`: start at Progress_Main mode 1 instead of FirstRun_Main.
     skip_to_title: bool,
@@ -430,13 +432,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save_loaded: false,
             main_menu_item: 0,
             bgm: None,
-            voice: None,
-            stream_se: None,
-            pending_stream_se: None,
+            voice: [None; 2],
+            stream_se: [None; 2],
+            pending_stream_se: [None, None],
             se_voice_paused: false,
             voice_fresh: false,
             voice_ended: false,
-            pending_voice: None,
+            pending_voice: [None, None],
             picture: None,
             skip_to_title,
             skip_to_menu,
@@ -658,13 +660,13 @@ const BATTLE_BUTTONS: [(GamepadButton, u32); 16] = [
 
 /// `Voice_GetStat(0)`: 2 while the file is decoded, 3 while it sounds, 5 once it played to its end, else 0.
 fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
-    if game.pending_voice.is_some() {
+    if game.pending_voice[0].is_some() {
         return 2;
     }
-    match game.voice {
+    match game.voice[0] {
         Some(player) if game.voice_fresh || players.contains(player.entity) => 3,
         Some(_) => {
-            game.voice = None;
+            game.voice[0] = None;
             game.voice_ended = true;
             anim::VOICE_PLAYEND
         }
@@ -677,10 +679,12 @@ fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
 fn stop_all(game: &mut Game, commands: &mut Commands) {
     game.se_voice_paused = false;
     stop_player(&mut game.bgm, commands);
-    stop_player(&mut game.voice, commands);
-    stop_player(&mut game.stream_se, commands);
-    game.pending_voice = None;
-    game.pending_stream_se = None;
+    for i in 0..2 {
+        stop_player(&mut game.voice[i], commands);
+        stop_player(&mut game.stream_se[i], commands);
+        game.pending_voice[i] = None;
+        game.pending_stream_se[i] = None;
+    }
     game.pending_bgm = None;
     game.voice_ended = false;
 }
@@ -690,18 +694,25 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
     for sound in sounds {
         match sound {
             TitleSound::PauseSeVoice(on) => game.se_voice_paused = on,
-            TitleSound::Voice(file_id) => {
-                stop_player(&mut game.voice, commands);
-                game.voice_ended = false;
-                game.pending_voice = Some(decode_adx_file(game.iso_path.clone(), file_id));
-            }
+            TitleSound::Voice(id) => play_voice(game, commands, 0, id, 0x80),
+            TitleSound::VoiceEx {
+                player, id, volume, ..
+            } => play_voice(game, commands, player as usize & 1, id, volume),
             TitleSound::VoiceStop => {
-                stop_player(&mut game.voice, commands);
-                game.pending_voice = None;
+                stop_player(&mut game.voice[0], commands);
+                game.pending_voice[0] = None;
                 game.voice_ended = false;
+            }
+            TitleSound::VoiceStopEx(player) => {
+                let i = player as usize & 1;
+                stop_player(&mut game.voice[i], commands);
+                game.pending_voice[i] = None;
+                if i == 0 {
+                    game.voice_ended = false;
+                }
             }
             TitleSound::FadeOutStep => {
-                for player in [&mut game.voice, &mut game.bgm].into_iter().flatten() {
+                for player in [&mut game.voice[0], &mut game.bgm].into_iter().flatten() {
                     player.level = sound::fade_out_step(player.level);
                 }
             }
@@ -725,12 +736,28 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
             } => game.se.play_se_ex(mask, id, volume, pan, 0, handle),
             TitleSound::SeStop(handle) => game.se.stop_handle(handle),
             TitleSound::SeStopBanks(mask) => game.se.stop_banks(mask),
-            TitleSound::StreamSe(file_id) => {
-                stop_player(&mut game.stream_se, commands);
-                game.pending_stream_se = Some(decode_adx_file(game.iso_path.clone(), file_id));
-            }
+            TitleSound::StreamSe(id) => play_stream_se(game, commands, 0, id, 0x40),
+            TitleSound::StreamSeEx {
+                player, id, volume, ..
+            } => play_stream_se(game, commands, player as usize & 1, id, volume),
         }
     }
+}
+
+/// `Voice_Play(player, id, volume, pan)`: the player restarts with the file once it is decoded. The pan is not
+/// applied (Bevy's players have none).
+fn play_voice(game: &mut Game, commands: &mut Commands, player: usize, id: u32, volume: i32) {
+    stop_player(&mut game.voice[player], commands);
+    if player == 0 {
+        game.voice_ended = false;
+    }
+    game.pending_voice[player] = Some((decode_adx_file(game.iso_path.clone(), id), volume));
+}
+
+/// `StreamSe_Play(player, id, volume, pan)`, as `play_voice`.
+fn play_stream_se(game: &mut Game, commands: &mut Commands, player: usize, id: u32, volume: i32) {
+    stop_player(&mut game.stream_se[player], commands);
+    game.pending_stream_se[player] = Some((decode_adx_file(game.iso_path.clone(), id), volume));
 }
 
 fn run_frames(
@@ -1180,51 +1207,63 @@ fn finish_decoding(
     }
 }
 
-/// `StreamSe_PlayDefault(0, id)` (volume 0x40) once the file is decoded.
+/// A one-shot ADX player started with its file once the decoder finished: player `channel` (`ADX_CH_*`) at
+/// volume `volume` (0..0x80).
+fn start_pending(
+    pending: &mut Option<(Decoding, i32)>,
+    commands: &mut Commands,
+    audio: &mut Assets<AudioSource>,
+    channel: usize,
+    what: &str,
+) -> Option<Player> {
+    if !pending.as_ref().is_some_and(|(d, _)| d.is_finished()) {
+        return None;
+    }
+    let (decoding, volume) = pending.take()?;
+    let mut source = None;
+    finish_decoding(&mut Some(decoding), &mut source, audio, what);
+    let level = sound::out_volume(channel, volume);
+    let settings = PlaybackSettings::DESPAWN.with_volume(sound::volume(level));
+    let entity = commands.spawn((AudioPlayer(source?), settings)).id();
+    Some(Player { entity, level })
+}
+
+/// The streamed-SE players' files once decoded.
 fn start_pending_stream_se(
     game: &mut Game,
     commands: &mut Commands,
     audio: &mut Assets<AudioSource>,
 ) {
-    if !game
-        .pending_stream_se
-        .as_ref()
-        .is_some_and(JoinHandle::is_finished)
-    {
-        return;
-    }
-    let mut source = None;
-    finish_decoding(
-        &mut game.pending_stream_se,
-        &mut source,
-        audio,
-        "a streamed sound",
-    );
-    if let Some(source) = source {
-        let level = sound::out_volume(sound::CH_SE0, 0x40);
-        let settings = PlaybackSettings::DESPAWN.with_volume(sound::volume(level));
-        let entity = commands.spawn((AudioPlayer(source), settings)).id();
-        game.stream_se = Some(Player { entity, level });
+    for i in 0..2 {
+        let channel = sound::CH_SE0 + i;
+        if let Some(p) = start_pending(
+            &mut game.pending_stream_se[i],
+            commands,
+            audio,
+            channel,
+            "a streamed sound",
+        ) {
+            game.stream_se[i] = Some(p);
+        }
     }
 }
 
-/// `Voice_Play(0, id, 0x80, 0)` once the file is decoded.
+/// The voice players' files once decoded.
 fn start_pending_voice(game: &mut Game, commands: &mut Commands, audio: &mut Assets<AudioSource>) {
-    if !game
-        .pending_voice
-        .as_ref()
-        .is_some_and(JoinHandle::is_finished)
-    {
-        return;
-    }
-    let mut source = None;
-    finish_decoding(&mut game.pending_voice, &mut source, audio, "a title voice");
-    if let Some(source) = source {
-        let level = sound::out_volume(sound::CH_VOICE0, 0x80);
-        let settings = PlaybackSettings::DESPAWN.with_volume(sound::volume(level));
-        let entity = commands.spawn((AudioPlayer(source), settings)).id();
-        game.voice = Some(Player { entity, level });
-        game.voice_fresh = true;
+    for i in 0..2 {
+        let channel = sound::CH_VOICE0 + i;
+        if let Some(p) = start_pending(
+            &mut game.pending_voice[i],
+            commands,
+            audio,
+            channel,
+            "a voice",
+        ) {
+            game.voice[i] = Some(p);
+            if i == 0 {
+                game.voice_fresh = true;
+            }
+        }
     }
 }
 
@@ -1830,7 +1869,10 @@ fn write_quad_mesh(mesh: &mut Mesh, quad: &ScreenQuad, texture_size: Option<(u32
 
 /// ADXT output volumes changed by fade steps, and the pause of the voice and streamed-SE players.
 fn apply_volumes(game: Res<Game>, mut sinks: Query<&mut AudioSink>) {
-    for player in [game.bgm, game.voice].into_iter().flatten() {
+    for player in [game.bgm, game.voice[0], game.voice[1]]
+        .into_iter()
+        .flatten()
+    {
         if let Ok(mut sink) = sinks.get_mut(player.entity) {
             let volume = sound::volume(player.level);
             if sink.volume() != volume {
@@ -1838,7 +1880,13 @@ fn apply_volumes(game: Res<Game>, mut sinks: Query<&mut AudioSink>) {
             }
         }
     }
-    for player in [game.voice, game.stream_se].into_iter().flatten() {
+    let se_voice = [
+        game.voice[0],
+        game.voice[1],
+        game.stream_se[0],
+        game.stream_se[1],
+    ];
+    for player in se_voice.into_iter().flatten() {
         if let Ok(sink) = sinks.get_mut(player.entity) {
             if game.se_voice_paused && !sink.is_paused() {
                 sink.pause();

@@ -10,6 +10,7 @@
 use bt3_data::snd::SeBank;
 
 use crate::battle::{Mtx, inverse_rt};
+use crate::battle_seq::{VOICE_CHARA_BASE, VOICE_CHARA_LINES};
 use crate::btl_chr::{Chr, Env, SideData, length, sub};
 use crate::btl_input::wrap_angle;
 use crate::title::TitleSound;
@@ -89,6 +90,8 @@ pub(crate) struct CharSound {
     /// Per request kind 0..3, by sound id: the sample loops (`Snd_IsLoopSe`); empty while the bank is not loaded.
     loop_bits: [Vec<bool>; 4],
     next_handle: u32,
+    /// `Voice_Stop(player)` asked for this frame (`BtlChar_StopVoiceOnFlag`).
+    stop_voice: [bool; 2],
 }
 
 impl CharSound {
@@ -108,6 +111,11 @@ impl CharSound {
     /// `BtlCharSnd_ClearRequests` (start of the frame).
     pub(crate) fn clear(&mut self) {
         self.reqs.clear();
+    }
+
+    /// `Voice_Stop(player)` before this frame's requests play.
+    pub(crate) fn stop_voice(&mut self, player: usize) {
+        self.stop_voice[player & 1] = true;
     }
 
     /// `BtlCharSnd_Request`: dropped when four are queued.
@@ -130,6 +138,12 @@ impl CharSound {
                 far,
             });
         }
+    }
+
+    /// This frame's requests as (owner, kind, id).
+    #[cfg(test)]
+    pub(crate) fn requests(&self) -> Vec<(i32, i32, i32)> {
+        self.reqs.iter().map(|r| (r.owner, r.kind, r.id)).collect()
     }
 
     /// `BtlCharSnd_IsRequested`.
@@ -165,15 +179,45 @@ impl CharSound {
     /// `BtlCharSnd_PlayRequests`: the frame's requests played (a looping sound only when it is not already
     /// playing), then each side's looping sounds nobody asked for this frame stopped. `view` is the battle
     /// camera's world-to-view matrix; `split` puts every sound in the middle at half volume.
-    pub(crate) fn play_requests(&mut self, view: &Mtx, split: bool, out: &mut Vec<TitleSound>) {
+    /// `charas`: each side's character (0x56 for a changed body), whose lines kinds 5 / 6 play.
+    pub(crate) fn play_requests(
+        &mut self,
+        view: &Mtx,
+        split: bool,
+        charas: [i32; 2],
+        out: &mut Vec<TitleSound>,
+    ) {
+        for player in 0..2 {
+            if std::mem::take(&mut self.stop_voice[player]) {
+                out.push(TitleSound::VoiceStopEx(player as u32));
+            }
+        }
         let reqs = self.reqs.clone();
         for req in reqs {
             let owner = req.owner.max(0) as usize & 1;
             let (vol, pan) = vol_pan(view, req.pos, req.near, req.far, split);
             match req.kind {
-                KIND_STREAM => out.push(TitleSound::StreamSe(req.id as u32)),
-                // The voice lines are not ported.
-                5..=7 => {}
+                KIND_STREAM => out.push(TitleSound::StreamSeEx {
+                    player: owner as u32,
+                    id: req.id as u32,
+                    volume: vol,
+                    pan,
+                }),
+                // Voice_PlayCharaEx: a line of the owner's character on its voice player.
+                5 | 6 => out.push(TitleSound::VoiceEx {
+                    player: owner as u32,
+                    id: VOICE_CHARA_BASE
+                        + charas[owner].max(0) as u32 * VOICE_CHARA_LINES
+                        + req.id as u32,
+                    volume: vol,
+                    pan,
+                }),
+                7 => out.push(TitleSound::VoiceEx {
+                    player: owner as u32,
+                    id: req.id as u32,
+                    volume: vol,
+                    pan,
+                }),
                 k @ 0..=3 => {
                     let kind = k as usize;
                     let looping = self.loop_bits[kind]
@@ -447,7 +491,6 @@ impl Chr {
     }
 
     /// `BtlCharSnd_PlayStream`: a streamed sound at node 3.
-    #[allow(dead_code)]
     pub(crate) fn play_stream(&self, snd: &mut CharSound, id: i32) {
         snd.request(
             at(self, 3),
@@ -471,12 +514,136 @@ impl Chr {
             line,
         );
     }
+
+    /// The voice parts of `BtlChar_UpdateLate`: `BtlChar_StopVoiceOnFlag` (flag 0x129 cuts the side's voice line;
+    /// story mode's script text, which would keep it, is not ported), `BtlCharSnd_PlayTechSounds` and
+    /// `BtlMove_UpdateAnimVoice`. The lip-sync state (`BtlObj_SetSubState`) is not ported.
+    pub(crate) fn late_voice(
+        &mut self,
+        data: &SideData,
+        opp_data: &SideData,
+        env: &Env,
+        frame: u32,
+    ) {
+        if self.flags.test(0x129) {
+            env.snd().stop_voice(self.player);
+        }
+        self.play_tech_sounds(&mut env.snd(), data, opp_data);
+        self.update_anim_voice(env, frame);
+    }
+
+    /// `BtlCharSnd_PlayTechSounds`: the sound (motion events 0x10000 .. 0x80000, own bank) and voice line (events
+    /// 0x8000 and 0x80_0000_0000) of the skill or technique in use; against an opponent with character flag 0x80
+    /// the technique's flags 0x20 / 0x40 drop the second and third sound.
+    fn play_tech_sounds(&self, snd: &mut CharSound, data: &SideData, opp_data: &SideData) {
+        let slot = crate::btl_act::id_class(self.act.current);
+        let (se, line) = match slot {
+            0 => (-1, 0x53),
+            1 => (-1, 0x55),
+            2 => (0x2D, 0x57),
+            3 => (0x31, 0x59),
+            4 => (0x35, 0x5B),
+            _ => return,
+        };
+        if se >= 0 {
+            let gated = opp_data.tables.params.chara_flags() & 0x80 != 0;
+            let tf = data.tables.tech().flags(slot);
+            if self.anim_test_attr(0x1_0000) {
+                self.play_own(snd, se);
+            }
+            if self.anim_test_attr(0x2_0000) && (!gated || tf & 0x20 == 0) {
+                self.play_own(snd, se + 1);
+            }
+            if self.anim_test_attr(0x4_0000) && (!gated || tf & 0x40 == 0) {
+                self.play_own(snd, se + 2);
+            }
+            if self.anim_test_attr(0x8_0000) {
+                self.play_own(snd, se + 3);
+            }
+        }
+        if self.anim_test_attr(0x8000) {
+            self.play_voice(snd, line);
+        }
+        if self.anim_test_attr(0x80_0000_0000) {
+            self.play_voice(snd, line + 1);
+        }
+    }
+
+    /// `BtlMove_UpdateAnimVoice`: the voices and streamed sounds of the motions flagged 0x12F .. 0x133.
+    fn update_anim_voice(&mut self, env: &Env, frame: u32) {
+        let mut kind = None;
+        if self.flags.test(0x12F) && self.anim_test_attr(0x8000) {
+            kind = Some(0xE);
+        }
+        if self.flags.test(0x130) {
+            if self.anim_test_attr(0x8000) {
+                kind = Some(0x34);
+            }
+            if self.anim_test_attr(0x80_0000_0000) {
+                kind = Some(0x35);
+            }
+            if self.anim_test_attr(0x2_0000) {
+                kind = Some(0x36);
+            }
+            if self.anim_test_attr(0x4_0000) {
+                self.play_stream(&mut env.snd(), 0x8D35);
+            }
+        }
+        if self.flags.test(0x131) {
+            if self.anim_test_attr(0x80_0000_8000) {
+                kind = Some(0x37);
+            }
+            if self.anim_test_attr(0x4_0000) {
+                self.play_stream(&mut env.snd(), 0x8D37);
+            }
+        }
+        if self.flags.test(0x132) && self.anim_test_attr(0x1_0000) {
+            self.play_stream(&mut env.snd(), 0x8D42);
+        }
+        if self.flags.test(0x133) && self.anim_test_attr(0x1_0000) {
+            self.play_stream(&mut env.snd(), 0x8D41);
+        }
+        if let Some(kind) = kind {
+            self.voice(env, frame, kind);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::battle::IDENTITY;
+
+    #[test]
+    fn voice_and_stream_requests_go_to_the_owners_players() {
+        let mut s = CharSound::default();
+        s.request([0.0; 3], 1, KIND_VOICE + 1, 200.0, 1500.0, 0x53);
+        s.request([0.0; 3], 0, KIND_VOICE, 200.0, 1500.0, 4);
+        s.request([0.0; 3], 1, 7, 200.0, 1500.0, 0x9000);
+        s.request([0.0; 3], 1, KIND_STREAM, 200.0, 1500.0, 0x8D3B);
+        let mut out = Vec::new();
+        s.play_requests(&IDENTITY, true, [3, 0x56], &mut out);
+        let v = |player, id| TitleSound::VoiceEx {
+            player,
+            id,
+            volume: 0x40,
+            pan: 0,
+        };
+        assert_eq!(
+            out,
+            [
+                v(1, VOICE_CHARA_BASE + 0x56 * 100 + 0x53),
+                v(0, VOICE_CHARA_BASE + 3 * 100 + 4),
+                v(1, 0x9000),
+                TitleSound::StreamSeEx {
+                    player: 1,
+                    id: 0x8D3B,
+                    volume: 0x40,
+                    pan: 0
+                },
+            ]
+        );
+    }
 
     #[test]
     fn four_requests_at_most_and_loops_stop_unless_asked_again() {
@@ -490,13 +657,13 @@ mod tests {
         // A looping sound plays once while it is asked for, and stops the frame it is not.
         let mut out = Vec::new();
         s.request([0.0; 3], 0, 0, 200.0, 1500.0, 1);
-        s.play_requests(&IDENTITY, false, &mut out);
+        s.play_requests(&IDENTITY, false, [0; 2], &mut out);
         s.clear();
         s.request([0.0; 3], 0, 0, 200.0, 1500.0, 1);
-        s.play_requests(&IDENTITY, false, &mut out);
+        s.play_requests(&IDENTITY, false, [0; 2], &mut out);
         assert_eq!(out.len(), 1);
         s.clear();
-        s.play_requests(&IDENTITY, false, &mut out);
+        s.play_requests(&IDENTITY, false, [0; 2], &mut out);
         assert!(matches!(out.last(), Some(TitleSound::SeStop(1))));
         // Volume falls off from near to far; a sound to the right pans right.
         assert_eq!(

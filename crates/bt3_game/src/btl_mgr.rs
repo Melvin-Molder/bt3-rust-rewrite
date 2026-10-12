@@ -551,11 +551,13 @@ impl Roster {
         }
     }
 
-    /// `BtlChars_EndFrame`: the late updates (`BtlChar_UpdateLate`: this frame's stat modifiers; the effects,
-    /// sounds and voices are not ported), stages 11 and 12, the frame's movement vectors.
-    pub(crate) fn end_frame(&mut self) {
-        for chr in &mut self.chars {
+    /// `BtlChars_EndFrame`: the late updates (`BtlChar_UpdateLate`: the voices and technique sounds, this
+    /// frame's stat modifiers; the effects are not ported), stages 11 and 12, the frame's movement vectors.
+    pub(crate) fn end_frame(&mut self, data: [&SideData; 2], env: &Env) {
+        for i in 0..2 {
+            let chr = &mut self.chars[i];
             if !chr.is_frozen() {
+                chr.late_voice(data[i], data[i ^ 1], env, self.frame);
                 chr.set_stat_frame_mods();
             }
         }

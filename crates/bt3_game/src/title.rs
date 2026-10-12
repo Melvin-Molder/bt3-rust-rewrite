@@ -188,6 +188,8 @@ pub enum TitleSound {
     Voice(u32),
     /// `Voice_Stop(0)`.
     VoiceStop,
+    /// `Voice_Stop(player)` (players 0 and 1).
+    VoiceStopEx(u32),
     /// `Bgm_Play(id)`.
     Bgm(u32),
     /// `Bgm_FadeOutStep()` alone.
@@ -210,6 +212,20 @@ pub enum TitleSound {
     SeStopBanks(u32),
     /// `StreamSe_PlayDefault(0, id)`.
     StreamSe(u32),
+    /// `StreamSe_Play(player, id, volume, pan)` (players 0 and 1).
+    StreamSeEx {
+        player: u32,
+        id: u32,
+        volume: i32,
+        pan: i32,
+    },
+    /// `Voice_Play(player, id, volume, pan)` (players 0 and 1).
+    VoiceEx {
+        player: u32,
+        id: u32,
+        volume: i32,
+        pan: i32,
+    },
     /// `Adx_PauseSeVoice` (true) / `Adx_ResumeSeVoice` (false): the streamed SE and voice players.
     PauseSeVoice(bool),
 }
