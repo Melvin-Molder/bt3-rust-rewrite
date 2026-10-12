@@ -64,8 +64,9 @@ pub(crate) struct Flashes {
     rush_state: i32,
     task: Option<Flash>,
     /// `gEftBlind->alpha[0]`, 0..255, and whether it shows.
-    blind: f32,
-    blind_shown: bool,
+    /// Each player's blinding overlay (player 1's only in split screen).
+    blind: [f32; 2],
+    blind_shown: [bool; 2],
 }
 
 impl Flashes {
@@ -102,7 +103,13 @@ impl Flashes {
 
     /// `EftFlashMgr_Update` then `EftFlash_Update`, then `EftBlind_Update` (`time_stopped`:
     /// `BtlScene_IsTimeStopped`; `paused`: the battle's pause flag).
-    pub(crate) fn update(&mut self, chars: &[FlashChr; 2], paused: bool, time_stopped: bool) {
+    pub(crate) fn update(
+        &mut self,
+        chars: &[FlashChr; 2],
+        paused: bool,
+        time_stopped: bool,
+        split: bool,
+    ) {
         for (i, c) in chars.iter().enumerate() {
             if c.flag8_action_104 && self.flags & 1 == 0 {
                 self.start(FlashArg {
@@ -119,10 +126,12 @@ impl Flashes {
             self.rush_state = self.rush_state(chars);
         }
         self.step(chars, paused);
-        // EftBlind_Update: player 0's blind level (split screen is not ported).
+        // EftBlind_Update: player 0's blind level, and player 1's in split screen.
         if !time_stopped {
-            self.blind = (chars[0].blind * 255.0).clamp(0.0, 255.0);
-            self.blind_shown = self.blind > 0.0;
+            for side in 0..if split { 2 } else { 1 } {
+                self.blind[side] = (chars[side].blind * 255.0).clamp(0.0, 255.0);
+                self.blind_shown[side] = self.blind[side] > 0.0;
+            }
         }
     }
 
@@ -226,33 +235,49 @@ impl Flashes {
         }
     }
 
-    /// `EftBlind_Draw` (not in a replay) then `EftFlash_Draw`: grey at the blind level, then the flash's colour
-    /// blended towards transparent white by its fade, each over the whole screen.
-    pub(crate) fn draw(&self, ot: &mut OrderTable, replay: bool) {
-        if self.blind_shown && !replay {
-            sprite(ot, [128, 128, 128, self.blind as u32 as u8]);
+    /// `EftBlind_Draw` (not in a replay) then `EftFlash_Draw`: grey at the blind level over the whole screen, or
+    /// in split screen's two views each player's over its half (none in split screen's single view), then the
+    /// flash's colour blended towards transparent white by its fade over the whole screen. `split`:
+    /// `Battle_IsSplitScreen`; `two`: its two views are drawn.
+    pub(crate) fn draw(&self, ot: &mut OrderTable, replay: bool, split: bool, two: bool) {
+        if !replay {
+            if !split {
+                if self.blind_shown[0] {
+                    sprite(ot, FULL, [128, 128, 128, self.blind[0] as u32 as u8]);
+                }
+            } else if two {
+                for (side, x) in [[0.0, 256.0], [256.0, 512.0]].into_iter().enumerate() {
+                    if self.blind_shown[side] {
+                        sprite(ot, x, [128, 128, 128, self.blind[side] as u32 as u8]);
+                    }
+                }
+            }
         }
         if let Some(w) = &self.task {
             let clear = [255.0, 255.0, 255.0, 0.0];
             let t = w.fade;
             let c: V4 = std::array::from_fn(|i| clear[i] * t + w.arg.color[i] * (1.0 - t));
-            sprite(ot, c.map(|v| v as u32 as u8));
+            sprite(ot, FULL, c.map(|v| v as u32 as u8));
         }
     }
 }
 
-/// A sprite (0x7000, 0x7200)..(0x9000, 0x8E00): the whole 512 x 448 screen, at the nearest depth.
-fn sprite(ot: &mut OrderTable, rgba: [u8; 4]) {
+/// The whole screen's columns.
+const FULL: [f32; 2] = [0.0, 512.0];
+
+/// A sprite (0x7000, 0x7200)..(0x9000, 0x8E00) at the nearest depth: the whole 512 x 448 screen, or the columns
+/// `x` of it (a half: 0x8000 is its middle).
+fn sprite(ot: &mut OrderTable, [x0, x1]: [f32; 2], rgba: [u8; 4]) {
     let corner = |x: f32, y: f32| EffectVertex {
         position: [x, y, 16_777_215.0],
         stq: [0.0, 0.0, 1.0],
         rgba,
     };
     let c = [
-        corner(0.0, 0.0),
-        corner(512.0, 0.0),
-        corner(0.0, 448.0),
-        corner(512.0, 448.0),
+        corner(x0, 0.0),
+        corner(x1, 0.0),
+        corner(x0, 448.0),
+        corner(x1, 448.0),
     ];
     for k in 0..2 {
         ot.add(
@@ -283,7 +308,7 @@ mod tests {
         let mut f = Flashes::default();
         let mut c = chars();
         c[1].flag8_action_104 = true;
-        f.update(&c, false, false);
+        f.update(&c, false, false, false);
         assert_eq!(f.flags, 5);
         // A second request while it runs: nothing new.
         assert!(!f.start(FlashArg {
@@ -295,38 +320,38 @@ mod tests {
         }));
         // 15 frames in (the first counted at once), then holding while fighter 1 has no variant.
         for _ in 0..14 {
-            f.update(&c, false, false);
+            f.update(&c, false, false, false);
         }
         assert_eq!(f.phase(), Some(1));
         let mut ot = OrderTable::new();
-        f.draw(&mut ot, false);
+        f.draw(&mut ot, false, false, false);
         let tris = ot.into_list();
         assert_eq!(tris[0].vertices[0].rgba, [255, 255, 255, 128]);
         assert_eq!(tris[0].blend, EffectBlend::Add);
         c[1].flag8_action_104 = false;
         for _ in 0..40 {
-            f.update(&c, false, false);
+            f.update(&c, false, false, false);
         }
         assert_eq!(f.phase(), Some(1));
         // Paused: nothing moves.
         c[1].variant = true;
-        f.update(&c, true, false);
+        f.update(&c, true, false, false);
         assert_eq!(f.task.unwrap().arg.hold, 30.0);
         // The hold's 30 frames, then 15 out, half way clear.
         for _ in 0..30 {
-            f.update(&c, false, false);
+            f.update(&c, false, false, false);
         }
         assert_eq!(f.phase(), Some(2));
         for _ in 0..8 {
-            f.update(&c, false, false);
+            f.update(&c, false, false, false);
         }
         assert_eq!(f.phase(), Some(4));
         let mut ot = OrderTable::new();
-        f.draw(&mut ot, false);
+        f.draw(&mut ot, false, false, false);
         let a = ot.into_list()[0].vertices[0].rgba[3];
         assert!((50..80).contains(&a), "{a}");
         for _ in 0..7 {
-            f.update(&c, false, false);
+            f.update(&c, false, false, false);
         }
         assert_eq!(f.phase(), None);
         assert_eq!(f.flags, 0);
@@ -349,21 +374,21 @@ mod tests {
             x.finish_phase = 1;
         }
         for _ in 0..10 {
-            f.update(&c, false, false);
+            f.update(&c, false, false, false);
         }
         assert_eq!(f.rush_state, 1);
         assert_eq!(f.phase(), Some(2));
         c[0].flag_2b = true;
-        f.update(&c, false, false);
+        f.update(&c, false, false, false);
         assert_eq!(f.rush_state, 1);
         c[1].flag_2b = true;
-        f.update(&c, false, false);
+        f.update(&c, false, false, false);
         assert_eq!(f.rush_state, 2);
-        f.update(&c, false, false);
+        f.update(&c, false, false, false);
         assert_eq!(f.phase(), Some(4));
         // Out of the sequence: the bits clear.
         c = chars();
-        f.update(&c, false, false);
+        f.update(&c, false, false, false);
         assert_eq!(f.rush_state, 0);
     }
 
@@ -373,19 +398,32 @@ mod tests {
         let mut c = chars();
         c[0].blind = 0.5;
         c[1].blind = 1.0;
-        f.update(&c, false, false);
+        f.update(&c, false, false, false);
         let mut ot = OrderTable::new();
-        f.draw(&mut ot, false);
+        f.draw(&mut ot, false, false, false);
         let tris = ot.into_list();
         assert_eq!(tris.len(), 2);
         assert_eq!(tris[0].vertices[0].rgba, [128, 128, 128, 127]);
         // Time stopped: it keeps its level.
         c[0].blind = 0.0;
-        f.update(&c, false, true);
-        assert!(f.blind_shown);
-        f.update(&c, false, false);
+        f.update(&c, false, true, false);
+        assert!(f.blind_shown[0]);
+        f.update(&c, false, false, false);
         let mut ot = OrderTable::new();
-        f.draw(&mut ot, false);
+        f.draw(&mut ot, false, false, false);
+        assert!(ot.into_list().is_empty());
+        // Split screen: each player's level over its half in the two views, nothing in the single view.
+        c[0].blind = 0.5;
+        f.update(&c, false, false, true);
+        let mut ot = OrderTable::new();
+        f.draw(&mut ot, false, true, true);
+        let tris = ot.into_list();
+        assert_eq!(tris.len(), 4);
+        assert_eq!(tris[0].vertices[1].position[0], 256.0);
+        assert_eq!(tris[2].vertices[0].position[0], 256.0);
+        assert_eq!(tris[2].vertices[0].rgba[3], 255);
+        let mut ot = OrderTable::new();
+        f.draw(&mut ot, false, true, false);
         assert!(ot.into_list().is_empty());
     }
 }

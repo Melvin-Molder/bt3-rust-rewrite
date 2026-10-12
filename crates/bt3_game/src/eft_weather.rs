@@ -14,7 +14,7 @@ use crate::rng::LibcRandom;
 /// `EFT_WEATHER_PTCL_MAX`.
 const PARTS: usize = 30;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Part {
     pos: V3,
     vel: V3,
@@ -84,7 +84,8 @@ impl Weather {
     }
 
     /// `EftWeatherPtcl_Draw`: the particles move (not while paused), then draw. `tint`: the stage tint's slot 0
-    /// colour and the stage's darkest alpha, when it is on.
+    /// colour and the stage's darkest alpha, when it is on. `second`: in split screen each view moves and draws
+    /// half the particles, the second view those of the table's second half.
     pub(crate) fn draw(
         &mut self,
         ot: &mut OrderTable,
@@ -92,12 +93,20 @@ impl Weather {
         tint: Option<([i32; 4], f32)>,
         paused: bool,
         libc: &mut LibcRandom,
+        second: Option<bool>,
     ) {
+        let range = match second {
+            Some(second) => {
+                let start = if second { PARTS / 2 } else { 0 };
+                start..start + self.count / 2
+            }
+            None => 0..self.count,
+        };
         if !paused {
-            self.step(ctx, tint, libc);
+            self.step(ctx, tint, libc, range.clone());
         }
         let s = self.size * 16.0;
-        for p in &self.parts[..self.count] {
+        for p in &self.parts[range] {
             let tex = self.textures.get(p.tex).copied();
             draw_sprite(
                 ot,
@@ -116,7 +125,13 @@ impl Weather {
 
     /// `EftWeather_Move`: each particle's velocity takes a random step (kept within 0.4); it drifts with the wind
     /// and its velocity; out of the box it wraps round it; then its alpha.
-    fn step(&mut self, ctx: &DrawCtx, tint: Option<([i32; 4], f32)>, libc: &mut LibcRandom) {
+    fn step(
+        &mut self,
+        ctx: &DrawCtx,
+        tint: Option<([i32; 4], f32)>,
+        libc: &mut LibcRandom,
+        range: std::ops::Range<usize>,
+    ) {
         let mut m = ctx.world2view;
         let inv = inverse_rt(&m);
         let cam = xyz(inv[3]);
@@ -140,7 +155,7 @@ impl Weather {
         m[3][2] -= 55.0;
         let flags = self.flags;
         let size = self.size;
-        for p in &mut self.parts[..self.count] {
+        for p in &mut self.parts[range] {
             for c in &mut p.vel {
                 *c += ((libc.rand() & 0x1FF) - 0xFF) as f32 * (1.0 / 255.0) * 0.02;
             }
@@ -274,7 +289,7 @@ mod tests {
         for _ in 0..30 {
             w.update(&mut libc);
             let mut ot = OrderTable::new();
-            w.draw(&mut ot, &ctx, None, false, &mut libc);
+            w.draw(&mut ot, &ctx, None, false, &mut libc, None);
             drawn += ot.into_list().len();
         }
         // Inside the box 55 in front of the camera after the first frames' wraps.
@@ -289,7 +304,7 @@ mod tests {
         assert!(drawn > 0);
         // Paused: they do not move.
         let before = w.parts[0].pos;
-        w.draw(&mut OrderTable::new(), &ctx, None, true, &mut libc);
+        w.draw(&mut OrderTable::new(), &ctx, None, true, &mut libc, None);
         assert_eq!(w.parts[0].pos, before);
         // Under the stage tint (slot 0 at alpha 50 of a stage darkest 100): darker by 50, half as opaque.
         let mut again = w.clone();
@@ -300,6 +315,7 @@ mod tests {
             None,
             false,
             &mut LibcRandom::new(99),
+            None,
         );
         again.draw(
             &mut OrderTable::new(),
@@ -307,10 +323,37 @@ mod tests {
             Some(([0, 0, 0, 50], 100.0)),
             false,
             &mut libc2,
+            None,
         );
         for (p, q) in w.parts[..w.count].iter().zip(&again.parts[..again.count]) {
             assert_eq!(q.color[..3], [78.0, 78.0, 78.0]);
             assert_eq!(q.color[3], p.color[3] * 0.5);
         }
+        // Split screen: the first view moves the first half of the particles, the second the table's second half.
+        let before = w.parts;
+        w.draw(
+            &mut OrderTable::new(),
+            &ctx,
+            None,
+            false,
+            &mut libc,
+            Some(true),
+        );
+        assert_eq!(w.parts[..PARTS / 2], before[..PARTS / 2]);
+        assert_ne!(
+            w.parts[PARTS / 2..PARTS / 2 + 10],
+            before[PARTS / 2..PARTS / 2 + 10]
+        );
+        let before = w.parts;
+        w.draw(
+            &mut OrderTable::new(),
+            &ctx,
+            None,
+            false,
+            &mut libc,
+            Some(false),
+        );
+        assert_ne!(w.parts[..10], before[..10]);
+        assert_eq!(w.parts[10..], before[10..]);
     }
 }

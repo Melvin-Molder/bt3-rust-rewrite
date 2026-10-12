@@ -34,8 +34,8 @@ pub(crate) struct Storm {
     textures: Vec<usize>,
     bolts: [Bolt; BOLTS],
     drops: [V3; DROPS],
-    /// The camera's position at the last draw (`prevCam[0]`).
-    prev_cam: V3,
+    /// Each view's camera position at its last draw (`prevCam`).
+    prev_cam: [V3; 2],
 }
 
 impl Storm {
@@ -45,7 +45,7 @@ impl Storm {
             textures,
             bolts: [Bolt::default(); BOLTS],
             drops: [[0.0; 3]; DROPS],
-            prev_cam: [0.0; 3],
+            prev_cam: [[0.0; 3]; 2],
         }
     }
 
@@ -134,23 +134,35 @@ impl Storm {
     }
 
     /// `EftStorm_Draw`: the bolts, then the rain (wrapped around the camera first).
-    /// `bright`: `EftStage_GetTintScale`.
+    /// `bright`: `EftStage_GetTintScale`; `view`: the current view's index (`gBtlCam->cur->index`); `split`:
+    /// `Battle_IsSplitScreen`, where each view has half of the drops (view 0 the second half).
     pub(crate) fn draw(
         &mut self,
         ot: &mut OrderTable,
         ctx: &DrawCtx,
         bright: f32,
         libc: &mut LibcRandom,
+        view: usize,
+        split: bool,
     ) {
         let cam = inverse_rt(&ctx.world2view);
         self.draw_bolts(ot, ctx, &cam, bright);
-        // EftStorm_DrawRain: the streak leans against the camera's movement since the last draw.
+        // EftStorm_DrawRain: the streak leans against the view's camera movement since its last draw.
         let center = xyz(apply(&cam, [0.0, 0.0, 150.0, 1.0]));
         let eye = xyz(cam[3]);
-        let streak = scale3(norm(add([0.0, 100.0, 0.0], sub(self.prev_cam, eye))), 20.0);
-        self.prev_cam = eye;
-        self.wrap_rain(center, libc);
-        for d in &self.drops {
+        let view = view & 1;
+        let streak = scale3(
+            norm(add([0.0, 100.0, 0.0], sub(self.prev_cam[view], eye))),
+            20.0,
+        );
+        self.prev_cam[view] = eye;
+        let range = match (split, view) {
+            (false, _) => 0..DROPS,
+            (true, 0) => DROPS / 2..DROPS,
+            (true, _) => 0..DROPS / 2,
+        };
+        self.wrap_rain(center, libc, range.clone());
+        for d in &self.drops[range] {
             rain_line(ot, ctx, *d, add(*d, streak));
         }
     }
@@ -228,10 +240,10 @@ impl Storm {
 
     /// `EftStorm_WrapRain`: a drop leaving the cube re-enters through the opposite face; through the top or the
     /// bottom it also gets a new random place across.
-    fn wrap_rain(&mut self, center: V3, libc: &mut LibcRandom) {
+    fn wrap_rain(&mut self, center: V3, libc: &mut LibcRandom, range: std::ops::Range<usize>) {
         let across =
             |libc: &mut LibcRandom, c: f32| c + ((libc.rand() & 0x3FF) - 0x1FF) as f32 * 0.25;
-        for d in &mut self.drops {
+        for d in &mut self.drops[range] {
             if center[0] + 100.0 < d[0] {
                 d[0] -= 200.0;
             }
@@ -344,10 +356,10 @@ mod tests {
         // Each draw moves a drop by one cube at most: a few bring them all in (a drop wrapped through the top or
         // bottom lands up to 128 across, which the next draw corrects).
         for _ in 0..12 {
-            s.draw(&mut OrderTable::new(), &ctx, 1.0, &mut libc);
+            s.draw(&mut OrderTable::new(), &ctx, 1.0, &mut libc, 0, false);
         }
         let mut ot = OrderTable::new();
-        s.draw(&mut ot, &ctx, 1.0, &mut libc);
+        s.draw(&mut ot, &ctx, 1.0, &mut libc, 0, false);
         assert!(
             s.drops
                 .iter()

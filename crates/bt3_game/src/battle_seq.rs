@@ -99,6 +99,11 @@ pub(crate) struct EftCam {
 }
 
 impl EftCam {
+    /// `EftCam_IsActive`.
+    pub(crate) fn is_active(&self) -> bool {
+        self.active
+    }
+
     /// `EftCam_Start`: `anim` on the demo camera attached to fighter `side` at its rush sequence frame `time`
     /// (or in world space from 0), the time stepped by `update`.
     pub(crate) fn start(
@@ -831,9 +836,11 @@ impl Battle {
         SeqState::Finish
     }
 
-    /// `BattleResult_IsPlayerWin`: side 0 won (always in modes 8 and 1).
+    /// `BattleResult_IsPlayerWin`: side 0 won (always in split screen and in modes 8 and 1).
     fn player_won(&self) -> bool {
-        matches!(self.assets.mode, 8 | 1) || self.seq.winner & WIN_P1 != 0
+        self.assets.screen_mode == 1
+            || matches!(self.assets.mode, 8 | 1)
+            || self.seq.winner & WIN_P1 != 0
     }
 
     /// `BtlSeqWinTalk_Enter` with `BtlSeqWinTalk_Setup`: the winner's line (its special line against the loser,

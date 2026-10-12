@@ -31,6 +31,7 @@ mod btl_text;
 mod btl_vib;
 mod char_select;
 mod chr_cam;
+mod clip;
 mod dialog;
 mod draw;
 mod duel_menu;
@@ -224,8 +225,10 @@ struct Game {
     samplers: Vec<Sampling>,
     accumulator: f32,
     pressed_latch: u32,
-    /// `PAD_*` bits pressed since the last battle frame.
-    battle_latch: u32,
+    /// Port 2's menu buttons pressed since the last frame.
+    pressed_latch2: u32,
+    /// `PAD_*` bits pressed since the last battle frame, per port.
+    battle_latch: [u32; 2],
     quads: Vec<ScreenQuad>,
     iso_path: PathBuf,
     random: GameRandom,
@@ -251,7 +254,7 @@ struct Game {
     shadow_effects: Vec<eft::EffectTri>,
     /// The pads' vibration of the last battle frame (`Pad.vibData`), and what pad 0's gamepads were last sent.
     rumble: [u8; 2],
-    rumble_sent: u8,
+    rumble_sent: [u8; 2],
     /// Effect textures sampled point by point (TEX1 0: the shadow pages).
     effect_point: Vec<usize>,
     /// `StgFx_DrawPost`'s redraws of the frame (the radial blur).
@@ -325,6 +328,8 @@ struct Game {
     skip_to_battle: bool,
     /// `--mode N` (`--course C` for survival): the battle mode `--battle` starts in.
     battle_mode: (i32, usize),
+    /// `--split`: `--battle` is 2P versus in split screen.
+    battle_split: bool,
     se: se::SoundEffects,
     font: font::Font,
 }
@@ -343,6 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut skip_to_menu = false;
     let mut skip_to_battle = false;
     let mut battle_mode = (0, 0);
+    let mut battle_split = false;
     let mut log_fps = false;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -363,6 +369,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|value| value.to_string_lossy().parse::<i32>().ok())
                 .filter(|value| matches!(value, 0 | 2..=7))
                 .ok_or("--mode requires a battle mode of 0 or 2 to 7")?;
+            skip_to_title = true;
+            skip_to_battle = true;
+        } else if argument == "--split" {
+            battle_split = true;
             skip_to_title = true;
             skip_to_battle = true;
         } else if argument == "--course" {
@@ -470,7 +480,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             samplers,
             accumulator: 0.0,
             pressed_latch: 0,
-            battle_latch: 0,
+            pressed_latch2: 0,
+            battle_latch: [0; 2],
             quads: Vec::new(),
             iso_path: image_path,
             random,
@@ -487,7 +498,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             under_effects: Vec::new(),
             shadow_effects: Vec::new(),
             rumble: [0; 2],
-            rumble_sent: 0,
+            rumble_sent: [0; 2],
             effect_point: Vec::new(),
             post_ops: Vec::new(),
             effect_updates: Vec::new(),
@@ -533,6 +544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_to_menu,
             skip_to_battle,
             battle_mode,
+            battle_split,
             se: effects,
             font,
         })
@@ -878,12 +890,15 @@ fn send_rumble(
     mut game: ResMut<Game>,
     mut rumble: MessageWriter<bevy::input::gamepad::GamepadRumbleRequest>,
 ) {
-    let data = game.rumble[0];
-    if data == game.rumble_sent && data == 0 {
-        return;
-    }
-    game.rumble_sent = data;
-    for gamepad in &gamepads {
+    // Each port's request to its controller (`ports`: the first gamepad is port 1, the others port 2).
+    let mut ports: Vec<Entity> = gamepads.iter().collect();
+    ports.sort();
+    for (i, gamepad) in ports.into_iter().enumerate() {
+        let port = i.min(1);
+        let data = game.rumble[port];
+        if data == game.rumble_sent[port] && data == 0 {
+            continue;
+        }
         rumble.write(bevy::input::gamepad::GamepadRumbleRequest::Stop { gamepad });
         if data != 0 {
             rumble.write(bevy::input::gamepad::GamepadRumbleRequest::Add {
@@ -896,36 +911,42 @@ fn send_rumble(
             });
         }
     }
+    game.rumble_sent = game.rumble;
 }
 
 fn run_frames(
     mut commands: Commands,
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
+    gamepad_query: Query<(Entity, &Gamepad)>,
     players: Query<(), With<AudioPlayer>>,
     mut audio: ResMut<Assets<AudioSource>>,
     mut game: ResMut<Game>,
 ) {
-    // Pad 0 for the battle: `Pad.held` with a latch that keeps a press shorter than a frame for one frame, and the
-    // left stick as `Pad_Update` reads it (y down).
-    let mut battle_held = 0;
+    // The controller ports: the keyboard and the first gamepad are port 1, the other gamepads port 2.
+    let mut sorted: Vec<(Entity, &Gamepad)> = gamepad_query.iter().collect();
+    sorted.sort_by_key(|(e, _)| *e);
+    let port_of = |i: usize| i.min(1);
+    // Each port for the battle: `Pad.held` with a latch that keeps a press shorter than a frame for one frame,
+    // and the left stick as `Pad_Update` reads it (y down).
+    let mut battle_held = [0u32; 2];
     for (key, bit) in BATTLE_KEYS {
         if keyboard.just_pressed(key) {
-            game.battle_latch |= bit;
+            game.battle_latch[0] |= bit;
         }
         if keyboard.pressed(key) {
-            battle_held |= bit;
+            battle_held[0] |= bit;
         }
     }
-    let mut battle_stick = [0.0f32; 2];
-    for pad in gamepads.iter() {
+    let mut battle_stick = [[0.0f32; 2]; 2];
+    for (i, (_, pad)) in sorted.iter().enumerate() {
+        let port = port_of(i);
         for (button, bit) in BATTLE_BUTTONS {
             if pad.just_pressed(button) {
-                game.battle_latch |= bit;
+                game.battle_latch[port] |= bit;
             }
             if pad.pressed(button) {
-                battle_held |= bit;
+                battle_held[port] |= bit;
             }
         }
         if let (Some(x), Some(y)) = (
@@ -935,17 +956,26 @@ fn run_frames(
             let raw = |v: f32| (v * 127.5 + 127.5).clamp(0.0, 255.0) as u8;
             let s = btl_input::stick_from_raw(raw(x), raw(-y));
             if s != [0.0; 2] {
-                battle_stick = s;
+                battle_stick[port] = s;
             }
         }
     }
     let mut held = 0;
+    let mut held2 = 0;
     for (key, button, bit) in BUTTONS {
-        if keyboard.just_pressed(key) || gamepads.iter().any(|pad| pad.just_pressed(button)) {
+        let port1 = sorted.iter().take(1);
+        let port2 = sorted.iter().skip(1);
+        if keyboard.just_pressed(key) || port1.clone().any(|(_, pad)| pad.just_pressed(button)) {
             game.pressed_latch |= bit;
         }
-        if keyboard.pressed(key) || gamepads.iter().any(|pad| pad.pressed(button)) {
+        if keyboard.pressed(key) || port1.clone().any(|(_, pad)| pad.pressed(button)) {
             held |= bit;
+        }
+        if port2.clone().any(|(_, pad)| pad.just_pressed(button)) {
+            game.pressed_latch2 |= bit;
+        }
+        if port2.clone().any(|(_, pad)| pad.pressed(button)) {
+            held2 |= bit;
         }
     }
     game.voice_fresh = false;
@@ -953,7 +983,7 @@ fn run_frames(
     start_pending_stream_se(&mut game, &mut commands, &mut audio);
     start_pending_map(&mut game, &mut commands, &mut audio);
     start_pending_bgm(&mut game, &mut commands, &mut audio);
-    let pad2 = gamepads.iter().count() >= 2;
+    let pad2 = sorted.len() >= 2;
     if std::mem::take(&mut game.skip_to_title) {
         if game.skip_to_battle {
             match quick_battle_setup(&mut game) {
@@ -979,6 +1009,7 @@ fn run_frames(
         // Only the last frame of this update is presented.
         let shown = game.accumulator < game.scene.frame_seconds();
         let pressed = std::mem::take(&mut game.pressed_latch);
+        let pressed2 = std::mem::take(&mut game.pressed_latch2);
         let cross = pressed & title::PAD_CROSS != 0;
         let start = pressed & title::PAD_START != 0;
         // Snd_Update at the top of every frame loop sends what the last frame queued.
@@ -1091,7 +1122,7 @@ fn run_frames(
                     cache: &mut game.pictures,
                 };
                 let frame = screen.run_frame(
-                    [(pressed, held), (0, 0)],
+                    [(pressed, held), (pressed2, held2)],
                     &mut loader,
                     &game.save,
                     &mut game.random,
@@ -1122,12 +1153,12 @@ fn run_frames(
                 }
             }
             Scene::Battle(battle) => {
-                let pad = btl_input::PadState {
-                    held: battle_held | std::mem::take(&mut game.battle_latch),
-                    left: battle_stick,
-                    status: 0,
-                };
-                let pads = [pad, btl_input::PadState::default()];
+                let pads: [btl_input::PadState; 2] =
+                    std::array::from_fn(|port| btl_input::PadState {
+                        held: battle_held[port] | std::mem::take(&mut game.battle_latch[port]),
+                        left: battle_stick[port],
+                        status: 0,
+                    });
                 let frame = battle.run_frame(
                     start,
                     pads,
@@ -1253,7 +1284,8 @@ fn leave_battle(
 
 /// `Battle_Main` from `Battle_Init`: `Battle_Load` shows the loading screen (it takes over the shared generators)
 /// while the files are read.
-/// The battle `--battle` / `--mode` start: 1P vs COM, pad 0 against the computer. Survival (mode 3) plays the
+/// The battle `--battle` / `--mode` start: 1P vs COM, pad 0 against the computer (2P in split screen with
+/// `--split`). Survival (mode 3) plays the
 /// course's opponents (`SurvSel_SetupBattle` from menu archive 3, section 2); free training (mode 6) takes the
 /// character select's rule for it (announcer 1, no time limit, no stage change, changes allowed). The other modes keep the versus
 /// rule under their own mode, whose rules `BattleSetup_FinishEx` applies.
@@ -1280,6 +1312,14 @@ fn quick_battle_setup(game: &mut Game) -> Result<BattleSetup, Box<dyn std::error
     setup.sides[1].chara = 1;
     setup.sides[1].control = 2;
     setup.sides[1].pad = 1;
+    // --split: the character select's 2P rule (pad 2 plays side 1, split screen).
+    if game.battle_split {
+        setup.screen_mode = 1;
+        setup.sides[1].control = 0;
+        for side in &mut setup.sides {
+            side.change_allowed = 1;
+        }
+    }
     if mode == 6 {
         setup.announcer = 1;
         setup.sides[1].cpu_level = -1;

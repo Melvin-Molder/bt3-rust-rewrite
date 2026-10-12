@@ -1365,7 +1365,7 @@ impl Scene {
                 blind: (c.blind_level as f32 / 90.0).clamp(0.0, 1.0),
             }
         });
-        self.flashes.update(&fc, w.paused, w.paused);
+        self.flashes.update(&fc, w.paused, w.paused, w.env.split);
         self.clamp_to_stage(w.env);
         // EftDet_Update: nothing while paused.
         if !w.paused {

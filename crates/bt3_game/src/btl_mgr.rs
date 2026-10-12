@@ -1453,6 +1453,7 @@ fn cam_update(
             yaw: me.cam.yaw,
             side: me.cam.side,
             dist_mode: me.cam.dist_mode,
+            split: env.split,
         });
         eye[1] += crate::chr_cam::bob(me, time_stopped);
         keep_behind = true;

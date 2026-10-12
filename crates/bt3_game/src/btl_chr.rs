@@ -552,6 +552,8 @@ pub(crate) struct Env<'a> {
     pub pool: &'a [PoolEntry],
     /// `Battle_GetStage`.
     pub stage_id: i32,
+    /// `Battle_IsSplitScreen`.
+    pub split: bool,
 }
 
 impl Env<'_> {

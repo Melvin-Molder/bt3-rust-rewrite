@@ -70,12 +70,18 @@ impl Blurs {
     }
 
     /// `StgBlur_Draw` of a full-screen view: `world2view` turns a world centre into the view.
-    pub(crate) fn draw(&self, view: usize, world2view: &Mtx) -> Vec<PostOp> {
+    /// `split`: `StgBlur_Draw(1, view)`, the view's half of the screen through a quarter of the buffers.
+    pub(crate) fn draw(&self, view: usize, world2view: &Mtx, split: bool) -> Vec<PostOp> {
         let b = &self.views[view];
         if !self.is_on(view) {
             return Vec::new();
         }
-        let (width, half, src_h, h) = (512i32, 256i32, 448i32, 224i32);
+        let (src_h, h) = (448i32, 224i32);
+        let (width, half, x_ofs) = if split {
+            (256i32, 128i32, if view == 1 { 256 } else { 0 })
+        } else {
+            (512, 256, 0)
+        };
         let c = if b.screen_space {
             b.center
         } else {
@@ -89,7 +95,7 @@ impl Blurs {
             PostBuf::Work(0),
             false,
             [0.0, 0.0, hf, h_f],
-            [0.0, 0.0, width as f32, src_h as f32],
+            [x_ofs as f32, 0.0, (x_ofs + width) as f32, src_h as f32],
             [0x80; 4],
         )];
         // With no pass the rings read texture block 0 (the game never does that): the first buffer here.
@@ -155,7 +161,7 @@ impl Blurs {
             [hx, cy + ry / 2, hx / 2, hy + rv / 2],
         ];
         let vert = |p: [i32; 4], color: u32| PostVertex {
-            xy: [p[0] as f32, p[1] as f32],
+            xy: [(p[0] + x_ofs) as f32, p[1] as f32],
             uv: [p[2] as f32 + 0.5, p[3] as f32 + 0.5],
             rgba: rgba(color),
         };
@@ -191,13 +197,13 @@ mod tests {
     #[test]
     fn the_blur_is_off_until_a_ring_has_alpha_then_zooms_through_both_buffers() {
         let mut b = Blurs::default();
-        assert!(b.draw(0, &IDENTITY).is_empty());
+        assert!(b.draw(0, &IDENTITY, false).is_empty());
         // Only the passes' colour: still off.
         b.set_color(0, 3, [0x80, 0x80, 0x80, 0x40]);
-        assert!(b.draw(0, &IDENTITY).is_empty());
+        assert!(b.draw(0, &IDENTITY, false).is_empty());
         b.set_color(0, 2, [0x80, 0x80, 0x80, 0x80]);
         b.set_center(0, [0.0, 0.0, 2.0], false);
-        let ops = b.draw(0, &IDENTITY);
+        let ops = b.draw(0, &IDENTITY, false);
         // The copy, two draws per pass, the rings.
         assert_eq!(ops.len(), 1 + 3 * 2 + 1);
         assert_eq!(
@@ -232,7 +238,7 @@ mod tests {
         b.set_color(0, 3, [0x80, 0x80, 0x80, 0x40]);
         // To the right in the view: the zoomed texels move right by f * 2 * 1.
         b.set_center(0, [3.0, 0.0, 0.0], false);
-        let ops = b.draw(0, &IDENTITY);
+        let ops = b.draw(0, &IDENTITY, false);
         let z = &ops[2];
         assert_eq!(z.tris[0][0].uv, [4.5, 2.5]);
         assert_eq!(z.tris[1][2].uv, [254.5, 222.5]);

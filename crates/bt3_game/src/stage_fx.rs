@@ -152,17 +152,29 @@ impl StageFx {
         tints: &crate::stg_tint::Tints,
         paused: bool,
         libc: &mut LibcRandom,
+        sv: &crate::battle::SceneView,
     ) {
         if let Some(s) = &self.surf {
-            // EftSurf_BuildPalettes, before the views draw.
-            updates.extend(s.palettes(&ctx.world2view).into_iter().flatten());
+            // EftSurf_BuildPalettes, before the first view draws: the camera's matrix, or in split screen one
+            // looking half down the y axis.
+            if sv.first {
+                let view = if sv.split {
+                    let mut m = crate::battle::IDENTITY;
+                    m[1][2] = 0.5;
+                    m
+                } else {
+                    ctx.world2view
+                };
+                updates.extend(s.palettes(&view).into_iter().flatten());
+            }
             s.draw(ot, direct, ctx, tints.scale(), tints.is_on(0));
         }
         if let Some(w) = &mut self.weather {
-            w.draw(ot, ctx, tints.weather(), paused, libc);
+            let second = sv.split.then_some(!sv.first);
+            w.draw(ot, ctx, tints.weather(), paused, libc, second);
         }
         if let Some(s) = &mut self.storm {
-            s.draw(ot, ctx, tints.scale(), libc);
+            s.draw(ot, ctx, tints.scale(), libc, sv.index, sv.split);
         }
         if let Some(s) = &self.smoke {
             s.draw(ot, ctx, light, tints.scale());

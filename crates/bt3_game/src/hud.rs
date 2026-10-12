@@ -1209,6 +1209,8 @@ pub(crate) struct Hud {
     caption: CaptionPart,
     /// `Battle_GetMode() == 7` (the attract demo): only the caption is drawn.
     caption_only: bool,
+    /// `Battle_IsSplitScreen`: side 1's prompts are drawn too.
+    pub(crate) split: bool,
     /// `gBtlGameReplayActive` (latched at the round's reset) and `gHud->replayMode`.
     replay: bool,
     replay_mode: i32,
@@ -1267,6 +1269,7 @@ impl Hud {
             ),
             caption: CaptionPart::new(sheets.get(CAPTION_SHEET).cloned().unwrap_or_default()),
             caption_only: mode == 7,
+            split: false,
             replay: false,
             replay_mode: 0,
             textures,
@@ -1444,9 +1447,12 @@ impl Hud {
             layer = (!self.layer.is_empty()).then(|| self.layer.to_rgba());
         }
         let mut prims = Vec::new();
-        // The prompts of side 0 (side 1's too only in split screen, which is not ported).
+        // The prompts of side 0, and side 1's in split screen.
         if self.flags & SHOW_PROMPT != 0 {
             self.prompt.run(0, &mut prims);
+            if self.split {
+                self.prompt.run(1, &mut prims);
+            }
         }
         if self.flags & SHOW_COMBO != 0 {
             for side in 0..2 {

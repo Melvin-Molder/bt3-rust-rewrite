@@ -108,13 +108,17 @@ impl ScrWarps {
     /// 512 x 448 frame; each grows by its speed, which slows, its ring widening, and fades over its last six
     /// frames; it ends with its life or past a radius of 600. `ScrWarp_Step` rebuilds its vertices (texels kept
     /// at least 2 across and 0 down).
-    pub(crate) fn update(&mut self, ctx: &DrawCtx) {
+    /// `ctxs`: the view drawn, or split screen's two (a wave is placed by its own view's camera, and view 1's is
+    /// then moved 256 left, as the original does).
+    pub(crate) fn update(&mut self, ctxs: &[DrawCtx]) {
         let dirs = dirs();
+        let two = ctxs.len() == 2;
         for slot in &mut self.objs {
             let Some(o) = slot else {
                 continue;
             };
             if !o.projected {
+                let ctx = if two { &ctxs[o.view.min(1)] } else { &ctxs[0] };
                 let (x, y, z) = ctx.project(o.pos);
                 let (x, y) = ((x as i32) as f32, (y as i32) as f32);
                 if z <= 0 || !(1792.0 < x && x < 2304.0 && 1824.0 < y && y < 2272.0) {
@@ -122,6 +126,9 @@ impl ScrWarps {
                     continue;
                 }
                 o.screen = [x - 1792.0, y - 1824.0];
+                if two && o.view == 1 {
+                    o.screen[0] -= 256.0;
+                }
                 o.projected = true;
             }
             o.life -= 1.0;
@@ -157,16 +164,23 @@ impl ScrWarps {
     /// `ScrWarp_Update`'s `ScrWarp_DrawAll` (one view): with any wave in use, the frame copied at half size (half
     /// a texel off) into work buffer 0, then each ring's two strips of 21 vertex pairs from it, the middle at the
     /// wave's alpha and the edges at an eighth of it, the coordinates as integers.
-    pub(crate) fn draw(&self) -> Vec<PostOp> {
-        if self.objs.iter().all(Option::is_none) {
+    /// `view`: split screen's view (`ScrWarp_Draw(1, view)`: its half copied into a quarter of the buffer and only
+    /// its waves, under the half's scissor), else the whole screen.
+    pub(crate) fn draw(&self, view: Option<usize>) -> Vec<PostOp> {
+        let mine = |o: &&Wave| view.is_none_or(|v| o.view == v);
+        if self.objs.iter().flatten().filter(mine).count() == 0 {
             return Vec::new();
         }
+        let (x0, w, tw) = match view {
+            Some(v) => (if v == 1 { 256.0 } else { 0.0 }, 256.0, 128.0),
+            None => (0.0, 512.0, 256.0),
+        };
         let copy = PostOp::sprite(
             PostBuf::Frame,
             PostBuf::Work(0),
             false,
-            [0.0, 0.0, 256.0, 224.0],
-            [0.5, 0.5, 512.5, 448.5],
+            [0.0, 0.0, tw, 224.0],
+            [x0 + 0.5, 0.5, x0 + w + 0.5, 448.5],
             [0x80; 4],
         );
         let mut rings = PostOp {
@@ -175,7 +189,7 @@ impl ScrWarps {
             blend: true,
             tris: Vec::new(),
         };
-        for o in self.objs.iter().flatten() {
+        for o in self.objs.iter().flatten().filter(mine) {
             let mid = (o.alpha * 255.0) as i32;
             let alpha = [mid / 8, mid, mid / 8];
             for j in 0..2 {
@@ -231,14 +245,14 @@ mod tests {
         let ctx = DrawCtx::new(view.world2screen, view.world2view);
         let mut frames = 0;
         while w.count() > 0 {
-            w.update(&ctx);
+            w.update(std::slice::from_ref(&ctx));
             frames += 1;
         }
         // 24 frames of life; the 24th update frees it.
         assert_eq!(frames, 24);
         // Behind the camera: dropped at its first update.
         w.spawn(0, [0.0, 0.0, -100.0], 0.8, 10.0, 50.0, 8.0, 0.4, &mut vu0);
-        w.update(&ctx);
+        w.update(std::slice::from_ref(&ctx));
         assert_eq!(w.count(), 0);
         for _ in 0..OBJECTS {
             assert!(w.spawn(0, [0.0; 3], 1.0, 1.0, 1.0, 1.0, 0.4, &mut vu0));
@@ -246,7 +260,7 @@ mod tests {
         assert!(!w.spawn(0, [0.0; 3], 1.0, 1.0, 1.0, 1.0, 0.4, &mut vu0));
         w.reset();
         assert_eq!(w.count(), 0);
-        assert!(w.draw().is_empty());
+        assert!(w.draw(None).is_empty());
     }
 
     #[test]
@@ -256,7 +270,7 @@ mod tests {
         let view = View::new([0.0; 3], [0.0; 3]);
         let ctx = DrawCtx::new(view.world2screen, view.world2view);
         w.spawn(0, [0.0, 0.0, 100.0], 0.8, 10.0, 50.0, 8.0, 0.4, &mut vu0);
-        w.update(&ctx);
+        w.update(std::slice::from_ref(&ctx));
         let o = w.objs[0].unwrap();
         // Straight ahead: the frame's centre. Inner radius 10 + 8, outer 18 + 50, the texels at half.
         assert_eq!(o.screen, [256.0, 224.0]);
@@ -271,7 +285,7 @@ mod tests {
         let rj = 18.0 + 50.0 * o.jitter[0];
         assert_eq!(o.xy[0][1][1], 224.0 - rj);
         assert_eq!(o.uv[0][1][1], (224.0 - 43.0) * 0.5);
-        let ops = w.draw();
+        let ops = w.draw(None);
         assert_eq!(ops.len(), 2);
         assert_eq!(
             (ops[0].source, ops[0].target),

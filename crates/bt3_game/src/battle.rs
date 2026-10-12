@@ -72,6 +72,8 @@ const STAT_CURVE: u32 = 0x2E_E7C0;
 const STAGE_CUT_SECTION: usize = 3;
 /// `BTL_FILE_STAGE`: `0x171 + stage`.
 pub const STAGE_FILE: u32 = 0x171;
+/// `BTL_FILE_STAGE_SPLIT`: the stages of split screen.
+const STAGE_FILE_SPLIT: u32 = 0x198;
 /// `BTL_FILE_SND_COMMON`, `BTL_FILE_SND_STAGE` (+ stage) and `BTL_FILE_VOICE` (+ character): the battle's sample
 /// banks 4, 8 and the sides' 0x10 / 0x20.
 const SND_COMMON_FILE: u32 = 0x14A;
@@ -364,7 +366,7 @@ pub fn load(
         scroll,
         anims,
         surf,
-    } = load_stage(read, setup.stage)?;
+    } = load_stage(read, setup.stage, setup.screen_mode == 1)?;
     // BtlLoad_StepInitial: the common, stage and both sides' sample banks.
     let mut snd = crate::btl_snd::CharSound::default();
     let mut bank_requests = Vec::new();
@@ -1141,9 +1143,12 @@ fn without_tcc<'a>(e: &bt3_data::tex::TextureEntry<'a>) -> bt3_data::tex::Textur
 fn load_stage(
     read: &mut dyn FnMut(u32) -> Result<Vec<u8>, String>,
     stage_id: i32,
+    split: bool,
 ) -> Result<LoadedStage, String> {
     let error = |e: std::io::Error| e.to_string();
-    let stage_file = read(STAGE_FILE + stage_id.max(0) as u32)?;
+    // Split screen has its own version of each stage.
+    let base = if split { STAGE_FILE_SPLIT } else { STAGE_FILE };
+    let stage_file = read(base + stage_id.max(0) as u32)?;
     let stage = StageResource::parse(&stage_file).map_err(error)?;
     let object = StageModel::object(&stage_file).map_err(error)?;
     let model = StageModel::parse(object).map_err(error)?;
@@ -1487,6 +1492,72 @@ pub struct BattleFrame {
     pub rumble: [u8; 2],
 }
 
+/// What one view draws (`Battle_Draw`'s middle, once per view in split screen).
+struct ViewDraw {
+    stage: Vec<StageBatch>,
+    models: Vec<ModelBatch>,
+    shadows: Vec<EffectTri>,
+    effects: Vec<EffectTri>,
+}
+
+/// The view a scene draw is for (`BtlScene_Draw(first)`, `BtlScene_IsSingleView`, `gBtlCam->cur`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SceneView {
+    /// `Battle_IsSplitScreen`.
+    pub split: bool,
+    /// Split screen's two views are drawn (not `BtlScene_IsSingleView`).
+    pub two: bool,
+    /// `BtlScene_Draw(1)`: the first view drawn this frame (`!first` is `BtlScene_IsSecondView`).
+    pub first: bool,
+    /// `gBtlCam->cur->index`: the view's (or the shown camera's) fighter.
+    pub index: usize,
+    demo: bool,
+    eft_cam: bool,
+    pri: [bool; 2],
+    replay: bool,
+    default_view: usize,
+}
+
+impl SceneView {
+    fn new(battle: &mut Battle, vi: usize, index: usize, two: bool, demo: bool) -> Self {
+        Self {
+            split: battle.assets.screen_mode == 1,
+            two,
+            first: vi == 0,
+            index,
+            demo,
+            eft_cam: battle.eft_cam.is_active(),
+            pri: [0, 1].map(|s| battle.roster.chars[s].flags.test(0xD3)),
+            replay: battle.replay.active,
+            default_view: battle.replay.default_view(),
+        }
+    }
+
+    /// `BtlScene_IsCharInView`: in split screen's two views, the view's own fighter; otherwise in split screen
+    /// everything under an effect camera, else `BtlCharApi_IsCamShown` (the demo camera shows both, then the camera
+    /// priorities, then everyone in split screen without a replay, else the default view's fighter; the clashes'
+    /// test is not ported).
+    pub(crate) fn in_view(&self, chr: usize) -> bool {
+        if self.two {
+            return chr == self.index;
+        }
+        if self.split && self.eft_cam {
+            return true;
+        }
+        if self.demo {
+            return true;
+        }
+        let (mine, other) = (self.pri[chr & 1], self.pri[(chr & 1) ^ 1]);
+        if mine != other {
+            return mine;
+        }
+        if self.split && !self.replay {
+            return true;
+        }
+        chr == self.default_view
+    }
+}
+
 /// The battle as far as it is ported.
 pub struct Battle {
     pub assets: BattleAssets,
@@ -1510,6 +1581,8 @@ pub struct Battle {
     started: bool,
     /// `gBtlAi`.
     pub(crate) ai: AiMgr,
+    /// The views the last frame drew (two: split screen's halves).
+    pub(crate) views_drawn: usize,
     /// `gBtlMenu` with the versus menus.
     pub(crate) menu: Option<PauseMenu>,
     /// Last frame's buttons per pad, for the menus' pressed words.
@@ -1613,6 +1686,7 @@ impl BattleAssets {
             ai_type: self.member_ai_type,
             pool: &self.pool,
             stage_id: self.stage_id,
+            split: self.screen_mode == 1,
             chara_bits: std::array::from_fn(|side| {
                 // BattleSetup_FixForMode: every character in mode 1, and for the computer's side in modes 2, 3,
                 // 4, 7 and 9.
@@ -1852,6 +1926,7 @@ impl Battle {
             assets.mode,
         );
         hud.set_prompt_defs(assets.prompt_defs.clone());
+        hud.split = assets.screen_mode == 1;
         // PauseMenu_Init; BtlGame_Reset closes both trees.
         let menu = assets.menus.clone().map(|(pause, result)| {
             let mut menu = PauseMenu::new(pause, result);
@@ -1875,6 +1950,7 @@ impl Battle {
             replay: Default::default(),
             started: false,
             ai,
+            views_drawn: 1,
             menu,
             prev_held: [0; 2],
             vu0: Vu0Random::default(),
@@ -2044,9 +2120,9 @@ impl Battle {
                 }
             }
             4 => {
-                let stage = self.assets.stage_id;
+                let (stage, split) = (self.assets.stage_id, self.assets.screen_mode == 1);
                 job.loaded = self.loader.as_mut().and_then(|read| {
-                    load_stage(read, stage)
+                    load_stage(read, stage, split)
                         .map_err(|e| bevy::log::error!("cannot load stage {stage}: {e}"))
                         .ok()
                 });
@@ -2364,7 +2440,7 @@ impl Battle {
         if self.assets.stage_id != start
             && let Some(read) = self.loader.as_mut()
         {
-            match load_stage(read, start) {
+            match load_stage(read, start, self.assets.screen_mode == 1) {
                 Ok(loaded) => {
                     self.assets.install_stage(loaded, start);
                     self.assets
@@ -2694,6 +2770,8 @@ impl Battle {
         };
         let cam = self.roster.chars[view_side].cam;
         let mut view = View::new(cam.pos, cam.rot);
+        // Whether this frame's view is the demo camera's (its update may end the cut on its last frame).
+        let mut demo_on = false;
         if self.demo.is_active() {
             let base = self.demo.attached().map(|side| {
                 if self.demo.chr_base() {
@@ -2712,6 +2790,7 @@ impl Battle {
             });
             if let Some(demo) = self.demo.update(base, paused, y_scale) {
                 view = demo;
+                demo_on = true;
                 // The camera stops where the stage hides the attached fighter's body from it (BtlCam_TraceStage
                 // from the body to the eye).
                 if let Some(side) = self.demo.attached()
@@ -2831,6 +2910,171 @@ impl Battle {
         {
             font.reset_icon_anim();
         }
+        // StgFx_DrawPre (nothing while a stage loads, StgFx_SetDisabled): the tint ramps step, then slots 0 and 1
+        // over the stage.
+        let mut under = Vec::new();
+        if !self.loading {
+            let tints = &mut self.roster.scene.tints;
+            tints.update(self.seq.paused);
+            tints.draw_back(&mut under);
+        }
+        // BtlCam_UpdateOverride in split screen: without a camera priority, the demo camera or a replay, each
+        // fighter's camera in its half of the screen (BtlCam_SetLayout(1)); else the one view, full screen.
+        let views: Vec<(View, usize)> = if self.assets.screen_mode == 1
+            && !self.replay.active
+            && !pri[0]
+            && !pri[1]
+            && !demo_on
+        {
+            [Layout::Left, Layout::Right]
+                .into_iter()
+                .enumerate()
+                .map(|(side, layout)| {
+                    let cam = self.roster.chars[side].cam;
+                    (
+                        View::with_layout(view_matrix(cam.pos, cam.rot), layout),
+                        side,
+                    )
+                })
+                .collect()
+        } else {
+            vec![(view, view_side)]
+        };
+        self.views_drawn = views.len();
+        // StgFx_DrawPost's ScrWarp_Update: the shock waves step (not while paused), each new one placed by its
+        // view's camera in split screen's two views; they draw with the post pass.
+        if !self.seq.paused {
+            let ctxs: Vec<DrawCtx> = views
+                .iter()
+                .map(|(v, _)| DrawCtx::new(v.world2screen, v.world2view))
+                .collect();
+            self.roster.scene.warps.update(&ctxs);
+        }
+        // BtlScene_SetSingleView / Battle_DrawSplit: one view, or split screen's two with their scissors.
+        let mut stage = Vec::new();
+        let mut batches = Vec::new();
+        let mut shadows = Vec::new();
+        let mut effects = Vec::new();
+        let mut texture_updates = Vec::new();
+        for (vi, &(ref v, index)) in views.iter().enumerate() {
+            let sv = SceneView::new(self, vi, index, views.len() == 2, demo_on);
+            let mut d = self.draw_view(v, sv, &mut *libc, &mut texture_updates);
+            if views.len() == 2 {
+                crate::clip::clip_stage(&mut d.stage, v.cols);
+                crate::clip::clip_models(&mut d.models, v.cols);
+                d.shadows = crate::clip::clip_effects(d.shadows, v.cols);
+                d.effects = crate::clip::clip_effects(d.effects, v.cols);
+            }
+            stage.append(&mut d.stage);
+            batches.append(&mut d.models);
+            shadows.append(&mut d.shadows);
+            effects.append(&mut d.effects);
+        }
+        self.hud.set_paused(self.seq.paused);
+        let mut hud = self.hud.draw(libc, shown);
+        if let Some(font) = font.as_deref_mut() {
+            let scripts = [0, 1].map(|s| self.assets.fighters[s].skill_text.as_deref());
+            self.hud.draw_combo_text(font, scripts);
+        }
+        // BtlGame_Draw: the menu over the HUD.
+        if let Some(menu) = &self.menu {
+            menu.draw(
+                &mut MenuDraw {
+                    font: font.as_deref_mut(),
+                    sheet: &self.assets.menu_sheet,
+                    texts: &self.assets.menu_texts,
+                },
+                &mut hud.prims,
+            );
+        }
+        let (capture, xfade_alpha) = self.xfade.draw_pass();
+        // StgFx_DrawPost (nothing while a stage loads): StgBlur_DrawAll, the view shown (view 0 under the demo
+        // camera) or both halves, each from its fighter's camera, then ScrWarp_DrawAll.
+        let post = if self.loading {
+            Vec::new()
+        } else {
+            let fighter_view = |side: usize| {
+                let cam = self.roster.chars[side].cam;
+                view_matrix(cam.pos, cam.rot)
+            };
+            let two = views.len() == 2;
+            let mut ops = Vec::new();
+            if two {
+                for (v, side) in &views {
+                    let mut o = self
+                        .roster
+                        .scene
+                        .blurs
+                        .draw(*side, &fighter_view(*side), true);
+                    crate::clip::clip_post(&mut o, v.cols);
+                    ops.extend(o);
+                }
+            } else {
+                let blur_view = if demo_on { 0 } else { view_side };
+                ops.extend(self.roster.scene.blurs.draw(
+                    blur_view,
+                    &fighter_view(blur_view),
+                    false,
+                ));
+            }
+            if two {
+                for (v, side) in &views {
+                    let mut o = self.roster.scene.warps.draw(Some(*side));
+                    crate::clip::clip_post(&mut o, v.cols);
+                    ops.extend(o);
+                }
+            } else {
+                ops.extend(self.roster.scene.warps.draw(None));
+            }
+            ops
+        };
+        // StgFx_DrawOverlay: slots 3 and 2 over everything, then the finished slots go off.
+        let front = if self.loading {
+            Vec::new()
+        } else {
+            let tints = &mut self.roster.scene.tints;
+            let front = tints.draw_front();
+            tints.release();
+            front
+        };
+        BattleFrame {
+            stage,
+            models: batches,
+            capture,
+            xfade_alpha,
+            // StgFx_DrawPost's fade slot 2, then Fade_DrawScreen's slot 0.
+            quads: self
+                .fade2
+                .quad()
+                .into_iter()
+                .chain(front.into_iter().map(|rgba| Quad {
+                    texture: None,
+                    screen: [0, 0, 512, 448],
+                    uv: [0; 4],
+                    rgba,
+                }))
+                .chain(self.fade.quad())
+                .collect(),
+            hud,
+            sounds,
+            exit: self.seq.left.then_some(self.seq.reason),
+            effects,
+            under,
+            post,
+            texture_updates,
+            shadows,
+            rumble: self.roster.pad_vib.each_mut().map(|p| p.send()),
+        }
+    }
+    /// One view's draw of `Battle_Draw` / `Battle_DrawSplit`: `StgModel_Draw`, `BtlObjDraw_Draw`'s fighters and
+    /// shadows for the view, then `BtlScene_Draw` and `Ot_Draw` (`sv` says which view of split screen it is).
+    fn draw_view(
+        &mut self,
+        view: &View,
+        sv: SceneView,
+        libc: &mut LibcRandom,
+        texture_updates: &mut Vec<(usize, RgbaTexture)>,
+    ) -> ViewDraw {
         // StgModel_Cull / StgModel_Draw: nothing while a stage loads.
         let mut stage = if self.loading {
             Vec::new()
@@ -2858,14 +3102,6 @@ impl Battle {
                 &view,
                 view.eye(),
             ));
-        }
-        // StgFx_DrawPre (nothing while a stage loads, StgFx_SetDisabled): the tint ramps step, then slots 0 and 1
-        // over the stage.
-        let mut under = Vec::new();
-        if !self.loading {
-            let tints = &mut self.roster.scene.tints;
-            tints.update(self.seq.paused);
-            tints.draw_back(&mut under);
         }
         let mut groups: HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>> = HashMap::new();
         for side in 0..2 {
@@ -2938,7 +3174,6 @@ impl Battle {
         // BtlObjDraw_DrawShadows: per fighter shown with flags 2 and 0x10 and its shadow flag, the page of its
         // silhouette and the ground triangles textured with it.
         let mut shadows = Vec::new();
-        let mut texture_updates = Vec::new();
         for side in 0..2 {
             let obj = &self.roster.chars[side].obj;
             let model = &self.assets.fighters[side].model;
@@ -2959,14 +3194,17 @@ impl Battle {
                 |t| tris.push(t),
             );
             let page = self.assets.shadow_pages[side];
-            texture_updates.push((
-                page,
-                RgbaTexture {
-                    width: crate::obj_shadow::PAGE as u32,
-                    height: crate::obj_shadow::PAGE as u32,
-                    pixels: crate::obj_shadow::render_page(&cams, obj.pos, shadow.light, tris),
-                },
-            ));
+            // The page is the object's: rendered with the first view.
+            if sv.first {
+                texture_updates.push((
+                    page,
+                    RgbaTexture {
+                        width: crate::obj_shadow::PAGE as u32,
+                        height: crate::obj_shadow::PAGE as u32,
+                        pixels: crate::obj_shadow::render_page(&cams, obj.pos, shadow.light, tris),
+                    },
+                ));
+            }
             let color = self
                 .assets
                 .stage
@@ -2980,10 +3218,6 @@ impl Battle {
         let effects = {
             let ctx = DrawCtx::new(view.world2screen, view.world2view);
             let mut ot = OrderTable::new();
-            // StgFx_DrawPost's ScrWarp_Update: the shock waves step (not while paused); they draw with the post pass.
-            if !self.seq.paused {
-                self.roster.scene.warps.update(&ctx);
-            }
             let fxw = FxWorld {
                 sets: std::array::from_fn(|s| {
                     crate::btl_blast::world_sets(
@@ -3006,23 +3240,21 @@ impl Battle {
                 paused: false,
                 in_technique: [false; 2],
             };
-            // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else the default view's
-            // side (the replay viewer's choice while a replay plays).
-            let demo = self.demo.is_active();
-            let shown = self.replay.default_view();
+            let in_view = |chr: usize| sv.in_view(chr);
             // Layer 0's stage effects, then the others.
             let roster = &mut self.roster;
             let mut direct = Vec::new();
             roster.scene.stage.draw(
                 &mut ot,
                 &mut direct,
-                &mut texture_updates,
+                texture_updates,
                 &ctx,
                 &roster.chars,
                 self.light_dir,
                 &roster.scene.tints,
                 self.seq.paused,
                 &mut *libc,
+                &sv,
             );
             // Layer 3: the aura (not of a hidden fighter, in a technique or a rush sequence, or with a glow), the
             // body lightning and the glow (not of a hidden fighter; all at 0.3 in its own view with object flag bit
@@ -3050,7 +3282,7 @@ impl Battle {
                             || glows.is_active(chr)
                         {
                             None
-                        } else if (demo || chr == shown) && c.obj.flags & 0x20_0000 != 0 {
+                        } else if in_view(chr) && c.obj.flags & 0x20_0000 != 0 {
                             Some(0.3)
                         } else {
                             Some(1.0)
@@ -3068,7 +3300,7 @@ impl Battle {
                         let o = &chars[chr].obj;
                         if o.flags & 2 == 0 {
                             None
-                        } else if (demo || chr == shown) && o.flags & 0x20_0000 != 0 {
+                        } else if in_view(chr) && o.flags & 0x20_0000 != 0 {
                             Some(0.3)
                         } else {
                             Some(1.0)
@@ -3086,7 +3318,7 @@ impl Battle {
                         let o = &chars[chr].obj;
                         if o.flags & 2 == 0 {
                             None
-                        } else if (demo || chr == shown) && o.flags & 0x20_0000 != 0 {
+                        } else if in_view(chr) && o.flags & 0x20_0000 != 0 {
                             Some(0.3)
                         } else {
                             Some(1.0)
@@ -3099,7 +3331,7 @@ impl Battle {
                 .scene
                 .spdlines
                 .draw(&mut ot, &ctx, self.assets.spdline_texture, |chr| {
-                    demo || chr == shown
+                    in_view(chr)
                 });
             self.roster
                 .scene
@@ -3125,9 +3357,12 @@ impl Battle {
             self.roster
                 .scene
                 .fx
-                .draw(&fxw, &mut ot, &ctx, |chr| demo || chr == shown);
+                .draw(&fxw, &mut ot, &ctx, |chr| in_view(chr));
             // EftBlind_Draw, EftFlash_Draw.
-            self.roster.scene.flashes.draw(&mut ot, self.replay.active);
+            self.roster
+                .scene
+                .flashes
+                .draw(&mut ot, self.replay.active, sv.split, sv.two);
             // EftBurst_IsBusy: the transition's first 150 frames.
             let busy = self.burst.as_ref().is_some_and(|b| b.frame < 150);
             self.roster
@@ -3143,70 +3378,11 @@ impl Battle {
             list.extend(ot.into_list());
             list
         };
-        self.hud.set_paused(self.seq.paused);
-        let mut hud = self.hud.draw(libc, shown);
-        if let Some(font) = font.as_deref_mut() {
-            let scripts = [0, 1].map(|s| self.assets.fighters[s].skill_text.as_deref());
-            self.hud.draw_combo_text(font, scripts);
-        }
-        // BtlGame_Draw: the menu over the HUD.
-        if let Some(menu) = &self.menu {
-            menu.draw(
-                &mut MenuDraw {
-                    font: font.as_deref_mut(),
-                    sheet: &self.assets.menu_sheet,
-                    texts: &self.assets.menu_texts,
-                },
-                &mut hud.prims,
-            );
-        }
-        let (capture, xfade_alpha) = self.xfade.draw_pass();
-        // StgFx_DrawPost (nothing while a stage loads): StgBlur_DrawAll, the view shown (view 0 under the demo
-        // camera), then ScrWarp_DrawAll.
-        let post = if self.loading {
-            Vec::new()
-        } else {
-            let blur_view = if self.demo.is_active() { 0 } else { view_side };
-            let mut ops = self.roster.scene.blurs.draw(blur_view, &view.world2view);
-            ops.extend(self.roster.scene.warps.draw());
-            ops
-        };
-        // StgFx_DrawOverlay: slots 3 and 2 over everything, then the finished slots go off.
-        let front = if self.loading {
-            Vec::new()
-        } else {
-            let tints = &mut self.roster.scene.tints;
-            let front = tints.draw_front();
-            tints.release();
-            front
-        };
-        BattleFrame {
+        ViewDraw {
             stage,
             models: batches,
-            capture,
-            xfade_alpha,
-            // StgFx_DrawPost's fade slot 2, then Fade_DrawScreen's slot 0.
-            quads: self
-                .fade2
-                .quad()
-                .into_iter()
-                .chain(front.into_iter().map(|rgba| Quad {
-                    texture: None,
-                    screen: [0, 0, 512, 448],
-                    uv: [0; 4],
-                    rgba,
-                }))
-                .chain(self.fade.quad())
-                .collect(),
-            hud,
-            sounds,
-            exit: self.seq.left.then_some(self.seq.reason),
-            effects,
-            under,
-            post,
-            texture_updates,
             shadows,
-            rumble: self.roster.pad_vib.each_mut().map(|p| p.send()),
+            effects,
         }
     }
 }
@@ -3360,6 +3536,8 @@ pub(crate) struct LockOn {
     pub side: f32,
     /// The distance preset (`cam->distMode`).
     pub dist_mode: i32,
+    /// `Battle_IsSplitScreen`: the view is half as wide.
+    pub split: bool,
 }
 
 /// `ChrCam_GetOffset`: the offset behind the fighter and the pitch of distance preset `mode` (0..2, SELECT steps
@@ -3419,7 +3597,8 @@ pub(crate) fn lock_on_camera(cam: &LockOn) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let limit = cam.side_slope.atan().max(0.785_398_2);
     let horiz = to_opp[0].hypot(to_opp[2]);
     let ofs_len = ofs[0].hypot(ofs[2]);
-    let fov = (512.0f32 * 0.5 / 433.0).atan() * 2.0;
+    let width = if cam.split { 256.0f32 } else { 512.0 };
+    let fov = (width * 0.5 / 433.0).atan() * 2.0;
     let half = fov * 0.7;
     let tn = half.tan();
     let spread = if 0.01 < horiz {
@@ -3461,6 +3640,16 @@ pub(crate) struct View {
     pub(crate) world2clip: Mtx,
     /// `view->clip2screen` (+0x100), what `StgModel_Draw` loads program 4 with.
     pub(crate) clip2screen: Mtx,
+    /// The scissor's columns (`scissorX0`, `scissorX1` + 1).
+    pub(crate) cols: [f32; 2],
+}
+
+/// `VIEW_LAYOUT_*`: the whole screen, or split screen's left or right half.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layout {
+    Full,
+    Left,
+    Right,
 }
 
 impl View {
@@ -3476,12 +3665,22 @@ impl View {
 
     /// `View_UpdateMatrices` for a given world-to-view matrix, with the full-screen projection.
     pub(crate) fn from_world_to_view(world2view: Mtx) -> Self {
-        let (view2screen, view2clip, clip2screen) = projection();
+        Self::with_layout(world2view, Layout::Full)
+    }
+
+    /// `View_UpdateMatrices` with the projection of a layout (`View_InitLayout`).
+    pub(crate) fn with_layout(world2view: Mtx, layout: Layout) -> Self {
+        let (view2screen, view2clip, clip2screen) = projection(layout);
         Self {
             world2view,
             world2screen: mul(&world2view, &view2screen),
             world2clip: mul(&world2view, &view2clip),
             clip2screen,
+            cols: match layout {
+                Layout::Full => [0.0, 512.0],
+                Layout::Left => [0.0, 255.0],
+                Layout::Right => [257.0, 512.0],
+            },
         }
     }
 }
@@ -3526,19 +3725,25 @@ fn lerp_rows(a: [f32; 4], ka: f32, b: [f32; 4], kb: f32) -> [f32; 4] {
     std::array::from_fn(|i| a[i] * ka + b[i] * kb)
 }
 
-/// `View_BuildProjection` for the full-screen layout: screen size 2047, distance 433, aspect (1 / 1.1666667, 1),
-/// centre 2048, Z from 10877000 (near 0.3) to 1 (far 65536), scale 1.
-fn projection() -> (Mtx, Mtx, Mtx) {
-    let (size, dist, scale) = (2047.0f32, 433.0f32, 1.0f32);
+/// `View_BuildProjection` for a layout (`View_InitLayout`): screen size 2047 (1919 across for a half), distance
+/// 433, aspect (1 / 1.1666667, 1), centre 2048 (1920 / 2176 across for the left / right half), Z from 10877000
+/// (near 0.3) to 1 (far 65536), scale 1.
+fn projection(layout: Layout) -> (Mtx, Mtx, Mtx) {
+    let (size_x, center_x) = match layout {
+        Layout::Full => (2047.0f32, 2048.0f32),
+        Layout::Left => (1919.0, 1920.0),
+        Layout::Right => (1919.0, 2176.0),
+    };
+    let (size_y, dist, scale) = (2047.0f32, 433.0f32, 1.0f32);
     let (ax, ay) = (1.0 / 1.166_666_7f32, 1.0f32);
-    let (center_x, center_y) = (2048.0f32, 2048.0f32);
+    let center_y = 2048.0f32;
     let (z_min, z_max, near, far) = (1.0f32, 10_877_000.0f32, 0.3f32, 65536.0f32);
     let z_ofs = (-z_max * near + z_min * far) / (far - near);
-    let hw = near * size / dist;
-    let hh = near * size / dist;
+    let hw = near * size_x / dist;
+    let hh = near * size_y / dist;
     let z_scale = far * near * (z_max - z_min) / (far - near);
-    let ox = (center_x - 2048.0) / (size * ax);
-    let oy = (center_y - 2048.0) / (size * ay);
+    let ox = (center_x - 2048.0) / (size_x * ax);
+    let oy = (center_y - 2048.0) / (size_y * ay);
     let mut persp = IDENTITY;
     persp[0][0] = dist * scale;
     persp[1][1] = dist * scale;
@@ -3708,13 +3913,37 @@ mod tests {
 
     #[test]
     fn projection_puts_the_view_axis_at_the_screen_centre_and_near_at_z_max() {
-        let (screen, _, _) = projection();
+        let (screen, _, _) = projection(Layout::Full);
         let s = apply(&screen, [0.0, 0.0, 0.3, 1.0]);
         assert_eq!(s[0] / s[3], 2048.0);
         assert_eq!(s[1] / s[3], 2048.0);
         assert!((s[2] / s[3] - 10_877_000.0).abs() < 4.0);
         let far = apply(&screen, [0.0, 0.0, 65536.0, 1.0]);
         assert!((far[2] / far[3] - 1.0).abs() < 0.01);
+    }
+
+    /// Split screen's halves keep the full screen's scale with their centres a quarter of the screen to each
+    /// side, and agree with their clip space on where the view axis lands.
+    #[test]
+    fn the_split_halves_centre_the_view_in_their_half() {
+        for (layout, cx, cols) in [
+            (Layout::Left, 1920.0, [0.0, 255.0]),
+            (Layout::Right, 2176.0, [257.0, 512.0]),
+        ] {
+            let v = View::with_layout(IDENTITY, layout);
+            let s = apply(&v.world2screen, [0.0, 0.0, 10.0, 1.0]);
+            assert_eq!(s[0] / s[3], cx);
+            let x = apply(&v.world2screen, [1.0, 0.0, 10.0, 1.0]);
+            let full = apply(
+                &View::from_world_to_view(IDENTITY).world2screen,
+                [1.0, 0.0, 10.0, 1.0],
+            );
+            assert!((x[0] / x[3] - cx - (full[0] / full[3] - 2048.0)).abs() < 1e-3);
+            let c = apply(&v.world2clip, [0.0, 0.0, 10.0, 1.0]);
+            let back = apply(&v.clip2screen, [c[0] / c[3], c[1] / c[3], c[2] / c[3], 1.0]);
+            assert!((back[0] - cx).abs() < 1e-2, "{} {}", back[0], cx);
+            assert_eq!(v.cols, cols);
+        }
     }
 
     #[test]
@@ -3737,6 +3966,7 @@ mod tests {
             yaw: 0.0,
             side: 0.0,
             dist_mode: 0,
+            split: false,
         };
         let (eye, rot, target) = lock_on_camera(&cam);
         assert!(eye[2] < 0.0 && eye[1] < 0.0 && eye[0].abs() < 1e-5);
@@ -4041,6 +4271,99 @@ mod tests {
             "{health} -> {}",
             battle.roster.chars[1].gauge.health
         );
+    }
+
+    /// Split screen (2P): the stage comes from the split files, each fighter's camera draws its half under its
+    /// scissor (nothing crosses the columns between), both fighters show in both halves, and pad 2's START opens
+    /// the pause menu for it.
+    #[test]
+    fn real_split_screen_draws_each_players_half() {
+        let mut setup = BattleSetup {
+            screen_mode: 1,
+            ..BattleSetup::default()
+        };
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        // The split version of stage 0 is a different file.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let mut image = bt3_data::Iso9660::open(&path).unwrap();
+        let mut read = |id: u32| -> Result<Vec<u8>, String> {
+            let location = bt3_data::afs::partition_entry_for_id(id);
+            bt3_data::afs::AfsArchive::open(
+                &mut image,
+                format!("DATA/PZS3US{}.AFS", location.partition),
+            )
+            .map_err(|e| e.to_string())?
+            .read_entry(&mut image, location.index)
+            .map_err(|e| e.to_string())
+        };
+        let (full, split) = (read(STAGE_FILE).unwrap(), read(STAGE_FILE_SPLIT).unwrap());
+        assert_ne!(full, split);
+        let split = load_stage(&mut read, 0, true).unwrap();
+        assert_eq!(
+            battle.assets.stage_model.nodes.len(),
+            split.model.nodes.len()
+        );
+        assert_eq!(
+            battle.assets.stage_model.texture_header,
+            split.model.texture_header
+        );
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        // The stage intro and the entrances play out under the demo camera, full screen on every frame.
+        let mut split_intro = Vec::new();
+        for f in 0..2000 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+            if battle.views_drawn == 2 {
+                split_intro.push((f, battle.seq.state));
+            }
+        }
+        // The cuts' last frames too (the demo camera's update ends the cut on them); the halves come with READY.
+        assert!(
+            split_intro.iter().all(|&(_, st)| st == SeqState::Ready),
+            "{split_intro:?}"
+        );
+        assert!(!split_intro.is_empty());
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert_eq!(battle.views_drawn, 2);
+        let xs: Vec<f32> = frame
+            .stage
+            .iter()
+            .flat_map(|b| b.vertices.iter().map(|v| v.position[0]))
+            .chain(
+                frame
+                    .models
+                    .iter()
+                    .flat_map(|b| b.vertices.iter().map(|v| v.position[0])),
+            )
+            .collect();
+        assert!(!xs.is_empty());
+        assert!(
+            xs.iter()
+                .all(|&x| (0.0..=255.0).contains(&x) || (257.0..=512.0).contains(&x))
+        );
+        assert!(xs.iter().any(|&x| x < 255.0) && xs.iter().any(|&x| x > 257.0));
+        let model_xs: Vec<f32> = frame
+            .models
+            .iter()
+            .flat_map(|b| b.vertices.iter().map(|v| v.position[0]))
+            .collect();
+        assert!(model_xs.iter().any(|&x| x <= 255.0) && model_xs.iter().any(|&x| x >= 257.0));
+        // Pad 2 pauses for itself.
+        let mut pads = idle;
+        pads[1].held = crate::btl_input::pad::START;
+        battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+        assert!(battle.seq.pause_menu);
+        assert_eq!(battle.seq.result_pad, 1);
     }
 
     /// The attract battle (mode 7): both fighters are the computer's, the fight starts without the intro talk and
@@ -6642,7 +6965,7 @@ mod tests {
         };
         let read = probe.loader.as_mut().unwrap();
         let Some((from, to)) = (0..0x27).find_map(|s| {
-            let kind = load_stage(read, s).ok()?.stage.change_kind;
+            let kind = load_stage(read, s, false).ok()?.stage.change_kind;
             let to = match kind {
                 1 => 0xF,
                 2 => 3,
@@ -6748,7 +7071,7 @@ mod tests {
         let read = battle.loader.as_mut().unwrap();
         let mut with = 0;
         for s in 0..0x27 {
-            let Some((p, textures)) = load_stage(read, s).ok().and_then(|s| s.bound) else {
+            let Some((p, textures)) = load_stage(read, s, false).ok().and_then(|s| s.bound) else {
                 continue;
             };
             with += 1;
@@ -6824,7 +7147,7 @@ mod tests {
         let read = battle.loader.as_mut().unwrap();
         let smoky: Vec<(i32, usize)> = (0..0x27)
             .filter_map(|s| {
-                let st = load_stage(read, s).ok()?.stage;
+                let st = load_stage(read, s, false).ok()?.stage;
                 (st.stage_flags & 2 != 0 && !st.smoke.is_empty()).then(|| (s, st.smoke.len()))
             })
             .collect();
@@ -6894,7 +7217,7 @@ mod tests {
         let read = battle.loader.as_mut().unwrap();
         let stages: Vec<i32> = (0..0x27)
             .filter(|&s| {
-                load_stage(read, s)
+                load_stage(read, s, false)
                     .ok()
                     .is_some_and(|st| st.pack11.is_some() && st.stage.weather.is_some_and(|w| w.on))
             })
@@ -6943,7 +7266,7 @@ mod tests {
                 textures,
                 normals,
                 ..
-            }) = load_stage(read, s).ok().and_then(|st| st.surf)
+            }) = load_stage(read, s, false).ok().and_then(|st| st.surf)
             else {
                 continue;
             };
@@ -7101,7 +7424,7 @@ mod tests {
         let read = battle.loader.as_mut().unwrap();
         let water: Vec<(i32, usize)> = (0..0x27)
             .filter_map(|s| {
-                let st = load_stage(read, s).ok()?;
+                let st = load_stage(read, s, false).ok()?;
                 let w = st.pack12.filter(|_| st.stage.water_fx)?;
                 Some((s, w.len()))
             })
