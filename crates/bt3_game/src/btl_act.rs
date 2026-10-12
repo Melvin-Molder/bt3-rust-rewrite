@@ -1157,6 +1157,10 @@ impl Ctx<'_, '_> {
             self.me.charge_timer = 0.0;
             self.me.charge_full_frames = 0;
             self.me.blast_charge = 0.0;
+            // The action's camera cut ends with it, unless flag 0xDD keeps it.
+            if !self.flag(0xDD) {
+                self.end_cut();
+            }
             self.pop_queue();
             self.me.flags.clear_range(0x81, 0x84);
             self.me.flags.clear_range(0x5B, 0x5D);

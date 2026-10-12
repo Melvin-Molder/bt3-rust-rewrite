@@ -8255,6 +8255,8 @@ mod tests {
         }
         battle.roster.chars[0].gauge.blast = 300_000;
         let acts = run_skill(&mut battle, false, 10);
+        // The skill's camera cut (it holds its last frame) has the screen while the skill runs.
+        assert!(crate::chr_cam::is_cut_active(&battle.roster.chars[0]));
         let (mut opp, mut blind) = (Vec::new(), 0);
         for _ in 0..120 {
             battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
@@ -8268,6 +8270,12 @@ mod tests {
         assert!(opp.contains(&0xC6), "{opp:x?}");
         let frames = battle.assets.fighters[0].tables.skill().frames(0);
         assert!(blind > 0 && blind <= frames, "{blind} {frames}");
+        // The cut ends with the skill's action (BtlAct_Update's ChrCam_EndCut): the camera is the fighter's own
+        // again, without the screen priority.
+        let me = &battle.roster.chars[0];
+        assert_ne!(me.act.current, 0xFD);
+        assert!(!crate::chr_cam::is_cut_active(me));
+        assert!(!me.flags.test(0xD3));
         // Player 0 blinded: the grey overlay over the screen as strong as its blind level (a ratio of 90), gone
         // once it wears off.
         battle.roster.chars[0].blind_timer = 60;
