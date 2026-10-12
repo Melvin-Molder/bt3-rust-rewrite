@@ -39,6 +39,24 @@ pub struct StageResource {
     /// Bit 0 of the first water record (`StgDataA` +0x90 / +0x94, `BtlStage_GetList90`): with stage pack entry
     /// 0x12 the stage has the water effects (`EftStage_HasKind(7)`).
     pub water_fx: bool,
+    /// The MEF0 block's list 1 (stage pack entry 0x13, `BtlStage_GetFxResB2`): the smoke emitters, used with
+    /// stage flag 2.
+    pub smoke: Vec<StageSmoke>,
+}
+
+/// `EftSmokeSrc`: a smoke emitter of the stage (its y and z negated as `BtlStage_BindMef` does).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageSmoke {
+    pub pos: [f32; 3],
+    /// The particles' sideways speed factor a frame.
+    pub damp: f32,
+    pub size: f32,
+    pub speed: f32,
+    pub life_base: u16,
+    /// One particle a frame with a chance of 1 in this.
+    pub rate: u16,
+    pub ambient: [u8; 4],
+    pub diffuse: [u8; 4],
 }
 
 /// `EftGndDustStage`: the colours, speed and size of the debris' dust puffs when `enabled`.
@@ -251,6 +269,27 @@ impl StageResource {
             read_u32(bytes, o)? & 1 != 0
         };
 
+        let smoke = parse_mef_list(bytes, 1)?
+            .into_iter()
+            .map(|o| {
+                let b = |k: usize| bytes[o + k];
+                Ok(StageSmoke {
+                    pos: [
+                        read_f32(bytes, o)?,
+                        -read_f32(bytes, o + 4)?,
+                        -read_f32(bytes, o + 8)?,
+                    ],
+                    damp: read_f32(bytes, o + 0xC)?,
+                    size: read_f32(bytes, o + 0x10)?,
+                    speed: read_f32(bytes, o + 0x14)?,
+                    life_base: u16::from_le_bytes([b(0x18), b(0x19)]),
+                    rate: u16::from_le_bytes([b(0x1A), b(0x1B)]),
+                    ambient: [b(0x1C), b(0x1D), b(0x1E), b(0x1F)],
+                    diffuse: [b(0x20), b(0x21), b(0x22), b(0x23)],
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
         Ok(Self {
             stage_id,
             flags,
@@ -268,8 +307,26 @@ impl StageResource {
             paths,
             dust,
             water_fx,
+            smoke,
         })
     }
+}
+
+/// The 0x30-byte records of list `n` of the stage file's MEF0 block (pack entry 0x13 when it is not empty,
+/// `BtlStage_BindMef`: magic, a word, then count and offset of lists 0..2 from the block); their offsets.
+fn parse_mef_list(bytes: &[u8], n: usize) -> io::Result<Vec<usize>> {
+    let (start, end) = (read_u32(bytes, 0x4C)?, read_u32(bytes, 0x50)?);
+    if start == end {
+        return Ok(Vec::new());
+    }
+    let mef = (start & !3) as usize;
+    if bytes.get(mef..mef + 4) != Some(b"MEF0".as_slice()) {
+        return Ok(Vec::new());
+    }
+    let count = read_count(bytes, mef + 8 + n * 8, "stage MEF0 list")?;
+    let list = mef + read_u32(bytes, mef + 0xC + n * 8)? as usize;
+    checked_range(bytes, list, count * 0x30, "stage MEF0 list")?;
+    Ok((0..count).map(|i| list + i * 0x30).collect())
 }
 
 /// `BtlStage_BindPaths` / `StgPathTable_Relocate`: the table at file word 0x18 (offsets from the table); none
@@ -455,6 +512,16 @@ mod tests {
         put_i32(&mut bytes, 0x100 + 0x90, 1);
         put_u32(&mut bytes, 0x100 + 0x94, 0x280);
         put_u32(&mut bytes, 0x380, 3);
+        // A MEF0 block (pack entry 0x13 at 0x300, entry 0x14 after it) with one smoke emitter in list 1.
+        put_u32(&mut bytes, 0x4C, 0x300);
+        put_u32(&mut bytes, 0x50, 0x3C0);
+        bytes[0x300..0x304].copy_from_slice(b"MEF0");
+        put_i32(&mut bytes, 0x310, 1);
+        put_u32(&mut bytes, 0x314, 0x40);
+        put_f32(&mut bytes, 0x344, 5.0);
+        put_f32(&mut bytes, 0x34C, 0.9);
+        put_u32(&mut bytes, 0x358, 0x0003_0040);
+        bytes[0x35C] = 77;
 
         let stage = StageResource::parse(&bytes).unwrap();
 
@@ -462,6 +529,13 @@ mod tests {
         assert_eq!(stage.flags, 2);
         assert_eq!(stage.water_level, Some(32.0));
         assert!(stage.water_fx);
+        assert_eq!(stage.smoke.len(), 1);
+        let smoke = stage.smoke[0];
+        assert_eq!((smoke.pos[1], smoke.damp), (-5.0, 0.9));
+        assert_eq!(
+            (smoke.life_base, smoke.rate, smoke.ambient[0]),
+            (0x40, 3, 77)
+        );
         assert_eq!(stage.object_count, 7);
         assert_eq!(stage.objects[1].hp, 30);
         assert_eq!(stage.objects[1].position, [0.0, -15.0, 0.0]);

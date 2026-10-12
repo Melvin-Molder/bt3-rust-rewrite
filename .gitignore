@@ -83,6 +83,7 @@
 !/crates/bt3_game/src/eft_ray.rs
 !/crates/bt3_game/src/eft_rays.rs
 !/crates/bt3_game/src/eft_ribbon.rs
+!/crates/bt3_game/src/eft_smoke.rs
 !/crates/bt3_data/src/eft_mesh.rs
 !/crates/bt3_data/src/eft_pack.rs
 !/crates/bt3_data/src/burst.rs
@@ -94,6 +95,7 @@
 !/crates/bt3_game/src/btl_snd.rs
 !/crates/bt3_game/src/stg_rigid.rs
 !/crates/bt3_game/src/stg_amb.rs
+!/crates/bt3_game/src/stage_fx.rs
 !/crates/bt3_game/src/stg_scroll.rs
 !/crates/bt3_game/src/gs_stage.wgsl
 !/crates/bt3_game/src/battle_seq.rs

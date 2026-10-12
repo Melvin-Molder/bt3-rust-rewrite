@@ -352,8 +352,8 @@ impl Roster {
                 me,
                 data[i],
                 env,
-                self.scene.water.as_mut(),
-                self.scene.bubbles.as_mut(),
+                self.scene.stage.water.as_mut(),
+                self.scene.stage.bubbles.as_mut(),
                 libc,
             );
             me.obj.build_volumes(&data[i].obj);

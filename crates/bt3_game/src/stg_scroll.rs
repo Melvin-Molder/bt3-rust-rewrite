@@ -25,17 +25,11 @@ pub(crate) struct Scroll {
     speed: f32,
     dir: [f32; 2],
     off: [f32; 2],
-    /// `EftStageScroll_Load`s still to run, each drawing its direction when the angle is negative: the task's
-    /// init and `Battle_Restart`'s reset come before the battle's first frame, which has the generator.
-    pending: u32,
-    /// Draws of the sheet this one replaced (its resets on a rematch that loads the first stage back), taken
-    /// before those.
-    pub burn: u32,
 }
 
 impl Scroll {
-    /// `EftStageScroll_Init`, with `loads` loads to run before the next update.
-    pub(crate) fn new(sheet: StageScroll, tex_base: usize, loads: u32) -> Self {
+    /// `EftStageScroll_Init` before its load (`StageFx::run_pending`).
+    pub(crate) fn new(sheet: StageScroll, tex_base: usize) -> Self {
         let size = sheet.size as f32;
         Self {
             speed: sheet.speed as f32 * 0.00001 * size,
@@ -44,19 +38,12 @@ impl Scroll {
             tex_base,
             dir: [0.0; 2],
             off: [0.0; 2],
-            pending: loads,
-            burn: 0,
         }
     }
 
     /// Whether a load draws a random number.
     pub(crate) fn random(&self) -> bool {
         self.sheet.angle < 0
-    }
-
-    /// One more load before the next update (`Battle_Restart`'s reset).
-    pub(crate) fn reload(&mut self) {
-        self.pending += 1;
     }
 
     /// `EftStageScroll_Load` (the init and the reset): the direction from the file's angle, or a random one.
@@ -68,17 +55,6 @@ impl Scroll {
         };
         let a = eft_wrap(deg * 3.141_592_7 / 180.0);
         self.dir = [a.cos(), a.sin()];
-    }
-
-    /// The loads left over from before the frame (the init and the first start's reset).
-    pub(crate) fn run_pending(&mut self, libc: &mut LibcRandom) {
-        for _ in 0..std::mem::take(&mut self.burn) {
-            libc.rand();
-        }
-        while self.pending > 0 {
-            self.pending -= 1;
-            self.load(libc);
-        }
     }
 
     /// `EftStageScroll_Update` (not while paused or loading): the offset moves and wraps into -size..size.
@@ -223,7 +199,7 @@ mod tests {
 
     #[test]
     fn the_offset_scrolls_along_the_direction_and_wraps() {
-        let mut s = Scroll::new(sheet(90, 128.0), 0, 0);
+        let mut s = Scroll::new(sheet(90, 128.0), 0);
         let mut libc = LibcRandom::new(1);
         s.load(&mut libc);
         // 90 degrees: (cos, sin) = (0, 1); speed 50 * 0.00001 * 4 = 0.002 a frame.
@@ -237,20 +213,22 @@ mod tests {
         s.off[1] = 3.999;
         s.update(false);
         assert!((s.off[1] - 0.001).abs() < 1e-3);
-        // A negative angle draws its direction, once per pending load.
-        let mut r = Scroll::new(sheet(-1, 128.0), 0, 2);
+        // A negative angle draws its direction at each load.
+        let mut r = Scroll::new(sheet(-1, 128.0), 0);
         let mut a = LibcRandom::new(5);
-        r.run_pending(&mut a);
+        r.load(&mut a);
+        r.load(&mut a);
         let mut b = LibcRandom::new(5);
         b.rand();
         b.rand();
         assert_eq!(a.rand(), b.rand());
+        assert!(r.random() && !s.random());
     }
 
     #[test]
     fn the_sheet_draws_into_group_0_after_its_materials_unless_its_alpha_is_below_one() {
         let view = View::new([0.0; 3], [0.0; 3]);
-        let s = Scroll::new(sheet(0, 128.0), 7, 0);
+        let s = Scroll::new(sheet(0, 128.0), 7);
         let batches = s.draw(&view);
         // Two runs, textures 7 and 8 of the stage's.
         assert_eq!(batches.len(), 2);
@@ -264,11 +242,11 @@ mod tests {
         assert!(batches.iter().all(|b| b.vertices.len() == 3));
         assert_eq!(batches[0].vertices[0].rgba, [128.0; 4]);
         // Alpha 0.5 is drawn (above 0.1) as a 0 byte.
-        let s = Scroll::new(sheet(0, 0.5), 0, 0);
+        let s = Scroll::new(sheet(0, 0.5), 0);
         let batches = s.draw(&view);
         assert_eq!(batches[0].vertices[0].rgba[3], 0.0);
         // Below 0.1: nothing.
-        let s = Scroll::new(sheet(0, 0.05), 0, 0);
+        let s = Scroll::new(sheet(0, 0.05), 0);
         assert!(s.draw(&view).is_empty());
     }
 }

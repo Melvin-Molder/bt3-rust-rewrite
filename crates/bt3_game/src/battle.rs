@@ -126,8 +126,8 @@ pub struct BattleAssets {
     pub(crate) ray_texture: Option<usize>,
     /// `gEftGndDust->tex`: the ground dust's texture set (common effect entry 0xB) among the effect textures.
     pub(crate) dust_textures: Vec<usize>,
-    /// The water effects' textures (stage pack entry 0x12) among the effect textures, on a stage with them.
-    pub(crate) water_textures: Option<Vec<usize>>,
+    /// Stage pack entry 0x12's textures among the effect textures, on a stage that has the entry.
+    pub(crate) stage_pack12: Option<Vec<usize>>,
     /// The boundary wall's parameters and texture (stage pack entries 0x15..0x17), on a stage with them.
     pub(crate) bound: Option<(bt3_data::stage::StageBound, Option<usize>)>,
     /// The scrolling sheet (stage pack entry 7) and its first texture among the stage textures.
@@ -280,7 +280,7 @@ pub fn load(
         cuts: stage_cuts,
         collision,
         nav,
-        water_textures,
+        pack12,
         bound,
         scroll,
     } = load_stage(read, setup.stage)?;
@@ -346,7 +346,7 @@ pub fn load(
         effect_textures: Vec::new(),
         ray_texture: None,
         dust_textures: Vec::new(),
-        water_textures: None,
+        stage_pack12: None,
         bound: None,
         scroll,
         fighters: Vec::new(),
@@ -436,7 +436,7 @@ pub fn load(
                 .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
         }
     }
-    assets.water_textures = water_textures.map(|t| assets.push_effect_textures(t));
+    assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
     assets.bound = bound.map(|(p, t)| (p, assets.push_effect_textures(t).first().copied()));
     for (index, side) in setup.sides.into_iter().enumerate() {
         let load = SideLoad {
@@ -754,9 +754,9 @@ pub(crate) struct LoadedStage {
     cuts: Vec<Option<CamAnim>>,
     collision: StageCollision,
     nav: StageNav,
-    /// `EftWater_Init`'s `EftTexSet_Load32` of stage pack entry 0x12, on a stage with the water effects
-    /// (`EftStage_HasKind(7)`).
-    water_textures: Option<Vec<RgbaTexture>>,
+    /// Stage pack entry 0x12's textures (`EftTexSet_Load32` of the water, `EftTexSet_Load8` of the smoke), when
+    /// the entry is not empty.
+    pack12: Option<Vec<RgbaTexture>>,
     /// `EftBoundMgr_Init`: the parameters (entry 23), colour (22) and textures (21), when all three are there.
     bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
     /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
@@ -798,7 +798,7 @@ fn load_stage(
         };
         word(n + 1).wrapping_sub(word(n))
     };
-    let water_textures = if stage.water_fx && entry_size(0x12) > 0 {
+    let pack12 = if entry_size(0x12) > 0 {
         let res = TextureResource::parse(pack_section(&stage_file, 0x12).map_err(error)?)
             .map_err(error)?;
         Some(
@@ -846,7 +846,7 @@ fn load_stage(
         model,
         textures,
         cuts,
-        water_textures,
+        pack12,
         bound,
         scroll,
         collision: StageCollision::parse(&stage_file).map_err(error)?,
@@ -1129,7 +1129,10 @@ impl BattleAssets {
 
     /// `EftWater_Init`: the water task of stage effect kind 7, on a stage with its textures.
     pub(crate) fn new_water(&self) -> Option<crate::eft_water::Water> {
-        let textures = self.water_textures.clone()?;
+        if !self.stage.water_fx {
+            return None;
+        }
+        let textures = self.stage_pack12.clone()?;
         let mut w = crate::eft_water::Water::new(
             self.stage.water_level.unwrap_or(0.0),
             self.stage_id,
@@ -1140,10 +1143,31 @@ impl BattleAssets {
         Some(w)
     }
 
-    /// `EftStageScroll_Init`: the sheet of kind 0, with `loads` loads to run before its first update.
-    pub(crate) fn new_scroll(&self, loads: u32) -> Option<crate::stg_scroll::Scroll> {
+    /// `EftStageScroll_Init`: the sheet of kind 0.
+    pub(crate) fn new_scroll(&self) -> Option<crate::stg_scroll::Scroll> {
         let (sheet, base) = self.scroll.clone()?;
-        Some(crate::stg_scroll::Scroll::new(sheet, base, loads))
+        Some(crate::stg_scroll::Scroll::new(sheet, base))
+    }
+
+    /// `EftSmokeMgr_Init`: the smoke emitters of kind 4, with stage flag 2 and the stage's records; texture 2 of
+    /// the set of pack entry 0x12.
+    pub(crate) fn new_smoke(&self) -> Option<crate::eft_smoke::Smoke> {
+        if self.stage.stage_flags & 2 == 0 || self.stage.smoke.is_empty() {
+            return None;
+        }
+        let texture = self.stage_pack12.as_ref().and_then(|t| t.get(2).copied());
+        Some(crate::eft_smoke::Smoke::new(&self.stage.smoke, texture))
+    }
+
+    /// `EftStage_CreateKinds`: the tasks of the kinds the stage has, their inits to run.
+    pub(crate) fn new_stage_fx(&self) -> crate::stage_fx::StageFx {
+        let mut fx = crate::stage_fx::StageFx::default();
+        fx.scroll = self.new_scroll();
+        fx.smoke = self.new_smoke();
+        fx.water = self.new_water();
+        fx.bubbles = self.new_bubbles();
+        fx.bound = self.new_bound();
+        fx.created()
     }
 
     /// `EftBoundMgr_Init`: the boundary walls of kind 8, with the fighters' body radii.
@@ -1156,7 +1180,10 @@ impl BattleAssets {
 
     /// `EftBubble_Init`: the bubble task of stage effect kind 7, with at least six textures in the set.
     pub(crate) fn new_bubbles(&self) -> Option<crate::eft_bubble::Bubbles> {
-        let textures = self.water_textures.clone()?;
+        if !self.stage.water_fx {
+            return None;
+        }
+        let textures = self.stage_pack12.clone()?;
         let level = self.stage.water_level.unwrap_or(0.0);
         let mut b = crate::eft_bubble::Bubbles::new(level, self.fx_tables.sin_coef, textures)?;
         b.split = self.screen_mode == 1;
@@ -1174,7 +1201,7 @@ impl BattleAssets {
         self.stage_cuts = s.cuts;
         self.collision = s.collision;
         self.nav = s.nav;
-        self.water_textures = s.water_textures.map(|t| self.push_effect_textures(t));
+        self.stage_pack12 = s.pack12.map(|t| self.push_effect_textures(t));
         self.bound = s
             .bound
             .map(|(p, t)| (p, self.push_effect_textures(t).first().copied()));
@@ -1206,11 +1233,9 @@ impl Battle {
         };
         let mut roster = roster;
         roster.scene.gdust = crate::eft_gdust::GndDust::new(assets.stage.dust.as_ref());
-        roster.scene.water = assets.new_water();
-        roster.scene.bubbles = assets.new_bubbles();
-        roster.scene.bound = assets.new_bound();
-        // The task's init and Battle_Restart's reset.
-        roster.scene.scroll = assets.new_scroll(2);
+        // Battle_Init: the tasks' inits, then Battle_Restart's reset.
+        roster.scene.stage = assets.new_stage_fx();
+        roster.scene.stage.reset();
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -1383,15 +1408,11 @@ impl Battle {
                 // BtlLoad_BeginStageSwap: EftStage_ResetAll (BtlScene_Reset(0): the dust puffs end), BtlStage_Term
                 // (StgAmb_Stop).
                 self.roster.scene.gdust.reset();
-                if let Some(w) = &mut self.roster.scene.water {
-                    w.reset();
-                }
-                if let Some(s) = &mut self.roster.scene.scroll {
-                    s.load(libc);
-                }
-                // EftStage_FreeKinds.
-                let scene = &mut self.roster.scene;
-                (scene.water, scene.bubbles, scene.bound, scene.scroll) = (None, None, None, None);
+                // ... and EftStage_FreeKinds.
+                let fx = &mut self.roster.scene.stage;
+                fx.reset();
+                fx.run_pending(libc, &mut self.vu0);
+                *fx = Default::default();
                 self.amb.stop();
                 let id = if self.assets.stage_id == 3 {
                     TRANSITION_FILE_3
@@ -1469,10 +1490,8 @@ impl Battle {
                             let stage = self.assets.stage_id;
                             self.assets.install_stage(loaded, stage);
                             // EftStage_CreateKinds: the new stage's effects.
-                            self.roster.scene.water = self.assets.new_water();
-                            self.roster.scene.bubbles = self.assets.new_bubbles();
-                            self.roster.scene.bound = self.assets.new_bound();
-                            self.roster.scene.scroll = self.assets.new_scroll(1);
+                            // EftStage_Recreate.
+                            self.roster.scene.stage = self.assets.new_stage_fx();
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -1711,12 +1730,10 @@ impl Battle {
         self.loading = false;
         self.burst = None;
         self.fade2 = Fade::default();
-        // Battle_Restart's BtlScene_Reset loads the sheet again; loading the first stage back resets it twice
-        // more (the reload's stage swap) and makes the new one.
-        let mut scroll = self.roster.scene.scroll.take();
-        if let Some(s) = &mut scroll {
-            s.reload();
-        }
+        // Battle_Restart's BtlScene_Reset resets the stage effects (kept); loading the first stage back resets
+        // them once more (the reload's stage swap) and makes the new stage's.
+        let mut stage_fx = std::mem::take(&mut self.roster.scene.stage);
+        stage_fx.reset();
         let start = self.assets.start_stage;
         if self.assets.stage_id != start
             && let Some(read) = self.loader.as_mut()
@@ -1724,16 +1741,9 @@ impl Battle {
             match load_stage(read, start) {
                 Ok(loaded) => {
                     self.assets.install_stage(loaded, start);
-                    self.roster.scene.water = self.assets.new_water();
-                    self.roster.scene.bubbles = self.assets.new_bubbles();
-                    self.roster.scene.bound = self.assets.new_bound();
-                    let burn = scroll
-                        .as_ref()
-                        .map_or(0, |s| if s.random() { 2 } else { 0 });
-                    scroll = self.assets.new_scroll(1);
-                    if let Some(s) = &mut scroll {
-                        s.burn = burn;
-                    }
+                    let burn = stage_fx.burn + 2 * stage_fx.reset_draws();
+                    stage_fx = self.assets.new_stage_fx();
+                    stage_fx.burn = burn;
                     self.assets
                         .reload_bank(read, 8, SND_STAGE_FILE + start.max(0) as u32);
                     self.light_dir =
@@ -1802,10 +1812,7 @@ impl Battle {
         };
         // The scene's dust manager keeps the starting stage's template.
         self.roster.scene.gdust = crate::eft_gdust::GndDust::new(self.assets.stage.dust.as_ref());
-        self.roster.scene.water = self.assets.new_water();
-        self.roster.scene.bubbles = self.assets.new_bubbles();
-        self.roster.scene.bound = self.assets.new_bound();
-        self.roster.scene.scroll = scroll;
+        self.roster.scene.stage = stage_fx;
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         self.fade = Fade::start_in(1.0);
         self.started = false;
@@ -1848,9 +1855,7 @@ impl Battle {
         if std::mem::take(&mut self.seq.restart) {
             self.restart(&mut sounds);
         }
-        if let Some(s) = &mut self.roster.scene.scroll {
-            s.run_pending(libc);
-        }
+        self.roster.scene.stage.run_pending(libc, &mut self.vu0);
         let menu = std::array::from_fn(|i| {
             use crate::btl_input::pad::{CROSS, DOWN, LEFT, RIGHT, START, TRIANGLE, UP};
             let (held, prev) = (pads[i].held, self.prev_held[i]);
@@ -1973,7 +1978,7 @@ impl Battle {
                     &mut vu0,
                     &mut *input.libc,
                     &mut roster.scene.gdust,
-                    roster.scene.water.as_mut(),
+                    roster.scene.stage.water.as_mut(),
                 );
                 false
             });
@@ -2061,7 +2066,7 @@ impl Battle {
             }
         }
         self.amb_cam = Some(view.eye());
-        if let Some(b) = &mut self.roster.scene.bubbles {
+        if let Some(b) = &mut self.roster.scene.stage.bubbles {
             b.cam = Some(view.world2view);
         }
         input.sounds.append(&mut self.amb.out);
@@ -2108,7 +2113,7 @@ impl Battle {
         };
         // EftStageScroll_Draw, from the stage draw after group 0.
         if !self.loading
-            && let Some(s) = &self.roster.scene.scroll
+            && let Some(s) = &self.roster.scene.stage.scroll
         {
             stage.extend(s.draw(&view));
         }
@@ -2182,24 +2187,10 @@ impl Battle {
             // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else side 0's view.
             let demo = self.demo.is_active();
             // Layer 0's stage effects, then the others.
-            if let Some(w) = &self.roster.scene.water {
-                w.draw(&mut ot, &ctx);
-            }
-            if let Some(b) = &self.roster.scene.bubbles {
-                b.draw(&mut ot, &ctx.world2view, &ctx.world2screen);
-            }
-            if let Some(b) = &self.roster.scene.bound {
-                let show = self
-                    .roster
-                    .chars
-                    .each_ref()
-                    .map(|c| crate::eft_bound::BoundShow {
-                        hidden: c.obj.flags & 2 == 0,
-                        locked_on: c.flags.test(5),
-                        rush_connected: c.flags.test(0xA1),
-                    });
-                b.draw(&mut ot, &ctx, &show);
-            }
+            self.roster
+                .scene
+                .stage
+                .draw(&mut ot, &ctx, &self.roster.chars, self.light_dir);
             self.roster
                 .scene
                 .fx
@@ -5169,7 +5160,7 @@ mod tests {
             tris.iter()
                 .all(|t| t.texture == battle.assets.bound.unwrap().1)
         );
-        assert!(battle.roster.scene.bound.is_some());
+        assert!(battle.roster.scene.stage.bound.is_some());
     }
 
     #[test]
@@ -5208,6 +5199,54 @@ mod tests {
     }
 
     #[test]
+    fn real_smoke_rises_on_its_stages() {
+        // The stages with smoke emitters (stage flag 2 and records in the MEF0 list 1).
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let read = battle.loader.as_mut().unwrap();
+        let smoky: Vec<(i32, usize)> = (0..0x27)
+            .filter_map(|s| {
+                let st = load_stage(read, s).ok()?.stage;
+                (st.stage_flags & 2 != 0 && !st.smoke.is_empty()).then(|| (s, st.smoke.len()))
+            })
+            .collect();
+        assert_eq!(smoky, [(3, 4), (6, 8), (9, 6), (28, 8), (29, 6), (30, 6)]);
+        let mut setup = BattleSetup::default();
+        setup.stage = 3;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let texture = battle.assets.stage_pack12.as_ref().unwrap()[2];
+        let smoke = battle.roster.scene.stage.smoke.as_ref().unwrap();
+        // Its emitters ran their first updates at the start: the smoke is there.
+        assert!(smoke.count() > 20, "{}", smoke.count());
+        let mut libc = LibcRandom::new(4);
+        let mut random = GameRandom::from_key(&[4]);
+        let mut drawn = 0;
+        for _ in 0..10 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            drawn += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture == Some(texture))
+                .count();
+        }
+        // The emitters keep their particles going, and the starting camera sees them.
+        assert!(battle.roster.scene.stage.smoke.as_ref().unwrap().count() > 20);
+        assert!(drawn > 100, "{drawn}");
+    }
+
+    #[test]
     fn real_water_stages_splash_and_draw_their_water() {
         // The stages whose files have the water effects (stage pack entry 0x12 and the water record's bit 0).
         let Some(mut battle) = real_battle(&BattleSetup::default()) else {
@@ -5216,7 +5255,8 @@ mod tests {
         let read = battle.loader.as_mut().unwrap();
         let water: Vec<(i32, usize)> = (0..0x27)
             .filter_map(|s| {
-                let w = load_stage(read, s).ok()?.water_textures?;
+                let st = load_stage(read, s).ok()?;
+                let w = st.pack12.filter(|_| st.stage.water_fx)?;
                 Some((s, w.len()))
             })
             .collect();
@@ -5230,7 +5270,7 @@ mod tests {
         let Some(mut battle) = fight_battle(&setup) else {
             return;
         };
-        let textures = battle.assets.water_textures.clone().unwrap();
+        let textures = battle.assets.stage_pack12.clone().unwrap();
         let level = battle.assets.stage.water_level.unwrap_or(0.0);
         let mut libc = LibcRandom::new(2);
         let mut random = GameRandom::from_key(&[2]);
@@ -5238,7 +5278,7 @@ mod tests {
         let mid: [f32; 3] = std::array::from_fn(|k| {
             (battle.roster.chars[0].pose.pos[k] + battle.roster.chars[1].pose.pos[k]) * 0.5
         });
-        let w = battle.roster.scene.water.as_mut().unwrap();
+        let w = battle.roster.scene.stage.water.as_mut().unwrap();
         w.add_splash_at([mid[0], level, mid[2]], 3.0, &mut libc);
         let mut drawn = 0;
         for _ in 0..20 {
@@ -5262,12 +5302,12 @@ mod tests {
         for &(s, n) in &water {
             assert_eq!(n >= 6, s == 22, "stage {s}: {n}");
         }
-        assert!(battle.roster.scene.bubbles.is_none());
+        assert!(battle.roster.scene.stage.bubbles.is_none());
         setup.stage = 22;
         let Some(mut battle) = fight_battle(&setup) else {
             return;
         };
-        let b = battle.roster.scene.bubbles.as_mut().unwrap();
+        let b = battle.roster.scene.stage.bubbles.as_mut().unwrap();
         b.start_burst(0, 10.0);
         assert_eq!(b.burst(0), 50.0);
         for _ in 0..8 {
@@ -5281,7 +5321,10 @@ mod tests {
                 false,
             );
         }
-        assert_eq!(battle.roster.scene.bubbles.as_ref().unwrap().burst(0), 0.0);
+        assert_eq!(
+            battle.roster.scene.stage.bubbles.as_ref().unwrap().burst(0),
+            0.0
+        );
     }
 
     #[test]

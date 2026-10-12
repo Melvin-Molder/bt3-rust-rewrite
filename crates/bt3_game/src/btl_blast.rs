@@ -319,13 +319,8 @@ pub(crate) struct Scene {
     deferred: Vec<Deferred>,
     /// The ground dust (`gEftGndDust`).
     pub gdust: crate::eft_gdust::GndDust,
-    /// The water effects (`gEftDust`) and the bubbles (`gEftBubble`), on a stage with them.
-    pub water: Option<crate::eft_water::Water>,
-    pub bubbles: Option<crate::eft_bubble::Bubbles>,
-    /// The boundary walls (`gEftBound`).
-    pub bound: Option<crate::eft_bound::Bound>,
-    /// The scrolling sheet (`gEftStageScroll`).
-    pub scroll: Option<crate::stg_scroll::Scroll>,
+    /// The stage effects of layer 0.
+    pub stage: crate::stage_fx::StageFx,
 }
 
 /// A generator draw made outside the scene update.
@@ -1034,33 +1029,7 @@ impl Scene {
         }
         // The ground dust (BtlScene_IsTimeStopped: paused); the stage effects of layer 0 in their table's order.
         self.gdust.update(w.paused);
-        if let Some(s) = &mut self.scroll {
-            s.update(w.paused);
-        }
-        if let Some(water) = &mut self.water {
-            water.update(&water_chars(w.chars, w.data), w.paused, w.libc);
-        }
-        if let Some(b) = &mut self.bubbles {
-            let chars = std::array::from_fn(|i| {
-                let c = &w.chars[i];
-                crate::eft_bubble::BubbleChr {
-                    pos: c.pose.pos,
-                    dir: c.pose.dir,
-                    height: w.data[i].height(),
-                    in_water: c.flags.test(0x11),
-                    nodes: std::array::from_fn(|n| c.obj.node_pos(n as u32)),
-                }
-            });
-            b.update(&chars, w.paused, w.libc);
-        }
-        if let Some(b) = &mut self.bound {
-            let chars = w.chars.each_ref().map(|c| crate::eft_bound::BoundChr {
-                node3: c.obj.node_pos(3),
-                in_technique: crate::btl_act::is_technique_id(c.act.current),
-                rush_connected: c.flags.test(0xA1),
-            });
-            b.update(&chars, w.paused);
-        }
+        self.stage.update(w.chars, w.data, w.paused, w.libc, w.vu0);
         // Layer 1: the technique effects.
         self.tech.update(
             w,
@@ -1175,7 +1144,7 @@ impl Scene {
 
     /// `BtlScene_UpdateRecords`: `EftWater_UpdateBlast` on every record (`EftBubble_OnBlastRecord` does nothing).
     fn update_records(&mut self, w: &mut World) {
-        if self.water.is_none() {
+        if self.stage.water.is_none() {
             return;
         }
         for i in 0..self.records.len() {
@@ -1196,7 +1165,7 @@ impl Scene {
                 radius_a: r.shape.a.radius,
             };
             let height = w.data.get(r.owner).map_or(10.0, |d| d.height());
-            let Some(water) = &mut self.water else {
+            let Some(water) = &mut self.stage.water else {
                 return;
             };
             let (set, sound) = water.update_blast(&rec, height, w.paused, w.libc);
