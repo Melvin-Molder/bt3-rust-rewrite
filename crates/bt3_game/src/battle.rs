@@ -918,15 +918,26 @@ pub(crate) fn load_side(
             continue;
         };
         let blast = tech_blast_set(pack);
-        let assets = match &blast {
+        let set_assets = match &blast {
             Some(set) => Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?),
             _ => None,
         };
         let places = bt3_data::eft_pack::tech_places(pack, stage.max(0) as usize);
+        // EftPropShotMgr_Init (and the other managers with a model): pack entry 1, technique 0x19A's by costume.
+        let def = crate::btl_tech_fx::TechDef::of_tables(&fighter.tables, slot as i32);
+        let entry = bt3_data::pack_entry(pack, 1).and_then(|e| {
+            if def.id == 0x19A {
+                bt3_data::pack_entry(e, side.costume.max(0) as usize + 1)
+            } else {
+                Some(e)
+            }
+        });
+        let model = entry.and_then(|e| load_effect_model(e, ramp, assets).ok());
         fighter.tech_packs[slot] = Some(TechPack {
             blast,
-            assets,
+            assets: set_assets,
             places,
+            model,
         });
     }
     if let Some(pack) = &fighter.effect {
@@ -1373,18 +1384,18 @@ fn load_stage(
     })
 }
 
-/// `BtlObjMdl_BindFiles` and `ObjDraw_UploadTextures`: a batch's TEX0_1 is its material texture at
-/// `tbp 0x3480 + tbpOfs`, `cbp 0x3C00 + cbpOfs` once `MdlTex_RebaseChain` moved it, and its TEX0_2 reads the
-/// CLUT that `TexFile_UploadRange(clutFirst, clutCount)` put at `0x3D00 + tbpOfs`.
-fn load_fighter(
-    file: &[u8],
+/// The material textures by their (tbpOfs, cbpOfs).
+type Materials = HashMap<(u32, u32), usize>;
+
+/// `BtlObjMdl_BindFiles` / `ObjDraw_UploadTextures` of a model file's textures: per part, per batch, the
+/// material texture and the shading row (the CLUTs through the ramp); and the materials.
+fn bind_model_textures(
+    model: &CharaModel,
+    textures: &TextureResource,
     ramp: &[u8],
     assets: &mut BattleAssets,
-) -> Result<FighterModel, String> {
+) -> Result<(Vec<Vec<[usize; 2]>>, Materials, HashMap<u32, usize>), String> {
     let error = |e: std::io::Error| e.to_string();
-    let model = CharaModel::from_file(file).map_err(error)?;
-    let textures = TextureResource::parse(pack_section(file, TEXTURE_SECTION).map_err(error)?)
-        .map_err(error)?;
     let header = &model.header;
     let entry = |i: u8| {
         textures
@@ -1424,24 +1435,84 @@ fn load_fighter(
             pixels,
         });
     }
-    let batch_texture = |batch: &Batch| -> Result<[usize; 2], String> {
-        let key = (
-            tex0_tbp(batch.tex0[0]).wrapping_sub(model.min_tbp),
-            tex0_cbp(batch.tex0[0]).wrapping_sub(model.min_cbp),
-        );
-        let base = *materials
-            .get(&key)
-            .ok_or("a batch names no material texture")?;
-        let shade = *shades
-            .get(&tex0_cbp(batch.tex0[1]))
-            .ok_or("a batch names no shading CLUT")?;
-        Ok([base, shade])
-    };
     let batch_textures = model
         .parts
         .iter()
-        .map(|part| part.batches.iter().map(batch_texture).collect())
+        .map(|part| {
+            part.batches
+                .iter()
+                .map(|b| batch_texture(model, &materials, &shades, b))
+                .collect()
+        })
         .collect::<Result<Vec<_>, String>>()?;
+    Ok((batch_textures, materials, shades))
+}
+
+/// A batch's material texture (its TEX0_1's blocks less the model's lowest) and shading row (its TEX0_2's CLUT).
+fn batch_texture(
+    model: &CharaModel,
+    materials: &Materials,
+    shades: &HashMap<u32, usize>,
+    batch: &Batch,
+) -> Result<[usize; 2], String> {
+    let key = (
+        tex0_tbp(batch.tex0[0]).wrapping_sub(model.min_tbp),
+        tex0_cbp(batch.tex0[0]).wrapping_sub(model.min_cbp),
+    );
+    let base = *materials
+        .get(&key)
+        .ok_or("a batch names no material texture")?;
+    let shade = *shades
+        .get(&tex0_cbp(batch.tex0[1]))
+        .ok_or("a batch names no shading CLUT")?;
+    Ok([base, shade])
+}
+
+/// `BtlObjMdl_BindFiles` of an effect model (`EftObj_Create`'s model pack, laid out as a character file): the
+/// model of section 3, its textures (section 0xC) and its own animations (sections 0x1D..0x24).
+pub(crate) fn load_effect_model(
+    pack: &[u8],
+    ramp: &[u8],
+    assets: &mut BattleAssets,
+) -> Result<crate::eft_obj::EffectModel, String> {
+    let error = |e: std::io::Error| e.to_string();
+    let model = CharaModel::from_file(pack).map_err(error)?;
+    let textures = TextureResource::parse(pack_section(pack, TEXTURE_SECTION).map_err(error)?)
+        .map_err(error)?;
+    let (batch_textures, _, _) = bind_model_textures(&model, &textures, ramp, assets)?;
+    let anims = (0..crate::eft_obj::MODEL_ANIMS)
+        .map(|i| {
+            bt3_data::pack_entry(pack, 0x1D + i)
+                .and_then(|b| bt3_data::motion::Motion::parse(b).ok())
+        })
+        .collect();
+    Ok(crate::eft_obj::EffectModel {
+        model,
+        batch_textures,
+        anims,
+    })
+}
+
+/// `BtlObjMdl_BindFiles` and `ObjDraw_UploadTextures`: a batch's TEX0_1 is its material texture at
+/// `tbp 0x3480 + tbpOfs`, `cbp 0x3C00 + cbpOfs` once `MdlTex_RebaseChain` moved it, and its TEX0_2 reads the
+/// CLUT that `TexFile_UploadRange(clutFirst, clutCount)` put at `0x3D00 + tbpOfs`.
+fn load_fighter(
+    file: &[u8],
+    ramp: &[u8],
+    assets: &mut BattleAssets,
+) -> Result<FighterModel, String> {
+    let error = |e: std::io::Error| e.to_string();
+    let model = CharaModel::from_file(file).map_err(error)?;
+    let textures = TextureResource::parse(pack_section(file, TEXTURE_SECTION).map_err(error)?)
+        .map_err(error)?;
+    let header = &model.header;
+    let entry = |i: u8| {
+        textures
+            .entries
+            .get(usize::from(i))
+            .ok_or_else(|| format!("texture {i} is missing"))
+    };
+    let (batch_textures, materials, shades) = bind_model_textures(&model, &textures, ramp, assets)?;
     // BtlObj_BindTables / BtlObj_CreateFace: the face's meshes, textures and lip tracks (of the voice set of the
     // options).
     let face_data = bt3_data::face::FaceData::from_file(file, crate::sound::options().alt_voice)
@@ -1485,7 +1556,11 @@ fn load_fighter(
     for (i, chain) in face_data.mouth_chains.iter().enumerate() {
         if let Some(batches) = chain {
             mouth_mesh[i] = true;
-            if let Ok(textures) = batches.iter().map(batch_texture).collect() {
+            if let Ok(textures) = batches
+                .iter()
+                .map(|b| batch_texture(&model, &materials, &shades, b))
+                .collect()
+            {
                 face_draw.chains[i] = Some((batches.clone(), textures));
             }
         }
@@ -3290,6 +3365,45 @@ impl Battle {
                     draw_part(
                         part,
                         batches,
+                        textures,
+                        &node.mtx,
+                        &node.parent,
+                        light,
+                        look,
+                        &view,
+                        &mut groups,
+                    );
+                }
+            }
+        }
+        // The effect objects (`EftObj`), drawn as the fighters are: a prop shot's prop.
+        for o in self.roster.scene.eft_objs.iter() {
+            // BtlObjDraw_Draw: only an object with its drawn flag (2).
+            if o.obj.flags & 2 == 0 {
+                continue;
+            }
+            let Some(m) = self.assets.fighters[o.model.side].tech_packs[o.model.slot]
+                .as_ref()
+                .and_then(|p| p.model.as_ref())
+            else {
+                continue;
+            };
+            let Some((light, look)) =
+                model_look(&o.obj, m.model.header.flags, self.light_dir, &view)
+            else {
+                continue;
+            };
+            let parts = m
+                .model
+                .parts
+                .iter()
+                .zip(&m.batch_textures)
+                .zip(&o.obj.nodes);
+            for ((part, textures), node) in parts {
+                if part.enabled && node_shown(m.model.header.flags, o.obj.flags, part.node) {
+                    draw_part(
+                        part,
+                        &part.batches,
                         textures,
                         &node.mtx,
                         &node.parent,
@@ -6618,12 +6732,31 @@ mod tests {
         // Character 81's slot 2 (technique 0x166, effect type 6): the disc leaves on the FIRE event and hits P2
         // once, its last hit knocking it away; its stage test uses the radius times the hit scale (0.05), so it
         // skims over the floor. Its end raises flag 0xA8.
-        let Some((hits, end_at, act)) = fire_slot_2(81, 150) else {
+        // Its prop (pack entry 1's model) is an effect object, shown in the hand from START (it follows the hand)
+        // and on the head once fired, gone with the shot.
+        let (mut objs, mut shown, mut last, mut model) = (0, 0, 1, false);
+        let Some((hits, end_at, act)) = fire_slot_with(81, 2, 150, |b, _, _| {
+            model |= b.assets.fighters[0].tech_packs[2]
+                .as_ref()
+                .is_some_and(|p| p.model.is_some());
+            let o = b.roster.scene.eft_objs.iter().count();
+            objs = objs.max(o);
+            last = o;
+            shown += b
+                .roster
+                .scene
+                .eft_objs
+                .iter()
+                .filter(|o| o.obj.flags & 2 != 0)
+                .count();
+        }) else {
             return;
         };
         assert_eq!(hits, [(7730, 0xF)]);
         assert_eq!(end_at, Some(74));
         assert_eq!(act, 0xB);
+        assert!(model && objs == 1 && shown > 10, "{model} {objs} {shown}");
+        assert_eq!(last, 0);
     }
 
     #[test]

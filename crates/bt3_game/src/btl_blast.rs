@@ -343,6 +343,8 @@ pub(crate) struct Scene {
     /// The orb bursts' emitters started, counted for the tests.
     #[cfg(test)]
     pub orb_bursts: usize,
+    /// The effect model objects (`EftObj`): the prop shots' props.
+    pub eft_objs: crate::eft_obj::EftObjs,
     /// The orb bursts' textures (set by the battle): each burst's texture set, first image.
     pub orb_burst_textures: [Option<usize>; 3],
     /// The aura (`gEftAuraPool`, layer 3).
@@ -1018,6 +1020,94 @@ impl Scene {
         }
     }
 
+    /// What the technique effects asked of the other modules (`TechReq`), in order.
+    fn serve_tech_requests(&mut self, w: &mut World) {
+        for req in std::mem::take(&mut self.tech.out.reqs) {
+            use crate::btl_tech_fx::TechReq;
+            match req {
+                TechReq::Flash { wait } => {
+                    self.flashes.start(crate::eft_flash::FlashArg {
+                        color: [255.0; 4],
+                        fade_in: 0.5,
+                        hold: 0.0,
+                        fade_out: 1.0,
+                        wait,
+                    });
+                }
+                // EftDelaySe_Start of the node sound table (five tasks at most).
+                TechReq::NodeSe(side) => {
+                    for delay in [0, 3, 0xA, 0xE, 0x15] {
+                        if self.delay_se.len() < 5 {
+                            self.delay_se.push((side, 0x47, delay));
+                        }
+                    }
+                }
+                TechReq::Streak {
+                    handle,
+                    side,
+                    kind,
+                    color,
+                    angle,
+                } => {
+                    if let Some(cfg) = w.env.streak {
+                        self.streaks.start(cfg, handle, side, kind, color, angle);
+                    }
+                }
+                TechReq::StreakStop(handle) => self.streaks.stop(handle),
+                TechReq::Orb { handle, side } => {
+                    if let Some(cfg) = w.env.orb {
+                        let c = &w.chars[side];
+                        let aura = crate::btl_fx::aura_type(c, w.data[side]);
+                        self.orbs.create(
+                            cfg,
+                            handle,
+                            side,
+                            aura,
+                            w.data[side].height(),
+                            c.pose.dir,
+                            w.libc,
+                        );
+                    }
+                }
+                TechReq::OrbPos { handle, pos } => {
+                    let (n2e, n3) = self.orbs.side_of(handle).map_or(([0.0; 3], [0.0; 3]), |s| {
+                        let o = &w.chars[s].obj;
+                        (o.node_pos(0x2E), o.node_pos(3))
+                    });
+                    self.orbs.set_pos(handle, pos, n2e, n3);
+                }
+                TechReq::OrbBurst(handle) => self.orbs.burst(handle),
+                TechReq::OrbKill(handle) => self.orbs.kill(handle),
+                TechReq::Glow { side, cmd } => {
+                    if let Some(cfg) = w.env.glow {
+                        let chars = &*w.chars;
+                        let node_pos = move |n: u32| chars[side].obj.node_pos(n);
+                        let gc = crate::btl_fx::glow_chr(&chars[side], w.data[side], &node_pos);
+                        self.glows.request(cfg, &gc, cmd, w.libc);
+                    }
+                }
+                TechReq::ObjCreate { handle, model } => {
+                    if let Some(m) =
+                        w.data[model.side].tech_packs[model.slot].and_then(|p| p.model.as_ref())
+                    {
+                        self.eft_objs.create(handle, model, m);
+                    }
+                }
+                TechReq::ObjMtx { handle, mtx } => self.eft_objs.set_mtx(handle, mtx),
+                TechReq::ObjVisible { handle, on } => self.eft_objs.set_visible(handle, on),
+                TechReq::ObjDestroy(handle) => self.eft_objs.destroy(handle),
+                TechReq::Landing { side, pos, scale } => {
+                    #[cfg(test)]
+                    {
+                        self.target_bursts += 1;
+                    }
+                    self.gdust
+                        .spawn_landing(side, pos, scale, w.libc, w.vu0, &w.env.fx.sin_coef);
+                }
+            }
+        }
+    }
+
     /// What a streak field reads of a fighter.
     pub(crate) fn streak_chr(&self, w: &World, side: usize) -> crate::eft_streak::StreakChr {
         let c = &w.chars[side];
@@ -1124,80 +1214,7 @@ impl Scene {
         for dir in self.tech.tints.drain(..) {
             self.tints.start(0, dir, 0.2);
         }
-        for req in std::mem::take(&mut self.tech.out.reqs) {
-            use crate::btl_tech_fx::TechReq;
-            match req {
-                TechReq::Flash { wait } => {
-                    self.flashes.start(crate::eft_flash::FlashArg {
-                        color: [255.0; 4],
-                        fade_in: 0.5,
-                        hold: 0.0,
-                        fade_out: 1.0,
-                        wait,
-                    });
-                }
-                // EftDelaySe_Start of the node sound table (five tasks at most).
-                TechReq::NodeSe(side) => {
-                    for delay in [0, 3, 0xA, 0xE, 0x15] {
-                        if self.delay_se.len() < 5 {
-                            self.delay_se.push((side, 0x47, delay));
-                        }
-                    }
-                }
-                TechReq::Streak {
-                    handle,
-                    side,
-                    kind,
-                    color,
-                    angle,
-                } => {
-                    if let Some(cfg) = w.env.streak {
-                        self.streaks.start(cfg, handle, side, kind, color, angle);
-                    }
-                }
-                TechReq::StreakStop(handle) => self.streaks.stop(handle),
-                TechReq::Orb { handle, side } => {
-                    if let Some(cfg) = w.env.orb {
-                        let c = &w.chars[side];
-                        let aura = crate::btl_fx::aura_type(c, w.data[side]);
-                        self.orbs.create(
-                            cfg,
-                            handle,
-                            side,
-                            aura,
-                            w.data[side].height(),
-                            c.pose.dir,
-                            w.libc,
-                        );
-                    }
-                }
-                TechReq::OrbPos { handle, pos } => {
-                    let (n2e, n3) = self.orbs.side_of(handle).map_or(([0.0; 3], [0.0; 3]), |s| {
-                        let o = &w.chars[s].obj;
-                        (o.node_pos(0x2E), o.node_pos(3))
-                    });
-                    self.orbs.set_pos(handle, pos, n2e, n3);
-                }
-                TechReq::OrbBurst(handle) => self.orbs.burst(handle),
-                TechReq::OrbKill(handle) => self.orbs.kill(handle),
-                TechReq::Glow { side, cmd } => {
-                    if let Some(cfg) = w.env.glow {
-                        let chars = &*w.chars;
-                        let node_pos = move |n: u32| chars[side].obj.node_pos(n);
-                        let gc = crate::btl_fx::glow_chr(&chars[side], w.data[side], &node_pos);
-                        self.glows.request(cfg, &gc, cmd, w.libc);
-                    }
-                }
-                TechReq::Landing { side, pos, scale } => {
-                    #[cfg(test)]
-                    {
-                        self.target_bursts += 1;
-                    }
-                    self.gdust
-                        .spawn_landing(side, pos, scale, w.libc, w.vu0, &w.env.fx.sin_coef);
-                }
-            }
-        }
+        self.serve_tech_requests(w);
         // The techniques' last setting of view 0's blur (EftBlast_UpdateBlur and the others).
         if let Some((alphas, dir)) = self.tech.blur.take() {
             for (i, a) in alphas.into_iter().enumerate() {
@@ -1598,6 +1615,11 @@ impl Scene {
         self.impacts
             .post_update(&mut self.fx, impact_sets, w.paused);
         self.tech.post_update_shots(w, &mut self.fx);
+        self.serve_tech_requests(w);
+        // BtlObj_UpdateAll's effect objects.
+        self.eft_objs.update(w.paused, |r| {
+            w.data[r.side].tech_packs[r.slot].and_then(|p| p.model.as_ref())
+        });
         self.update_records(w);
         self.spawn_impacts(w);
         for (i, chr) in w.chars.iter_mut().enumerate() {
