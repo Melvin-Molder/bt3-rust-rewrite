@@ -248,6 +248,8 @@ pub(crate) struct FighterModel {
     pub(crate) effect: Option<EffectPack>,
     /// The textures and sprite packs of its two ki blast emitter sets.
     pub(crate) blast_assets: [Option<SetAssets>; 2],
+    /// The drain glow's set's assets (`EftAbsorbMgr_Init`).
+    pub(crate) absorb_assets: Option<SetAssets>,
     /// The technique slots' effect packs (`effectPacks`, the second animation file's entries 1..5).
     pub(crate) tech_packs: [Option<TechPack>; 5],
     /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
@@ -606,6 +608,10 @@ pub(crate) fn load_side(
                 fighter.blast_assets[list] =
                     Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
             }
+        }
+        if let Some(set) = &pack.absorb_set {
+            fighter.absorb_assets =
+                Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
         }
     }
     let motions = read(MOTION_FILE + side.anim_chara.max(0) as u32 * 10)?;
@@ -1089,6 +1095,7 @@ fn load_fighter(
         gauge: SideGauge::default(),
         effect: None,
         blast_assets: [None, None],
+        absorb_assets: None,
         tech_packs: Default::default(),
         skill_text: None,
     })
@@ -1215,6 +1222,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         entry: f.entry,
         effect: f.effect.as_ref(),
         blast_assets: std::array::from_fn(|i| f.blast_assets[i].as_ref()),
+        absorb_assets: f.absorb_assets.as_ref(),
         tech_packs: std::array::from_fn(|i| f.tech_packs[i].as_ref()),
         costume: f.costume,
         chara: f.chara,
@@ -3292,6 +3300,60 @@ mod tests {
             })
             .map(|r| fx.counts(Some(r)).iter().sum::<usize>())
             .sum()
+    }
+
+    #[test]
+    fn real_absorbed_blast_glows_at_both_hands() {
+        // Character 103's pack makes the drain glow's manager (pack bit 9, entry 0xB); character 0's does not.
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 103;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..10 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        let data = [
+            side_data(&battle.assets.fighters[0]),
+            side_data(&battle.assets.fighters[1]),
+        ];
+        assert!(crate::btl_blast::absorb_set(&data[0]).is_some());
+        assert!(crate::btl_blast::absorb_set(&data[1]).is_none());
+        let env = battle.assets.env(0, Default::default());
+        // Request 0x37 (a blast was absorbed) after the scene: a glow at both hands, on side 0 only.
+        battle.roster.chars[0].set_fx(0x37);
+        battle.roster.chars[1].set_fx(0x37);
+        battle
+            .roster
+            .post_scene([&data[0], &data[1]], &env, &mut libc);
+        assert_eq!(battle.roster.scene.absorbs[0].count(), (0, 1));
+        assert_eq!(battle.roster.scene.absorbs[1].count(), (0, 0));
+        // It runs the set's emitters at the hands, then ends once nothing of it is alive.
+        let list = crate::eft::SetRef {
+            side: 0,
+            list: crate::eft_absorb::LIST,
+        };
+        let mut most = 0;
+        for _ in 0..300 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            most = most.max(
+                battle
+                    .roster
+                    .scene
+                    .fx
+                    .counts(Some(list))
+                    .iter()
+                    .sum::<usize>(),
+            );
+            if battle.roster.scene.absorbs[0].count() == (0, 0) {
+                break;
+            }
+        }
+        assert!(most > 0, "the glow started nothing");
+        assert_eq!(battle.roster.scene.absorbs[0].count(), (0, 0));
     }
 
     #[test]

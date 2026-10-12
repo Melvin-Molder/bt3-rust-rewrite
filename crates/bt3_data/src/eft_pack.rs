@@ -411,6 +411,8 @@ pub struct EffectPack {
     /// The emitter sets of the ki blast managers (`EftKiBlastMgr_Init`): kind 1 is entry 3, kind 2 entry 4; each
     /// header is entry 1 of its entry. `None` when it cannot be read.
     pub blast_sets: [Option<EmitSet>; 2],
+    /// The drain glow's emitter set (`EftAbsorbMgr_Init`, kind 9): entry 0xB, its header entry 1.
+    pub absorb_set: Option<EmitSet>,
 }
 
 /// `BObjFile_GetEntry`: entry `n` of a pack, `None` when it is empty.
@@ -435,6 +437,7 @@ impl EffectPack {
         Some(Self {
             kind_bits,
             blast_sets: [set(3), set(4)],
+            absorb_set: set(0xB),
         })
     }
 }

@@ -362,6 +362,20 @@ impl Roster {
                 self.scene.stage.bubbles.as_mut(),
                 libc,
             );
+            // BtlFx_UpdateReq38: the drain glow while the drain technique holds request 0x38.
+            if let Some(set) = crate::btl_blast::absorb_set(data[i]) {
+                let node_pos = |n| me.obj.node_pos(n);
+                let c = crate::eft_absorb::AbsorbChr {
+                    node_pos: &node_pos,
+                    event_400: me.anim_test_attr(0x400),
+                };
+                if me.fx_new(0x38) {
+                    self.scene.absorbs[i].start(set, &c);
+                }
+                if me.fx_ended(0x38) {
+                    self.scene.absorbs[i].stop();
+                }
+            }
             me.obj.build_volumes(&data[i].obj);
         }
         self.update_queued_damage(data, env);
@@ -573,6 +587,17 @@ impl Roster {
             }
             me.obj_to_pose();
             cam_update(me, opp, data[i], data[i ^ 1], env, libc);
+            // BtlFx_SpawnReq37: the glow at both hands once a blast was absorbed.
+            if me.test_fx(0x37)
+                && let Some(set) = crate::btl_blast::absorb_set(data[i])
+            {
+                let node_pos = |n| me.obj.node_pos(n);
+                let c = crate::eft_absorb::AbsorbChr {
+                    node_pos: &node_pos,
+                    event_400: false,
+                };
+                self.scene.absorbs[i].start_hands(set, &c);
+            }
             crate::btl_fx::post_scene(me, data[i], env, &mut self.scene.impacts);
             let g = &mut me.gauge;
             if g.health < 10000 {

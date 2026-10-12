@@ -381,6 +381,8 @@ pub(crate) struct SideData<'a> {
     pub effect: Option<&'a EffectPack>,
     /// The decoded textures and sprite packs of the two blast lists' emitter sets.
     pub blast_assets: [Option<&'a crate::eft::SetAssets>; 2],
+    /// The drain glow's set's assets.
+    pub absorb_assets: Option<&'a crate::eft::SetAssets>,
     /// The technique slots' effect packs (`BtlCharApi_GetPlayerEffectPack`).
     pub tech_packs: [Option<&'a crate::btl_tech_fx::TechPack>; 5],
     /// The costume of the side's character (`BtlMember_GetActive()->costume`).
@@ -397,6 +399,7 @@ impl<'a> SideData<'a> {
             0 | 1 => self.blast_assets[l],
             2..=4 => self.tech_packs[l].and_then(|p| p.assets.as_ref()),
             5 | 6 => self.tech_packs[l - 5].and_then(|p| p.assets.as_ref()),
+            crate::eft_absorb::LIST => self.absorb_assets,
             _ => None,
         })
     }

@@ -327,6 +327,8 @@ pub(crate) struct Scene {
     pub shotfx: crate::eft_shotfx::ShotFx,
     /// The impacts (`gEftImpactList`, layer 3).
     pub impacts: crate::eft_impact::Impacts,
+    /// Each fighter's drain glows (its kind 9 manager, layer 2).
+    pub absorbs: [crate::eft_absorb::Absorbs; 2],
     /// The stage effects of layer 0.
     pub stage: crate::stage_fx::StageFx,
 }
@@ -980,6 +982,7 @@ impl Scene {
         for list in &mut self.ki_objs[side] {
             list.clear();
         }
+        self.absorbs[side].reset(&mut self.fx);
         self.tech.reset_side(chars, &mut self.fx, side);
     }
 
@@ -1099,6 +1102,16 @@ impl Scene {
                     }
                 }
             }
+            // Kind 9, the drain glow (the kinds between are not ported).
+            if let Some((_, ctx)) = absorb_ctx(w, side) {
+                let chars = &*w.chars;
+                let node_pos = |n| chars[side].obj.node_pos(n);
+                let c = crate::eft_absorb::AbsorbChr {
+                    node_pos: &node_pos,
+                    event_400: chars[side].anim_test_attr(0x400),
+                };
+                self.absorbs[side].update(&mut self.fx, &c, &ctx, w.paused, w.libc, w.vu0);
+            }
         }
         // Layer 3 (`gEftLayer3Classes`): the ground dust (BtlScene_IsTimeStopped: paused), the speed lines, the
         // vanish lines, the struggle, the discs, the impacts, the blast objects, then the particle modules.
@@ -1193,6 +1206,9 @@ impl Scene {
                         self.ki_objs[side][list][k] = o;
                     }
                 }
+            }
+            if let Some(set) = absorb_set(w.data[side]) {
+                self.absorbs[side].post_update(set, &mut self.fx);
             }
         }
         self.tech.discs.post_update(w, &mut self.fx);
@@ -2090,6 +2106,26 @@ pub(crate) fn spawn_ctx<'s>(
         opp_chara_flags: w.data[opp].tables.params.chara_flags(),
         opp_node3: w.chars[opp].obj.node_pos(3),
     }
+}
+
+/// The drain glow's set, when the character's pack makes the kind 9 manager (`EftChar_Init`: pack bit 9).
+pub(crate) fn absorb_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
+    let pack = data.effect?;
+    if pack.kind_bits & (1 << 9) == 0 {
+        return None;
+    }
+    pack.absorb_set.as_ref()
+}
+
+/// The drain glow's set and what `EftEmit_Spawn` reads of its fighter.
+fn absorb_ctx<'d>(w: &World<'_, 'd>, side: usize) -> Option<(&'d EmitSet, SpawnCtx<'d>)> {
+    let data = w.data[side];
+    let set = absorb_set(data)?;
+    let assets = data.absorb_assets?;
+    Some((
+        set,
+        spawn_ctx(w, side, set, assets, crate::eft_absorb::LIST),
+    ))
 }
 
 /// A side's emitter sets with the impacts' common sets after them.
