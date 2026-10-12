@@ -1278,6 +1278,8 @@ pub struct ScreenVertex {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelBatch {
     pub textures: [usize; 2],
+    /// The fighter's colour mode as the batch is drawn.
+    pub look: ModelLook,
     /// Three vertices per triangle.
     pub vertices: Vec<ScreenVertex>,
 }
@@ -2368,6 +2370,13 @@ impl Battle {
             }
             false
         });
+        // BtlObj_UpdateAll (not while paused): the fighters' colour flash and mode-2 fade step.
+        if !paused {
+            for c in &mut self.roster.chars {
+                let fading = c.obj.flags & 0x4_0000 != 0;
+                c.obj.flash.step(fading);
+            }
+        }
         self.check_stage_change();
         if !paused && !self.loading {
             // BtlStage_Update: StgAmb_Update, then the objects' animations and StgRigid_Update (not while paused or
@@ -2546,9 +2555,17 @@ impl Battle {
             tints.update(self.seq.paused);
             tints.draw_back(&mut under);
         }
-        let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
+        let mut groups: HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>> = HashMap::new();
         for side in 0..2 {
             let model = &self.assets.fighters[side];
+            let Some((light, look)) = model_look(
+                &self.roster.chars[side].obj,
+                model.model.header.flags,
+                self.light_dir,
+                &view,
+            ) else {
+                continue;
+            };
             let nodes = &self.roster.chars[side].obj.nodes;
             let parts = model
                 .model
@@ -2564,7 +2581,8 @@ impl Battle {
                         textures,
                         &node.mtx,
                         &node.parent,
-                        self.light_dir,
+                        light,
+                        look,
                         &view,
                         &mut groups,
                     );
@@ -2573,9 +2591,13 @@ impl Battle {
         }
         let mut batches: Vec<ModelBatch> = groups
             .into_iter()
-            .map(|(textures, vertices)| ModelBatch { textures, vertices })
+            .map(|((textures, look), vertices)| ModelBatch {
+                textures,
+                look,
+                vertices,
+            })
             .collect();
-        batches.sort_by_key(|batch| batch.textures);
+        batches.sort_by_key(|batch| (batch.textures, batch.look));
         // BtlScene_Draw(1), then Ot_Draw.
         let mut texture_updates = Vec::new();
         let effects = {
@@ -2806,6 +2828,92 @@ impl Battle {
             texture_updates,
         }
     }
+}
+
+/// What the colour mode changes in a fighter's draw (`ObjDraw_AddClutPass` over its palettes, the shading of
+/// `ObjDraw_SetLight`), as bytes: the palettes lerp towards (255, 0x44, 0x66) by `fade` / 128 (mode 2's fade),
+/// then get `tint` (mode 6: the colour preset times its alpha / 128) and the flash added; mode 3 draws the
+/// texture unshaded (its ramp, the light file's second texture, has alpha 0 under ALPHA_2 0x48).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModelLook {
+    pub fade: u8,
+    pub tint: [u8; 4],
+    pub flash: [u8; 4],
+    pub unshaded: bool,
+}
+
+/// `ObjDraw_SetLight`'s light direction and the CLUT pass, by the object's colour flag; `None` for the colour
+/// flags whose draw writes no colour (0x100000, 0x200000).
+pub(crate) fn model_look(
+    obj: &crate::btl_obj::Obj,
+    model_flags: u32,
+    stage_light: [f32; 3],
+    view: &View,
+) -> Option<([f32; 3], ModelLook)> {
+    let flags = obj.flags;
+    let m = &view.world2view;
+    let cam_z = [m[0][2], m[1][2], m[2][2]];
+    // The camera's direction to node 3, leaning along the view's x axis (its y replaced by the axis's).
+    let towards = |weight: f32| {
+        let node3 = obj
+            .node(3)
+            .map_or(obj.pos, |n| [n.mtx[3][0], n.mtx[3][1], n.mtx[3][2]]);
+        let mut d = normalize(sub3(view.eye(), node3));
+        d[0] += m[0][0] * 0.7;
+        d[1] = m[1][0];
+        d[2] += m[2][0] * 0.7;
+        let d = scale3(normalize(d), weight);
+        let l = scale3(normalize(stage_light), 1.0 - weight);
+        normalize([d[0] + l[0], d[1] + l[1], d[2] + l[2]])
+    };
+    let light = if flags & 0x1_0000 != 0 {
+        stage_light
+    } else if flags & 0x2_0000 != 0 {
+        cam_z
+    } else if flags & 0x40_0000 != 0 {
+        if model_flags & 0x100_0000 != 0 {
+            cam_z
+        } else {
+            towards(1.0)
+        }
+    } else if flags & 0x8_0000 != 0 {
+        normalize([
+            -m[0][0] - m[0][2] * -0.7,
+            -m[1][0] - m[1][2] * -0.7,
+            -m[2][0] - m[2][2] * -0.7,
+        ])
+    } else if flags & 0x4_0000 != 0 {
+        towards(obj.flash.fade().unwrap_or(0.0))
+    } else {
+        return None;
+    };
+    let mut look = ModelLook {
+        unshaded: flags & 0x8_0000 != 0,
+        ..ModelLook::default()
+    };
+    if let Some(f) = obj.flash.fade() {
+        look.fade = (f * 70.0) as i32 as u8;
+    }
+    if flags & 0x40_0000 != 0 {
+        look.tint = obj.preset[..4]
+            .try_into()
+            .map(|c: [f32; 4]| c.map(|v| v as u32 as u8))
+            .unwrap_or_default();
+    }
+    if let Some((c, f)) = obj.flash.color() {
+        let a = ((f * 128.0) as i32).min(0x80);
+        look.flash = [
+            c[0] as u32 as u8,
+            c[1] as u32 as u8,
+            c[2] as u32 as u8,
+            a as u8,
+        ];
+    }
+    Some((light, look))
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
 /// `BtlObj_IsNodeShown`: whether the geometry on `node` is drawn, by the model's part layout class and the
@@ -3082,21 +3190,23 @@ fn projection() -> (Mtx, Mtx, Mtx) {
 
 /// `ObjDraw_DrawParts` mode 0 for one part and VU1 program 0 on its batches: bone A is the part's node, bone B
 /// its parent; `offset_a` / `offset_b` are their rest positions in model space.
+#[allow(clippy::too_many_arguments)]
 fn draw_part(
     part: &ModelPart,
     textures: &[[usize; 2]],
     mtx_a: &Mtx,
     mtx_b: &Mtx,
     light_dir: [f32; 3],
+    look: ModelLook,
     view: &View,
-    groups: &mut HashMap<[usize; 2], Vec<ScreenVertex>>,
+    groups: &mut HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>>,
 ) {
     // Mtx_MakeNormalLight(light, lightDir, 0, 0): x of light * n is -L . n; Vec3_Normalize clears w.
     let neg_light = scale3(normalize(light_dir), -1.0);
     for (batch, &tex) in part.batches.iter().zip(textures) {
         let mut flags = [false; 2];
         let mut previous: [Option<ScreenVertex>; 2] = [None, None];
-        let out = groups.entry(tex).or_default();
+        let out = groups.entry((tex, look)).or_default();
         for vertex in &batch.vertices {
             let [x, y, z, w] = vertex.position;
             let pa = apply(
@@ -8389,5 +8499,68 @@ mod tests {
         assert_eq!(b.obj.preset[1], 171.0);
         b.obj.set_color_preset(4, Some(2));
         assert_eq!(b.obj.preset[1], 255.0);
+    }
+
+    #[test]
+    fn real_colour_modes_change_the_fighters_draw() {
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        let mut frame =
+            |b: &mut Battle| b.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        // No mode: the stage light, the plain palettes.
+        assert_eq!(battle.roster.chars[0].obj.flags & 0xFF_0000, 0x1_0000);
+        let looks = |f: &BattleFrame| f.models.iter().map(|b| b.look).collect::<Vec<_>>();
+        assert!(
+            looks(&frame(&mut battle))
+                .iter()
+                .all(|l| *l == ModelLook::default())
+        );
+        // Mode 6 (the power-up look): the colour preset added at its alpha 40.
+        let preset = battle.roster.chars[0].obj.preset;
+        battle.roster.chars[0].obj.set_color_mode(6, true);
+        assert_eq!(battle.roster.chars[0].obj.flags & 0xFF_0000, 0x40_0000);
+        let l = looks(&frame(&mut battle));
+        let tint = [preset[0] as u8, preset[1] as u8, preset[2] as u8, 40];
+        assert!(l.iter().any(|l| l.tint == tint));
+        assert!(l.iter().any(|l| *l == ModelLook::default()));
+        // Mode 3 over it (the transformation's flash): unshaded, without the tint.
+        battle.roster.chars[0].obj.set_color_mode(3, true);
+        assert!(
+            looks(&frame(&mut battle))
+                .iter()
+                .any(|l| l.unshaded && l.tint == [0; 4])
+        );
+        battle.roster.chars[0].obj.set_color_mode(3, false);
+        battle.roster.chars[0].obj.set_color_mode(6, false);
+        assert_eq!(battle.roster.chars[0].obj.flags & 0xFF_0000, 0x1_0000);
+        // Mode 2 (a technique's flag 0x8000): its fade rises by tenths to 70 / 128 towards pink, the light turning
+        // to the camera; and a strong white flash for a fifth of a second (stepped once before the draw).
+        battle.roster.chars[0].obj.set_color_mode(2, true);
+        for _ in 0..10 {
+            frame(&mut battle);
+        }
+        battle.roster.chars[0].obj.flash.start(2);
+        let l = looks(&frame(&mut battle));
+        assert!(
+            l.iter()
+                .any(|l| l.fade == 70 && l.flash == [255, 255, 255, 80]),
+            "{l:?}"
+        );
+        // The colour flag 0x40000 makes the aura type 3.
+        let data = side_data(&battle.assets.fighters[0]);
+        assert_eq!(crate::btl_fx::aura_type(&battle.roster.chars[0], &data), 3);
+        battle.roster.chars[0].obj.set_color_mode(7, true);
+        for _ in 0..12 {
+            frame(&mut battle);
+        }
+        assert!(
+            looks(&frame(&mut battle))
+                .iter()
+                .all(|l| *l == ModelLook::default())
+        );
     }
 }

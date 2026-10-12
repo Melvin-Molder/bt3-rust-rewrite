@@ -674,6 +674,9 @@ pub(crate) struct Chr {
     pub blind_level: i32,
     /// `filter`: the screen filter's (radial blur's) strength 0..1, by requests 9 / 0xA.
     pub filter: f32,
+    /// `trigger1E` / `trigger1F`: requests 0x1E / 0x1F flash the model every fourth frame.
+    pub trigger_1e: u32,
+    pub trigger_1f: u32,
     pub recover_presses: i32,
     pub react_count: [u8; 0x32],
     pub react_timer: [i8; 0x32],
@@ -846,6 +849,8 @@ impl Chr {
             blind_timer: 0,
             blind_level: 0,
             filter: 0.0,
+            trigger_1e: 0,
+            trigger_1f: 0,
             recover_presses: 0,
             react_count: [0; 0x32],
             react_timer: [0; 0x32],
@@ -1642,6 +1647,8 @@ impl Chr {
         self.obj.root_pos = old.root_pos;
         self.obj.lean = old.lean;
         self.obj.flags = old.flags;
+        self.obj.color_modes = old.color_modes;
+        self.obj.flash = old.flash;
         self.obj.area = old.area;
         self.anim.sub = -1;
         self.flags.clear(0xBE);

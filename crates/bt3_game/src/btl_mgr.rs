@@ -362,7 +362,9 @@ impl Roster {
                 libc,
             );
             crate::btl_fx::screen_filter(me, &mut self.scene.blurs);
+            crate::btl_fx::trigger_obj_1e_1f(me);
             crate::btl_fx::update_obj_flag80(me, data[i]);
+            crate::btl_fx::obj_mask_event_400(me, data[i]);
             self.scene.spawn_held_disc(me, data[i]);
             // BtlFx_UpdateChargeFx: the charge aura while request 7 holds, its burst on request 8.
             if let Some(set) = crate::btl_blast::charge_set(data[i]) {
@@ -441,6 +443,7 @@ impl Roster {
             }
             me.flags.set_stage(10);
             crate::btl_snd::after_hit_sounds(me, data[i], env, frame);
+            crate::btl_fx::trigger_obj_1d(me);
             let impacts = &mut self.scene.impacts;
             if let Some(pos) =
                 crate::btl_fx::after_hits(me, opp, data[i], data[i ^ 1], env, impacts)

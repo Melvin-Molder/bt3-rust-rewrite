@@ -177,6 +177,44 @@ pub(crate) fn screen_filter(me: &mut Chr, blurs: &mut crate::stg_blur::Blurs) {
     }
 }
 
+/// `BtlFx_TriggerObjReq1D`: request 0x1D flashes the model yellow.
+pub(crate) fn trigger_obj_1d(me: &mut Chr) {
+    if me.test_fx(0x1D) {
+        me.obj.flash.start(0);
+    }
+}
+
+/// `BtlFx_TriggerObjReq1E` / `1F`: while held, the model flashes white (strong white) every fourth frame.
+pub(crate) fn trigger_obj_1e_1f(me: &mut Chr) {
+    if me.test_fx(0x1E) {
+        if me.trigger_1e == 0 {
+            me.obj.flash.start(1);
+        }
+        me.trigger_1e = (me.trigger_1e + 1) % 4;
+    } else {
+        me.trigger_1e = 0;
+    }
+    if me.test_fx(0x1F) {
+        if me.trigger_1f == 0 {
+            me.obj.flash.start(2);
+        }
+        me.trigger_1f = (me.trigger_1f + 1) % 4;
+    } else {
+        me.trigger_1f = 0;
+    }
+}
+
+/// `BtlFx_SetObjMaskOnEvent400`: animation event 0x400 in skill 0x18 turns colour mode 2 on.
+pub(crate) fn obj_mask_event_400(me: &mut Chr, data: &SideData) {
+    let cur = me.act.current;
+    if (0xFD..0x103).contains(&cur)
+        && data.tables.skill().id(crate::btl_act::id_class(cur)) == 0x18
+        && me.anim_test_attr(0x400)
+    {
+        me.obj.set_color_mode(2, true);
+    }
+}
+
 /// `BtlFx_UpdateObjFlag80`: with parameter flag 0x200000, ability 0x79 shows model part 4 (object flag 0x80, the
 /// geometry on node 0x6F); without either it is cleared, but only while the object is drawn (flag 2).
 pub(crate) fn update_obj_flag80(me: &mut Chr, data: &SideData) {

@@ -21,7 +21,7 @@ use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin};
 use bt3_data::gs::RgbaTexture;
 
-use crate::battle::ModelBatch;
+use crate::battle::{ModelBatch, ModelLook};
 use crate::eft::{EffectBlend, EffectTri};
 use crate::hud::{HudBlend, HudPrim};
 use crate::stage_draw::StageBatch;
@@ -51,6 +51,39 @@ pub struct GsModelMaterial {
     #[texture(2)]
     #[sampler(3)]
     shade: Handle<Image>,
+    #[uniform(4)]
+    look: ModelLookUniform,
+}
+
+/// The colour mode's palette operations (0..1 raw colours, amounts as the GS's FIX / 128) and the flags.
+#[derive(Clone, Copy, Default, bevy::render::render_resource::ShaderType)]
+struct ModelLookUniform {
+    /// rgb towards which the palettes lerp, by w.
+    fade: Vec4,
+    /// rgb added, times w; then the flash's.
+    tint: Vec4,
+    flash: Vec4,
+    /// x: unshaded.
+    flags: Vec4,
+}
+
+impl From<ModelLook> for ModelLookUniform {
+    fn from(l: ModelLook) -> Self {
+        let add = |c: [u8; 4]| {
+            Vec4::new(
+                f32::from(c[0]) / 255.0,
+                f32::from(c[1]) / 255.0,
+                f32::from(c[2]) / 255.0,
+                f32::from(c[3]) / 128.0,
+            )
+        };
+        Self {
+            fade: Vec4::new(1.0, 68.0 / 255.0, 102.0 / 255.0, f32::from(l.fade) / 128.0),
+            tint: add(l.tint),
+            flash: add(l.flash),
+            flags: Vec4::new(if l.unshaded { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
+        }
+    }
 }
 
 impl Material2d for GsModelMaterial {
@@ -569,7 +602,7 @@ fn stage_alpha_ref(group: usize) -> f32 {
 pub struct ModelTextures {
     base: Vec<Handle<Image>>,
     shade: Vec<Handle<Image>>,
-    materials: HashMap<[usize; 2], Handle<GsModelMaterial>>,
+    materials: HashMap<([usize; 2], ModelLook), Handle<GsModelMaterial>>,
 }
 
 #[derive(Component)]
@@ -1102,13 +1135,14 @@ pub fn sync_models(
             .shade
             .push(images.add(model_image(texture, ImageAddressMode::ClampToEdge)));
     }
-    let mut material = |key: [usize; 2], textures: &mut ModelTextures| {
+    let mut material = |key: ([usize; 2], ModelLook), textures: &mut ModelTextures| {
         if let Some(handle) = textures.materials.get(&key) {
             return handle.clone();
         }
         let handle = materials.add(GsModelMaterial {
-            base: textures.base[key[0]].clone(),
-            shade: textures.shade[key[1]].clone(),
+            base: textures.base[key.0[0]].clone(),
+            shade: textures.shade[key.0[1]].clone(),
+            look: key.1.into(),
         });
         textures.materials.insert(key, handle.clone());
         handle
@@ -1123,7 +1157,7 @@ pub fn sync_models(
         if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
             write_batch_mesh(&mut mesh, batch);
         }
-        let wanted = material(batch.textures, &mut textures);
+        let wanted = material((batch.textures, batch.look), &mut textures);
         if handle.0 != wanted {
             handle.0 = wanted;
         }
@@ -1138,7 +1172,7 @@ pub fn sync_models(
         commands.spawn((
             ModelSlot(index),
             Mesh2d(meshes.add(mesh)),
-            MeshMaterial2d(material(batch.textures, &mut textures)),
+            MeshMaterial2d(material((batch.textures, batch.look), &mut textures)),
             Transform::default(),
         ));
     }

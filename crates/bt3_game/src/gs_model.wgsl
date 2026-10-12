@@ -18,6 +18,17 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var shade_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var shade_sampler: sampler;
 
+// The colour mode (ObjDraw_AddClutPass, ObjDraw_SetLight): the palettes lerp towards fade.rgb by fade.w (ALPHA
+// 0x64), then get tint.rgb * tint.w and flash.rgb * flash.w added (ALPHA 0x68), each clamped as the GS does;
+// flags.x draws the texture unshaded.
+struct ModelLook {
+    fade: vec4<f32>,
+    tint: vec4<f32>,
+    flash: vec4<f32>,
+    flags: vec4<f32>,
+}
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> look: ModelLook;
+
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let low = c / 12.92;
     let high = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
@@ -30,9 +41,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef VERTEX_COLORS
 #ifdef VERTEX_UVS
     let q = in.color.z;
-    let base = textureSample(base_texture, base_sampler, in.uv / q).rgb;
+    var base = textureSample(base_texture, base_sampler, in.uv / q).rgb;
+    base = clamp(base + (look.fade.rgb - base) * look.fade.w, vec3<f32>(0.0), vec3<f32>(1.0));
+    base = min(base + look.tint.rgb * look.tint.w, vec3<f32>(1.0));
+    base = min(base + look.flash.rgb * look.flash.w, vec3<f32>(1.0));
     let shade = textureSample(shade_texture, shade_sampler, vec2<f32>(in.color.x / q, 0.5)).rgb;
-    color = vec4<f32>(srgb_to_linear(clamp(base - shade, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
+    var lit = clamp(base - shade, vec3<f32>(0.0), vec3<f32>(1.0));
+    if look.flags.x > 0.5 {
+        lit = base;
+    }
+    color = vec4<f32>(srgb_to_linear(lit), 1.0);
 #endif
 #endif
 #ifdef TONEMAP_IN_SHADER

@@ -1699,6 +1699,9 @@ impl Ctx<'_, '_> {
         } else {
             self.me.recover_presses = 0;
         }
+        if self.me.is_dead() && self.me.obj.flags & 0x4_0000 != 0 {
+            self.me.obj.set_color_mode(2, false);
+        }
         if self.env.mode == 1 && self.me.input_off_timer > 0 {
             self.me.input_off_timer -= 1;
             self.set(0x11E);
@@ -1895,6 +1898,9 @@ impl Ctx<'_, '_> {
             self.me.pose.fall_speed = 0.0;
             if win {
                 self.me.stun_timer = 0;
+                if self.me.obj.flags & 0x4_0000 != 0 {
+                    self.me.obj.set_color_mode(2, false);
+                }
             } else {
                 self.me.blind_timer = 0;
                 self.me.blind_level = 0;
@@ -7214,7 +7220,8 @@ impl Ctx<'_, '_> {
     }
 
     /// `BtlSuper_Begin`: speed and fall stopped, the technique flags cleared, the use counted, in flight; class 4
-    /// only when forced. The colour mode of flag 0x8000 is not ported.
+    /// only when forced. A technique with flag 0x8000 turns colour mode 2 on (not in skill 0x18's state, flag
+    /// 0x98).
     /// `BtlSuper_PlayStartSound`: sound 0x2B (an Ultimate Blast only when forced).
     fn super_start_sound(&mut self, cls: i32, force: bool) {
         if force || cls != 4 {
@@ -7238,6 +7245,9 @@ impl Ctx<'_, '_> {
         }
         if !self.flag(0xF) {
             self.held(0xE);
+        }
+        if self.tech().flags(cls) & 0x8000 != 0 && !self.flag(0x98) {
+            self.me.obj.set_color_mode(2, true);
         }
     }
 
@@ -7312,8 +7322,8 @@ impl Ctx<'_, '_> {
         self.me.anim_set_step(step);
     }
 
-    /// `BtlSuper_Leave`: unless another technique action follows, the cooldown starts and the effect requests and
-    /// the input lock are dropped.
+    /// `BtlSuper_Leave`: unless another technique action follows, the cooldown starts, the effect requests and
+    /// the input lock are dropped, and flag 0x8000's colour mode 2 ends.
     fn super_leave(&mut self, cls: i32) {
         if is_technique_id(self.requested()) {
             return;
@@ -7321,6 +7331,12 @@ impl Ctx<'_, '_> {
         self.me.tech_delay = self.tech().cooldown_frames(cls);
         self.me.flags.clear_range(0xA7, 0xAA);
         self.clear(0x11F);
+        if self.tech().flags(cls) & 0x8000 != 0
+            && !self.flag(0x98)
+            && self.me.obj.flags & 0x4_0000 != 0
+        {
+            self.me.obj.set_color_mode(2, false);
+        }
         match self.tech().id(cls) {
             0x268 => self.me.skill_count3 = 0,
             0x2CD => self.me.boost_stock = 0,
@@ -10225,10 +10241,11 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// `BtlAct_EndFlag98`: skill id 0x18's state ends (the model's colour mode is not ported).
+    /// `BtlAct_EndFlag98`: skill id 0x18's state ends with its colour mode 2.
     fn end_flag98(&mut self) {
         if self.flag(0x98) {
             self.clear(0x98);
+            self.me.obj.set_color_mode(2, false);
             self.me.end_stat_kind4(self.data);
         }
     }
@@ -10247,7 +10264,7 @@ impl Ctx<'_, '_> {
 
     /// Actions 0xFD / 0xFE (`BtlAct_SkillBasic`): the skill motion, the skill applied at the start (or at its end
     /// with attribute 0x80), turned about with attributes 2 / 4; then action 0xB; attribute 0x40000 asks for the
-    /// common camera cut 5. The model's colour mode (id 0x18) is not ported.
+    /// common camera cut 5. Skill 0x18's leave ends its colour mode 2 (outside its state, flag 0x98).
     fn skill_basic(&mut self, phase: u32) {
         let cls = self.current_class();
         let attr = self.skill().flags(cls);
@@ -10306,6 +10323,14 @@ impl Ctx<'_, '_> {
             if self.skill().id(cls) == 1 {
                 self.set(0x137);
             }
+        }
+        if phase == LEAVE
+            && self.skill().id(cls) == 0x18
+            && !self.flag(0x98)
+            && self.me.obj.flags & 0x4_0000 != 0
+        {
+            self.me.obj.set_color_mode(2, false);
+            return;
         }
         if phase == LEAVE && self.skill().id(cls) == 1 {
             self.held(cls as u32 + 0x4C);

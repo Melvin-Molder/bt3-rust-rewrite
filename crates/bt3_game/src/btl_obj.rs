@@ -247,8 +247,12 @@ pub(crate) struct Obj {
     pub lean: [f32; 4],
     /// Object flags (+0xA40).
     pub flags: u32,
-    /// `state.modeBits`: the colour mode requests (`BtlObj_SetColorMode`; 3 the black silhouette). Kept, not drawn.
+    /// `state.modeBits`: the colour mode requests (`BtlObj_SetColorMode`), the one in force mirrored into `flags`
+    /// bits 16..23: 2 a technique's look (flag 0x40000), 3 the transformation flash's unshaded body (0x80000), 6 the
+    /// power-up look (0x400000).
     pub color_modes: u32,
+    /// `work->flash`: the colour flash and the mode-2 fade (`BtlObjFlash_*`, `BtlObjFade_*`).
+    pub flash: ObjFlash,
     /// `state.preset`: the colour preset row (`BtlObj_SetColorPreset`: the tint colour and two alphas the colour
     /// modes blend with). Kept, not drawn.
     pub preset: [f32; 5],
@@ -263,7 +267,17 @@ pub(crate) struct Obj {
 }
 
 impl Obj {
+    /// `BtlObj_InitFlags`' colour flag on top of the flags `new` gives.
+    fn init_color(mut self) -> Self {
+        self.flags |= self.default_color();
+        self
+    }
+
     pub(crate) fn new(data: &ObjData, radius: f32) -> Self {
+        Self::new_plain(data, radius).init_color()
+    }
+
+    fn new_plain(data: &ObjData, radius: f32) -> Self {
         let mut node_index = [None; 0x80];
         for (i, part) in data.model.parts.iter().enumerate() {
             if let Some(slot) = node_index.get_mut(usize::from(part.node)) {
@@ -300,6 +314,7 @@ impl Obj {
             // BtlObj_InitFlags for a fighter (type 0): visible (2) among others.
             flags: 0x1200_0016,
             color_modes: 0,
+            flash: ObjFlash::default(),
             preset: [0.0; 5],
             color_a: data.model.header.flags & 0x100_0000 != 0,
             area: -1,
@@ -394,16 +409,41 @@ impl Obj {
         }
     }
 
-    /// `BtlObj_SetColorMode`: a requester's bit on or off; bit 7 clears them all.
+    /// The colour flag of no mode: 0x20000 for a model with flag 0x1000000, else 0x10000.
+    fn default_color(&self) -> u32 {
+        if self.color_a { 0x2_0000 } else { 0x1_0000 }
+    }
+
+    /// `BtlObj_SetColorMode`: a requester's bit on or off, then the colour flag (bits 16..23) of the one in force,
+    /// by priority 3, 2, 6, 0, 1, 4, 5; bit 7, or none left, the default.
     pub(crate) fn set_color_mode(&mut self, bit: u32, on: bool) {
         if on {
             self.color_modes |= 1 << bit;
         } else {
             self.color_modes &= !(1 << bit);
         }
-        if bit == 7 {
+        let m = self.color_modes;
+        let color = if bit == 7 || m == 0 {
+            None
+        } else {
+            [
+                (8, 0x8_0000),
+                (4, 0x4_0000),
+                (0x40, 0x40_0000),
+                (1, 0x1_0000),
+                (2, 0x2_0000),
+                (0x10, 0x10_0000),
+                (0x20, 0x20_0000),
+            ]
+            .into_iter()
+            .find(|&(b, _)| m & b != 0)
+            .map(|(_, c)| c)
+        };
+        let color = color.unwrap_or_else(|| {
             self.color_modes = 0;
-        }
+            self.default_color()
+        });
+        self.flags = (self.flags & !0xFF_0000) | color;
     }
 
     /// `BtlCharApi_GetNodePos`: node `id`'s world position (the object's position without the node).
@@ -1216,6 +1256,28 @@ mod tests {
     }
 
     #[test]
+    fn the_object_flash_fades_over_a_fifth_of_a_second_and_mode_2_fades_by_tenths() {
+        let mut f = ObjFlash::default();
+        assert_eq!((f.color(), f.fade()), (None, None));
+        f.start(2);
+        assert_eq!(f.color(), Some(([255.0, 255.0, 255.0, 96.0], 0.75)));
+        for _ in 0..3 {
+            f.step(true);
+        }
+        let (_, a) = f.color().unwrap();
+        assert!((a - 0.375).abs() < 1e-5, "{a}");
+        assert!((f.fade().unwrap() - 0.3).abs() < 1e-6);
+        for _ in 0..3 {
+            f.step(false);
+        }
+        // Six thirtieths and three tenths in f32 leave slivers, as in the original: one more frame of each.
+        assert!(f.color().unwrap().1 < 1e-6);
+        assert!(f.fade().unwrap() < 1e-6);
+        f.step(false);
+        assert_eq!((f.color(), f.fade()), (None, None));
+    }
+
+    #[test]
     fn sphere_touches_a_box_by_face_edge_and_corner_distance() {
         let obb = unit_obb([0.0; 3]);
         assert!(sphere_contacts_obb([1.5, 0.0, 0.0], 1.0, &obb));
@@ -1250,5 +1312,46 @@ mod tests {
         assert_eq!(mask_to_node(0x100 | 0x80), 0x14);
         assert_eq!(mask_to_node(0x8000), 0);
         assert_eq!(mask_to_node(0), 0);
+    }
+}
+
+/// `BobjFlash`: a 0.2 s colour flash over the model's palettes, and the fade of colour mode 2.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ObjFlash {
+    time: f32,
+    color: [f32; 4],
+    fade: f32,
+}
+
+impl ObjFlash {
+    /// `BtlObjFlash_Start`: kind 0 yellow, 1 white, 2 strong white (alpha 32 / 32 / 96).
+    pub(crate) fn start(&mut self, kind: u32) {
+        self.time = 0.2;
+        self.color = match kind {
+            1 => [255.0, 255.0, 255.0, 32.0],
+            2 => [255.0, 255.0, 255.0, 96.0],
+            _ => [255.0, 255.0, 0.0, 32.0],
+        };
+    }
+
+    /// `BtlObjFlash_Step` and `BtlObjFade_Step`: the flash counts down a frame; the fade rises by a tenth while
+    /// `fading` (object flag 0x40000), else falls.
+    pub(crate) fn step(&mut self, fading: bool) {
+        self.time = (self.time - 1.0 / 30.0).max(0.0);
+        self.fade = if fading {
+            (self.fade + 0.1).min(1.0)
+        } else {
+            (self.fade - 0.1).max(0.0)
+        };
+    }
+
+    /// `BtlObjFlash_GetColor`: the colour and its strength (time / 0.2 * alpha / 128) while it runs.
+    pub(crate) fn color(&self) -> Option<([f32; 4], f32)> {
+        (self.time > 0.0).then(|| (self.color, self.time / 0.2 * self.color[3] * (1.0 / 128.0)))
+    }
+
+    /// `BtlObjFade_Get`: the fade when not 0.
+    pub(crate) fn fade(&self) -> Option<f32> {
+        (self.fade != 0.0).then_some(self.fade)
     }
 }
