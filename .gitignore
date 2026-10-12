@@ -148,6 +148,7 @@
 !/crates/bt3_game/src/gsc.rs
 !/crates/bt3_game/src/btl_event.rs
 !/crates/bt3_game/src/btl_script.rs
+!/crates/bt3_game/src/options.rs
 !/crates/bt3_game/src/get_win.rs
 !/crates/bt3_game/src/stg_blur.rs
 !/crates/bt3_game/src/post.rs

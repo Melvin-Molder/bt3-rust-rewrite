@@ -14,7 +14,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 - [x] Title screen and attract battle (`Title_Run`, mode 1)
 - [x] Main menu (`MainMenu_Run`, mode 4)
 - [x] Saves: load, save, sound options taking effect
-- [ ] Options screen (`OptMode_Main`, mode 62; src/menu/option.c)
+- [x] Options screen (`OptMode_Main`, mode 62; src/menu/option.c)
 - [ ] Character reference (`CharRefMode_Main`, mode 60; src/menu/char_reference.c, src/ui/char_viewer.c)
 
 ### Story: Dragon History (`Hist_Main`, modes 3, 6..10)

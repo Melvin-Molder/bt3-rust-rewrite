@@ -105,6 +105,7 @@ mod mode_menu;
 mod model_draw;
 mod movie;
 mod obj_shadow;
+mod options;
 mod password;
 mod post;
 mod post_draw;
@@ -189,6 +190,8 @@ enum Scene {
     BootCard(Box<boot_card::BootCardScreen>),
     /// `Dc_Main` mode 53: the Data Center's top menu.
     DcMenu(Box<dc_menu::DcMenuScreen>),
+    /// `OptMode_Main`, progress mode 62: the options screen.
+    Options(Box<options::OptionScreen>),
     /// `Dc_Main` mode 54: the password screen.
     DcPass(Box<dc_password::DcPassScreen>),
     /// `Dc_Main` mode 55: the custom character list.
@@ -251,6 +254,7 @@ impl Scene {
             | Scene::HistResult(_)
             | Scene::HistSave(_)
             | Scene::HistOutro(_)
+            | Scene::Options(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
                 2.0 * VBLANK_SECONDS
@@ -385,6 +389,7 @@ struct Game {
     chara_table: Vec<u8>,
     /// The Data Center's screens (archive 8, sections 1 and 4) and its fields of `gProgress`.
     dc_menu: Option<dc_menu::DcMenuData>,
+    options: Option<options::OptionData>,
     replay_menu: Option<replay_menu::ReplayMenuData>,
     dc_pass: Option<dc_password::DcPassData>,
     dc_list: Option<dc_list::DcListData>,
@@ -742,6 +747,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             card_res,
             chara_table,
             dc_menu: None,
+            options: None,
             replay_menu: None,
             dc_pass: None,
             dc_list: None,
@@ -1156,6 +1162,10 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                     player.level = sound::fade_out_step(player.level);
                 }
             }
+            TitleSound::BgmStop => {
+                stop_player(&mut game.bgm, commands);
+                game.pending_bgm = None;
+            }
             TitleSound::BgmFadeOutStep => {
                 if let Some(player) = &mut game.bgm {
                     player.level = sound::fade_out_step(player.level);
@@ -1390,6 +1400,30 @@ fn run_frames(
                     game.scene = Scene::Logos(LogoSequence::new());
                 }
             }
+            Scene::Options(screen) => {
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.random,
+                    &mut game.font,
+                    &mut mc,
+                );
+                let done = screen.is_done();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    // OptMode_Main: Adx_StopAll, back to the main menu.
+                    stop_all(game, &mut commands);
+                    start_main_menu(game, &mut commands, &mut audio);
+                }
+            }
             Scene::DcMenu(screen) => {
                 let mut mc = mcflow::McEnv {
                     card: &mut game.card,
@@ -1597,6 +1631,7 @@ fn run_frames(
                             game.dc.replay_cursor = 0;
                             start_dc_menu(game, &mut commands);
                         }
+                        MainMenuResult::Mode(62) => start_options(game, &mut commands),
                         MainMenuResult::Mode(mode) => {
                             info!("progress mode {mode} is not ported yet");
                             game.scene = Scene::Black;
@@ -2496,6 +2531,48 @@ fn start_duel_menu(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the duel menu: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `OptMode_Main` mode 62: `Bgm_Play(BGM_OPTION)`, then `Option_Run(1)` from `gMenuArc10`.
+fn start_options(game: &mut Game, commands: &mut Commands) {
+    if game.options.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, options::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    options::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| options::OptionAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout = options::OptionLayout::new(background, dialog, |key| firsts[&key]);
+                game.options = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the options screen: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.options.as_ref().expect("options assets are loaded");
+    match options::OptionScreen::new(data, &game.save, game.card_res.as_deref()) {
+        Ok(screen) => {
+            play_bgm(game, commands, options::BGM_FILE_ID);
+            game.scene = Scene::Options(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the options screen: {error}");
             game.scene = Scene::Black;
         }
     }

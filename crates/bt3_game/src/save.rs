@@ -39,6 +39,11 @@ const OFS_RULE: usize = 0xC34;
 const OFS_FLAGS: usize = 0x1608;
 const OFS_KEY: usize = 0x160C;
 const OFS_KEY_EDIT: usize = 0x164C;
+const OFS_CAM_DIST_MODE: usize = 0x1694;
+const OFS_CAM_SHAKE_OFF: usize = 0x1698;
+const OFS_SCREEN_X: usize = 0x169C;
+const OFS_SCREEN_Y: usize = 0x16A0;
+const OFS_SOUND_MODE: usize = 0x16A4;
 const OFS_BGM_VOLUME: usize = 0x16A8;
 const OFS_SE_VOLUME: usize = 0x16AC;
 const OFS_CUSTOM: usize = 0x1808;
@@ -196,6 +201,79 @@ impl SaveData {
     pub fn raise_stock_level(&mut self) {
         self.set_word(OFS_STOCK_LEVEL, self.word(OFS_STOCK_LEVEL) + 1);
         self.set_word(OFS_SHOP_FLAGS, self.word(OFS_SHOP_FLAGS) | 1);
+    }
+
+    /// `flags`: `SAVE_FLAG_VOICE` (1), each pad's vibration (2, 4) and own key assignment (8, 0x10).
+    pub fn flags(&self) -> i32 {
+        self.word(OFS_FLAGS)
+    }
+
+    pub fn set_flags(&mut self, v: i32) {
+        self.set_word(OFS_FLAGS, v);
+    }
+
+    /// `camDistMode` (0..2) and `camShakeOff`: the options' screen page.
+    pub fn cam_dist_mode(&self) -> i32 {
+        self.word(OFS_CAM_DIST_MODE)
+    }
+
+    pub fn set_cam_dist_mode(&mut self, v: i32) {
+        self.set_word(OFS_CAM_DIST_MODE, v);
+    }
+
+    pub fn cam_shake_off(&self) -> i32 {
+        self.word(OFS_CAM_SHAKE_OFF)
+    }
+
+    pub fn set_cam_shake_off(&mut self, v: i32) {
+        self.set_word(OFS_CAM_SHAKE_OFF, v);
+    }
+
+    /// `screenX` / `screenY`: the display offset, -16..16 each.
+    pub fn screen_pos(&self) -> (i32, i32) {
+        (self.word(OFS_SCREEN_X), self.word(OFS_SCREEN_Y))
+    }
+
+    pub fn set_screen_pos(&mut self, x: i32, y: i32) {
+        self.set_word(OFS_SCREEN_X, x);
+        self.set_word(OFS_SCREEN_Y, y);
+    }
+
+    /// `soundMode`: 0 stereo, 1 mono.
+    pub fn sound_mode(&self) -> i32 {
+        self.word(OFS_SOUND_MODE)
+    }
+
+    pub fn set_sound_mode(&mut self, v: i32) {
+        self.set_word(OFS_SOUND_MODE, v);
+    }
+
+    /// `bgmVolume` / `seVolume`: 0..9.
+    pub fn volumes(&self) -> (i32, i32) {
+        (self.word(OFS_BGM_VOLUME), self.word(OFS_SE_VOLUME))
+    }
+
+    pub fn set_volumes(&mut self, bgm: i32, se: i32) {
+        self.set_word(OFS_BGM_VOLUME, bgm);
+        self.set_word(OFS_SE_VOLUME, se);
+    }
+
+    /// `key[pad][k]`: the key assignment in force, and `keyEdit[pad][k]`, the copy the options edit.
+    #[cfg(test)]
+    pub fn key(&self, pad: usize, k: usize) -> i32 {
+        self.word(OFS_KEY + pad * 0x20 + k * 4)
+    }
+
+    pub fn set_key(&mut self, pad: usize, k: usize, v: i32) {
+        self.set_word(OFS_KEY + pad * 0x20 + k * 4, v);
+    }
+
+    pub fn key_edit(&self, pad: usize, k: usize) -> i32 {
+        self.word(OFS_KEY_EDIT + pad * 0x20 + k * 4)
+    }
+
+    pub fn set_key_edit(&mut self, pad: usize, k: usize, v: i32) {
+        self.set_word(OFS_KEY_EDIT + pad * 0x20 + k * 4, v);
     }
 
     /// `money`.

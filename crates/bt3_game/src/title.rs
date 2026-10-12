@@ -210,6 +210,8 @@ pub enum TitleSound {
     Bgm(u32),
     /// `Bgm_FadeOutStep()` alone.
     BgmFadeOutStep,
+    /// `Bgm_Stop`.
+    BgmStop,
     /// `Voice_FadeOutStep(0)` and `Bgm_FadeOutStep()`.
     FadeOutStep,
     /// `Voice_FadeOutStep(0)` alone.
