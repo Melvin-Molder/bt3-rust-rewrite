@@ -213,6 +213,31 @@ pub struct HistProgress {
     pub sub_menu: i32,
     pub sub_menu_item: i32,
     pub level: i32,
+    /// What winning the battle gives (`gProgress->reward`, set by its script's command 16).
+    pub reward: HistReward,
+}
+
+/// `HistReward`: by level the points; the items, characters, stages and episodes (counted through all sagas)
+/// it gives, -1 none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistReward {
+    pub points: [i32; 3],
+    pub item: [i32; 3],
+    pub chara: [i32; 3],
+    pub stage: [i32; 3],
+    pub episode: [i32; 3],
+}
+
+impl Default for HistReward {
+    fn default() -> Self {
+        Self {
+            points: [0; 3],
+            item: [-1; 3],
+            chara: [-1; 3],
+            stage: [-1; 3],
+            episode: [-1; 3],
+        }
+    }
 }
 
 /// How `HistSel_Run` ended.

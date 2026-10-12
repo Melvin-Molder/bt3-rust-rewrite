@@ -79,7 +79,9 @@ mod eft_weather;
 mod fade;
 mod flash;
 mod font;
+mod get_win;
 mod gfx_water;
+mod hist_result;
 mod hist_select;
 mod hud;
 mod hud_combo;
@@ -200,6 +202,8 @@ enum Scene {
     HistSelect(Box<hist_select::HistSelScreen>),
     /// `ModeMenu_Run(2)`, progress mode 7: a saga's episode list.
     ModeMenu(Box<mode_menu::ModeMenuScreen>),
+    /// `HistResult_Run(3)`, progress mode 8: the story battle's result.
+    HistResult(Box<hist_result::HistResultScreen>),
     Black,
     Loading(LoadingScreen),
     /// `Battle_Load`: the loading screen while the battle's files are read.
@@ -234,6 +238,7 @@ impl Scene {
             | Scene::TeamSelect(_)
             | Scene::HistSelect(_)
             | Scene::ModeMenu(_)
+            | Scene::HistResult(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
                 2.0 * VBLANK_SECONDS
@@ -340,6 +345,9 @@ struct Game {
     /// The episode list's own section and the first texture of each of its files; the sagas' packs, by saga.
     mode_menu: Option<(mode_menu::ModeMenuData, HashMap<menu_res::FileKey, usize>)>,
     sagas: HashMap<usize, mode_menu::SagaData>,
+    hist_result: Option<hist_result::HistResultData>,
+    /// `--story-result win|lose`: start at the story battle's result screen.
+    story_result: Option<bool>,
     char_select: Option<CharSelData>,
     /// The character select's fields of `gProgress`.
     char_progress: CharSelProgress,
@@ -388,6 +396,9 @@ struct Game {
     se_voice_paused: bool,
     /// The voice entity was spawned this update, so it is not in the world yet.
     voice_fresh: bool,
+    /// The same for streamed-SE player 0, and whether its last file played to its end.
+    stream_fresh: bool,
+    stream_ended: bool,
     /// The last voice played to its end (`ADXT_STAT_PLAYEND`).
     voice_ended: bool,
     /// The files being decoded for the voice players, with their volumes.
@@ -421,6 +432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut forced_type = None;
     let mut skip_to_title = false;
     let mut skip_to_menu = false;
+    let mut story_result = None;
     let mut skip_to_battle = false;
     let mut battle_stage = 0;
     let mut seed = None;
@@ -437,6 +449,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if argument == "--menu" {
             skip_to_title = true;
             skip_to_menu = true;
+        } else if argument == "--story-result" {
+            // A debugging aid while story battles are not ported: their result screen, saga 0's first episode.
+            story_result = Some(
+                match arguments
+                    .next()
+                    .map(|v| v.to_string_lossy().into_owned())
+                    .as_deref()
+                {
+                    Some("win") => true,
+                    Some("lose") => false,
+                    _ => return Err("--story-result requires win or lose".into()),
+                },
+            );
+            skip_to_title = true;
         } else if argument == "--fps" {
             log_fps = true;
         } else if argument == "--shot" {
@@ -680,6 +706,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hist: hist_select::HistProgress::default(),
             mode_menu: None,
             sagas: HashMap::new(),
+            hist_result: None,
+            story_result,
             char_select: None,
             char_progress: CharSelProgress::default(),
             chr_table,
@@ -710,6 +738,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pending_stream_se: [None, None],
             se_voice_paused: false,
             voice_fresh: false,
+            stream_fresh: false,
+            stream_ended: false,
             voice_ended: false,
             pending_voice: [None, None],
             picture: None,
@@ -1020,6 +1050,23 @@ fn voice_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
     }
 }
 
+/// `StreamSe_GetStat(0)`, as `voice_stat`.
+fn stream_se_stat(game: &mut Game, players: &Query<(), With<AudioPlayer>>) -> i32 {
+    if game.pending_stream_se[0].is_some() {
+        return 2;
+    }
+    match game.stream_se[0] {
+        Some(player) if game.stream_fresh || players.contains(player.entity) => 3,
+        Some(_) => {
+            game.stream_se[0] = None;
+            game.stream_ended = true;
+            anim::VOICE_PLAYEND
+        }
+        None if game.stream_ended => anim::VOICE_PLAYEND,
+        None => 0,
+    }
+}
+
 /// `Adx_StopAll`: `Adx_ResumeSeVoice`, then every player stops.
 fn stop_all(game: &mut Game, commands: &mut Commands) {
     game.se_voice_paused = false;
@@ -1034,6 +1081,7 @@ fn stop_all(game: &mut Game, commands: &mut Commands) {
     }
     game.pending_bgm = None;
     game.voice_ended = false;
+    game.stream_ended = false;
 }
 
 /// What a menu frame asked of the sound players.
@@ -1236,6 +1284,7 @@ fn run_frames(
         player.level = sound::out_volume(sound::CH_BGM, 0x40);
     }
     game.voice_fresh = false;
+    game.stream_fresh = false;
     start_pending_voice(&mut game, &mut commands, &mut audio);
     start_pending_stream_se(&mut game, &mut commands, &mut audio);
     start_pending_map(&mut game, &mut commands, &mut audio);
@@ -1250,6 +1299,10 @@ fn run_frames(
                     game.scene = Scene::Black;
                 }
             }
+        } else if let Some(won) = game.story_result {
+            load_menu_bank(&mut game);
+            game.save_loaded = true;
+            start_hist_result(&mut game, won, 0);
         } else if game.skip_to_menu {
             load_menu_bank(&mut game);
             game.save_loaded = true;
@@ -1273,6 +1326,7 @@ fn run_frames(
         game.se.update();
         let game = &mut *game;
         let stat = voice_stat(game, &players);
+        let stream_stat = stream_se_stat(game, &players);
         // Gfx_EndFrame(vsyncs) of the screen this frame runs.
         let vsyncs = if game.scene.frame_seconds() > VBLANK_SECONDS {
             2
@@ -1602,6 +1656,30 @@ fn run_frames(
                         mode_menu::ModeMenuResult::Back => start_hist_select(game, &mut commands),
                         mode_menu::ModeMenuResult::Battle(script) => {
                             info!("story battle script {script} is not ported yet");
+                            game.scene = Scene::Black;
+                        }
+                    }
+                }
+            }
+            Scene::HistResult(screen) => {
+                let frame = screen.run_frame(pressed, stream_stat, &mut game.save, &mut game.font);
+                let result = screen.result();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    stop_all(game, &mut commands);
+                    match result {
+                        hist_result::HistResultResult::Lost => {
+                            start_mode_menu(game, &mut commands, 8)
+                        }
+                        hist_result::HistResultResult::Won => {
+                            info!(
+                                "progress mode 10 (the story mode's save screen) is not ported yet"
+                            );
+                            game.scene = Scene::Black;
+                        }
+                        hist_result::HistResultResult::Cleared => {
+                            info!("progress mode 9 (the saga's outro) is not ported yet");
                             game.scene = Scene::Black;
                         }
                     }
@@ -2039,6 +2117,10 @@ fn start_pending_stream_se(
             "a streamed sound",
         ) {
             game.stream_se[i] = Some(p);
+            if i == 0 {
+                game.stream_fresh = true;
+                game.stream_ended = false;
+            }
         }
     }
 }
@@ -2521,6 +2603,32 @@ impl char_select::PictureLoader for Pictures<'_> {
         Some(index)
     }
 
+    fn texture_file(&mut self, file_id: u32) -> Option<usize> {
+        // Cached apart from the files read as portraits.
+        let key = file_id | 0x8000_0000;
+        if let Some(&index) = self.cache.get(&key) {
+            return Some(index);
+        }
+        let textures = self.load(file_id)?;
+        let first = self.textures.len();
+        for texture in textures {
+            push_to(
+                self.textures,
+                self.samplers,
+                texture.clone(),
+                Sampling::Linear,
+            );
+            push_to(
+                self.textures,
+                self.samplers,
+                texture,
+                Sampling::LinearRepeat,
+            );
+        }
+        self.cache.insert(key, first);
+        Some(first)
+    }
+
     fn picture(&mut self, file_id: u32) -> Option<usize> {
         if let Some(&index) = self.cache.get(&file_id) {
             return Some(index);
@@ -2669,28 +2777,20 @@ fn start_hist_select(game: &mut Game, commands: &mut Commands) {
     }
 }
 
-/// `Hist_Main` mode 7: `ModeMenu_Run(2)` for the saga `game.hist.sub_menu`, from `gMenuArc2` and the saga's pack
-/// (it starts its own music); `prev_mode` is the mode it comes from.
-fn start_mode_menu(game: &mut Game, commands: &mut Commands, prev_mode: i32) {
-    let saga = game.hist.sub_menu.clamp(0, 7) as usize;
-    let load = |game: &Game, id: u32, section: Option<usize>| {
-        Iso9660::open(&game.iso_path)
-            .map_err(Into::into)
-            .and_then(|mut image| read_file(&mut image, id))
-            .and_then(|file| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-                Ok(match section {
-                    Some(n) => bpe::decode(pack_section(&file, n)?)?,
-                    None => bpe::decode(&file)?,
-                })
-            })
-    };
+/// `File_LoadSync(baseFile + 0x10 + saga)` + `Sprite_Unpack`: the saga's own pack (with the episode list's section,
+/// whose textures its layout shares); false (and a black screen) when they cannot be read.
+fn load_saga(game: &mut Game, saga: usize) -> bool {
     if game.mode_menu.is_none() {
-        let loaded = load(
-            game,
-            hist_select::ARCHIVE_FILE_ID,
-            Some(mode_menu::ARCHIVE_SECTION),
-        )
-        .and_then(|res| mode_menu::ModeMenuAssets::parse(&res));
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, hist_select::ARCHIVE_FILE_ID))
+            .and_then(|file| {
+                Ok(bpe::decode(pack_section(
+                    &file,
+                    mode_menu::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| mode_menu::ModeMenuAssets::parse(&res));
         match loaded {
             Ok(assets) => {
                 let mut data = assets.data;
@@ -2701,33 +2801,107 @@ fn start_mode_menu(game: &mut Game, commands: &mut Commands, prev_mode: i32) {
             Err(error) => {
                 error!("cannot load the episode list: {error}");
                 game.scene = Scene::Black;
-                return;
+                return false;
             }
         }
     }
-    if !game.sagas.contains_key(&saga) {
-        let loaded = load(game, mode_menu::SAGA_FILE + saga as u32, None)
-            .and_then(|res| mode_menu::SagaAssets::parse(saga, &res));
+    if game.sagas.contains_key(&saga) {
+        return true;
+    }
+    let loaded = Iso9660::open(&game.iso_path)
+        .map_err(Into::into)
+        .and_then(|mut image| read_file(&mut image, mode_menu::SAGA_FILE + saga as u32))
+        .and_then(|file| Ok(bpe::decode(&file)?))
+        .and_then(|res| mode_menu::SagaAssets::parse(saga, &res));
+    match loaded {
+        Ok(assets) => {
+            let mut data = assets.data;
+            let background = register_picture(game, assets.background);
+            let own = register_files(game, assets.files);
+            let screen = &game.mode_menu.as_ref().expect("episode list is loaded").1;
+            data.layout = mode_menu::SagaLayout::new(saga, background, |key| {
+                own.get(&key)
+                    .or_else(|| screen.get(&key))
+                    .copied()
+                    .unwrap_or(0)
+            });
+            game.sagas.insert(saga, data);
+            true
+        }
+        Err(error) => {
+            error!("cannot load saga {saga}'s pack: {error}");
+            game.scene = Scene::Black;
+            false
+        }
+    }
+}
+
+/// `Hist_Main` mode 8: `HistResult_Run(3)` after a story battle, won or lost (`ball` the dragon ball it found,
+/// 1-based, 0 none).
+fn start_hist_result(game: &mut Game, won: bool, ball: i32) {
+    let saga = game.hist.sub_menu.clamp(0, 7) as usize;
+    if !load_saga(game, saga) {
+        return;
+    }
+    if game.hist_result.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, hist_select::ARCHIVE_FILE_ID))
+            .and_then(|file| {
+                Ok(bpe::decode(pack_section(
+                    &file,
+                    hist_result::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| hist_result::HistResultAssets::parse(&res));
         match loaded {
             Ok(assets) => {
                 let mut data = assets.data;
                 let background = register_picture(game, assets.background);
-                let own = register_files(game, assets.files);
-                let screen = &game.mode_menu.as_ref().expect("episode list is loaded").1;
-                data.layout = mode_menu::SagaLayout::new(saga, background, |key| {
-                    own.get(&key)
-                        .or_else(|| screen.get(&key))
-                        .copied()
-                        .unwrap_or(0)
-                });
-                game.sagas.insert(saga, data);
+                let firsts = register_files(game, assets.files);
+                data.layout = hist_result::HistResultLayout::new(background, |key| firsts[&key]);
+                game.hist_result = Some(data);
             }
             Err(error) => {
-                error!("cannot load saga {saga}'s pack: {error}");
+                error!("cannot load the story result screen: {error}");
                 game.scene = Scene::Black;
                 return;
             }
         }
+    }
+    // The saga pack's section 2 entry 1 (the episode list's image 36).
+    let picture = game.sagas[&saga].layout.flash.get(36).copied().flatten();
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    let data = game.hist_result.as_ref().expect("result screen is loaded");
+    match hist_result::HistResultScreen::new(
+        data,
+        &game.hist,
+        won,
+        ball,
+        picture,
+        &mut game.save,
+        &mut loader,
+        &mut game.random,
+    ) {
+        Ok(screen) => game.scene = Scene::HistResult(Box::new(screen)),
+        Err(error) => {
+            error!("cannot start the story result screen: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Hist_Main` mode 7: `ModeMenu_Run(2)` for the saga `game.hist.sub_menu`, from `gMenuArc2` and the saga's pack
+/// (it starts its own music); `prev_mode` is the mode it comes from.
+fn start_mode_menu(game: &mut Game, commands: &mut Commands, prev_mode: i32) {
+    let saga = game.hist.sub_menu.clamp(0, 7) as usize;
+    if !load_saga(game, saga) {
+        return;
     }
     let (data, _) = game.mode_menu.as_ref().expect("episode list is loaded");
     let mut sounds = Vec::new();

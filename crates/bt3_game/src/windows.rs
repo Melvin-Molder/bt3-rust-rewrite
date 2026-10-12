@@ -75,6 +75,24 @@ impl TextBox {
         self
     }
 
+    /// `TextBox_SetOffset`.
+    pub fn with_offset(mut self, x: i32, y: i32) -> Self {
+        (self.x, self.y) = (x, y);
+        self
+    }
+
+    /// `TextBox_SetColor`.
+    pub fn with_color(mut self, rgba: [u8; 4]) -> Self {
+        self.color = Some(rgba);
+        self
+    }
+
+    /// `TextBox_SetLineOffsets`: extra y for texts of one to five rows (all 0 drops them).
+    pub fn with_line_y(mut self, rows: [i32; 5]) -> Self {
+        self.line_y = (rows != [0; 5]).then_some(rows);
+        self
+    }
+
     /// `TextBox_AttachLine(flash, clip, 0, 0, line, box)`: hangs line `line` of `text` on the clip as `tag`. A negative
     /// line or a missing clip takes the text off the clip.
     pub fn attach_line(

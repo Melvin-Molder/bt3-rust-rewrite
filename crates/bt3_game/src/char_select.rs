@@ -630,6 +630,10 @@ pub enum CharSelResult {
 pub trait PictureLoader {
     fn portrait(&mut self, file_id: u32) -> Option<usize>;
     fn picture(&mut self, file_id: u32) -> Option<usize>;
+    /// Every texture of a file as clamped / wrapping pairs: the first one's index.
+    fn texture_file(&mut self, _file_id: u32) -> Option<usize> {
+        None
+    }
 }
 
 /// `CharSelSide`.

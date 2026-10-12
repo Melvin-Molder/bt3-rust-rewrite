@@ -44,6 +44,9 @@ const OFS_SE_VOLUME: usize = 0x16AC;
 const OFS_CUSTOM: usize = 0x1808;
 const OFS_REC: usize = 0x2D40;
 const OFS_ITEM: usize = 0x2EC8;
+const OFS_MONEY: usize = 0x3028;
+/// `SAVE_MONEY_MAX`.
+const MONEY_MAX: i32 = 9_999_999;
 /// `SAVE_FLAG_DEFAULT` and `SAVE_VOLUME_DEFAULT`.
 const FLAG_DEFAULT: i32 = 7;
 const VOLUME_DEFAULT: i32 = 9;
@@ -171,6 +174,31 @@ impl SaveData {
     /// `slot[n].val[k]`: 0 the listed episodes, 1 the cleared ones, 2 the new ones (bit per episode).
     pub fn slot_val(&self, n: usize, k: usize) -> i32 {
         self.word(OFS_SLOT + n * 0x10 + 4 + k * 4)
+    }
+
+    /// `item[n]`: bit 0 owned, bit 1 new.
+    pub fn item(&self, n: usize) -> u8 {
+        self.image.get(OFS_ITEM + n).copied().unwrap_or(0)
+    }
+
+    /// `Save_AddItem`: an item not owned yet becomes owned and new.
+    pub fn add_item(&mut self, n: usize) {
+        if let Some(b) = self.image.get_mut(OFS_ITEM + n)
+            && *b & 1 == 0
+        {
+            *b |= 3;
+        }
+    }
+
+    /// `money`.
+    pub fn money(&self) -> i32 {
+        self.word(OFS_MONEY)
+    }
+
+    /// `Save_AddMoney`: clamped to 0..9,999,999.
+    pub fn add_money(&mut self, amount: i32) {
+        let v = self.money().saturating_add(amount).clamp(0, MONEY_MAX);
+        self.set_word(OFS_MONEY, v);
     }
 
     pub fn set_slot_val(&mut self, n: usize, k: usize, v: i32) {

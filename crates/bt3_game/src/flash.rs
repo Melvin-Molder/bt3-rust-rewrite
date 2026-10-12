@@ -131,6 +131,7 @@ pub const QUAD_MASK_SET: u32 = 0x40;
 /// Flash_ClipSetFlags `props` bits.
 pub const PROP_PLAY: u32 = 0x001;
 pub const PROP_VISIBLE: u32 = 0x002;
+pub const PROP_ADD: u32 = 0x020;
 pub const PROP_MASK: u32 = 0x080;
 pub const PROP_MASK_SET: u32 = 0x100;
 pub const PROP_REPEAT: u32 = 0x200;
@@ -589,7 +590,7 @@ impl Flash {
                 (0x004, OV_FLIPX),
                 (0x008, OV_FLIPY),
                 (0x010, OV_NO_OFS),
-                (0x020, OV_ADD),
+                (PROP_ADD, OV_ADD),
                 (0x040, OV_SUB),
                 (PROP_MASK, OV_MASK),
                 (PROP_MASK_SET, OV_MASK_SET),
