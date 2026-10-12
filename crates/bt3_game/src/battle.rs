@@ -131,6 +131,9 @@ pub struct BattleAssets {
     pub(crate) impact_sets: Vec<crate::eft_impact::ImpactSet>,
     /// `EftTransformMgr_Init`: the transformation effect's eight sets (empty when one does not load).
     pub(crate) transform_sets: Vec<crate::eft_impact::ImpactSet>,
+    /// `EftGlowMgr_Init`: the power-up glow's settings and textures.
+    pub(crate) glow_cfg: Option<crate::eft_glow::GlowCfg>,
+    pub(crate) glow_textures: crate::eft_glow::GlowTextures,
     /// `gEftStage->sprite`: the stage pack's entry 0x14 texture (the sun the transformation of kind 5 shows),
     /// among the effect textures, on a stage that has it.
     pub(crate) stage_sun: Option<usize>,
@@ -379,6 +382,8 @@ pub fn load(
         spdline_texture: None,
         impact_sets: Vec::new(),
         transform_sets: Vec::new(),
+        glow_cfg: None,
+        glow_textures: crate::eft_glow::GlowTextures::default(),
         stage_sun: None,
         stage_pack12: None,
         stage_pack14: None,
@@ -499,6 +504,44 @@ pub fn load(
     }
     if impact_sets.len() == crate::eft_impact::SET_ENTRIES.len() {
         assets.impact_sets = impact_sets;
+    }
+    // EftGlowMgr_Init: the settings (common entry 7); entry 9's image under each palette of its first nine
+    // entries (the aura types), its image 8 under palettes 8 and 9 (the textured variant), entry 8's first.
+    assets.glow_cfg =
+        bt3_data::eft_pack::common_entry(&common_fx, 7).and_then(crate::eft_glow::GlowCfg::parse);
+    if let Some(entry) = bt3_data::eft_pack::common_entry(&common_fx, 9)
+        && let Ok(res) = TextureResource::parse(entry)
+    {
+        let mut push = |t: Option<RgbaTexture>| {
+            t.map(|t| {
+                assets.effect_textures.push(t);
+                assets.effect_textures.len() - 1
+            })
+        };
+        if let Some(img) = res.entries.first() {
+            for clut in res.entries.iter().take(9) {
+                let t = bt3_data::gs::decode_sprite_texture_with_clut(img, clut).ok();
+                assets.glow_textures.plain.push(push(t));
+            }
+        }
+        if let Some(img) = res.entries.get(8) {
+            for (k, slot) in assets.glow_textures.textured.iter_mut().enumerate() {
+                let t = res
+                    .entries
+                    .get(8 + k)
+                    .and_then(|clut| bt3_data::gs::decode_sprite_texture_with_clut(img, clut).ok());
+                *slot = push(t);
+            }
+        }
+    }
+    if let Some(entry) = bt3_data::eft_pack::common_entry(&common_fx, 8)
+        && let Ok(res) = TextureResource::parse(entry)
+        && let Some(e) = res.entries.first()
+    {
+        assets.glow_textures.pair = Some(assets.effect_textures.len());
+        assets
+            .effect_textures
+            .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
     }
     // EftTransformMgr_Init.
     let mut transform_sets = Vec::new();
@@ -1313,6 +1356,7 @@ impl BattleAssets {
             fx: &self.fx_tables,
             impact: &self.impact_sets,
             transform: &self.transform_sets,
+            glow: self.glow_cfg.as_ref(),
             change_allowed: self.change_allowed,
             team: self.team,
             team_count: self.team_count,
@@ -2499,7 +2543,28 @@ impl Battle {
                 self.seq.paused,
                 &mut *libc,
             );
-            // Layer 3: the speed lines, the vanish lines, then the particle modules.
+            // Layer 3: the glow (not of a hidden fighter; at 0.3 in its own view with object flag bit 21), the speed
+            // lines, the vanish lines, then the particle modules.
+            if let Some(cfg) = &self.assets.glow_cfg {
+                let chars = &self.roster.chars;
+                self.roster.scene.glows.draw(
+                    cfg,
+                    &self.assets.glow_textures,
+                    &mut ot,
+                    &ctx,
+                    |chr| {
+                        let o = &chars[chr].obj;
+                        if o.flags & 2 == 0 {
+                            None
+                        } else if (demo || chr == 0) && o.flags & 0x20_0000 != 0 {
+                            Some(0.3)
+                        } else {
+                            Some(1.0)
+                        }
+                    },
+                    [0, 1].map(|s| chars[s].act.current == 0x33),
+                );
+            }
             self.roster
                 .scene
                 .spdlines
@@ -3723,12 +3788,17 @@ mod tests {
         let (mut trails, mut streaks, mut speed_rays, mut vanish) = (0, 0, 0, 0);
         let (mut sparks, mut spark_objects) = (std::collections::BTreeSet::new(), 0);
         let mut blast_impacts = std::collections::BTreeSet::new();
+        let (mut glow, mut glow_mode, mut glow_ended) = (0, false, false);
         for _ in 0..5400 {
             battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
             dust = dust.max(battle.roster.scene.gdust.fighter_parts());
             vanish = vanish.max(battle.roster.scene.shotfx.count());
             sparks.extend(battle.roster.scene.impacts.ids(0));
             blast_impacts.extend(battle.roster.scene.impacts.ids(1));
+            let (quads, on) = battle.roster.scene.glows.state(1);
+            glow = glow.max(quads);
+            glow_mode |= battle.roster.chars[1].obj.color_modes & 0x40 != 0;
+            glow_ended |= glow > 0 && !on;
             spark_objects = spark_objects.max(impact_objects(&battle.roster.scene.fx));
             let (t, s) = battle.roster.scene.spdlines.counts();
             trails = trails.max(t);
@@ -3765,6 +3835,11 @@ mod tests {
         );
         // Its ki blasts and techniques leave blast impacts where they hit.
         assert!(!blast_impacts.is_empty(), "{blast_impacts:?}");
+        // Its dashes (request 4) raise the power-up glow, colour mode 6 on, and it fades away after.
+        assert!(
+            glow > 20 && glow_mode && glow_ended,
+            "{glow} {glow_mode} {glow_ended}"
+        );
         assert!(min_gap < start_gap - 10.0, "the CPU did not close in");
         assert!(
             battle.roster.chars[0].gauge.health < health,

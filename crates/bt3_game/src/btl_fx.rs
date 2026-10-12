@@ -7,6 +7,114 @@ use crate::btl_tech_volley::{mathf_cos, mathf_sin};
 use crate::eft::{V3, add, dot, scale3};
 use crate::eft_impact::{ImpactArg, Impacts};
 
+/// `BtlMember_HasAnyListedAbility`: one of the aura colour abilities.
+pub(crate) fn has_any_listed_ability(me: &Chr) -> bool {
+    [
+        0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x74,
+    ]
+    .into_iter()
+    .any(|a| me.has_ability(a))
+}
+
+/// `BtlParam_GetAuraKind`: the parameter's +3, replaced by 0..10 by abilities 0x4D..0x53, 0x74, 0x54..0x56 (the
+/// first held in that order).
+pub(crate) fn aura_kind(me: &Chr, data: &SideData) -> i32 {
+    const BY_ABILITY: [(i32, i32); 11] = [
+        (0x4D, 0),
+        (0x4E, 1),
+        (0x4F, 2),
+        (0x50, 3),
+        (0x51, 4),
+        (0x52, 5),
+        (0x53, 6),
+        (0x74, 7),
+        (0x54, 8),
+        (0x55, 9),
+        (0x56, 10),
+    ];
+    BY_ABILITY
+        .into_iter()
+        .find(|&(a, _)| me.has_ability(a))
+        .map_or(i32::from(data.tables.params.u8_at(3) as i8), |(_, k)| k)
+}
+
+/// `BtlCharApi_GetAuraType`: 3 with object flag 0x40000, else the aura kind.
+pub(crate) fn aura_type(me: &Chr, data: &SideData) -> i32 {
+    if me.obj.flags & 0x4_0000 != 0 {
+        3
+    } else {
+        aura_kind(me, data)
+    }
+}
+
+/// `BtlCharApi_GetActionFxKind`: 3 rising (0x17, 0xF3), 4 falling (0x18, 0xBB), 5 the techniques' sequences
+/// (0x12D..0x12F), else 1.
+pub(crate) fn action_fx_kind(me: &Chr) -> i32 {
+    match me.act.current {
+        0xBB | 0x18 => 4,
+        0x17 | 0xF3 => 3,
+        0x12D..=0x12F => 5,
+        _ => 1,
+    }
+}
+
+/// What the power-up glow reads of a fighter.
+pub(crate) fn glow_chr<'a>(
+    me: &Chr,
+    data: &SideData,
+    node_pos: &'a dyn Fn(u32) -> V3,
+) -> crate::eft_glow::GlowChr<'a> {
+    crate::eft_glow::GlowChr {
+        side: me.player,
+        height: data.height(),
+        aura_type: aura_type(me, data),
+        param_flags: data.tables.params.chara_flags(),
+        fx_kind: action_fx_kind(me),
+        dir: me.pose.dir,
+        rot: me.pose.rot,
+        fall_speed: me.pose.fall_speed,
+        moved: me.pose.moved,
+        node_pos,
+    }
+}
+
+/// `BtlFx_UpdatePowerUpLook` (without parameter flag 0x10, or with an aura colour ability): request 5 removes
+/// the glow, request 4 starts it (object colour mode 6 on) and its end fades it (mode 6 off).
+pub(crate) fn power_up_look(
+    me: &mut Chr,
+    data: &SideData,
+    env: &Env,
+    glows: &mut crate::eft_glow::Glows,
+    libc: &mut crate::rng::LibcRandom,
+) {
+    if data.tables.params.flags() & 0x10 != 0 && !has_any_listed_ability(me) {
+        return;
+    }
+    let cmd = if me.test_fx(5) {
+        me.obj.set_color_mode(6, false);
+        [Some(2), None]
+    } else {
+        let mut cmds = [None, None];
+        if me.fx_new(4) {
+            me.obj.set_color_mode(6, true);
+            cmds[0] = Some(0);
+        }
+        if me.fx_ended(4) {
+            me.obj.set_color_mode(6, false);
+            cmds[1] = Some(1);
+        }
+        cmds
+    };
+    let Some(cfg) = env.glow else {
+        return;
+    };
+    for c in cmd.into_iter().flatten() {
+        let node_pos = |n| me.obj.node_pos(n);
+        let gc = glow_chr(me, data, &node_pos);
+        glows.request(cfg, &gc, c, libc);
+    }
+}
+
 /// `BtlScene_GetCharScale`.
 fn char_scale(data: &SideData) -> f32 {
     data.height() / 19.35

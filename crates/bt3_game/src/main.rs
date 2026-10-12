@@ -39,6 +39,7 @@ mod eft_chain;
 mod eft_charge;
 mod eft_gdust;
 mod eft_geyser;
+mod eft_glow;
 mod eft_impact;
 mod eft_link;
 mod eft_part10;

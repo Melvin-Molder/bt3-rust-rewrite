@@ -469,6 +469,8 @@ pub(crate) struct Env<'a> {
     pub impact: &'a [crate::eft_impact::ImpactSet],
     /// The transformation effect's emitter sets of the common effect pack.
     pub transform: &'a [crate::eft_impact::ImpactSet],
+    /// The power-up glow's settings (common effect entry 7).
+    pub glow: Option<&'a crate::eft_glow::GlowCfg>,
     /// `BattleSide_GetChangeAllowed` by player.
     pub change_allowed: [i32; 2],
     /// `BattleSide.members` (character, costume) by player, `memberCount` of them, and `switchEnabled`.
