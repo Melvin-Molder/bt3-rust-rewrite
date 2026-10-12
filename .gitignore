@@ -135,6 +135,7 @@
 !/crates/bt3_game/src/btl_mgr.rs
 !/crates/bt3_game/src/btl_obj.rs
 !/crates/bt3_game/src/btl_obj_chain.rs
+!/crates/bt3_game/src/btl_head.rs
 !/crates/bt3_game/src/hud.rs
 !/crates/bt3_game/src/hud_combo.rs
 !/crates/bt3_game/src/hud_gauge.rs

@@ -8703,4 +8703,76 @@ mod tests {
         }
         assert!(most > 0.01, "{most}");
     }
+
+    #[test]
+    fn real_heads_turn_towards_the_opponent() {
+        let Some(mut battle) = fight_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        // Goku's limits follow his chain parameters (section 0x17): yaw 70, up 34, down 6, neck -18, head 11.
+        let lim = battle.assets.fighters[0].tables.chain.clone().unwrap();
+        assert_eq!(
+            (
+                lim.head_yaw_max,
+                lim.head_up_max,
+                lim.head_down_max,
+                lim.neck_pitch,
+                lim.head_pitch
+            ),
+            (70, 34, 6, -18, 11)
+        );
+        for _ in 0..10 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        // In the fighting stance the chest is turned aside: the opponent straight ahead is outside the window that
+        // starts the tracking, so the head keeps the motion's pose.
+        assert!(!battle.roster.chars[0].look.tracking);
+        assert!(battle.roster.chars[0].obj.head_weight < 0.01);
+        // Round the fighter at head height, the opponent somewhere within the window (and within 90 degrees of the
+        // heading) starts it: the weights ease up to 1 and the head and neck turn.
+        let data = side_data(&battle.assets.fighters[0]);
+        let me0 = battle.roster.chars[0].clone();
+        let mut found = None;
+        for k in 0..36 {
+            let a = k as f32 * 10f32.to_radians();
+            let mut me = me0.clone();
+            let mut opp = battle.roster.chars[1].clone();
+            opp.snap_mask = 0;
+            opp.pose.pos = [
+                me.pose.pos[0] + a.sin() * 150.0,
+                me.pose.pos[1] - 10.0,
+                me.pose.pos[2] + a.cos() * 150.0,
+            ];
+            me.look.enabled = true;
+            for _ in 0..30 {
+                crate::btl_head::update_head(&mut me, &opp, &data);
+            }
+            if me.look.tracking {
+                found = Some(me);
+                break;
+            }
+        }
+        let mut me = found.expect("no direction starts the tracking");
+        assert!(me.obj.head_weight > 0.99 && me.obj.neck_weight > 0.99);
+        assert_ne!(me.obj.head_rot, [0.0, 0.0, 0.0, 1.0]);
+        me.obj.calc_matrices(&data.obj);
+        let turned = me.obj.node(0x2E).unwrap().mtx;
+        let plain = me0.obj.node(0x2E).unwrap().mtx;
+        assert!((0..3).any(|r| (0..3).any(|c| (plain[r][c] - turned[r][c]).abs() > 1e-3)));
+        // Without the look enabled (no looking action this frame) the weights ease back down.
+        me.look.enabled = false;
+        let opp = battle.roster.chars[1].clone();
+        crate::btl_head::update_head(&mut me, &opp, &data);
+        assert!(me.obj.head_weight < 0.71);
+        // A technique's start resets it at once.
+        crate::btl_head::reset_look(&mut me, &data);
+        assert_eq!(
+            (me.obj.head_weight, me.obj.head_rot),
+            (0.0, [0.0, 0.0, 0.0, 1.0])
+        );
+        assert!((me.look.height - data.height() * 0.7).abs() < 1e-4);
+    }
 }

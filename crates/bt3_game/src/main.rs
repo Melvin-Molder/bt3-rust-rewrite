@@ -9,6 +9,7 @@ mod btl_chr;
 mod btl_clash;
 mod btl_flags;
 mod btl_fx;
+mod btl_head;
 mod btl_hit;
 mod btl_input;
 mod btl_ki_obj;

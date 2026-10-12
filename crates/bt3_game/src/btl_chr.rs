@@ -672,6 +672,8 @@ pub(crate) struct Chr {
     pub unk_ff0: i32,
     pub blind_timer: i32,
     pub blind_level: i32,
+    /// The head tracking (`look`).
+    pub look: crate::btl_head::Look,
     /// `filter`: the screen filter's (radial blur's) strength 0..1, by requests 9 / 0xA.
     pub filter: f32,
     /// `trigger1E` / `trigger1F`: requests 0x1E / 0x1F flash the model every fourth frame.
@@ -849,6 +851,7 @@ impl Chr {
             unk_ff0: 0,
             blind_timer: 0,
             blind_level: 0,
+            look: crate::btl_head::Look::default(),
             filter: 0.0,
             trigger_1e: 0,
             trigger_1f: 0,
@@ -913,6 +916,7 @@ impl Chr {
         chr.flags.set_held(5);
         chr.pose_to_obj(true);
         chr.anim_play(data, 0, 0.0);
+        crate::btl_head::reset_look(&mut chr, data);
         chr.obj.sample_pose(&data.obj);
         chr.obj.calc_matrices(&data.obj);
         chr.form.allowed = env.change_allowed[player];
@@ -1617,6 +1621,7 @@ impl Chr {
     /// not ported.
     pub(crate) fn on_stage_loaded(&mut self, data: &SideData, env: &Env) {
         self.pose = Pose::default();
+        crate::btl_head::reset_look(self, data);
         self.place_at_start(data, env);
         self.flags.clear(0xE);
         self.flags.set_held(0xF);

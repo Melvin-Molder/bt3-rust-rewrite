@@ -98,7 +98,7 @@ fn turn(m: &Mtx, v: V4) -> V4 {
 }
 
 /// `Vec3_RotateAxis` (Rodrigues, `Mathf_Sin` / `Mathf_Cos`), the source's w kept.
-fn rotate_axis(v: V4, k: V4, angle: f32) -> V4 {
+pub(crate) fn rotate_axis(v: V4, k: V4, angle: f32) -> V4 {
     let (s, c) = (mathf_sin(angle), mathf_cos(angle));
     let d = dot3(k, v) * (1.0 - c);
     let x = [
@@ -132,7 +132,7 @@ fn acos(x: f32) -> f32 {
 }
 
 /// `Quat_FromAxisAngle`: identity for a null axis.
-fn q_axis_angle(x: f32, y: f32, z: f32, angle: f32) -> Q {
+pub(crate) fn q_axis_angle(x: f32, y: f32, z: f32, angle: f32) -> Q {
     let len = (x * x + y * y + z * z).sqrt();
     if len > 0.000_001 {
         let half = angle * 0.5;
@@ -158,7 +158,7 @@ fn q_slerp_identity(q: Q, t: f32) -> Q {
 }
 
 /// `Quat_FromVectors`: the shortest rotation from `from` to `to`, scaled by `t`.
-fn q_from_vectors(from: V4, to: V4, t: f32) -> Q {
+pub(crate) fn q_from_vectors(from: V4, to: V4, t: f32) -> Q {
     let (a, b) = (norm3(from), norm3(to));
     let axis = [
         a[1] * b[2] - a[2] * b[1],
@@ -188,7 +188,7 @@ fn q_conjugate_by(q: Q, r: Q) -> Q {
 }
 
 /// `Quat_Slerp` along the shorter arc.
-fn q_slerp(a: Q, b: Q, t: f32) -> Q {
+pub(crate) fn q_slerp(a: Q, b: Q, t: f32) -> Q {
     let mut qb = b;
     let mut c = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
     if c < 0.0 {

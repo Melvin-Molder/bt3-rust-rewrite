@@ -150,6 +150,7 @@ impl Roster {
             chr.flags.set_held(0xF);
             chr.flags.set_held(5);
             chr.flags.clear(0x125);
+            crate::btl_head::reset_look(chr, data[i]);
             chr.place_at_start(data[i], env);
             chr.prev_action = chr.act.current;
             chr.act.current = 0xF9;
@@ -274,6 +275,7 @@ impl Roster {
             me.update_lean();
             me.obj.calc_matrices(&data[i].obj);
             me.obj_to_pose();
+            crate::btl_head::update_look_offset(me, data[i], env.gate.time_stopped);
         }
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
@@ -340,6 +342,7 @@ impl Roster {
             me.obj.chains.move_vec = me.pose.vel;
             let wind = env.stage.wind.unwrap_or([0.0; 4]);
             me.obj.update_chains(data[i].tables.chain.as_ref(), wind);
+            crate::btl_head::update_head(me, opp, data[i]);
             me.obj.calc_matrices(&data[i].obj);
             // BtlFx_UpdateAll, in its order: the aura, then the technique shots and the ki blasts it starts.
             crate::btl_fx::update_aura(me, data[i], env, &mut self.scene.auras);
@@ -994,6 +997,8 @@ fn begin_frame(chr: &mut Chr, data: &SideData, env: &Env) {
     chr.frames_left_override = -1;
     chr.prev_fx_bits = chr.fx_bits;
     chr.fx_bits = [0; 0x10];
+    // BtlChar_SetLookEnabled(chr, 0): the actions that look enable it again.
+    chr.look.enabled = false;
     // The dashes and vanishes in a row: the parameter's +0x70 / +0x72 in the powered-up mode, else 1; + 2 / 1
     // with ability 1 / 0 (dashes) and 3 / 2 (vanishes).
     let p = &data.tables.params;

@@ -245,6 +245,12 @@ pub(crate) struct Obj {
     pub root_pos: [f32; 3],
     /// `look.node2`: the lean quaternion multiplied onto node 2.
     pub lean: [f32; 4],
+    /// `look.node2E` / `node2F` and their weights: the head tracking's rotations of the head and neck nodes, which
+    /// the pose slerps towards.
+    pub head_rot: [f32; 4],
+    pub neck_rot: [f32; 4],
+    pub head_weight: f32,
+    pub neck_weight: f32,
     /// Object flags (+0xA40).
     pub flags: u32,
     /// `state.modeBits`: the colour mode requests (`BtlObj_SetColorMode`), the one in force mirrored into `flags`
@@ -313,6 +319,10 @@ impl Obj {
             mtx: IDENTITY,
             root_pos: [0.0; 3],
             lean: [0.0, 0.0, 0.0, 1.0],
+            head_rot: [0.0, 0.0, 0.0, 1.0],
+            neck_rot: [0.0, 0.0, 0.0, 1.0],
+            head_weight: 0.0,
+            neck_weight: 0.0,
             // BtlObj_InitFlags for a fighter (type 0): visible (2) among others.
             flags: 0x1200_0016,
             color_modes: 0,
@@ -826,10 +836,12 @@ impl Obj {
         for (part, node) in data.model.parts.iter().zip(&mut self.nodes) {
             stack.push(current);
             node.parent = current;
-            let q = if part.node == 2 {
-                quat_mul(self.lean, node.rot)
-            } else {
-                node.rot
+            // BtlObjPose_GetNodeMtx: node 2 leans, the head and neck slerp towards the tracking's rotations.
+            let q = match part.node {
+                2 => quat_mul(self.lean, node.rot),
+                0x2E => crate::btl_obj_chain::q_slerp(node.rot, self.head_rot, self.head_weight),
+                0x2F => crate::btl_obj_chain::q_slerp(node.rot, self.neck_rot, self.neck_weight),
+                _ => node.rot,
             };
             let mut local = quat_to_mtx(q);
             local[3] = [node.pos[0], node.pos[1], node.pos[2], 1.0];

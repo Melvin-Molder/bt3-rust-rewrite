@@ -335,6 +335,13 @@ pub struct ChainParams {
     pub swing_b: [f32; 8],
     pub yaw_max: [i8; 8],
     pub yaw_min: [i8; 8],
+    /// The head tracking's limits that follow (`BtlCtlParam` +0x350..+0x354, degrees): yaw, up, down, and the
+    /// neck's and head's pitch; 0 when the section ends before them.
+    pub head_yaw_max: u8,
+    pub head_up_max: u8,
+    pub head_down_max: u8,
+    pub neck_pitch: i8,
+    pub head_pitch: i8,
 }
 
 impl ChainParams {
@@ -369,6 +376,11 @@ impl ChainParams {
             swing_b: f8(0x320),
             yaw_max: std::array::from_fn(|i| b[0x340 + i] as i8),
             yaw_min: std::array::from_fn(|i| b[0x348 + i] as i8),
+            head_yaw_max: b.get(0x350).copied().unwrap_or(0),
+            head_up_max: b.get(0x351).copied().unwrap_or(0),
+            head_down_max: b.get(0x352).copied().unwrap_or(0),
+            neck_pitch: b.get(0x353).map_or(0, |&v| v as i8),
+            head_pitch: b.get(0x354).map_or(0, |&v| v as i8),
         })
     }
 }

@@ -1961,15 +1961,21 @@ impl Ctx<'_, '_> {
             self.set(0xC9);
             self.set(0x1C);
             self.set(0x25);
+            // The head looks unless the tired idle of parameter flag 0x10000 plays.
+            let mut look = true;
             if self.me.gauge.low_health_idle {
                 self.set(0x96);
                 if self.data.tables.params.flags() & 0x1_0000 != 0 {
                     self.set(0x137);
+                    look = false;
                 }
             }
             let m = self.idle_motion();
             if self.anim_id() != m {
                 self.request_anim(m, 0.15);
+            }
+            if look {
+                self.me.look.enabled = true;
             }
         }
         if phase == DECIDE {
@@ -7488,7 +7494,7 @@ impl Ctx<'_, '_> {
     }
 
     /// The common start of the beam techniques: the start motion, the begin, facing the opponent, the start flags,
-    /// the camera cut and the ki, with the start sound. The head look is not ported.
+    /// the camera cut and the ki, with the start sound; the head tracking reset.
     fn super_start(&mut self, cls: i32, blend: f32) {
         self.play(super_anim(cls, 0), blend);
         self.super_begin(cls, false);
@@ -7502,6 +7508,7 @@ impl Ctx<'_, '_> {
         self.super_request_cut(cls);
         let ki = self.tech_ki(cls);
         self.me.spend_ki(ki, true);
+        crate::btl_head::reset_look(self.me, self.data);
     }
 
     /// The button command during a technique (input 0x6F): the held flags 0x9C..0x9E (more damage), with sounds
@@ -8082,10 +8089,11 @@ impl Ctx<'_, '_> {
 
     /// Action 0x105 (`BtlAct_UltimateStartHandler`): before an Ultimate Blast, motion 0x16B under level 2 hit-stop
     /// (the battle frozen round the pose); its end starts the queued technique, under the character's camera cut 3.
-    /// The start sound; the head look is not ported.
+    /// The start sound; the head tracking reset.
     fn ultimate_start(&mut self, phase: u32) {
         let slot = self.current_class();
         if phase == ENTER {
+            crate::btl_head::reset_look(self.me, self.data);
             self.play(0x16B, 0.0);
             self.super_begin(slot, true);
             self.super_start_sound(slot, true);
@@ -8293,6 +8301,7 @@ impl Ctx<'_, '_> {
         let ki = self.tech_ki(cls) / 2;
         self.me.spend_ki(ki, true);
         self.held(0xE);
+        crate::btl_head::reset_look(self.me, self.data);
     }
 
     /// Actions 0x11B..0x11D (technique kinds 4, 5) and 0x11E..0x120 (kind 6, flying straight: work[0] bit 0)
@@ -8601,6 +8610,7 @@ impl Ctx<'_, '_> {
             let ki = self.tech_ki(cls);
             self.me.spend_ki(ki, true);
             self.held(0xE);
+            crate::btl_head::reset_look(self.me, self.data);
         }
         if phase == RUN {
             let (mut moving, mut lean) = (false, 0.0);
@@ -9319,6 +9329,7 @@ impl Ctx<'_, '_> {
         let yaw = self.me.pose.rot[1];
         self.me.set_heading(yaw, 0.0);
         self.me.save_placement();
+        crate::btl_head::reset_look(self.me, self.data);
     }
 
     /// Actions 0xEC (`BtlAct_TransformA`) and 0xF0 (`BtlAct_TransformE`, the long presentation): the lead-in 0x177,
@@ -9735,6 +9746,7 @@ impl Ctx<'_, '_> {
             self.me.set_heading(yaw, 0.0);
             self.me.save_placement();
             self.set(0xF4);
+            crate::btl_head::reset_look(self.me, self.data);
             self.request_cut(1, 2);
         }
         if phase == RUN {
@@ -11239,6 +11251,7 @@ impl Ctx<'_, '_> {
             self.set(0xC9);
             self.set(0xD5);
             self.set(0x1C);
+            self.me.look.enabled = true;
             if self.flag(0xF) && kmh(200.0) < crate::btl_chr::length(self.me.pose.moved) {
                 self.me.set_fx(0x32);
             }
@@ -11842,6 +11855,7 @@ impl Ctx<'_, '_> {
             self.set(0x1C);
             self.set(0x25);
             self.me.request_orbit(20.0, 50.0);
+            self.me.look.enabled = true;
             if self.flag(0xE) && self.flag(0xF) {
                 self.clear(0xE);
             }
@@ -11916,6 +11930,7 @@ impl Ctx<'_, '_> {
             self.step(2, 2, dir_mode, speed, kmh(100.0));
             self.me.apply_gravity();
             self.set(0x1C);
+            self.me.look.enabled = true;
             self.me.request_orbit(10.0, 20.0);
             if self.me.gauge.low_health_idle {
                 self.set(0x96);
