@@ -20,7 +20,10 @@
 //! events), keeps them alive in its post-update (`EftEmit_UpdateAlive`, a fighter hit marking the phase 6 ones,
 //! `EftEmit_MarkKind6`) and kills them when the scene resets its fighter (`EftEmit_KillAll`).
 //!
-//! Not ported: the skills' shots (slots 0, 1); the prop shots' models, stage blur, flash and
+//! The skills (slots 0, 1) start the same way from effect bit 0x3C / 0x3D: kind 0, their events from the frame
+//! table when they have one, their records answered by `BtlColl_GuardStrike` / `BtlColl_HitByStrike`.
+//!
+//! Not ported: the skills' fire sounds; the prop shots' models, stage blur, flash and
 //! sound; abilities; the battle events.
 
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -49,7 +52,7 @@ pub(crate) struct TechPack {
     /// The slot's emitter set (header entry 4, `EftEmit_LoadSet` of every effect type's manager); `None` when it
     /// cannot be read.
     pub blast: Option<EmitSet>,
-    /// Its decoded textures and module definitions (slots 2..4 only).
+    /// Its decoded textures and module definitions.
     pub assets: Option<crate::eft::SetAssets>,
     /// The placements of a rush technique's steps on the battle's stage (`BtlSuper_GetStagePlacement`).
     pub places: Option<[[f32; 4]; 5]>,
@@ -120,12 +123,41 @@ pub(crate) struct TechDef {
     pub shot_life: f32,
     /// `shotSpeed`: effect type 2's target point speed.
     pub item_speed: f32,
+    /// `frames`: a skill's frame table of its events (-1 none; the techniques take them from the motion).
+    pub frames: [i32; 6],
 }
 
 impl TechDef {
-    /// `EftShot_BuildParam` of slot 2..4 and `EftShot_Start`'s life, speed and turn rate from the request
-    /// (`BtlSuper_GetShotTime` / `GetShotSpeed` / `GetShotTurnRate`).
+    /// `EftShot_BuildParam` and `EftShot_Start`'s life, speed and turn rate from the request
+    /// (`BtlSuper_GetShotTime` / `GetShotSpeed` / `GetShotTurnRate`, `BtlSkill_*` for the skills of slots 0, 1:
+    /// kind 0, a life of 60 frames, no shot life, hit scale 0.1 and power 1).
     pub(crate) fn of(data: &SideData, slot: i32) -> Self {
+        if slot < 2 {
+            let s = data.tables.skill();
+            return Self {
+                id: s.id(slot),
+                level: s.level(slot),
+                kind: 0,
+                sub: s.hit_dir_kind(slot),
+                shape: s.hit_shape(slot),
+                shots: s.shots_raw(slot),
+                volley: s.hits_b_raw(slot),
+                max_hits: s.max_hits(slot),
+                hit_interval: s.hit_interval(slot),
+                effect_type: s.effect_type(slot),
+                nodes: s.effect_nodes(slot),
+                life: 60,
+                scale: s.shot_scale(slot),
+                hit_scale: 0.1,
+                power: 1.0,
+                speed: s.shot_speed(slot) * 10.0 * kmh(1.0),
+                homing: s.shot_turn(slot) * 3.141_592_7 / 180.0 * (1.0 / 30.0),
+                flags: s.flags_a(slot),
+                shot_life: 0.0,
+                item_speed: 0.0,
+                frames: s.effect_frames(slot),
+            };
+        }
         let t = data.tables.tech();
         Self {
             id: t.id(slot),
@@ -148,6 +180,7 @@ impl TechDef {
             flags: t.flags_a(slot),
             shot_life: t.shot_life(slot),
             item_speed: t.item_speed(slot),
+            frames: [-1; 6],
         }
     }
 
@@ -192,9 +225,13 @@ struct Timeline {
     fire_timer: i32,
     end_timer: i32,
     end_time: i32,
-    /// 2 the fire timer runs, 4 the end timer runs, 8 the rush connected, 0x10 stepped this frame.
+    /// 2 the fire timer runs, 4 the end timer runs, 8 the rush connected, 0x10 stepped this frame, 0x20 a skill
+    /// has fired.
     flags: u32,
     frame: i32,
+    /// `useFrames`: the events START, FIRE, END and 0x10 .. 0x40 come at the frames of `frames`.
+    use_frames: bool,
+    frames: [i32; 6],
 }
 
 /// `EftEmitNodes`: the node of each event slot (and its pair), fixed when the slot's event first comes.
@@ -376,12 +413,12 @@ fn attr_pair(chr: &Chr, bits: u32) -> (i32, i32) {
     (a, b)
 }
 
-/// The flag word of a slot's definition; the skills' (slots 0, 1) are not ported.
+/// The flag word of a slot's definition.
 fn slot_flags(data: &SideData, slot: i32) -> u32 {
-    if (2..5).contains(&slot) {
-        data.tables.tech().flags_a(slot)
-    } else {
-        0
+    match slot {
+        0 | 1 => data.tables.skill().flags_a(slot),
+        2..=4 => data.tables.tech().flags_a(slot),
+        _ => 0,
     }
 }
 
@@ -602,7 +639,7 @@ pub(crate) fn drive_parts_at(
     let Some((set, assets)) = slot_set(w.data[side], src.slot) else {
         return;
     };
-    let ctx = crate::btl_blast::spawn_ctx(w, side, set, assets, src.slot as usize);
+    let ctx = crate::btl_blast::spawn_ctx(w, side, set, assets, crate::eft::tech_list(src.slot));
     let nodes = nodes.spawn_nodes();
     for kind in 0..0x13u8 {
         if set.head.mask & (1 << kind) == 0 {
@@ -1048,6 +1085,31 @@ impl Timeline {
     fn is_rush(&self, chars: &[Chr; 2]) -> bool {
         self.kind != 0 && (self.sub == 5 || in_rush_sequence(&chars[self.side]))
     }
+
+    /// `EftTechEvtTask_CollectEvents`: this frame's raw events as animation attribute bits, the first six from the
+    /// frame table when it is used (`frame` before this frame's step).
+    fn collect_events(&self, chr: &Chr) -> u32 {
+        let mut ev = 0;
+        for (i, a) in [0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000]
+            .into_iter()
+            .enumerate()
+        {
+            let on = if self.use_frames {
+                self.frame == self.frames[i]
+            } else {
+                chr.anim_test_attr(a)
+            };
+            if on {
+                ev |= a as u32;
+            }
+        }
+        for a in [0x20_0000, 0x40_0000, 0x80_0000] {
+            if chr.anim_test_attr(a) {
+                ev |= a as u32;
+            }
+        }
+        ev
+    }
 }
 
 impl TechFx {
@@ -1079,8 +1141,7 @@ impl TechFx {
                 slot = s;
             }
         }
-        // The skills' shots (slots 0, 1) are not ported.
-        if !(2..5).contains(&slot) {
+        if slot < 0 {
             return;
         }
         let side = me.player;
@@ -1100,6 +1161,9 @@ impl TechFx {
                 end_time: def.life - 1,
                 flags: 0,
                 frame: 0,
+                // EftTechEvtTask_Init: a skill with any frame number takes its events from the table.
+                use_frames: def.kind == 0 && def.frames.iter().any(|&f| f != -1),
+                frames: def.frames,
             });
             self.requests[side] = 0;
         }
@@ -1581,31 +1645,57 @@ impl TechFx {
         self.shots.post_update(w, fx);
     }
 
-    /// `EftTechEvtTask_UpdateNormal` of a technique: START runs the fire timer, FIRE the end timer, the motion's
-    /// END ends it, as does leaving the technique or an interrupting motion (ABORT); END again once the end
-    /// timer has run out. Returns whether the timeline dies.
+    /// `EftTechEvtTask_UpdateNormal` of a technique or a skill: START runs the fire timer, FIRE the end timer, the
+    /// motion's (or frame table's) END ends it, as does an interrupting motion or leaving the technique (ABORT);
+    /// a skill left after its FIRE gives END instead. END again once the end timer has run out. Returns whether
+    /// the timeline dies.
     fn update_normal(&mut self, t: &mut Timeline, chars: &[Chr; 2], env: &Env) -> bool {
         let chr = &chars[t.side];
         let e = &mut self.events[t.side];
+        let ev = t.collect_events(chr);
         t.frame += 1;
-        if chr.anim_test_attr(0x200) {
+        if ev & 0x200 != 0 {
             *e |= EV_START;
             t.flags |= 2;
         }
-        if chr.anim_test_attr(0x400) {
+        if ev & 0x400 != 0 {
             *e |= EV_FIRE;
             t.flags |= if t.kind != 0 { 4 } else { 0x20 };
         }
-        if chr.anim_test_attr(0x800) {
+        if ev & 0x800 != 0 {
             *e |= EV_END;
             return true;
         }
-        // Kind 0 (the skills, with their frame tables) is not ported.
-        if !in_technique(chr) || env.anim_flags(chr.anim.cur) & 0x10 != 0 {
+        let interrupted = env.anim_flags(chr.anim.cur) & 0x10 != 0;
+        if t.kind == 0 {
+            if interrupted {
+                *e |= EV_ABORT;
+                return true;
+            }
+            if !in_skill(chr) {
+                *e |= if t.flags & 0x20 != 0 {
+                    EV_END
+                } else {
+                    EV_ABORT
+                };
+                return true;
+            }
+        } else if !in_technique(chr) || interrupted {
             *e |= EV_ABORT;
             return true;
         }
-        *e |= extra_events(chr);
+        for (a, b) in [
+            (0x1000, 0x10),
+            (0x2000, 0x20),
+            (0x4000, 0x40),
+            (0x20_0000, 0x80),
+            (0x40_0000, 0x100),
+            (0x80_0000, 0x200),
+        ] {
+            if ev & a != 0 {
+                *e |= b;
+            }
+        }
         if t.end_timer <= 0 {
             *e |= EV_END;
         }
@@ -1821,6 +1911,91 @@ pub(crate) fn tech_damage(
     d
 }
 
+/// `BtlColl_GuardStrike`: a fighter in a guard motion not facing away from a skill's record takes its guarded
+/// damage and push, unless flag 0x45 lets it through or the skill has attribute 0x200000. The sound, shake and
+/// vibration are not ported.
+pub(crate) fn guard_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
+    let Some(src) = rec.tech else {
+        return false;
+    };
+    if w.chars[target].flags.test(0x45) {
+        return false;
+    }
+    let kind = guard_kind(&w.chars[target]);
+    let (yaw, dir) = hit_dir(w, target, rec);
+    if kind != 6 && is_facing(&w.chars[target], yaw) {
+        return false;
+    }
+    let s = w.data[src.side].tables.skill();
+    if s.flags(src.slot) & 0x20_0000 != 0 {
+        return false;
+    }
+    let dmg = s.guard_damage(src.slot);
+    if kind == 0 || kind == 5 {
+        return false;
+    }
+    let env = w.env;
+    let chr = &mut w.chars[target];
+    chr.flags.set(0x66);
+    chr.damage(env, w.data[target], dmg, 0xC);
+    chr.set_impulse_dir(dir, s.guard_push(src.slot));
+    true
+}
+
+/// `BtlColl_HitByStrike`: a skill's record hits (one not of hit direction kind 4 only from in front of its user):
+/// the reaction by the victim's state (0x800), 0 meaning 3 and 1 nothing; the push, the stun of reactions
+/// 0x17..0x1C, the damage. Flag 0x45 lets it through. The sound, shake, vibration and events are not ported.
+pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
+    let Some(src) = rec.tech else {
+        return false;
+    };
+    let (side, slot) = (src.side, src.slot);
+    if w.chars[target].flags.test(0x45) {
+        return false;
+    }
+    let (yaw, dir) = hit_dir(w, target, rec);
+    let front = is_facing(&w.chars[target], yaw);
+    let s = w.data[side].tables.skill();
+    if s.hit_dir_kind(slot) != 4
+        && opp_yaw_from_facing(&w.chars[side], &w.chars[target]).abs() > FRAC_PI_2
+    {
+        return false;
+    }
+    let mut react = if w.env.anim_flags(w.chars[target].anim.cur) & 0x800 != 0 {
+        s.react_s800(slot)
+    } else {
+        s.react(slot)
+    };
+    if react == 0 {
+        react = 3;
+    }
+    if react == 1 {
+        return false;
+    }
+    let env = w.env;
+    let chr = &mut w.chars[target];
+    if chr.no_flinch > 0 {
+        react = REACT_NOFLINCH;
+    }
+    chr.react.yaw = yaw;
+    chr.react.back = front;
+    chr.react.reaction = react;
+    if react != REACT_NOFLINCH {
+        chr.react.scale = 0.0;
+        chr.flags.set(0x94);
+        chr.react.turn_yaw = if front { yaw } else { wrap_angle(yaw + PI) };
+        chr.react.turn_pitch = 0.0;
+        chr.set_impulse_dir(dir, s.push(slot));
+        if (0x17..=0x1C).contains(&react) {
+            chr.stun_timer = s.frames(slot);
+        }
+    }
+    chr.set_fx(0x1D);
+    let flags = if slot == 0 { 0x20_0000 } else { 0x40_0000 };
+    chr.damage(env, w.data[target], s.damage(slot), flags);
+    true
+}
+
 /// `BtlColl_GuardRush`: a fighter in a guard motion facing the technique takes the guarded damage (a catch or
 /// throw technique is shrugged off by a size class 4 fighter, and only guarded from behind, kind 6); the push on
 /// the last hit, the recoil on the attacker. Flag 0x46 lets it through; technique flag 1 (unblockable), and a full
@@ -2006,17 +2181,20 @@ pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     true
 }
 
-/// `BtlColl_TryDodge` for a technique record of slot 2..4: flag 0x46 lets it pass; else a free fighter in a
-/// guardable motion, before the record's first hit, evades it in its dodge window (free) or with a counted dodge
-/// (flags 0x56 / 0x57 too), sideways by the stick (or the frame), raising flag 0x80.
-pub(crate) fn try_dodge_tech(w: &mut World, target: usize, hit_count: i32) -> bool {
+/// `BtlColl_TryDodge` for a technique or skill record: flag 0x46 (a technique's, slots 2..4) or 0x45 (a
+/// skill's) lets it pass; else a free fighter in a guardable motion, before the record's first hit, evades a
+/// technique, or a skill with attribute 0x400000, in its dodge window (free) or with a counted dodge (flags 0x56 /
+/// 0x57 too), sideways by the stick (or the frame), a technique's raising flag 0x80.
+pub(crate) fn try_dodge_tech(w: &mut World, target: usize, hit_count: i32, src: TechSrc) -> bool {
     let frame = w.frame;
     let anim = w.env.anim_flags(w.chars[target].anim.cur);
+    let rush = src.slot >= 2;
+    let can_dodge = rush || w.data[src.side].tables.skill().flags(src.slot) & 0x40_0000 != 0;
     let chr = &mut w.chars[target];
-    if chr.flags.test(0x46) {
+    if chr.flags.test(if rush { 0x46 } else { 0x45 }) {
         return true;
     }
-    if !chr.is_free() || anim & 0xB1 == 0 || hit_count != 0 {
+    if !chr.is_free() || anim & 0xB1 == 0 || hit_count != 0 || !can_dodge {
         return false;
     }
     let (mut ok, mut used) = (false, false);
@@ -2052,8 +2230,10 @@ pub(crate) fn try_dodge_tech(w: &mut World, target: usize, hit_count: i32) -> bo
         dir = 1;
     }
     chr.flags.set(if dir == 0 { 0x74 } else { 0x75 });
-    // Ability 0x22 (blast gauge on a free dodge) is not ported.
-    chr.flags.set_held(0x80);
+    if rush {
+        // Ability 0x22 (blast gauge on a free dodge) is not ported.
+        chr.flags.set_held(0x80);
+    }
     if used {
         chr.flags.set(if chr.skill_slot == 0 { 0xDE } else { 0xDF });
     }

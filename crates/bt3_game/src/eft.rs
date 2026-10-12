@@ -2,7 +2,7 @@
 //! and eft_sweep.c), the particle modules they start, and the depth-sorted pass the modules draw into (the ordering
 //! table of src/sys/gfx_ot.c, with the clipper and projection of src/sys/vu0_math.c).
 //!
-//! The sets are the ki blasts' (`SetRef::list` 0 / 1) and the technique slots' (2..4). Ported modules, by emitter
+//! The sets are the ki blasts' (`SetRef::list` 0 / 1) and the technique slots' (2..4, the skills' 5 / 6). Ported modules, by emitter
 //! kind: 0 the ray bursts (`eft_ray`), 2 the rays (`eft_rays`), 5 the particle emitters (`eft_ptcl`), 9 the quad
 //! emitters (`eft_quad`), 10 the ring emitters (`eft_part10`), 14 the keyframed sprite animations (`EftAnimPart_*`
 //! of src/battle/eft_char_parts.c playing `EftSprAnim_*` of src/battle/eft_sprite_anim.c, here), 15 the sprite
@@ -920,7 +920,7 @@ struct SprLayerState {
 }
 
 /// Where a part's resources are: the owner side and its set (`list` 0 / 1: the blast lists' sets; 2..4: the
-/// technique slots' sets).
+/// technique slots' sets; 5 / 6: the skill slots' sets, `tech_list`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SetRef {
     pub side: usize,
@@ -928,7 +928,16 @@ pub(crate) struct SetRef {
 }
 
 /// `FxWorld::sets`' entries per side.
-pub(crate) const SET_LISTS: usize = 5;
+pub(crate) const SET_LISTS: usize = 7;
+
+/// The `SetRef::list` of technique slot `slot` (0..4).
+pub(crate) fn tech_list(slot: i32) -> usize {
+    if slot < 2 {
+        5 + slot as usize
+    } else {
+        slot as usize
+    }
+}
 
 impl SetRef {
     /// The kind of `BtlScene_IsEffectStopped` its objects are given (`EftEmit_Spawn`'s `srcKind`): 0 for the ki
@@ -1365,7 +1374,7 @@ pub(crate) enum Handle {
 
 /// What the modules read of the battle while they update or draw.
 pub(crate) struct FxWorld<'a> {
-    /// Per side: the set assets of its two blast lists and of its technique slots 2..4 (`SetRef::list`).
+    /// Per side: the set assets of its two blast lists and of its technique slots (`SetRef::list`).
     pub sets: [[Option<&'a SetAssets>; SET_LISTS]; 2],
     /// `BtlScene_IsAnyCharStopped`: a fighter in hit-stop.
     pub any_frozen: bool,

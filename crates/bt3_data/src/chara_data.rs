@@ -643,9 +643,92 @@ impl SkillTable<'_> {
         self.at::<1>(base, slot)
             .map_or(0, |b| i32::from(b[0] as i8))
     }
+    /// `BtlSkill_GetFlagsA` (+0x00): the effect definition's flags (`EftShot_BuildParam`).
+    pub fn flags_a(&self, slot: i32) -> u32 {
+        self.u32_of(0, slot)
+    }
     /// `BtlSkill_GetFlags` (+0x08): the attribute bits.
     pub fn flags(&self, slot: i32) -> u32 {
         self.u32_of(0x8, slot)
+    }
+    /// The effect's clash level (+0x14, `EftShot_BuildParam`'s `level`).
+    pub fn level(&self, slot: i32) -> i32 {
+        self.at::<2>(0x14, slot)
+            .map_or(0, |b| i32::from(u16::from_le_bytes(b)))
+    }
+    /// `BtlSkill_GetShotTime` (+0x18, seconds), `GetShotSpeed`'s raw 10 km/h (+0x20), `GetShotTurnRate`'s raw
+    /// degrees per second (+0x28) and the effect's scale (+0x30).
+    pub fn shot_time(&self, slot: i32) -> f32 {
+        self.f32_of(0x18, slot)
+    }
+    pub fn shot_speed(&self, slot: i32) -> f32 {
+        self.f32_of(0x20, slot)
+    }
+    pub fn shot_turn(&self, slot: i32) -> f32 {
+        self.f32_of(0x28, slot)
+    }
+    pub fn shot_scale(&self, slot: i32) -> f32 {
+        self.f32_of(0x30, slot)
+    }
+    /// The hit factors as stored (+0x3A shots, +0x3C hits B, +0x40 hits C less 1), the hit shape (+0x3E) and the
+    /// frames between two hits (+0x42).
+    pub fn shots_raw(&self, slot: i32) -> i32 {
+        self.s8_of(0x3A, slot)
+    }
+    pub fn hits_b_raw(&self, slot: i32) -> i32 {
+        self.s8_of(0x3C, slot)
+    }
+    pub fn hit_shape(&self, slot: i32) -> i32 {
+        self.s8_of(0x3E, slot)
+    }
+    pub fn max_hits(&self, slot: i32) -> i32 {
+        self.s8_of(0x40, slot)
+    }
+    pub fn hit_interval(&self, slot: i32) -> i32 {
+        self.s8_of(0x42, slot)
+    }
+    /// `BtlSkill_GetHitCount`: shots (at least 1) * hits B (at least 1) * (hits C + 1); at least 1 here.
+    pub fn hit_count(&self, slot: i32) -> i32 {
+        let n =
+            self.shots_raw(slot).max(1) * self.hits_b_raw(slot).max(1) * (self.max_hits(slot) + 1);
+        if n > 0 { n } else { 1 }
+    }
+    /// The effect's node per event slot (+0x48, stride 2) and its frame table (+0x54, -1 none).
+    pub fn effect_nodes(&self, slot: i32) -> [i32; 6] {
+        std::array::from_fn(|i| self.s8_of(0x48 + i * 2, slot))
+    }
+    pub fn effect_frames(&self, slot: i32) -> [i32; 6] {
+        std::array::from_fn(|i| self.s8_of(0x54 + i * 2, slot))
+    }
+    /// The effect type (+0x60: 0 the plain blast / beam, -1 none).
+    pub fn effect_type(&self, slot: i32) -> i32 {
+        self.s8_of(0x60, slot)
+    }
+    /// `BtlSkill_GetHitDirKind` (+0x62).
+    pub fn hit_dir_kind(&self, slot: i32) -> i32 {
+        self.s8_of(0x62, slot)
+    }
+    /// `BtlSkill_GetReact` (+0x68) / `GetReactS800` (+0x6A, the first when not positive).
+    pub fn react(&self, slot: i32) -> i32 {
+        self.s8_of(0x68, slot)
+    }
+    pub fn react_s800(&self, slot: i32) -> i32 {
+        let r = self.s8_of(0x6A, slot);
+        if r > 0 { r } else { self.react(slot) }
+    }
+    /// `BtlSkill_GetPush` / `GetGuardPush` (+0x74 / +0x7C, as stored): of one hit.
+    pub fn push(&self, slot: i32) -> f32 {
+        self.f32_of(0x74, slot) / self.hit_count(slot) as f32
+    }
+    pub fn guard_push(&self, slot: i32) -> f32 {
+        self.f32_of(0x7C, slot) / self.hit_count(slot) as f32
+    }
+    /// `BtlSkill_GetDamage` / `GetGuardDamage` (+0x84 / +0x8C) of one hit.
+    pub fn damage(&self, slot: i32) -> i32 {
+        self.s32_of(0x84, slot) / self.hit_count(slot)
+    }
+    pub fn guard_damage(&self, slot: i32) -> i32 {
+        self.s32_of(0x8C, slot) / self.hit_count(slot)
     }
     /// `BtlSkill_GetId` (+0x10).
     pub fn id(&self, slot: i32) -> i32 {

@@ -348,14 +348,13 @@ pub(crate) struct SideData<'a> {
 }
 
 impl<'a> SideData<'a> {
-    /// The assets of the side's emitter sets by `SetRef::list`: the two blast lists, then technique slots 2..4.
+    /// The assets of the side's emitter sets by `SetRef::list`: the two blast lists, technique slots 2..4, then
+    /// the skill slots 0, 1.
     pub(crate) fn fx_sets(&self) -> [Option<&'a crate::eft::SetAssets>; crate::eft::SET_LISTS] {
-        std::array::from_fn(|l| {
-            if l < 2 {
-                self.blast_assets[l]
-            } else {
-                self.tech_packs[l].and_then(|p| p.assets.as_ref())
-            }
+        std::array::from_fn(|l| match l {
+            0 | 1 => self.blast_assets[l],
+            2..=4 => self.tech_packs[l].and_then(|p| p.assets.as_ref()),
+            _ => self.tech_packs[l - 5].and_then(|p| p.assets.as_ref()),
         })
     }
 

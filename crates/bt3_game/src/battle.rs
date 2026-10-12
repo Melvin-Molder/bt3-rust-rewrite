@@ -421,11 +421,8 @@ pub(crate) fn load_side(
             continue;
         };
         let blast = tech_blast_set(pack);
-        // The skills' effects (slots 0, 1) are not ported.
         let assets = match &blast {
-            Some(set) if slot >= 2 => {
-                Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?)
-            }
+            Some(set) => Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?),
             _ => None,
         };
         let places = bt3_data::eft_pack::tech_places(pack, stage.max(0) as usize);
@@ -1334,12 +1331,10 @@ impl Battle {
             let fxw = FxWorld {
                 sets: std::array::from_fn(|s| {
                     let f = &self.assets.fighters[s];
-                    std::array::from_fn(|l| {
-                        if l < 2 {
-                            f.blast_assets[l].as_ref()
-                        } else {
-                            f.tech_packs[l].as_ref().and_then(|p| p.assets.as_ref())
-                        }
+                    std::array::from_fn(|l| match l {
+                        0 | 1 => f.blast_assets[l].as_ref(),
+                        2..=4 => f.tech_packs[l].as_ref().and_then(|p| p.assets.as_ref()),
+                        _ => f.tech_packs[l - 5].as_ref().and_then(|p| p.assets.as_ref()),
                     })
                 }),
                 any_frozen: self.roster.chars.iter().any(|c| c.is_frozen()),
@@ -4298,6 +4293,79 @@ mod tests {
         );
         // The opponent was ahead; now the fighter is on its other side.
         assert!(crate::btl_chr::dot(d0, d1) < 0.0, "{d0:?} {d1:?}");
+    }
+
+    #[test]
+    fn real_skill_effects() {
+        use crate::btl_input::pad::UP;
+        // Character 15's first skill (id 0x10, effect type 0 at its node with the frame table) knocks back an
+        // opponent standing close: the skill record hits through `BtlColl_HitByStrike` for the table's damage,
+        // and its effects return to their pools.
+        let Some(mut battle) = transform_battle(15, false) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pad = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        for _ in 0..300 {
+            let r = &battle.roster;
+            if crate::btl_chr::opp_distance_xz(&r.chars[0], &r.chars[1]) < 30.0 {
+                break;
+            }
+            battle.run_frame(false, pad(UP), 0, &mut libc, &mut random, None, false);
+        }
+        for _ in 0..20 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+        }
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let health = battle.roster.chars[1].gauge.health;
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut acts = run_skill(&mut battle, false, 10);
+        let mut most = 0;
+        for _ in 0..150 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+            most = most.max(battle.roster.scene.fx.counts(None).iter().sum::<usize>());
+            let a = battle.roster.chars[0].act.current;
+            if acts.last() != Some(&a) {
+                acts.push(a);
+            }
+        }
+        assert!(acts.contains(&0xFD), "{acts:x?}");
+        let s = battle.assets.fighters[0].tables.skill();
+        let lost = health - battle.roster.chars[1].gauge.health;
+        assert!(
+            lost > 0 && lost % s.damage(0) == 0,
+            "{lost} {}",
+            s.damage(0)
+        );
+        assert!(most > 0);
+        assert_eq!(battle.roster.scene.fx.counts(None).iter().sum::<usize>(), 0);
+
+        // Character 22's first skill (id 7, lock-on, a capsule from node 47) stuns the opponent (reaction 0x17..:
+        // action 0xD3 for the skill's frames).
+        let mut battle = transform_battle(22, false).unwrap();
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let health = battle.roster.chars[1].gauge.health;
+        run_skill(&mut battle, false, 10);
+        let mut opp = Vec::new();
+        for _ in 0..60 {
+            battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+            let a = battle.roster.chars[1].act.current;
+            if opp.last() != Some(&a) {
+                opp.push(a);
+            }
+        }
+        assert!(opp.contains(&0xD3), "{opp:x?}");
+        assert!(battle.roster.chars[1].gauge.health < health);
     }
 
     #[test]

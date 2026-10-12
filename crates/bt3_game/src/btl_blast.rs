@@ -29,7 +29,8 @@ use crate::btl_input::wrap_angle;
 use crate::btl_ki_obj::{KiObj, LIST_MAX};
 use crate::btl_obj::mask_to_node;
 use crate::btl_tech_fx::{
-    TechFx, TechSrc, absorb_amount, guard_rush, hit_by_rush, tech_outclasses, try_dodge_tech,
+    TechFx, TechSrc, absorb_amount, guard_rush, guard_strike, hit_by_rush, hit_by_strike,
+    tech_outclasses, try_dodge_tech,
 };
 use crate::eft::{EmitState, FxWorld, Modules, Nodes, SetAssets, SetRef, SpawnCtx, spawn};
 use crate::rng::LibcRandom;
@@ -2126,10 +2127,9 @@ pub(crate) fn hit_dir(w: &World, target: usize, rec: &HitRec) -> (f32, [f32; 3])
     let chr = &w.chars[target];
     let mut from_pos = rec.unk54 || length(rec.vel) < 0.01;
     let mut from_atk = None;
-    // The skills' records (slots 0, 1) are not ported.
+    // A skill's record always comes from its user; a technique's of hit direction kind 3.
     if let Some(src) = rec.tech
-        && (2..5).contains(&src.slot)
-        && w.data[src.side].tables.tech().hit_dir_kind(src.slot) == 3
+        && (src.slot < 2 || w.data[src.side].tables.tech().hit_dir_kind(src.slot) == 3)
     {
         from_pos = false;
         from_atk = Some(src.side);
@@ -2171,8 +2171,7 @@ fn try_dodge(w: &mut World, target: usize, rec: &HitRec, hit_count: i32) -> bool
     }
     match rec.tech {
         None => chr.flags.test(0x44),
-        Some(src) if (2..5).contains(&src.slot) => try_dodge_tech(w, target, hit_count),
-        Some(_) => false,
+        Some(src) => try_dodge_tech(w, target, hit_count, src),
     }
 }
 
@@ -2292,16 +2291,16 @@ fn try_absorb(w: &mut World, target: usize, rec: &HitRec) -> bool {
     true
 }
 
-/// `BtlColl_TryGuard`: flag 0x59 takes any record as guarded; else a ki blast by `guard_blast`, a technique's
-/// record (slots 2..4) by `guard_rush`.
+/// `BtlColl_TryGuard`: flag 0x59 takes any record as guarded; else a ki blast by `guard_blast`, a skill's record
+/// (slots 0, 1) by `guard_strike`, a technique's (slots 2..4) by `guard_rush`.
 fn try_guard(w: &mut World, target: usize, rec: &HitRec) -> bool {
     if w.chars[target].flags.test(0x59) {
         return true;
     }
     match rec.tech {
         None => guard_blast(w, target, rec),
-        Some(src) if (2..5).contains(&src.slot) => guard_rush(w, target, rec),
-        Some(_) => false,
+        Some(src) if src.slot < 2 => guard_strike(w, target, rec),
+        Some(_) => guard_rush(w, target, rec),
     }
 }
 
@@ -2347,8 +2346,8 @@ fn hit(w: &mut World, target: usize, rec: &HitRec) -> bool {
     }
     let ret = match rec.tech {
         None => hit_by_blast(w, target, rec),
-        Some(src) if (2..5).contains(&src.slot) => hit_by_rush(w, target, rec),
-        Some(_) => false,
+        Some(src) if src.slot < 2 => hit_by_strike(w, target, rec),
+        Some(_) => hit_by_rush(w, target, rec),
     };
     if ret {
         let (atk, def) = if rec.owner == 0 {
