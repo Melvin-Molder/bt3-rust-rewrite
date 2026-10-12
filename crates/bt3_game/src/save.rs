@@ -128,6 +128,19 @@ impl SaveData {
         save
     }
 
+    /// `ZSAVE->rec[slot] = rec`: a custom character with its items and extra slots (the record's other two
+    /// fields 0).
+    pub fn store_rec(&mut self, slot: usize, chara: i32, items: [u16; 8], level: u16) {
+        self.rec_chara[slot] = chara;
+        self.rec_items[slot] = items;
+        self.rec_level[slot] = level;
+        let at = OFS_REC + slot * 0x1C;
+        if let Some(b) = self.image.get_mut(at + 0x10..at + 0x18) {
+            b[..4].fill(0);
+            b[6..].fill(0);
+        }
+    }
+
     /// The block with the typed fields written in and its checksum (`McCard_Checksum(.., 1)`).
     pub fn to_image(&self) -> Vec<u8> {
         let mut b = self.image.clone();

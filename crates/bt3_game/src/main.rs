@@ -33,7 +33,9 @@ mod btl_vib;
 mod char_select;
 mod chr_cam;
 mod clip;
+mod dc_list;
 mod dc_menu;
+mod dc_password;
 mod dialog;
 mod draw;
 mod duel_menu;
@@ -88,6 +90,7 @@ mod menu_res;
 mod model_draw;
 mod movie;
 mod obj_shadow;
+mod password;
 mod post;
 mod post_draw;
 mod replay_menu;
@@ -166,6 +169,10 @@ enum Scene {
     BootCard(Box<boot_card::BootCardScreen>),
     /// `Dc_Main` mode 53: the Data Center's top menu.
     DcMenu(Box<dc_menu::DcMenuScreen>),
+    /// `Dc_Main` mode 54: the password screen.
+    DcPass(Box<dc_password::DcPassScreen>),
+    /// `Dc_Main` mode 55: the custom character list.
+    DcList(Box<dc_list::DcListScreen>),
     /// `Dc_Main` mode 56: the replay list.
     ReplayMenu(Box<replay_menu::ReplayMenuScreen>),
     Logos(LogoSequence),
@@ -197,6 +204,8 @@ impl Scene {
         match self {
             Scene::BootCard(_)
             | Scene::DcMenu(_)
+            | Scene::DcPass(_)
+            | Scene::DcList(_)
             | Scene::ReplayMenu(_)
             | Scene::Logos(_)
             | Scene::Title(_)
@@ -317,6 +326,8 @@ struct Game {
     /// The Data Center's screens (archive 8, sections 1 and 4) and its fields of `gProgress`.
     dc_menu: Option<dc_menu::DcMenuData>,
     replay_menu: Option<replay_menu::ReplayMenuData>,
+    dc_pass: Option<dc_password::DcPassData>,
+    dc_list: Option<dc_list::DcListData>,
     dc: dc_menu::DcProgress,
     /// The last battle's setup and replay (`gBattleReplay`), which the replay list saves.
     last_battle: Option<(BattleSetup, btl_replay::Replay)>,
@@ -607,6 +618,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chara_table,
             dc_menu: None,
             replay_menu: None,
+            dc_pass: None,
+            dc_list: None,
             dc: dc_menu::DcProgress::default(),
             last_battle: None,
             pending_replay: None,
@@ -813,8 +826,9 @@ fn setup(mut commands: Commands, stream: Res<SeStream>, mut outputs: ResMut<Asse
 #[derive(Resource)]
 struct SeStream(Arc<Mutex<se::Engine>>);
 
-/// Pad 0 game buttons: arrows or the d-pad, Space or South (Cross), Escape or North (Triangle), Enter or Start.
-const BUTTONS: [(KeyCode, GamepadButton, u32); 7] = [
+/// Pad 0 game buttons: arrows or the d-pad, Space or South (Cross), Escape or North (Triangle), Enter or Start,
+/// C or East (Circle), Q / E or the shoulder buttons (L1 / R1), A / D or the triggers (L2 / R2).
+const BUTTONS: [(KeyCode, GamepadButton, u32); 12] = [
     (KeyCode::ArrowLeft, GamepadButton::DPadLeft, title::PAD_LEFT),
     (
         KeyCode::ArrowRight,
@@ -826,6 +840,27 @@ const BUTTONS: [(KeyCode, GamepadButton, u32); 7] = [
     (KeyCode::Space, GamepadButton::South, title::PAD_CROSS),
     (KeyCode::Escape, GamepadButton::North, title::PAD_TRIANGLE),
     (KeyCode::Enter, GamepadButton::Start, title::PAD_START),
+    (KeyCode::KeyC, GamepadButton::East, dc_password::PAD_CIRCLE),
+    (
+        KeyCode::KeyQ,
+        GamepadButton::LeftTrigger,
+        dc_password::PAD_L1,
+    ),
+    (
+        KeyCode::KeyE,
+        GamepadButton::RightTrigger,
+        dc_password::PAD_R1,
+    ),
+    (
+        KeyCode::KeyA,
+        GamepadButton::LeftTrigger2,
+        dc_password::PAD_L2,
+    ),
+    (
+        KeyCode::KeyD,
+        GamepadButton::RightTrigger2,
+        dc_password::PAD_R2,
+    ),
 ];
 
 /// Pad 0's `PAD_*` bits in battle: the d-pad on the arrows; Z, X, C, V for Square, Cross, Circle, Triangle (Space is
@@ -1176,17 +1211,70 @@ fn run_frames(
                 if let Some(next) = result {
                     stop_all(game, &mut commands);
                     match next {
+                        54 => start_dc_pass(game, &mut commands),
+                        55 => start_dc_list(game, &mut commands),
                         56 => start_replay_menu(game, &mut commands),
                         0 => {
                             game.dc.visits += 1;
                             start_main_menu(game, &mut commands, &mut audio);
                         }
                         mode => {
-                            // Dc_Main runs the password screen and the list (not ported), then the top menu.
-                            info!("progress mode {mode} is not ported yet");
+                            info!("progress mode {mode} is not a Data Center mode");
                             start_dc_menu(game, &mut commands);
                         }
                     }
+                }
+            }
+            Scene::DcPass(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.dc,
+                    &mut game.save,
+                    &mut game.random,
+                    &mut loader,
+                    &mut game.font,
+                );
+                let done = screen.is_done();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    // Dc_Main: back to the top menu.
+                    stop_all(game, &mut commands);
+                    start_dc_menu(game, &mut commands);
+                }
+            }
+            Scene::DcList(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.dc,
+                    &mut game.save,
+                    &game.chr_table,
+                    &mut game.random,
+                    &mut loader,
+                    &mut game.font,
+                );
+                let done = screen.is_done();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    stop_all(game, &mut commands);
+                    start_dc_menu(game, &mut commands);
                 }
             }
             Scene::ReplayMenu(screen) => {
@@ -1999,6 +2087,84 @@ fn start_dc_menu(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the Data Center: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Dc_Main` mode 54: `Bgm_Play(DC_BGM)`, then `DcPass_Run(3)`.
+fn start_dc_pass(game: &mut Game, commands: &mut Commands) {
+    if game.dc_pass.is_none() {
+        match load_dc_section(&game.iso_path, dc_password::ARCHIVE_SECTION)
+            .and_then(|res| dc_password::DcPassAssets::parse(&res))
+        {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout =
+                    dc_password::DcPassLayout::new(background, dialog, |key| firsts[&key]);
+                game.dc_pass = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the password screen: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .dc_pass
+        .as_ref()
+        .expect("password screen assets are loaded");
+    match dc_password::DcPassScreen::new(data, &game.chara_table, &mut game.random) {
+        Ok(screen) => {
+            play_bgm(game, commands, dc_menu::BGM_FILE_ID);
+            game.scene = Scene::DcPass(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the password screen: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Dc_Main` mode 55: `Bgm_Play(DC_BGM)`, then `DcList_Run(2)`.
+fn start_dc_list(game: &mut Game, commands: &mut Commands) {
+    if game.chr_table.costumes.is_empty() {
+        game.chr_table = bt3_data::chara_data::ChrTable::parse(&game.chara_table, 0xA1);
+    }
+    if game.dc_list.is_none() {
+        match load_dc_section(&game.iso_path, dc_list::ARCHIVE_SECTION)
+            .and_then(|res| dc_list::DcListAssets::parse(&res))
+        {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout = dc_list::DcListLayout::new(background, dialog, |key| firsts[&key]);
+                game.dc_list = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the custom character list: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .dc_list
+        .as_ref()
+        .expect("character list assets are loaded");
+    match dc_list::DcListScreen::new(data, &game.save, &game.chara_table, &mut game.random) {
+        Ok(screen) => {
+            play_bgm(game, commands, dc_menu::BGM_FILE_ID);
+            game.scene = Scene::DcList(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the custom character list: {error}");
             game.scene = Scene::Black;
         }
     }

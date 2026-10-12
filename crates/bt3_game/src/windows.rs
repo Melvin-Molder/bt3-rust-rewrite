@@ -21,6 +21,8 @@ pub struct TextBox {
     max_w: Option<i32>,
     /// `TEXTBOX_FLAG_LINE_Y`: extra y for texts of one to five rows.
     line_y: Option<[i32; 5]>,
+    /// `TextBox_SetClip`: `[x0, y0, x1, y1]`, inclusive.
+    clip: Option<[i32; 4]>,
 }
 
 impl TextBox {
@@ -59,6 +61,12 @@ impl TextBox {
             },
             _ => Self::default(),
         }
+    }
+
+    /// `TextBox_SetClip(box, x0, x1, y0, y1)`: the text is cut to the rectangle.
+    pub fn with_clip(mut self, x0: i32, x1: i32, y0: i32, y1: i32) -> Self {
+        self.clip = Some([x0, y0, x1, y1]);
+        self
     }
 
     /// `TextBox_AttachLine(flash, clip, 0, 0, line, box)`: hangs line `line` of `text` on the clip as `tag`. A negative
@@ -108,6 +116,7 @@ impl TextBox {
             scale_x,
             color: color.map(i32::from),
             shadow: [0x20, 0x20, 0x20, i32::from((alpha * 64.0) as u32 as u8)],
+            clip: self.clip.unwrap_or([0, 0, 0x1FF, 0x1BF]),
             text,
         })
     }
@@ -123,6 +132,7 @@ pub struct TextDraw {
     scale_x: f32,
     color: [i32; 4],
     shadow: [i32; 4],
+    clip: [i32; 4],
     text: Vec<u16>,
 }
 
@@ -156,7 +166,7 @@ fn draw_clip(draw: &TextDraw, over: &DrawOver, font: &mut Font) {
     font.style.shadow_dx = 1;
     font.style.shadow_dy = 2;
     font.style.shadow_color = rgba(shadow[0], shadow[1], shadow[2], shadow[3]);
-    font.style.clip = [0, 0, 0x1FF, 0x1BF];
+    font.style.clip = draw.clip;
     font.style.spacing_x = 0;
     font.style.spacing_y = 0;
     font.print_at(x, y, &draw.text);

@@ -60,7 +60,12 @@ pub fn panel_textures(side: usize) -> [ImageTexture; 21] {
 
 /// `ItemHelp_Init`'s textures (`gItemHelp->tex[n]`).
 pub fn help_textures() -> [ImageTexture; 7] {
-    let h = |n: usize, e: usize| Some(((HELP_SECTION, n), e));
+    help_textures_in(HELP_SECTION)
+}
+
+/// `ItemHelp_Init(MPACK_AT(res, section))`'s textures, for the screens that keep the page in another section.
+pub fn help_textures_in(section: usize) -> [ImageTexture; 7] {
+    let h = |n: usize, e: usize| Some(((section, n), e));
     let mut tex = [None; 7];
     tex[1] = h(1, 0);
     tex[2] = h(1, 4);

@@ -48,7 +48,12 @@ pub fn screen_quads(quads: &[DrawQuad], textures: &[Option<usize>]) -> Vec<Scree
             mask = Some([min(xs), min(ys), max(xs), max(ys)]);
             continue;
         }
-        let screen = screen_quad(quad, textures);
+        let mut screen = Some(screen_quad(quad, textures));
+        if let Some([x0, y0, x1, y1]) = quad.scissor {
+            let rect = [x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32];
+            screen = screen.and_then(|s| clip_quad(s, rect));
+        }
+        let Some(screen) = screen else { continue };
         match (quad.flags & QUAD_MASK != 0, mask) {
             (true, Some(rect)) => out.extend(clip_quad(screen, rect)),
             (true, None) => {}
@@ -150,6 +155,9 @@ pub struct DrawQuad {
     pub rgba: [i32; 4],
     /// Record of tag 3, or `None` for a flat quad.
     pub image: Option<usize>,
+    /// The scissor a clip's callbacks set around it (`Sprite_SetScissor`, inclusive bounds), `None` for the
+    /// whole screen.
+    pub scissor: Option<[i32; 4]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -217,6 +225,8 @@ struct Clip {
     tl: Timeline,
     /// `drawOver`: the caller's tag, reported with the clip's drawing state after its children.
     draw_over: Option<u32>,
+    /// Callbacks A / B that set a scissor before the clip and the whole screen after it: `[x0, y0, x1, y1]`.
+    scissor: Option<[i32; 4]>,
 }
 
 /// A `drawOver` call: the clip's combined matrix translation and colour transform.
@@ -353,6 +363,7 @@ impl Flash {
                 prop: Prop::reset(),
                 tl: new_timeline(&program, usize::from(id) + 1),
                 draw_over: None,
+                scissor: None,
             })
             .collect();
         let depths = usize::from(program.timelines[0].depths)
@@ -511,6 +522,26 @@ impl Flash {
     pub fn clip_set_draw_over(&mut self, r: ClipRef, tag: Option<u32>) {
         for index in self.refs(r) {
             self.clips[index].draw_over = tag;
+        }
+    }
+
+    /// `Flash_ClipSetCallbackA` / `B` with `Sprite_SetScissor(x0, x1, y0, y1)` before the clip and the whole
+    /// screen after it (`[x0, y0, x1, y1]`, inclusive); `None` takes them off.
+    pub fn clip_set_scissor(&mut self, r: ClipRef, rect: Option<[i32; 4]>) {
+        for index in self.refs(r) {
+            self.clips[index].scissor = rect;
+        }
+    }
+
+    /// `Flash_ClipSetScale`: negative factors are refused.
+    pub fn clip_set_scale(&mut self, r: ClipRef, x: f32, y: f32) {
+        if x < 0.0 || y < 0.0 {
+            return;
+        }
+        for index in self.refs(r) {
+            let prop = &mut self.clips[index].prop;
+            (prop.scale_x, prop.scale_y) = (x, y);
+            prop.flags |= OV_SCALE;
         }
     }
 
@@ -1014,6 +1045,7 @@ impl Flash {
                     prop.cx.add[i] = add.clamp(0, 255) as i16;
                 }
             }
+            let first = quads.len();
             self.draw_tl(
                 TlId::Clip(clip_index),
                 Some(&prop),
@@ -1021,6 +1053,12 @@ impl Flash {
                 quads,
                 overs,
             );
+            if let Some(rect) = clip.scissor {
+                // Callback B sets the whole screen again, so a scissor inside keeps its own.
+                for q in &mut quads[first..] {
+                    q.scissor.get_or_insert(rect);
+                }
+            }
             if let Some(tag) = clip.draw_over {
                 overs.push(DrawOver {
                     tag,
@@ -1061,6 +1099,7 @@ impl Flash {
                     (rec.rgba & 0xFF) as i32,
                 ],
                 image: None,
+                scissor: None,
             };
             if rec.image >= 0 {
                 let image = rec.image as usize;
@@ -1208,4 +1247,35 @@ fn parse_timeline(data: &[u8], record: usize) -> io::Result<TimelineProgram> {
         frames,
         end_label,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A quad drawn under a clip's scissor (inclusive bounds) is cut to it, its texels following; one outside
+    /// it is dropped.
+    #[test]
+    fn scissored_quads_are_cut_to_the_window() {
+        let quad = |x0: f32, x1: f32| DrawQuad {
+            flags: 0,
+            pt: [[x0, 0.0], [x1, 0.0], [x0, 100.0], [x1, 100.0]],
+            uv: Uv {
+                u0: 0,
+                v0: 0,
+                u1: 102,
+                v1: 102,
+                tex: 0,
+            },
+            rgba: [0x80; 4],
+            image: None,
+            scissor: Some([0, 20, 49, 79]),
+        };
+        let out = screen_quads(&[quad(0.0, 100.0), quad(60.0, 100.0)], &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pt[0], [0.0, 20.0]);
+        assert_eq!(out[0].pt[3], [50.0, 80.0]);
+        assert_eq!(out[0].uv[0], [1.0, 21.0]);
+        assert_eq!(out[0].uv[3], [51.0, 81.0]);
+    }
 }
