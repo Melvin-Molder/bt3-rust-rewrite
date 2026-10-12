@@ -195,6 +195,8 @@ pub struct StageObjectDef {
     pub anim: i32,
     pub parent: i32,
     pub position: [f32; 3],
+    /// +0x30: the rotation in degrees (an animated object's placement, `StgModel_DrawAnims`).
+    pub rotation: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -247,6 +249,11 @@ impl StageResource {
                     anim: read_i32(bytes, o + 8)?,
                     parent: read_i32(bytes, o + 0xC)?,
                     position: read_game_position(bytes, o + 0x20)?,
+                    rotation: [
+                        read_f32(bytes, o + 0x30)?,
+                        read_f32(bytes, o + 0x34)?,
+                        read_f32(bytes, o + 0x38)?,
+                    ],
                 })
             })
             .collect::<io::Result<_>>()?;

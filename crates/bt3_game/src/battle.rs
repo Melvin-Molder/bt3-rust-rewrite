@@ -350,6 +350,7 @@ pub fn load(
         sun,
         bound,
         scroll,
+        anims,
         surf,
     } = load_stage(read, setup.stage)?;
     // BtlLoad_StepInitial: the common, stage and both sides' sample banks.
@@ -467,10 +468,9 @@ pub fn load(
             anim_chara: s.chara,
             anim1_chara: s.chara,
         }),
-        stage_objs: std::sync::Mutex::new(crate::stg_obj::StageObjs::new(
-            &stage.objects,
-            &stage_model,
-        )),
+        stage_objs: std::sync::Mutex::new(
+            crate::stg_obj::StageObjs::new(&stage.objects, &stage_model).with_anims(anims),
+        ),
         snd: std::sync::Mutex::new(snd),
         bank_requests,
         stage,
@@ -1050,6 +1050,8 @@ pub(crate) struct LoadedStage {
     bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
     /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
     scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
+    /// `StgModel_BindAnims`: the animated objects, their textures among `textures`.
+    anims: crate::stage_anim::StageAnims,
     /// `EftSurf_Init`: the surface file's meshes, textures and parameters (entry 0xD), and the normal maps of a
     /// reflecting one (`EftTexSet_Load34` of entry 0xA, all but its last four textures).
     surf: Option<LoadedSurf>,
@@ -1108,6 +1110,9 @@ fn load_stage(
         .map(decode_sprite_texture)
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
+    let anims =
+        crate::stage_anim::StageAnims::load(&stage_file, &mut textures, stage.objects.len())
+            .map_err(error)?;
     let cuts = (0..3)
         .map(|i| {
             pack_section(&stage_file, STAGE_CUT_SECTION + i)
@@ -1222,6 +1227,7 @@ fn load_stage(
         model,
         textures,
         cuts,
+        anims,
         surf,
         pack12,
         pack14,
@@ -1713,8 +1719,9 @@ impl BattleAssets {
     /// `BtlLoad_EndStageSwap`'s stage half (`StgModel_InitStage`, `StgNav_Rebind`): the stage's resources, its
     /// objects whole, its textures to upload again.
     fn install_stage(&mut self, s: LoadedStage, stage_id: i32) {
-        self.stage_objs =
-            std::sync::Mutex::new(crate::stg_obj::StageObjs::new(&s.stage.objects, &s.model));
+        self.stage_objs = std::sync::Mutex::new(
+            crate::stg_obj::StageObjs::new(&s.stage.objects, &s.model).with_anims(s.anims),
+        );
         self.stage = s.stage;
         self.stage_model = s.model;
         self.stage_textures = s.textures;
@@ -1834,9 +1841,14 @@ impl Battle {
         .with_ambience()
     }
 
-    /// `Battle_Restart`'s `BtlStage_Reset` at the first start: `StgAmb_Start`.
+    /// `Battle_Restart`'s `BtlStage_Reset` at the first start: `StgAmb_Start`, and an animation pass owed.
     fn with_ambience(mut self) -> Self {
         self.amb.start(self.assets.stage_id);
+        self.assets
+            .stage_objs
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .owe_reset();
         self
     }
 
@@ -2020,6 +2032,11 @@ impl Battle {
                         if let Some(loaded) = job.loaded.take() {
                             let stage = self.assets.stage_id;
                             self.assets.install_stage(loaded, stage);
+                            self.assets
+                                .stage_objs
+                                .get_mut()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .run_pending_resets(&mut self.vu0);
                             // EftStage_CreateKinds: the new stage's effects.
                             // EftStage_Recreate.
                             self.roster.scene.stage = self.assets.new_stage_fx();
@@ -2275,6 +2292,11 @@ impl Battle {
             match load_stage(read, start) {
                 Ok(loaded) => {
                     self.assets.install_stage(loaded, start);
+                    self.assets
+                        .stage_objs
+                        .get_mut()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .run_pending_resets(&mut self.vu0);
                     stage_fx.reset();
                     let old = std::mem::replace(&mut stage_fx, self.assets.new_stage_fx());
                     stage_fx.prev = Some(Box::new(old));
@@ -2288,7 +2310,8 @@ impl Battle {
         }
         // BtlStage_Reset: every stage object whole again, the ambience started again.
         let objs = self.assets.stage_objs.get_mut();
-        objs.unwrap_or_else(|e| e.into_inner()).reset_stage();
+        objs.unwrap_or_else(|e| e.into_inner())
+            .reset_stage(&mut self.vu0);
         self.amb.start(self.assets.stage_id);
         if let Some(menu) = &mut self.menu {
             menu.reset();
@@ -2394,6 +2417,12 @@ impl Battle {
         if std::mem::take(&mut self.seq.restart) {
             self.restart(&mut sounds);
         }
+        // Battle_Init's stage binding and Battle_Restart's BtlStage_Reset: the animated objects' start frames.
+        self.assets
+            .stage_objs
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .run_pending_resets(&mut self.vu0);
         self.roster.scene.stage.run_pending(libc, &mut self.vu0);
         let menu = std::array::from_fn(|i| {
             use crate::btl_input::pad::{CROSS, DOWN, LEFT, RIGHT, START, TRIANGLE, UP};
@@ -2691,11 +2720,13 @@ impl Battle {
             stage.extend(s.draw(&view));
         }
         if !self.loading {
-            let objs = self
+            let mut objs = self
                 .assets
                 .stage_objs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            // StgModel_DrawAnims, after the main group.
+            stage.append(&mut objs.draw_anims(&view));
             stage.extend(crate::stage_draw::draw_debris(
                 &self.assets.stage_model,
                 &objs.falling_pieces(),
@@ -8933,6 +8964,52 @@ mod tests {
             most = most.max((angle(rot(&battle)) - rest).abs());
         }
         assert!(most > 0.01, "{most}");
+    }
+
+    #[test]
+    fn real_stage_objects_play_their_animations() {
+        let mut setup = BattleSetup::default();
+        setup.stage = 5;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        // Objects 36..43 play the stage's one animation (150 frames), each from its own random start.
+        let frames = |b: &mut Battle| -> Vec<f32> {
+            b.assets.stage_objs.get_mut().unwrap().anim_frames()[36..44].to_vec()
+        };
+        let before = frames(&mut battle);
+        assert!(
+            before.iter().all(|f| (0.0..=150.0).contains(f)),
+            "{before:?}"
+        );
+        assert!(before.windows(2).any(|w| w[0] != w[1]));
+        let mut drawn = Vec::new();
+        for _ in 0..3 {
+            let frame = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            drawn.push(
+                frame
+                    .stage
+                    .into_iter()
+                    .filter(|b| b.group == 2 && b.order >= 9000)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let after = frames(&mut battle);
+        for (a, b) in before.iter().zip(&after) {
+            assert!(*b == a + 6.0 || *b < *a, "{a} -> {b}");
+        }
+        // Drawn after the main group, posed differently from frame to frame.
+        assert!(drawn.iter().all(|d| !d.is_empty()));
+        let verts = |d: &Vec<crate::stage_draw::StageBatch>| d[0].vertices.clone();
+        assert!(
+            verts(&drawn[0])
+                .iter()
+                .all(|v| v.position.iter().all(|c| c.is_finite()))
+        );
+        assert_ne!(verts(&drawn[0]), verts(&drawn[2]));
     }
 
     #[test]

@@ -89,6 +89,7 @@ mod save;
 mod scr_warp;
 mod se;
 mod sound;
+mod stage_anim;
 mod stage_draw;
 mod stage_fx;
 mod stg_amb;

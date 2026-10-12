@@ -20,6 +20,7 @@ pub mod model;
 pub mod motion;
 pub mod snd;
 pub mod stage;
+pub mod stage_anim;
 pub mod stage_col;
 pub mod stage_model;
 pub mod stage_surf;

@@ -76,6 +76,11 @@ pub(crate) struct StageObjs {
     node_mtx: Vec<[[f32; 4]; 4]>,
     node_body: Vec<i32>,
     rigid: StgRigid,
+    /// The animated objects' animations and frames.
+    anims: crate::stage_anim::StageAnims,
+    /// `StgModel_ResetAnims` passes owed since the stage was bound (they draw VU0 random numbers, which the
+    /// battle supplies on its next step).
+    pending_resets: u8,
 }
 
 /// A falling piece as `StgModel_FadeDebris` reads it: its part, its node and the fade of its object.
@@ -188,16 +193,60 @@ impl StageObjs {
             node_mtx: model.nodes.iter().map(|n| n.mtx).collect(),
             node_body: vec![0; model.nodes.len()],
             rigid: StgRigid::default(),
+            anims: crate::stage_anim::StageAnims::default(),
+            pending_resets: 0,
         };
         s.reset(false);
         s
     }
 
-    /// `BtlStage_Reset`: every object whole (`BtlStage_ResetObjs(0)`) and the rigid bodies forgotten
-    /// (`StgRigid_Reset`).
-    pub(crate) fn reset_stage(&mut self) {
+    /// `StgModel_BindAnims` and `BtlStage_Init`'s `BtlStage_Reset`: the stage's animations, each object's frame
+    /// to be drawn twice.
+    pub(crate) fn with_anims(mut self, anims: crate::stage_anim::StageAnims) -> Self {
+        self.anims = anims;
+        self.pending_resets = 2;
+        self
+    }
+
+    /// One more `BtlStage_Reset`'s animation pass owed (`Battle_Restart` at the first start).
+    pub(crate) fn owe_reset(&mut self) {
+        self.pending_resets += 1;
+    }
+
+    /// The owed `StgModel_ResetAnims` passes.
+    pub(crate) fn run_pending_resets(&mut self, vu0: &mut Vu0Random) {
+        for _ in 0..std::mem::take(&mut self.pending_resets) {
+            self.reset_anims(vu0);
+        }
+    }
+
+    fn reset_anims(&mut self, vu0: &mut Vu0Random) {
+        let objs = &self.objs;
+        let broken = |i: usize| objs.get(i).is_some_and(|o| o.state & BROKEN != 0);
+        self.anims.reset(&self.defs, broken, vu0);
+    }
+
+    /// `BtlStage_Reset`: every object whole (`BtlStage_ResetObjs(0)`), the animations at random frames
+    /// (`StgModel_ResetAnims`) and the rigid bodies forgotten (`StgRigid_Reset`).
+    pub(crate) fn reset_stage(&mut self, vu0: &mut Vu0Random) {
         self.reset(false);
+        self.reset_anims(vu0);
         self.rigid.reset();
+    }
+
+    /// `StgModel_DrawAnims`.
+    pub(crate) fn draw_anims(
+        &mut self,
+        view: &crate::battle::View,
+    ) -> Vec<crate::stage_draw::StageBatch> {
+        let objs = &self.objs;
+        let broken = |i: usize| objs.get(i).is_some_and(|o| o.state & BROKEN != 0);
+        self.anims.draw(&self.defs, broken, view)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn anim_frames(&self) -> &[f32] {
+        &self.anims.frames
     }
 
     /// `BtlStage_ResetObjs`: every object whole (hit points, type and parent reloaded, `StgObj_LoadDef`), or with
@@ -415,6 +464,12 @@ impl StageObjs {
                     w.add_splash_at([prev[0], prev[1], prev[2]], 3.0, libc);
                 }
             }
+        }
+        // StgModel_UpdateAnims, between StgAmb_Update and StgRigid_Update.
+        {
+            let objs = &self.objs;
+            let broken = |i: usize| objs.get(i).is_some_and(|o| o.state & BROKEN != 0);
+            self.anims.update(&self.defs, broken);
         }
         self.rigid.update(inner_radius);
     }
