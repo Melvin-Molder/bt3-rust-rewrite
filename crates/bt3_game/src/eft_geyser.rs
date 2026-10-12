@@ -183,9 +183,10 @@ impl Geysers {
     }
 
     /// `EftGeyser_Draw` of every column (`EftGeyser_DrawColumn`).
-    pub(crate) fn draw(&self, ot: &mut OrderTable, ctx: &DrawCtx) {
+    /// `bright`: `EftStage_GetTintScale`.
+    pub(crate) fn draw(&self, ot: &mut OrderTable, ctx: &DrawCtx, bright: f32) {
         for c in &self.columns {
-            c.draw(ot, ctx, self.texture);
+            c.draw(ot, ctx, self.texture, bright);
         }
     }
 }
@@ -205,10 +206,11 @@ impl Column {
     /// Three segments between four points a quarter of the height apart upwards from the base, each turned to
     /// the camera; the texture runs once along them from the scroll position, the top edge transparent. A
     /// segment with a corner off the GS area is skipped, and the texture position only advances past one drawn.
-    fn draw(&self, ot: &mut OrderTable, ctx: &DrawCtx, texture: Option<usize>) {
+    fn draw(&self, ot: &mut OrderTable, ctx: &DrawCtx, texture: Option<usize>, bright: f32) {
         let w = self.cur.width;
-        // EftStage_GetTintScale: 1 without a stage tint.
-        let mut col = [self.cur.cur_color; 4];
+        // The colour's RGB scaled by the stage tint (Vec3_Scale keeps the alpha).
+        let c = self.cur.cur_color;
+        let mut col = [[c[0] * bright, c[1] * bright, c[2] * bright, c[3]]; 4];
         let pt: [V3; 4] = std::array::from_fn(|i| {
             let b = self.cur.base;
             [b[0], b[1] - self.cur.height * 0.25 * i as f32, b[2]]
@@ -361,7 +363,7 @@ mod tests {
         let view = View::new([0.0, -100.0, 0.0], [0.0; 3]);
         let ctx = DrawCtx::new(view.world2screen, view.world2view);
         let mut ot = OrderTable::new();
-        g.draw(&mut ot, &ctx);
+        g.draw(&mut ot, &ctx, 1.0);
         let tris = ot.into_list();
         assert_eq!(tris.len(), 6);
         assert!(tris.iter().all(|t| t.texture == Some(6)));

@@ -1300,6 +1300,8 @@ pub struct BattleFrame {
     pub exit: Option<u32>,
     /// `BtlScene_Draw` and `Ot_Draw`: the effects' triangles in the order the GS draws them, after the fighters.
     pub effects: Vec<EffectTri>,
+    /// `StgFx_DrawPre`: what is drawn over the stage before the fighters (the back tints).
+    pub under: Vec<EffectTri>,
     /// Effect textures whose texels changed this frame (the reflecting surface's lit palettes).
     pub texture_updates: Vec<(usize, RgbaTexture)>,
 }
@@ -1629,6 +1631,8 @@ impl Battle {
         // Battle_Init: the tasks' inits, then Battle_Restart's reset.
         roster.scene.stage = assets.new_stage_fx();
         roster.scene.stage.reset();
+        // StgFx_Reset: the tints off.
+        roster.scene.tints = crate::stg_tint::Tints::new(assets.stage.tint);
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -1885,6 +1889,9 @@ impl Battle {
                             // EftStage_CreateKinds: the new stage's effects.
                             // EftStage_Recreate.
                             self.roster.scene.stage = self.assets.new_stage_fx();
+                            // BtlLoad_EndStageSwap's StgFx_Reset.
+                            self.roster.scene.tints =
+                                crate::stg_tint::Tints::new(self.assets.stage.tint);
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -2209,6 +2216,7 @@ impl Battle {
             self.assets.stage.light_colors,
         );
         self.roster.scene.stage = stage_fx;
+        self.roster.scene.tints = crate::stg_tint::Tints::new(self.assets.stage.tint);
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         self.fade = Fade::start_in(1.0);
         self.started = false;
@@ -2527,6 +2535,14 @@ impl Battle {
                 view.eye(),
             ));
         }
+        // StgFx_DrawPre (nothing while a stage loads, StgFx_SetDisabled): the tint ramps step, then slots 0 and 1
+        // over the stage.
+        let mut under = Vec::new();
+        if !self.loading {
+            let tints = &mut self.roster.scene.tints;
+            tints.update(self.seq.paused);
+            tints.draw_back(&mut under);
+        }
         let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
         for side in 0..2 {
             let model = &self.assets.fighters[side];
@@ -2600,6 +2616,7 @@ impl Battle {
                 &ctx,
                 &roster.chars,
                 self.light_dir,
+                &roster.scene.tints,
                 self.seq.paused,
                 &mut *libc,
             );
@@ -2738,6 +2755,15 @@ impl Battle {
             );
         }
         let (capture, xfade_alpha) = self.xfade.draw_pass();
+        // StgFx_DrawOverlay: slots 3 and 2 over everything, then the finished slots go off.
+        let front = if self.loading {
+            Vec::new()
+        } else {
+            let tints = &mut self.roster.scene.tints;
+            let front = tints.draw_front();
+            tints.release();
+            front
+        };
         BattleFrame {
             stage,
             models: batches,
@@ -2748,12 +2774,19 @@ impl Battle {
                 .fade2
                 .quad()
                 .into_iter()
+                .chain(front.into_iter().map(|rgba| Quad {
+                    texture: None,
+                    screen: [0, 0, 512, 448],
+                    uv: [0; 4],
+                    rgba,
+                }))
                 .chain(self.fade.quad())
                 .collect(),
             hud,
             sounds,
             exit: self.seq.left.then_some(self.seq.reason),
             effects,
+            under,
             texture_updates,
         }
     }
@@ -5120,7 +5153,7 @@ mod tests {
         };
         let mut frame = |battle: &mut Battle, held: u32| {
             let start = held & START != 0 && battle.prev_held[0] & START == 0;
-            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+            battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false)
         };
         for i in 0..200 {
             let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
@@ -5145,6 +5178,9 @@ mod tests {
         let (mut acts, mut fire_at, mut beam_at, mut end_at) = (Vec::new(), None, None, None);
         let mut hits = Vec::new();
         let mut health = battle.roster.chars[1].gauge.health;
+        // The technique's request 0x10 darkens the stage behind the fighters (the stage tint's slot 0, black to
+        // alpha 100 over 0.2 s) until it ends.
+        let (mut dark, mut dark_at, mut last_under) = (0, None, 0);
         for i in 0..110 {
             let held = match i {
                 2..4 => L2,
@@ -5152,7 +5188,13 @@ mod tests {
                 6..40 => TRIANGLE,
                 _ => 0,
             };
-            frame(&mut battle, held);
+            let f = frame(&mut battle, held);
+            if let Some(t) = f.under.first() {
+                assert_eq!(t.vertices[0].rgba[..3], [0, 0, 0]);
+                dark = dark.max(t.vertices[0].rgba[3]);
+                dark_at.get_or_insert(i);
+            }
+            last_under = f.under.len();
             let a = &battle.roster.chars[0];
             let o = &battle.roster.chars[1];
             acts.push((a.act.current, a.anim.cur));
@@ -5198,6 +5240,9 @@ mod tests {
         assert!(end_at.is_some_and(|e| e < hits[5].0 + 5), "{end_at:?}");
         assert!(battle.roster.scene.tech.beams_of(0).is_empty());
         assert_eq!(battle.roster.chars[0].gauge.ki, 40_000);
+        assert_eq!(dark, 100, "{dark_at:?}");
+        assert_eq!(last_under, 0);
+        assert!(!battle.roster.scene.tints.is_on(0));
     }
 
     #[test]

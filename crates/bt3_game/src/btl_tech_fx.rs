@@ -325,6 +325,8 @@ pub(crate) struct TechFx {
     /// whose cut runs ended (`EftCam_Stop`).
     pub(crate) cam_requests: Vec<(usize, i32)>,
     pub(crate) cam_stop: bool,
+    /// The stage tint's slot 0 starts of this update (`StgTint_Start(0, dir, 0.2)`, by the rush shots), in order.
+    pub(crate) tints: Vec<usize>,
     events: [u32; 2],
     requests: [u32; 2],
     timelines: Vec<Timeline>,
@@ -356,6 +358,7 @@ impl Default for TechFx {
         Self {
             cam_requests: Vec::new(),
             cam_stop: false,
+            tints: Vec::new(),
             events: [0; 2],
             requests: [0; 2],
             timelines: Vec::new(),
@@ -1461,7 +1464,12 @@ impl TechFx {
                 let mut k = 0;
                 while k < self.rush_shots[side][slot].len() {
                     let r = &mut self.rush_shots[side][slot][k];
+                    let attached = r.attached();
                     let (rec, stop) = r.update(w, fx, self.events[side], self.cur_slot[side]);
+                    // The rush connected: the stage darkens.
+                    if !attached && r.attached() {
+                        self.tints.push(0);
+                    }
                     // EftRushShot_StartCam / EftCam_Stop.
                     if !r.cam_sent && r.connected() {
                         r.cam_sent = true;
@@ -1474,7 +1482,10 @@ impl TechFx {
                         records.push(rec);
                     }
                     if r.dead() {
-                        // EftRushShot_Term (the stage tint is not ported).
+                        // EftRushShot_Term: the stage tint back once attached.
+                        if r.attached() {
+                            self.tints.push(1);
+                        }
                         if r.src().def.kind != 0 {
                             w.chars[side].flags.set_held(0xA8);
                         }

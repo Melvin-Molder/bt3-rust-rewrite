@@ -268,7 +268,16 @@ impl Surf {
     /// `EftSurf_DrawMeshes`: each shown mesh whose box may be in view (one near the camera only within 400 of
     /// it, fading from 200), its triangles scrolled or wobbled, through the route its flags pick. `direct`
     /// takes what goes straight to the GS (`EftSurf_BeginDraw`: blended, depth tested, not written).
-    pub(crate) fn draw(&self, ot: &mut OrderTable, direct: &mut Vec<EffectTri>, ctx: &DrawCtx) {
+    /// `bright`: `EftStage_GetTintScale` (the reflecting colour's RGB); `tinted`: `StgTint_IsOn(0)`, which drops a
+    /// reflecting triangle's table pass when it has no specular one.
+    pub(crate) fn draw(
+        &self,
+        ot: &mut OrderTable,
+        direct: &mut Vec<EffectTri>,
+        ctx: &DrawCtx,
+        bright: f32,
+        tinted: bool,
+    ) {
         // The camera at the water's height (BtlStage_GetWaterLevel).
         let cam = [ctx.eye[0], self.level, ctx.eye[2]];
         for m in &self.meshes {
@@ -287,7 +296,7 @@ impl Surf {
                 }
             }
             if m.flags & REFLECT != 0 {
-                self.draw_reflect(ot, direct, ctx, m, cam);
+                self.draw_reflect(ot, direct, ctx, m, cam, bright, tinted);
                 continue;
             }
             let layer: u8 = if m.flags & NO_DEPTH_TEST != 0 {
@@ -312,7 +321,6 @@ impl Surf {
                         st[1] += m.v;
                         col[3] *= fade;
                     }
-                    // EftStage_GetTintScale: 1 without a stage tint.
                     ClipVtx {
                         pos: point(v.pos),
                         uv: [st[0], st[1], 1.0, 1.0],
@@ -336,6 +344,7 @@ impl Surf {
     /// fade by the squared distance to the camera (at the water's height) up to the fade distance; a clipped
     /// mesh draws straight to the GS (clipped when the triangle is within 450 of the camera), the others into
     /// the table.
+    #[allow(clippy::too_many_arguments)]
     fn draw_reflect(
         &self,
         ot: &mut OrderTable,
@@ -343,6 +352,8 @@ impl Surf {
         ctx: &DrawCtx,
         m: &SurfMesh,
         cam: V3,
+        bright: f32,
+        tinted: bool,
     ) {
         let Some(r) = &self.reflect else {
             return;
@@ -350,9 +361,9 @@ impl Surf {
         let p = &r.param;
         let dist_sq = p.fade_dist * p.fade_dist;
         let light = [
-            p.color_a[0],
-            p.color_a[1],
-            p.color_a[2],
+            p.color_a[0] * bright,
+            p.color_a[1] * bright,
+            p.color_a[2] * bright,
             p.color_a[3] * (1.0 / 128.0),
         ];
         let tex = [Some(r.out[0]), Some(r.out[1])];
@@ -393,7 +404,7 @@ impl Surf {
                 let p = project_clipped(ctx, out);
                 for i in 2..p.len() {
                     let z = (p[0].z >> 8) - m.z_bias;
-                    queue_pair(ot, [&p[0], &p[i - 1], &p[i]], tex, fog, z);
+                    queue_pair(ot, [&p[0], &p[i - 1], &p[i]], tex, fog, z, tinted);
                 }
             }
         }
@@ -450,13 +461,24 @@ fn direct_pair(direct: &mut Vec<EffectTri>, v: &[Proj; 3], tex: [Option<usize>; 
     }
 }
 
-/// `EftSurf_QueueTri` of the reflecting surface: the same two passes into layers 0 and 1 of the depth slot.
-fn queue_pair(ot: &mut OrderTable, v: [&Proj; 3], tex: [Option<usize>; 2], fog: [f32; 3], z: i32) {
+/// `EftSurf_QueueTri` of the reflecting surface: the same two passes into layers 0 and 1 of the depth slot; with
+/// only the first and the stage tint's slot 0 on, nothing.
+fn queue_pair(
+    ot: &mut OrderTable,
+    v: [&Proj; 3],
+    tex: [Option<usize>; 2],
+    fog: [f32; 3],
+    z: i32,
+    tinted: bool,
+) {
     if v.iter().all(|p| p.col[3] <= 0.0) {
         return;
     }
     let count = if fog.iter().all(|&f| f <= 0.01) { 1 } else { 2 };
     for layer in 0..count {
+        if count == 1 && tinted {
+            continue;
+        }
         let vert = |k: usize| {
             let mut c = v[k].col;
             if layer == 1 {
@@ -666,7 +688,7 @@ mod tests {
         let view = View::new([0.0, 0.0, 0.0], [0.0; 3]);
         let ctx = DrawCtx::new(view.world2screen, view.world2view);
         let (mut ot, mut direct) = (OrderTable::new(), Vec::new());
-        s.draw(&mut ot, &mut direct, &ctx);
+        s.draw(&mut ot, &mut direct, &ctx, 1.0, false);
         let tris = ot.into_list();
         // The clipped mesh straight to the GS; the plain ones in layer 0 (alpha) and 1 (additive, no depth
         // test); the hidden one not at all.
@@ -723,7 +745,7 @@ mod tests {
         // Clipped (0x400) and near: straight to the GS, blended with the first texture, then added with the
         // second.
         let (mut ot, mut direct) = (OrderTable::new(), Vec::new());
-        s.draw(&mut ot, &mut direct, &ctx);
+        s.draw(&mut ot, &mut direct, &ctx, 1.0, false);
         assert!(!direct.is_empty());
         assert_eq!(direct[0].texture, Some(40));
         assert_eq!(direct[0].blend, EffectBlend::Alpha);

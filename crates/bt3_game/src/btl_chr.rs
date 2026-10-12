@@ -1185,6 +1185,11 @@ impl Chr {
         test_bit(&self.fx_bits, bit)
     }
 
+    /// `BtlChar_TestPrevFxBit`: set a frame ago.
+    pub(crate) fn test_prev_fx(&self, bit: u32) -> bool {
+        test_bit(&self.prev_fx_bits, bit)
+    }
+
     /// `BtlChar_IsFxBitNew`: set now, not a frame ago.
     pub(crate) fn fx_new(&self, bit: u32) -> bool {
         self.test_fx(bit) && !test_bit(&self.prev_fx_bits, bit)

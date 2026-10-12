@@ -129,6 +129,29 @@ pub(crate) fn update_aura(
     }
 }
 
+/// `BtlFx_UpdateStageFxRequest`: request 0x10 raises 0x12 (in a technique only when its flag word A has bit 31
+/// clear); request 0x11 raises it once the animation's attribute 0x200 was seen during it (flag 0x12E, dropped
+/// when 0x11 ends).
+pub(crate) fn stage_fx_request(me: &mut Chr, data: &SideData) {
+    if me.test_fx(0x10) {
+        let cur = me.act.current;
+        let class = crate::btl_act::id_class(cur);
+        if !crate::btl_act::is_technique_id(cur) || data.tables.tech().flags_a(class) as i32 >= 0 {
+            me.set_fx(0x12);
+        }
+    }
+    if me.test_fx(0x11) {
+        if me.anim_test_attr(0x200) {
+            me.flags.set_held(0x12E);
+        }
+        if me.flags.test(0x12E) {
+            me.set_fx(0x12);
+        }
+    } else {
+        me.flags.clear(0x12E);
+    }
+}
+
 /// `BtlFx_UpdateObjFlag80`: with parameter flag 0x200000, ability 0x79 shows model part 4 (object flag 0x80, the
 /// geometry on node 0x6F); without either it is cleared, but only while the object is drawn (flag 2).
 pub(crate) fn update_obj_flag80(me: &mut Chr, data: &SideData) {

@@ -4,8 +4,8 @@
 //! ten frames, then two screen shock waves and the "after" group), request 2 lets it run its end frames. One at a
 //! time; layer 3.
 //!
-//! Not drawn: the stage tint the flash turns on (`StgTint_Start(1, ..)`) and the silhouette itself (the object's
-//! colour mode 3 is kept on the object).
+//! The flash turns the stage tint's slot 1 on (`StgTint_Start(1, ..)`, by the scene with the silhouette); the
+//! silhouette itself is not drawn (the object's colour mode 3 is kept on the object).
 
 use bt3_data::eft_pack::EmitSet;
 

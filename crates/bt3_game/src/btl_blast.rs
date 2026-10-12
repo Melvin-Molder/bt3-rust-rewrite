@@ -347,6 +347,9 @@ pub(crate) struct Scene {
     pub warps: crate::scr_warp::ScrWarps,
     /// The stage effects of layer 0.
     pub stage: crate::stage_fx::StageFx,
+    /// The stage tint (`gStgTint`; a member of the screen effects' group, kept here for the requests that start
+    /// it).
+    pub tints: crate::stg_tint::Tints,
 }
 
 /// A generator draw made outside the scene update.
@@ -1067,6 +1070,9 @@ impl Scene {
             HIT_MAX,
             &mut self.next_id,
         );
+        for dir in self.tech.tints.drain(..) {
+            self.tints.start(0, dir, 0.2);
+        }
         // The sweeps' marks that ran out start their blast impacts.
         for (arg, scale) in self.tech.blast_impacts.drain(..) {
             self.impacts.spawn_blast(w.env.impact, &arg, scale, 1.0);
@@ -1292,8 +1298,10 @@ impl Scene {
                 w.vu0,
             );
         }
+        // The flash: the stage tint's slot 1 (white) at once and the silhouette; the reveal undoes both.
         for r in &self.transforms.model_requests {
             w.chars[r.chr].obj.set_color_mode(3, r.silhouette);
+            self.tints.start(1, usize::from(!r.silhouette), 0.0);
         }
         // EftImpact_Update.
         self.impacts.update(

@@ -205,6 +205,11 @@ impl RushShot {
 
     /// `EftRushShot_Update`. Returns the record and whether the owner's timeline is to stop
     /// (`EftTechEvt_RequestStop`, as the rush connects).
+    /// `EFT_RUSHSHOT_ATTACHED`: the shot is on the opponent (the stage tint's slot 0 holds).
+    pub(crate) fn attached(&self) -> bool {
+        self.flags & ATTACHED != 0
+    }
+
     /// The owner's rush has connected (`EFT_RUSHSHOT_CONNECTED`).
     pub(crate) fn connected(&self) -> bool {
         self.flags & CONNECTED != 0

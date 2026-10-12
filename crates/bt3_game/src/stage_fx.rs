@@ -149,25 +149,26 @@ impl StageFx {
         ctx: &DrawCtx,
         chars: &[Chr; 2],
         light: V3,
+        tints: &crate::stg_tint::Tints,
         paused: bool,
         libc: &mut LibcRandom,
     ) {
         if let Some(s) = &self.surf {
             // EftSurf_BuildPalettes, before the views draw.
             updates.extend(s.palettes(&ctx.world2view).into_iter().flatten());
-            s.draw(ot, direct, ctx);
+            s.draw(ot, direct, ctx, tints.scale(), tints.is_on(0));
         }
         if let Some(w) = &mut self.weather {
-            w.draw(ot, ctx, paused, libc);
+            w.draw(ot, ctx, tints.weather(), paused, libc);
         }
         if let Some(s) = &mut self.storm {
-            s.draw(ot, ctx, libc);
+            s.draw(ot, ctx, tints.scale(), libc);
         }
         if let Some(s) = &self.smoke {
-            s.draw(ot, ctx, light);
+            s.draw(ot, ctx, light, tints.scale());
         }
         if let Some(g) = &self.geysers {
-            g.draw(ot, ctx);
+            g.draw(ot, ctx, tints.scale());
         }
         if let Some(w) = &self.water {
             w.draw(ot, ctx);

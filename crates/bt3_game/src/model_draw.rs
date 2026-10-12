@@ -40,6 +40,8 @@ const FIGHTER_SORT: f32 = -100.0;
 const HUD_SORT: f32 = 100.0;
 /// The effects' sorted pass (`Ot_Draw`) between the fighters and the HUD, in the order of its batches.
 const EFFECT_SORT: f32 = 0.0;
+/// `StgFx_DrawPre`'s rectangles: after the stage, before the fighters.
+const UNDER_SORT: f32 = -200.0;
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct GsModelMaterial {
@@ -229,6 +231,7 @@ pub struct GsEffectMaterial {
     blend: EffectBlend,
     zwrite: bool,
     order: u16,
+    under: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -256,7 +259,8 @@ impl Material2d for GsEffectMaterial {
     }
 
     fn depth_bias(&self) -> f32 {
-        EFFECT_SORT + f32::from(self.order) * 0.001
+        let base = if self.under { UNDER_SORT } else { EFFECT_SORT };
+        base + f32::from(self.order) * 0.001
     }
 
     /// `Ot_AddEnv`: depth test without writes (but for the triangles that write it); the layer's ALPHA_1 /
@@ -308,7 +312,8 @@ pub struct EffectTextures {
     /// Each texture clamped (CLAMP 5) and wrapping (the sorted pass's CLAMP 0).
     images: Vec<[Handle<Image>; 2]>,
     blank: Option<Handle<Image>>,
-    materials: HashMap<(Option<usize>, bool, EffectBlend, bool, u8, u16), Handle<GsEffectMaterial>>,
+    materials:
+        HashMap<(Option<usize>, bool, EffectBlend, bool, u8, u16, bool), Handle<GsEffectMaterial>>,
 }
 
 #[derive(Component)]
@@ -377,16 +382,24 @@ pub fn sync_effects(
         bool,
         u8,
         Vec<&'a EffectTri>,
+        bool,
     );
+    // The rectangles under the fighters first (their own sort range), then the sorted pass.
     let mut batches: Vec<Batch> = Vec::new();
-    for tri in &game.effects {
+    let tris = game
+        .under_effects
+        .iter()
+        .map(|t| (t, true))
+        .chain(game.effects.iter().map(|t| (t, false)));
+    for (tri, under) in tris {
         match batches.last_mut() {
-            Some((t, c, b, z, a, list))
+            Some((t, c, b, z, a, list, u))
                 if *t == tri.texture
                     && *c == tri.clamp
                     && *b == tri.blend
                     && *z == tri.zwrite
-                    && *a == tri.alpha_ref =>
+                    && *a == tri.alpha_ref
+                    && *u == under =>
             {
                 list.push(tri)
             }
@@ -397,17 +410,28 @@ pub fn sync_effects(
                 tri.zwrite,
                 tri.alpha_ref,
                 vec![tri],
+                under,
             )),
         }
     }
+    #[allow(clippy::too_many_arguments)]
     let mut material = |index: usize,
                         texture: Option<usize>,
                         clamp: bool,
                         blend: EffectBlend,
                         zwrite: bool,
                         alpha_ref: u8,
+                        under: bool,
                         textures: &mut EffectTextures| {
-        let key = (texture, clamp, blend, zwrite, alpha_ref, index as u16);
+        let key = (
+            texture,
+            clamp,
+            blend,
+            zwrite,
+            alpha_ref,
+            index as u16,
+            under,
+        );
         if let Some(handle) = textures.materials.get(&key) {
             return handle.clone();
         }
@@ -434,6 +458,7 @@ pub fn sync_effects(
             blend,
             zwrite,
             order: index as u16,
+            under,
         });
         textures.materials.insert(key, handle.clone());
         handle
@@ -441,7 +466,8 @@ pub fn sync_effects(
     let mut existing = 0;
     for (slot, mesh, mut handle, mut visibility) in &mut slots {
         existing = existing.max(slot.0 + 1);
-        let Some((texture, clamp, blend, zwrite, alpha_ref, tris)) = batches.get(slot.0) else {
+        let Some((texture, clamp, blend, zwrite, alpha_ref, tris, under)) = batches.get(slot.0)
+        else {
             *visibility = Visibility::Hidden;
             continue;
         };
@@ -455,6 +481,7 @@ pub fn sync_effects(
             *blend,
             *zwrite,
             *alpha_ref,
+            *under,
             &mut textures,
         );
         if handle.0 != wanted {
@@ -462,7 +489,7 @@ pub fn sync_effects(
         }
         *visibility = Visibility::Visible;
     }
-    for (index, (texture, clamp, blend, zwrite, alpha_ref, tris)) in
+    for (index, (texture, clamp, blend, zwrite, alpha_ref, tris, under)) in
         batches.iter().enumerate().skip(existing)
     {
         let mut mesh = Mesh::new(
@@ -480,6 +507,7 @@ pub fn sync_effects(
                 *blend,
                 *zwrite,
                 *alpha_ref,
+                *under,
                 &mut textures,
             )),
             Transform::default(),

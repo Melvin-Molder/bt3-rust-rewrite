@@ -134,9 +134,16 @@ impl Storm {
     }
 
     /// `EftStorm_Draw`: the bolts, then the rain (wrapped around the camera first).
-    pub(crate) fn draw(&mut self, ot: &mut OrderTable, ctx: &DrawCtx, libc: &mut LibcRandom) {
+    /// `bright`: `EftStage_GetTintScale`.
+    pub(crate) fn draw(
+        &mut self,
+        ot: &mut OrderTable,
+        ctx: &DrawCtx,
+        bright: f32,
+        libc: &mut LibcRandom,
+    ) {
         let cam = inverse_rt(&ctx.world2view);
-        self.draw_bolts(ot, ctx, &cam);
+        self.draw_bolts(ot, ctx, &cam, bright);
         // EftStorm_DrawRain: the streak leans against the camera's movement since the last draw.
         let center = xyz(apply(&cam, [0.0, 0.0, 150.0, 1.0]));
         let eye = xyz(cam[3]);
@@ -150,9 +157,8 @@ impl Storm {
 
     /// `EftStorm_DrawBolts`: corners (-4, -1.5), (4, 8), (-8, -3), (8, 0) times 150 turned with the camera
     /// around each live bolt; a bolt with a corner off the GS area is skipped.
-    fn draw_bolts(&self, ot: &mut OrderTable, ctx: &DrawCtx, cam: &Mtx) {
-        // EftStage_GetTintScale: 1 without a stage tint.
-        let col = 128.0f32;
+    fn draw_bolts(&self, ot: &mut OrderTable, ctx: &DrawCtx, cam: &Mtx, bright: f32) {
+        let col = bright * 128.0;
         let corners = [[-4.0, -1.5], [4.0, 8.0], [-8.0, -3.0], [8.0, -0.0]]
             .map(|[x, y]| xyz(apply(cam, [x * 150.0, y * 150.0, 0.0, 0.0])));
         for b in self.bolts.iter().filter(|b| b.life != 0 && b.wait == 0) {
@@ -338,10 +344,10 @@ mod tests {
         // Each draw moves a drop by one cube at most: a few bring them all in (a drop wrapped through the top or
         // bottom lands up to 128 across, which the next draw corrects).
         for _ in 0..12 {
-            s.draw(&mut OrderTable::new(), &ctx, &mut libc);
+            s.draw(&mut OrderTable::new(), &ctx, 1.0, &mut libc);
         }
         let mut ot = OrderTable::new();
-        s.draw(&mut ot, &ctx, &mut libc);
+        s.draw(&mut ot, &ctx, 1.0, &mut libc);
         assert!(
             s.drops
                 .iter()

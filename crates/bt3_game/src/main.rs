@@ -87,6 +87,7 @@ mod stg_amb;
 mod stg_obj;
 mod stg_rigid;
 mod stg_scroll;
+mod stg_tint;
 mod title;
 mod windows;
 
@@ -232,6 +233,8 @@ struct Game {
     /// The fighters' effect textures and this frame's effect triangles in draw order.
     effect_textures: Vec<RgbaTexture>,
     effects: Vec<eft::EffectTri>,
+    /// What `StgFx_DrawPre` draws between the stage and the fighters (the back tints).
+    under_effects: Vec<eft::EffectTri>,
     /// The effect textures whose texels changed this frame (the draw writes them again).
     effect_updates: Vec<usize>,
     /// The HUD sheets of the battle and this frame's HUD sprites.
@@ -439,6 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             stage_batches: Vec::new(),
             effect_textures: Vec::new(),
             effects: Vec::new(),
+            under_effects: Vec::new(),
             effect_updates: Vec::new(),
             hud_textures: Vec::new(),
             hud_prims: Vec::new(),
@@ -1076,6 +1080,7 @@ fn run_frames(
                 game.model_batches = frame.models;
                 game.stage_batches = frame.stage;
                 game.effects = frame.effects;
+                game.under_effects = frame.under;
                 game.effect_updates.clear();
                 for (i, t) in frame.texture_updates {
                     if let Some(slot) = game.effect_textures.get_mut(i) {
@@ -1135,6 +1140,7 @@ fn leave_battle(
     game.model_batches.clear();
     game.stage_batches.clear();
     game.effects.clear();
+    game.under_effects.clear();
     game.hud_prims.clear();
     game.hud_layer = None;
     game.xfade_alpha = 0;
@@ -1187,6 +1193,7 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
     game.model_batches.clear();
     game.stage_batches.clear();
     game.effects.clear();
+    game.under_effects.clear();
     game.hud_prims.clear();
     game.hud_layer = None;
     game.scene = Scene::BattleLoad(Box::new(BattleLoad {

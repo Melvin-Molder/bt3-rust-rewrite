@@ -142,11 +142,10 @@ impl Smoke {
         }
     }
 
-    /// `EftSmoke_Draw` of every emitter: `light` is the stage's light direction (`BtlStage_GetLightVecB`).
-    pub(crate) fn draw(&self, ot: &mut OrderTable, ctx: &DrawCtx, light: V3) {
+    /// `EftSmoke_Draw` of every emitter: `light` is the stage's light direction (`BtlStage_GetLightVecB`),
+    /// `bright` `EftStage_GetTintScale`.
+    pub(crate) fn draw(&self, ot: &mut OrderTable, ctx: &DrawCtx, light: V3, bright: f32) {
         let light = norm(light);
-        // EftStage_GetTintScale: 1 without a stage tint, which is not ported.
-        let bright = 1.0;
         for e in &self.emitters {
             let a = &e.arg;
             let base = [a.pos[0], a.pos[1] - 50.0, a.pos[2]];
@@ -316,7 +315,7 @@ mod tests {
         let view = View::new([0.0, -50.0, 0.0], [0.0; 3]);
         let ctx = DrawCtx::new(view.world2screen, view.world2view);
         let mut ot = OrderTable::new();
-        s.draw(&mut ot, &ctx, [0.0, 1.0, 0.0]);
+        s.draw(&mut ot, &ctx, [0.0, 1.0, 0.0], 1.0);
         let tris = ot.into_list();
         assert!(!tris.is_empty());
         assert!(tris.iter().all(|t| t.texture == Some(4)));

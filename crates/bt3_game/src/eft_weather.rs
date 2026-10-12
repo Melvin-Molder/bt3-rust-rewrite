@@ -83,16 +83,18 @@ impl Weather {
         self.angle = (self.angle + (libc.rand() & 3)) % 360;
     }
 
-    /// `EftWeatherPtcl_Draw`: the particles move (not while paused), then draw.
+    /// `EftWeatherPtcl_Draw`: the particles move (not while paused), then draw. `tint`: the stage tint's slot 0
+    /// colour and the stage's darkest alpha, when it is on.
     pub(crate) fn draw(
         &mut self,
         ot: &mut OrderTable,
         ctx: &DrawCtx,
+        tint: Option<([i32; 4], f32)>,
         paused: bool,
         libc: &mut LibcRandom,
     ) {
         if !paused {
-            self.step(ctx, libc);
+            self.step(ctx, tint, libc);
         }
         let s = self.size * 16.0;
         for p in &self.parts[..self.count] {
@@ -114,7 +116,7 @@ impl Weather {
 
     /// `EftWeather_Move`: each particle's velocity takes a random step (kept within 0.4); it drifts with the wind
     /// and its velocity; out of the box it wraps round it; then its alpha.
-    fn step(&mut self, ctx: &DrawCtx, libc: &mut LibcRandom) {
+    fn step(&mut self, ctx: &DrawCtx, tint: Option<([i32; 4], f32)>, libc: &mut LibcRandom) {
         let mut m = ctx.world2view;
         let inv = inverse_rt(&m);
         let cam = xyz(inv[3]);
@@ -220,8 +222,20 @@ impl Weather {
                     a = 0.0;
                 }
             }
-            // StgTint_IsOn(0): the stage tint is not ported.
-            p.color = [128.0, 128.0, 128.0, a * 128.0];
+            // With the stage tint on: the weather's colour (0x80 each) darkened by slot 0's alpha, the alpha by
+            // its share of the stage's darkest.
+            p.color = match tint {
+                Some((t, max)) => {
+                    let mut c = [0x80i32; 3];
+                    let mut k = 1.0f32;
+                    if t[3] != 0 {
+                        c = c.map(|v| (v - t[3]).max(0));
+                        k -= t[3] as f32 / max;
+                    }
+                    [c[0] as f32, c[1] as f32, c[2] as f32, a * 128.0 * k]
+                }
+                None => [128.0, 128.0, 128.0, a * 128.0],
+            };
             p.pos = pos;
         }
     }
@@ -260,7 +274,7 @@ mod tests {
         for _ in 0..30 {
             w.update(&mut libc);
             let mut ot = OrderTable::new();
-            w.draw(&mut ot, &ctx, false, &mut libc);
+            w.draw(&mut ot, &ctx, None, false, &mut libc);
             drawn += ot.into_list().len();
         }
         // Inside the box 55 in front of the camera after the first frames' wraps.
@@ -275,7 +289,28 @@ mod tests {
         assert!(drawn > 0);
         // Paused: they do not move.
         let before = w.parts[0].pos;
-        w.draw(&mut OrderTable::new(), &ctx, true, &mut libc);
+        w.draw(&mut OrderTable::new(), &ctx, None, true, &mut libc);
         assert_eq!(w.parts[0].pos, before);
+        // Under the stage tint (slot 0 at alpha 50 of a stage darkest 100): darker by 50, half as opaque.
+        let mut again = w.clone();
+        let mut libc2 = LibcRandom::new(99);
+        w.draw(
+            &mut OrderTable::new(),
+            &ctx,
+            None,
+            false,
+            &mut LibcRandom::new(99),
+        );
+        again.draw(
+            &mut OrderTable::new(),
+            &ctx,
+            Some(([0, 0, 0, 50], 100.0)),
+            false,
+            &mut libc2,
+        );
+        for (p, q) in w.parts[..w.count].iter().zip(&again.parts[..again.count]) {
+            assert_eq!(q.color[..3], [78.0, 78.0, 78.0]);
+            assert_eq!(q.color[3], p.color[3] * 0.5);
+        }
     }
 }

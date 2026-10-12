@@ -405,6 +405,19 @@ impl Roster {
             }
             me.obj.build_volumes(&data[i].obj);
         }
+        // BtlFx_UpdateRoster: requests 0x10 / 0x11 become 0x12, whose start and end (by any fighter) darken the
+        // stage and bring it back (the stage tint's slot 0).
+        for i in 0..2 {
+            crate::btl_fx::stage_fx_request(&mut self.chars[i], data[i]);
+        }
+        let now = self.chars.iter().any(|c| c.test_fx(0x12));
+        let prev = self.chars.iter().any(|c| c.test_prev_fx(0x12));
+        if now && !prev {
+            self.scene.tints.start(0, 0, 0.2);
+        }
+        if !now && prev {
+            self.scene.tints.start(0, 1, 0.2);
+        }
         self.update_queued_damage(data, env);
         if !self.chars.iter().any(Chr::is_frozen) {
             let mut pair = Pair {
