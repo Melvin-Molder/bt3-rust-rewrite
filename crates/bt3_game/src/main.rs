@@ -58,6 +58,7 @@ mod se;
 mod sound;
 mod stage_draw;
 mod stg_obj;
+mod stg_rigid;
 mod title;
 mod windows;
 

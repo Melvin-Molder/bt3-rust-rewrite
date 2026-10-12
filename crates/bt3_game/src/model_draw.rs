@@ -121,10 +121,12 @@ impl Material2d for GsStageMaterial {
         key: Material2dKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         let group = key.bind_group_data.group;
+        // The debris (group 6) writes depth too: TEST_1 0x51809 keeps the depth of a fading piece (alpha below
+        // 0x80) unwritten, which is not reproduced.
         set_pipeline_state(
             descriptor,
             Some(BlendState::ALPHA_BLENDING),
-            matches!(group, 1 | 2),
+            matches!(group, 1 | 2 | 6),
         );
         Ok(())
     }

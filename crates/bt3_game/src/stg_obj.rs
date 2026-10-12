@@ -1,11 +1,16 @@
 //! The stage's destructible objects (src/battle/stg_parts.c): their hit points, breaking (with the objects that
-//! name the broken one as parent), the shakes a break gives the cameras near it, and the time their pieces fall.
+//! name the broken one as parent), the shakes a break gives the cameras near it, and their pieces' fall: a piece
+//! with keys follows them, a piece with one key is a rigid body thrown away from the hit (`stg_rigid`).
 //!
-//! Not ported: the debris pieces' animation and rigid bodies, their dust and splashes, the break sound, the pads'
-//! rumble, the hidden item of mode 1 and the way-point graph's object flags (nothing reads them).
+//! Not ported: the pieces' dust and splashes (`EftGndDust_SpawnDebris`, `EftWater_AddSplashAt`, which also draw
+//! random numbers), the break sound, the pads' rumble, the hidden item of mode 1 and the way-point graph's object
+//! flags (nothing reads them).
 
 use bt3_data::stage::StageObjectDef;
-use bt3_data::stage_model::StageModel;
+use bt3_data::stage_model::{StageModel, StageNode};
+
+use crate::rng::{LibcRandom, Vu0Random};
+use crate::stg_rigid::StgRigid;
 
 /// `STG_OBJ_BROKEN` / `STG_OBJ_FALLING`.
 const BROKEN: u32 = 1;
@@ -17,7 +22,7 @@ const SHAKE_M: i32 = 0x20;
 const SHAKE_L: i32 = 0x40;
 
 /// `StgObj`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct StgObj {
     state: u32,
     hp: i32,
@@ -29,6 +34,16 @@ struct StgObj {
     hit_pos: [f32; 3],
     /// Part 0 (the whole model's first part): its centre and radius, `None` without one.
     part: Option<([f32; 3], f32)>,
+    /// The debris pieces: their part, node and radius.
+    pieces: Vec<Piece>,
+}
+
+/// A debris piece (`StgPart` with a node).
+#[derive(Clone, Copy, Debug)]
+struct Piece {
+    part: usize,
+    node: usize,
+    radius: f32,
 }
 
 /// A camera shake a break asks for (`BtlCharApi_ShakeCamsNear`).
@@ -50,6 +65,86 @@ pub(crate) struct StageObjs {
     pub shakes: Vec<Shake>,
     /// The broken set changed since the model last took it.
     dirty: bool,
+    /// The pieces' nodes (`StgNode`): their keys, their current matrices and rigid bodies (< 0: none).
+    nodes: Vec<StageNode>,
+    node_mtx: Vec<[[f32; 4]; 4]>,
+    node_body: Vec<i32>,
+    rigid: StgRigid,
+}
+
+/// A falling piece as `StgModel_FadeDebris` reads it: its part, its node and the fade of its object.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FallingPiece {
+    pub part: usize,
+    pub node: usize,
+    /// `Stg_FadeRatio(frame, animEnd)`.
+    pub ratio: f32,
+}
+
+/// `STG_ANGLE`: degrees into -pi..pi (`Stg_WrapRange`).
+fn wrap_angle_deg(deg: f32) -> f32 {
+    use std::f32::consts::PI;
+    let mut v = deg * PI / 180.0;
+    if v < -PI {
+        while -PI > v {
+            v += 2.0 * PI;
+        }
+    } else {
+        while PI < v {
+            v -= 2.0 * PI;
+        }
+    }
+    v
+}
+
+/// `STG_NODE_BUILD`: identity, then the X, Y and Z rotations (`StgVu_RotateX` .. `Z`, each a row-vector rotation
+/// multiplied on the right), then the position added to row 3.
+fn node_matrix(pos: [f32; 3], rot: [f32; 3]) -> [[f32; 4]; 4] {
+    let (sx, cx) = rot[0].sin_cos();
+    let (sy, cy) = rot[1].sin_cos();
+    let (sz, cz) = rot[2].sin_cos();
+    let rx = [[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]];
+    let ry = [[cy, 0.0, -sy], [0.0, 1.0, 0.0], [sy, 0.0, cy]];
+    let rz = [[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]];
+    let mul = |a: [[f32; 3]; 3], b: [[f32; 3]; 3]| -> [[f32; 3]; 3] {
+        std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+    };
+    let m = mul(mul(rx, ry), rz);
+    [
+        [m[0][0], m[0][1], m[0][2], 0.0],
+        [m[1][0], m[1][1], m[1][2], 0.0],
+        [m[2][0], m[2][1], m[2][2], 0.0],
+        [pos[0], pos[1], pos[2], 1.0],
+    ]
+}
+
+/// `StgPart_Animate`: the node's matrix at `frame` of its keys (the last key from the end frame on; between two
+/// keys the position linear and the angles through +3600 so that they turn the short way); unchanged when the
+/// frame falls between no pair of keys.
+fn animate(node: &StageNode, frame: f32) -> Option<[[f32; 4]; 4]> {
+    let keys = &node.keys;
+    let at = |k: &bt3_data::stage_model::StageKey| node_matrix(k.pos, k.rot.map(wrap_angle_deg));
+    if node.end_frame as f32 <= frame {
+        return keys.last().map(at);
+    }
+    for i in 1..keys.len() {
+        let (a, b) = (&keys[i - 1], &keys[i]);
+        if a.frame as f32 == frame {
+            return Some(at(a));
+        }
+        if (a.frame as f32) < frame && frame < b.frame as f32 {
+            let t = (frame - a.frame as f32) / (b.frame as f32 - a.frame as f32);
+            let rot = std::array::from_fn(|k| {
+                wrap_angle_deg(((b.rot[k] + 3600.0) - (a.rot[k] + 3600.0)) * t + a.rot[k])
+            });
+            let pos = std::array::from_fn(|k| (b.pos[k] - a.pos[k]) * t + a.pos[k]);
+            return Some(node_matrix(pos, rot));
+        }
+        if frame == b.frame as f32 {
+            return Some(at(b));
+        }
+    }
+    None
 }
 
 impl StageObjs {
@@ -61,6 +156,18 @@ impl StageObjs {
             .map(|o| StgObj {
                 anim_end: o.anim_end,
                 part: o.parts[0].map(|p| (model.parts[p].center, model.parts[p].radius)),
+                pieces: o
+                    .pieces
+                    .iter()
+                    .filter_map(|&p| {
+                        let part = &model.parts[p];
+                        part.node.map(|node| Piece {
+                            part: p,
+                            node,
+                            radius: part.radius,
+                        })
+                    })
+                    .collect(),
                 ..StgObj::default()
             })
             .collect();
@@ -69,9 +176,20 @@ impl StageObjs {
             defs: defs.to_vec(),
             shakes: Vec::new(),
             dirty: false,
+            nodes: model.nodes.clone(),
+            node_mtx: model.nodes.iter().map(|n| n.mtx).collect(),
+            node_body: vec![0; model.nodes.len()],
+            rigid: StgRigid::default(),
         };
         s.reset(false);
         s
+    }
+
+    /// `BtlStage_Reset`: every object whole (`BtlStage_ResetObjs(0)`) and the rigid bodies forgotten
+    /// (`StgRigid_Reset`).
+    pub(crate) fn reset_stage(&mut self) {
+        self.reset(false);
+        self.rigid.reset();
     }
 
     /// `BtlStage_ResetObjs`: every object whole (hit points, type and parent reloaded, `StgObj_LoadDef`), or with
@@ -177,13 +295,17 @@ impl StageObjs {
         true
     }
 
-    /// `BtlStage_UpdateObjs` (not while paused): the falling objects' frame advances by 2 until their animation's
-    /// end (0x94 when 0), which ends the fall.
-    pub(crate) fn update(&mut self) {
-        for o in &mut self.objs {
+    /// `BtlStage_UpdateObjs` then `StgRigid_Update` (not while paused): the falling objects' frame advances by 2
+    /// until their animation's end (0x94 when 0), which ends the fall and releases their bodies; on the first frame
+    /// a rigid piece gets a body at its first key, thrown by the hit's direction and the object's material; a keyed
+    /// piece follows its keys, a rigid one its body.
+    pub(crate) fn update(&mut self, inner_radius: f32, vu0: &mut Vu0Random, libc: &mut LibcRandom) {
+        for i in 0..self.objs.len() {
+            let o = &mut self.objs[i];
             if o.state & FALLING == 0 {
                 continue;
             }
+            let first = o.frame == 0;
             o.frame += 2;
             if o.anim_end == 0 {
                 o.anim_end = 0x94;
@@ -191,8 +313,71 @@ impl StageObjs {
             if o.anim_end <= o.frame {
                 o.frame = 0;
                 o.state ^= FALLING;
+                for p in &o.pieces {
+                    if self.nodes[p.node].is_rigid() && self.node_body[p.node] >= 0 {
+                        self.rigid.release(self.node_body[p.node]);
+                    }
+                }
+                continue;
+            }
+            let (frame, hit_pos, material) = (o.frame, o.hit_pos, material(o.kind));
+            if first {
+                // The pieces at frame 0 (their centre is worked out and never used).
+                for p in &o.pieces {
+                    if let Some(m) = animate(&self.nodes[p.node], 0.0) {
+                        self.node_mtx[p.node] = m;
+                    }
+                }
+            }
+            for k in 0..self.objs[i].pieces.len() {
+                let p = self.objs[i].pieces[k];
+                if self.nodes[p.node].is_rigid() {
+                    if first {
+                        let pos = animate(&self.nodes[p.node], 0.0).map_or([0.0; 3], |m| {
+                            self.node_mtx[p.node] = m;
+                            [m[3][0], m[3][1], m[3][2]]
+                        });
+                        let body = self.rigid.create(pos, p.radius);
+                        self.node_body[p.node] = body;
+                        if body >= 0 {
+                            self.rigid.launch(body, hit_pos, material, vu0, libc);
+                        }
+                    }
+                    if let Some(m) = self.rigid.matrix(self.node_body[p.node]) {
+                        self.node_mtx[p.node] = m;
+                    }
+                } else {
+                    self.node_body[p.node] = 0;
+                    if let Some(m) = animate(&self.nodes[p.node], frame as f32) {
+                        self.node_mtx[p.node] = m;
+                    }
+                }
             }
         }
+        self.rigid.update(inner_radius);
+    }
+
+    /// The pieces of the falling objects that are shown (`StgModel_FadeDebris`: those with a body or keys).
+    pub(crate) fn falling_pieces(&self) -> Vec<FallingPiece> {
+        let mut out = Vec::new();
+        for o in self.objs.iter().filter(|o| o.state & FALLING != 0) {
+            // Stg_FadeRatio: fading over the last 30 frames.
+            let d = (o.anim_end - o.frame) as f32;
+            let ratio = if d < 30.0 { d / 30.0 } else { 1.0 };
+            for p in o.pieces.iter().filter(|p| self.node_body[p.node] >= 0) {
+                out.push(FallingPiece {
+                    part: p.part,
+                    node: p.node,
+                    ratio,
+                });
+            }
+        }
+        out
+    }
+
+    /// The pieces' current matrices, by node.
+    pub(crate) fn node_matrices(&self) -> &[[[f32; 4]; 4]] {
+        &self.node_mtx
     }
 
     /// Hands the broken set to the stage model when it changed (`StgModel_Cull` reads the parts' flags).
@@ -204,6 +389,19 @@ impl StageObjs {
             model.set_broken(i, self.is_broken(i));
         }
         model.refresh_drawable();
+    }
+}
+
+/// `StgObj_GetMaterial`: 0, 1 or 2 by type bits 1, 2, 4.
+fn material(kind: i32) -> i32 {
+    if kind & 1 != 0 {
+        0
+    } else if kind & 2 != 0 {
+        1
+    } else if kind & 4 != 0 {
+        2
+    } else {
+        0
     }
 }
 
@@ -239,8 +437,9 @@ mod tests {
         assert_eq!(s.shakes.len(), 3);
         assert_eq!((s.shakes[0].strength, s.shakes[0].near), (1.0, 150.0));
         // The pieces fall for 0x94 frames, two a frame.
+        let (mut vu0, mut libc) = (Vu0Random::default(), LibcRandom::new(1));
         for _ in 0..0x4A {
-            s.update();
+            s.update(1000.0, &mut vu0, &mut libc);
         }
         assert!(s.objs.iter().all(|o| o.state & FALLING == 0));
         s.reset(false);

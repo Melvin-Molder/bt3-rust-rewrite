@@ -5,6 +5,10 @@
 use bt3_data::stage_model::{GROUP_DEBRIS, GROUP_MAIN, StageModel};
 
 use crate::battle::{View, apply};
+use crate::stg_obj::FallingPiece;
+
+/// The near plane of the battle view (`view->nearZ`), which `Stg_FadeByCamDist` measures from.
+const NEAR_Z: f32 = 0.3;
 
 /// The GS frame offset of the battle (`View_InitLayout`, full screen).
 const OFFSET_X: f32 = 2048.0 - 256.0;
@@ -68,6 +72,117 @@ pub fn draw_stage(model: &mut StageModel, stage_id: i32, view: &View) -> Vec<Sta
         }
     }
     batches
+}
+
+/// `StgModel_FadeDebris` then `StgModel_DrawDebris` (VU1 program 7): the falling objects' pieces, each mesh
+/// moved by its node's matrix, with an alpha that fades over the fall's last 30 frames and near the camera (none
+/// within 75 of its near plane, full from 100); a triangle with a vertex outside the clip volume, or closing on a
+/// vertex flagged not to draw, is dropped. `eye` is the view's position.
+pub fn draw_debris(
+    model: &StageModel,
+    pieces: &[FallingPiece],
+    node_mtx: &[[[f32; 4]; 4]],
+    view: &View,
+    eye: [f32; 3],
+) -> Vec<StageBatch> {
+    let mut alpha = vec![0u8; model.drawable.len()];
+    for p in pieces {
+        let Some(m) = node_mtx.get(p.node) else {
+            continue;
+        };
+        let pos = [m[3][0], m[3][1], m[3][2]];
+        let d = [eye[0] - pos[0], eye[1] - pos[1], eye[2] - pos[2]];
+        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - NEAR_Z;
+        // Stg_FadeByCamDist.
+        let a = if dist <= 0.0 {
+            0.0
+        } else if dist > 100.0 {
+            p.ratio
+        } else if dist > 75.0 {
+            (dist - 75.0) / 25.0 * p.ratio
+        } else {
+            0.0
+        };
+        let a = if a < 1.0 { (a * 128.0) as u8 } else { 0x80 };
+        if a == 0 {
+            continue;
+        }
+        for &vis in &model.parts[p.part].vis {
+            if let Some(slot) = alpha.get_mut(usize::from(vis)) {
+                *slot = a;
+            }
+        }
+    }
+    let mut batches = Vec::new();
+    let Some(materials) = model.groups.get(GROUP_DEBRIS) else {
+        return batches;
+    };
+    for (order, material) in materials.iter().enumerate() {
+        let mut vertices = Vec::new();
+        for mesh in &material.meshes {
+            let a = alpha.get(usize::from(mesh.vis)).copied().unwrap_or(0);
+            let Some(m) = mesh.node.and_then(|n| node_mtx.get(n)) else {
+                continue;
+            };
+            if a == 0 {
+                continue;
+            }
+            for strip in &mesh.strips {
+                draw_strip_prog7(strip, m, f32::from(a), view, &mut vertices);
+            }
+        }
+        if !vertices.is_empty() {
+            batches.push(StageBatch {
+                group: GROUP_DEBRIS,
+                order,
+                texture: usize::from(material.tex),
+                vertices,
+            });
+        }
+    }
+    batches
+}
+
+/// Program 7's vertex loop over one strip: the position through the mesh's matrix, the colour's alpha replaced,
+/// a triangle drawn only when none of its vertices is clipped and its last one is not flagged (`ADC`).
+fn draw_strip_prog7(
+    strip: &[bt3_data::stage_model::StageVertex],
+    local: &[[f32; 4]; 4],
+    alpha: f32,
+    view: &View,
+    out: &mut Vec<StageScreenVertex>,
+) {
+    let mut history: Vec<(StageScreenVertex, u32)> = Vec::with_capacity(strip.len());
+    for vertex in strip {
+        let p = vertex.position;
+        let world = apply(local, [p[0], p[1], p[2], 1.0]);
+        let s = apply(&view.world2screen, world);
+        let c = apply(&view.world2clip, world);
+        let q = 1.0 / s[3];
+        let mut rgba = vertex.color.map(f32::trunc);
+        rgba[3] = alpha;
+        history.push((
+            StageScreenVertex {
+                position: [
+                    (s[0] * q * 16.0).trunc() / 16.0 - OFFSET_X,
+                    (s[1] * q * 16.0).trunc() / 16.0 - OFFSET_Y,
+                    (s[2] * q).trunc(),
+                ],
+                stq: vertex.stq.map(|v| v * q),
+                rgba,
+            },
+            clip_flags(c),
+        ));
+        let n = history.len();
+        let flagged = p[3].to_bits() & 0xFFFF != 0;
+        if n < 3 || flagged {
+            continue;
+        }
+        let tri = [&history[n - 3], &history[n - 2], &history[n - 1]];
+        if tri.iter().all(|v| v.1 == 0) {
+            out.extend(tri.map(|v| v.0));
+        }
+    }
 }
 
 /// The texture a group 2 material draws with: its animation stepped once (looping, or back and forth with bit

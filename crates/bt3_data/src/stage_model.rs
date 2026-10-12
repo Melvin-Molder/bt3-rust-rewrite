@@ -20,13 +20,39 @@ pub struct StageVertex {
     pub stq: [f32; 3],
 }
 
-/// One `StgMMesh`: its byte in the visibility table, the VU1 program group 2 checks, and the strips its chain
-/// hands to program 4 (one per batch after the object header).
+/// One `StgMMesh`: its byte in the visibility table, the VU1 program group 2 checks, the strips its chain hands
+/// to program 4 or 7 (one per batch after the object header), and for a debris mesh the node whose matrix it is
+/// drawn with (index into `StageModel::nodes`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StageMesh {
     pub vis: u16,
     pub prog: u8,
     pub strips: Vec<Vec<StageVertex>>,
+    pub node: Option<usize>,
+}
+
+/// `StgKey`: a debris piece's key (position, frame, angles in degrees).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageKey {
+    pub pos: [f32; 3],
+    pub frame: i32,
+    pub rot: [f32; 3],
+}
+
+/// `StgNode`: the transform node of a debris piece: its matrix as the file holds it, its keys (a single key: a
+/// rigid body drives it, `StgNode_IsRigid`) and the frame of its last key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StageNode {
+    pub mtx: [[f32; 4]; 4],
+    pub keys: Vec<StageKey>,
+    pub end_frame: i32,
+}
+
+impl StageNode {
+    /// `StgNode_IsRigid`.
+    pub fn is_rigid(&self) -> bool {
+        self.keys.len() == 1
+    }
 }
 
 /// `StgMTexAnim`.
@@ -48,14 +74,14 @@ pub struct StageMaterial {
 }
 
 /// `StgPart`: a group of meshes (by visibility byte) with its runtime flag bit 0 (drawn by the culling tree), its
-/// bounding sphere and its transform node (byte offset, 0 for none).
+/// bounding sphere and its transform node (index into `StageModel::nodes`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StagePart {
     pub vis: Vec<u16>,
     pub on: bool,
     pub radius: f32,
     pub center: [f32; 3],
-    pub node: usize,
+    pub node: Option<usize>,
 }
 
 /// `StgObj` of the model: a destructible object's parts (0, 2, 4 the whole model, 1, 3, 5 the broken one; indices
@@ -77,6 +103,7 @@ pub struct StageModel {
     pub texture_header: usize,
     pub parts: Vec<StagePart>,
     pub objects: Vec<StageObject>,
+    pub nodes: Vec<StageNode>,
     /// The meshes of the never-culled list.
     always: Vec<u16>,
     /// The parts of the culling tree.
@@ -94,6 +121,38 @@ impl StageModel {
 
     pub fn parse(s: &[u8]) -> io::Result<Self> {
         let r = Reader(s);
+        let mut nodes = Vec::new();
+        let mut node_index = HashMap::new();
+        let mut node_at = |node: usize| -> io::Result<Option<usize>> {
+            if node == 0 {
+                return Ok(None);
+            }
+            if let Some(&i) = node_index.get(&node) {
+                return Ok(Some(i));
+            }
+            let mtx = std::array::from_fn(|i| {
+                std::array::from_fn(|j| r.f32(node + (i * 4 + j) * 4).unwrap_or(0.0))
+            });
+            let count = r.u32(node + 0x40)? as usize;
+            let keys_at = r.ptr(node + 0x44)?;
+            let keys = (0..count)
+                .map(|k| {
+                    let o = keys_at + k * 0x20;
+                    Ok(StageKey {
+                        pos: [r.f32(o)?, r.f32(o + 4)?, r.f32(o + 8)?],
+                        frame: r.u32(o + 0xC)? as i32,
+                        rot: [r.f32(o + 0x10)?, r.f32(o + 0x14)?, r.f32(o + 0x18)?],
+                    })
+                })
+                .collect::<io::Result<_>>()?;
+            nodes.push(StageNode {
+                mtx,
+                keys,
+                end_frame: r.u32(node + 0x48)? as i32,
+            });
+            node_index.insert(node, nodes.len() - 1);
+            Ok(Some(nodes.len() - 1))
+        };
         let mut groups = Vec::with_capacity(GROUP_COUNT);
         let group_count = r.u32(0x18)? as usize;
         let groups_at = r.ptr(0x1C)?;
@@ -122,10 +181,19 @@ impl StageModel {
                 let meshes = (0..n)
                     .map(|k| {
                         let mesh = list + k * 0x10;
+                        let node = if g == GROUP_DEBRIS {
+                            node_at(r.ptr(mesh + 0xC)?)?
+                        } else {
+                            None
+                        };
                         Ok(StageMesh {
                             vis: r.u16(mesh)?,
                             prog: r.u8(mesh + 3)?,
-                            strips: parse_chain(s.get(r.ptr(mesh + 8)?..).unwrap_or(&[]))?,
+                            strips: parse_chain(
+                                s.get(r.ptr(mesh + 8)?..).unwrap_or(&[]),
+                                g != GROUP_DEBRIS,
+                            )?,
+                            node,
                         })
                     })
                     .collect::<io::Result<_>>()?;
@@ -157,7 +225,7 @@ impl StageModel {
                     r.f32(part + 0x14)?,
                     r.f32(part + 0x18)?,
                 ],
-                node: r.ptr(part + 8)?,
+                node: node_at(r.ptr(part + 8)?)?,
             });
             index.insert(part, parts.len() - 1);
             Ok(parts.len() - 1)
@@ -222,6 +290,7 @@ impl StageModel {
             texture_header: r.ptr(0x54)?,
             parts,
             objects,
+            nodes,
             always,
             tree,
         };
@@ -267,11 +336,12 @@ impl StageModel {
     }
 }
 
-/// The program 4 strips of a mesh chain: the first MSCNT runs `object_header`, every later one a batch (A+D tag
-/// and data at +0/+1, the strip tag at +2, vertices of position, colour and s/t/q from +3).
-fn parse_chain(chain: &[u8]) -> io::Result<Vec<Vec<StageVertex>>> {
+/// The strips of a mesh chain: for program 4 the first MSCNT runs `object_header` (`header`), every other one a
+/// batch (A+D tag and data at +0/+1, the strip tag at +2, vertices of position, colour and s/t/q from +3);
+/// program 7's call packet runs its setup itself, so every MSCNT of a debris chain is a batch.
+fn parse_chain(chain: &[u8], header: bool) -> io::Result<Vec<Vec<StageVertex>>> {
     let mut strips = Vec::new();
-    let mut header = true;
+    let mut header = header;
     walk_vif(chain, |memory| {
         if std::mem::take(&mut header) {
             return Ok(());
@@ -365,6 +435,30 @@ mod tests {
                 model.objects.len() <= data.object_count,
                 "stage file {file_id:#X}"
             );
+            // Every debris mesh has strips and hangs on a node with keys, as every object's piece does.
+            for mesh in model
+                .groups
+                .get(GROUP_DEBRIS)
+                .into_iter()
+                .flatten()
+                .flat_map(|m| &m.meshes)
+            {
+                assert!(!mesh.strips.is_empty(), "stage file {file_id:#X}");
+                let node = mesh.node.expect("a debris mesh has a node");
+                assert!(
+                    !model.nodes[node].keys.is_empty(),
+                    "stage file {file_id:#X}"
+                );
+            }
+            for o in &model.objects {
+                for &p in &o.pieces {
+                    let node = model.parts[p].node.expect("a piece has a node");
+                    assert!(
+                        !model.nodes[node].keys.is_empty(),
+                        "stage file {file_id:#X}"
+                    );
+                }
+            }
             let mut broken = model.clone();
             for i in 0..broken.objects.len() {
                 broken.set_broken(i, true);

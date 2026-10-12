@@ -1190,7 +1190,7 @@ impl Battle {
         self.xfade = ScrXfade::default();
         // BtlStage_Reset: every stage object whole again.
         let objs = self.assets.stage_objs.get_mut();
-        objs.unwrap_or_else(|e| e.into_inner()).reset(false);
+        objs.unwrap_or_else(|e| e.into_inner()).reset_stage();
         if let Some(menu) = &mut self.menu {
             menu.reset();
         }
@@ -1385,7 +1385,8 @@ impl Battle {
             if !paused {
                 roster.post_scene(data, env, &mut *input.libc);
                 // BtlStage_Update: BtlStage_UpdateObjs (not while paused).
-                env.objs().update();
+                env.objs()
+                    .update(env.inner_radius(), &mut vu0, &mut *input.libc);
             }
             false
         });
@@ -1444,7 +1445,21 @@ impl Battle {
         {
             font.reset_icon_anim();
         }
-        let stage = draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view);
+        let mut stage = draw_stage(&mut self.assets.stage_model, self.assets.stage_id, &view);
+        {
+            let objs = self
+                .assets
+                .stage_objs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            stage.extend(crate::stage_draw::draw_debris(
+                &self.assets.stage_model,
+                &objs.falling_pieces(),
+                objs.node_matrices(),
+                &view,
+                view.eye(),
+            ));
+        }
         let mut groups: HashMap<[usize; 2], Vec<ScreenVertex>> = HashMap::new();
         for side in 0..2 {
             let model = &self.assets.fighters[side];
@@ -1666,6 +1681,12 @@ pub(crate) struct View {
 impl View {
     fn new(pos: [f32; 3], rot: [f32; 3]) -> Self {
         Self::from_world_to_view(view_matrix(pos, rot))
+    }
+
+    /// The camera's position (`view->pos`): the inverse view matrix's translation.
+    pub(crate) fn eye(&self) -> [f32; 3] {
+        let m = inverse_rt(&self.world2view);
+        [m[3][0], m[3][1], m[3][2]]
     }
 
     /// `View_UpdateMatrices` for a given world-to-view matrix, with the full-screen projection.
@@ -4326,6 +4347,48 @@ mod tests {
                 "stage {stage}: object {obj} at {center:?} r {radius}"
             );
             assert_ne!(battle.assets.stage_model.drawable, whole, "stage {stage}");
+            // Its pieces fall: their matrices move from frame to frame, and seen from above the object the debris
+            // pass draws them.
+            let falling = |b: &Battle| {
+                let objs = b.assets.stage_objs.lock().unwrap();
+                let pieces = objs.falling_pieces();
+                let mtx: Vec<_> = pieces
+                    .iter()
+                    .map(|p| objs.node_matrices()[p.node])
+                    .collect();
+                (pieces, mtx)
+            };
+            let (pieces, before) = falling(&battle);
+            if !battle.assets.stage_model.objects[obj].pieces.is_empty() {
+                assert!(!pieces.is_empty(), "stage {stage}");
+                for _ in 0..4 {
+                    battle.run_frame(
+                        false,
+                        [PadState::default(); 2],
+                        0,
+                        &mut libc,
+                        &mut random,
+                        None,
+                        false,
+                    );
+                }
+                let (pieces, after) = falling(&battle);
+                assert!(!pieces.is_empty() && after != before, "stage {stage}");
+                let eye = [center[0], center[1] - radius - 400.0, center[2] - 600.0];
+                let view = View::new(eye, [0.6, 0.0, 0.0]);
+                let objs = battle.assets.stage_objs.lock().unwrap();
+                let drawn = crate::stage_draw::draw_debris(
+                    &battle.assets.stage_model,
+                    &objs.falling_pieces(),
+                    objs.node_matrices(),
+                    &view,
+                    view.eye(),
+                );
+                assert!(
+                    drawn.iter().any(|b| !b.vertices.is_empty()),
+                    "stage {stage}"
+                );
+            }
             let mut sounds = Vec::new();
             battle.restart(&mut sounds);
             battle.run_frame(
