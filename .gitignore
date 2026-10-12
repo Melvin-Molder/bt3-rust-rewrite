@@ -27,6 +27,7 @@
 !/crates/bt3_data/src/model.rs
 !/crates/bt3_data/src/motion.rs
 !/crates/bt3_data/src/stage_model.rs
+!/crates/bt3_data/src/stage_surf.rs
 !/crates/bt3_data/src/cam_anim.rs
 !/crates/bt3_data/src/chara_data.rs
 !/crates/bt3_data/src/elf.rs
@@ -87,6 +88,7 @@
 !/crates/bt3_game/src/eft_ribbon.rs
 !/crates/bt3_game/src/eft_smoke.rs
 !/crates/bt3_game/src/eft_storm.rs
+!/crates/bt3_game/src/eft_surf.rs
 !/crates/bt3_data/src/eft_mesh.rs
 !/crates/bt3_data/src/eft_pack.rs
 !/crates/bt3_data/src/burst.rs

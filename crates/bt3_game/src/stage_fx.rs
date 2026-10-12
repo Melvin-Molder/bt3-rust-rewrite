@@ -13,6 +13,8 @@ use crate::rng::{LibcRandom, Vu0Random};
 pub(crate) struct StageFx {
     /// Kind 0.
     pub scroll: Option<crate::stg_scroll::Scroll>,
+    /// Kind 1.
+    pub surf: Option<crate::eft_surf::Surf>,
     /// Kind 2.
     pub weather: Option<crate::eft_weather::Weather>,
     /// Kind 3.
@@ -94,6 +96,9 @@ impl StageFx {
         if let Some(s) = &mut self.scroll {
             s.update(paused);
         }
+        if let Some(s) = &mut self.surf {
+            s.update(paused);
+        }
         if let Some(w) = &mut self.weather {
             w.update(libc);
         }
@@ -133,16 +138,22 @@ impl StageFx {
     }
 
     /// The kinds' draws into the effect pass (the sheet is drawn with the stage; the weather and the storm's rain
-    /// move while drawing and draw random numbers). `light`: the stage's light direction.
+    /// move while drawing and draw random numbers; `direct` takes what the surfaces send straight to the GS).
+    /// `light`: the stage's light direction.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw(
         &mut self,
         ot: &mut OrderTable,
+        direct: &mut Vec<crate::eft::EffectTri>,
         ctx: &DrawCtx,
         chars: &[Chr; 2],
         light: V3,
         paused: bool,
         libc: &mut LibcRandom,
     ) {
+        if let Some(s) = &self.surf {
+            s.draw(ot, direct, ctx);
+        }
         if let Some(w) = &mut self.weather {
             w.draw(ot, ctx, paused, libc);
         }

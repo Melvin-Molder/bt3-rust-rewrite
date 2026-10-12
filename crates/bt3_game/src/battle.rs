@@ -136,6 +136,8 @@ pub struct BattleAssets {
     pub(crate) bound: Option<(bt3_data::stage::StageBound, Option<usize>)>,
     /// The scrolling sheet (stage pack entry 7) and its first texture among the stage textures.
     pub(crate) scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
+    /// The surfaces' meshes (stage pack entry 0xD) and their textures among the effect textures.
+    pub(crate) surf: Option<(Vec<bt3_data::stage_surf::SurfMesh>, Vec<Option<usize>>)>,
     pub(crate) fighters: Vec<FighterModel>,
     /// The light ramp the shading rows are looked up through, and common file 2 (`BtlLoad_StepChara` reloads a
     /// side with them).
@@ -289,6 +291,7 @@ pub fn load(
         pack11,
         bound,
         scroll,
+        surf,
     } = load_stage(read, setup.stage)?;
     // BtlLoad_StepInitial: the common, stage and both sides' sample banks.
     let mut snd = crate::btl_snd::CharSound::default();
@@ -357,6 +360,7 @@ pub fn load(
         stage_pack11: None,
         bound: None,
         scroll,
+        surf: None,
         fighters: Vec::new(),
         ramp: Vec::new(),
         common_file: Vec::new(),
@@ -447,6 +451,7 @@ pub fn load(
     assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
     assets.stage_pack14 = pack14.map(|t| assets.push_effect_textures(t));
     assets.stage_pack11 = pack11.map(|t| assets.push_effect_textures(t));
+    assets.surf = surf.map(|(m, t)| (m, assets.push_optional_textures(t)));
     assets.bound = bound.map(|(p, t)| (p, assets.push_effect_textures(t).first().copied()));
     for (index, side) in setup.sides.into_iter().enumerate() {
         let load = SideLoad {
@@ -775,6 +780,11 @@ pub(crate) struct LoadedStage {
     bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
     /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
     scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
+    /// `EftSurf_Init`: the surface file's meshes and textures (entry 0xD).
+    surf: Option<(
+        Vec<bt3_data::stage_surf::SurfMesh>,
+        Vec<Option<RgbaTexture>>,
+    )>,
 }
 
 /// Reads stage `stage_id`'s file (`BTL_FILE_STAGE + stage`).
@@ -871,11 +881,25 @@ fn load_stage(
     } else {
         None
     };
+    let surf = if entry_size(0xD) > 0 {
+        let file =
+            bt3_data::stage_surf::SurfFile::parse(pack_section(&stage_file, 0xD).map_err(error)?)
+                .map_err(error)?;
+        let textures = file
+            .textures
+            .iter()
+            .map(|t| decode_sprite_texture(t).ok())
+            .collect();
+        Some((file.meshes, textures))
+    } else {
+        None
+    };
     Ok(LoadedStage {
         stage,
         model,
         textures,
         cuts,
+        surf,
         pack12,
         pack14,
         pack11,
@@ -1152,6 +1176,18 @@ impl BattleAssets {
         self.bank_requests.push((mask, data));
     }
 
+    /// Appends the textures that decoded to the effect textures; their indices.
+    fn push_optional_textures(&mut self, t: Vec<Option<RgbaTexture>>) -> Vec<Option<usize>> {
+        t.into_iter()
+            .map(|t| {
+                t.map(|t| {
+                    self.effect_textures.push(t);
+                    self.effect_textures.len() - 1
+                })
+            })
+            .collect()
+    }
+
     /// Appends decoded textures to the effect textures; their indices.
     fn push_effect_textures(&mut self, t: Vec<RgbaTexture>) -> Vec<usize> {
         let first = self.effect_textures.len();
@@ -1208,6 +1244,11 @@ impl BattleAssets {
     pub(crate) fn new_stage_fx(&self) -> crate::stage_fx::StageFx {
         let mut fx = crate::stage_fx::StageFx::default();
         fx.scroll = self.new_scroll();
+        // EftSurf_Init.
+        fx.surf = self
+            .surf
+            .clone()
+            .map(|(m, t)| crate::eft_surf::Surf::new(m, t, self.stage.water_level.unwrap_or(0.0)));
         // EftWeather_Init: the record on, the textures of pack entry 0xB.
         fx.weather = self
             .stage
@@ -1263,6 +1304,7 @@ impl BattleAssets {
             .bound
             .map(|(p, t)| (p, self.push_effect_textures(t).first().copied()));
         self.scroll = s.scroll;
+        self.surf = s.surf.map(|(m, t)| (m, self.push_optional_textures(t)));
         self.stage_id = stage_id;
         self.stage_rev += 1;
     }
@@ -2245,8 +2287,10 @@ impl Battle {
             let demo = self.demo.is_active();
             // Layer 0's stage effects, then the others.
             let roster = &mut self.roster;
+            let mut direct = Vec::new();
             roster.scene.stage.draw(
                 &mut ot,
+                &mut direct,
                 &ctx,
                 &roster.chars,
                 self.light_dir,
@@ -2261,11 +2305,12 @@ impl Battle {
                 .scene
                 .gdust
                 .draw(&mut ot, &ctx, &self.assets.dust_textures);
-            // EftBurst_Draw sends its packets straight to the GS while the scene draws: before the table.
-            let mut list = match (&self.burst, &self.burst_res) {
-                (Some(b), Some((_, res))) => b.draw(res, &view.world2view, &view.world2screen),
-                _ => Vec::new(),
-            };
+            // EftSurf_DrawMeshes (layer 0) and EftBurst_Draw (layer 4) send their packets straight to the GS while
+            // the scene draws: before the table.
+            let mut list = direct;
+            if let (Some(b), Some((_, res))) = (&self.burst, &self.burst_res) {
+                list.extend(b.draw(res, &view.world2view, &view.world2screen));
+            }
             list.extend(ot.into_list());
             list
         };
@@ -5357,6 +5402,70 @@ mod tests {
         let mut random = GameRandom::from_key(&[7]);
         let mut drawn = 0;
         for _ in 0..60 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            drawn += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture.is_some_and(|i| textures.contains(&i)))
+                .count();
+        }
+        assert!(drawn > 0);
+    }
+
+    #[test]
+    fn real_surfaces_scroll_on_their_stages() {
+        let Some(mut battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let read = battle.loader.as_mut().unwrap();
+        let mut with = Vec::new();
+        for s in 0..0x27 {
+            let Some((meshes, textures)) = load_stage(read, s).ok().and_then(|st| st.surf) else {
+                continue;
+            };
+            // Every texture of the surface files decodes; every mesh names one.
+            assert!(textures.iter().all(Option::is_some), "stage {s}");
+            assert!(
+                meshes
+                    .iter()
+                    .all(|m| m.tex < textures.len() || textures.is_empty()),
+                "stage {s}"
+            );
+            with.push(s);
+        }
+        // (Stage 38's file has one too, but the stage does not load: its camera animations are cut short.)
+        assert_eq!(
+            with,
+            [0, 2, 3, 7, 10, 11, 12, 14, 15, 17, 18, 21, 22, 23, 32, 33]
+        );
+        let mut setup = BattleSetup::default();
+        setup.stage = 10;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let textures: Vec<usize> = battle
+            .assets
+            .surf
+            .as_ref()
+            .unwrap()
+            .1
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let mut libc = LibcRandom::new(8);
+        let mut random = GameRandom::from_key(&[8]);
+        let mut drawn = 0;
+        for _ in 0..10 {
             let frame = battle.run_frame(
                 false,
                 [PadState::default(); 2],

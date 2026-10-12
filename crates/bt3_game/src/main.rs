@@ -45,6 +45,7 @@ mod eft_rays;
 mod eft_ribbon;
 mod eft_smoke;
 mod eft_storm;
+mod eft_surf;
 mod eft_water;
 mod eft_weather;
 mod fade;
