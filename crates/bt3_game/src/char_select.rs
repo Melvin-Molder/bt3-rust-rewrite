@@ -494,6 +494,70 @@ impl BattleSetup {
     }
 }
 
+/// `gProgress->demoCount` (attract battles since the opening movie) and `demoPick` (the last pairing, -1 at
+/// start).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DemoProgress {
+    pub count: u32,
+    pub pick: i32,
+}
+
+impl Default for DemoProgress {
+    fn default() -> Self {
+        Self { count: 0, pick: -1 }
+    }
+}
+
+/// `Demo_SetupBattle`'s pairings: the two characters and the stage.
+const DEMO_PAIRS: [(i32, i32, i32); 9] = [
+    (0xA, 0x93, 0x1D),
+    (0x2A, 0x6C, 6),
+    (0x19, 0x5C, 2),
+    (0x27, 0x60, 1),
+    (0x17, 0x6F, 1),
+    (0x49, 0x5B, 0x10),
+    (0, 0x1E, 0x19),
+    (0x32, 0x72, 5),
+    (5, 0x25, 1),
+];
+
+impl BattleSetup {
+    /// `Demo_SetupBattle`: the attract battle (mode 7), two computer fighters at CPU level 13 in one of nine fixed
+    /// pairings on its stage, never the last one again (`Rand_Range(9)` until it differs), with music 8..16
+    /// (`Rand_Range(9)` once more), announcer 4 and time limit 5.
+    pub fn demo(random: &mut GameRandom, last: &mut i32) -> Self {
+        let pick = loop {
+            let pick = random.range(9) as i32;
+            if pick != *last {
+                break pick;
+            }
+        };
+        *last = pick;
+        let (a, b, stage) = DEMO_PAIRS[pick as usize];
+        let bgm = random.range(9) as i32 + 8;
+        let side = |pad, chara| SideSetup {
+            control: 2,
+            pad,
+            change_allowed: 1,
+            chara,
+            cpu_level: crate::btl_menu::cpu_level_from_setting(2),
+            switch_enabled: 1,
+            ..SideSetup::default()
+        };
+        let mut setup = Self {
+            mode: 7,
+            bgm,
+            time_limit: 5,
+            announcer: 4,
+            stage,
+            sides: [side(0, a), side(1, b)],
+            ..Self::default()
+        };
+        setup.finish();
+        setup
+    }
+}
+
 /// How `CharSel_Run` ended.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CharSelResult {
@@ -2517,5 +2581,31 @@ mod tests {
         assert!(setup.pool.iter().all(|m| (0..0xA0).contains(&m.chara)));
         assert!((0..35).contains(&setup.stage));
         assert!(BattleSetup::survival(&data, 3, (3, 0, [0; 8]), &mut random, &mut libc).is_none());
+    }
+
+    /// `Demo_SetupBattle`: a computer pairing on its stage, never the last one twice in a row.
+    #[test]
+    fn demo_battles_change_their_pairing() {
+        let mut random = GameRandom::from_key(&[7]);
+        let mut last = -1;
+        let mut seen = Vec::new();
+        for _ in 0..40 {
+            let before = last;
+            let s = BattleSetup::demo(&mut random, &mut last);
+            assert_ne!(last, before);
+            let (a, b, stage) = DEMO_PAIRS[last as usize];
+            assert_eq!((s.sides[0].chara, s.sides[1].chara, s.stage), (a, b, stage));
+            assert_eq!(
+                (s.mode, s.time_limit, s.announcer, s.screen_mode),
+                (7, 5, 4, 0)
+            );
+            assert_eq!((s.sides[0].control, s.sides[1].control), (2, 2));
+            assert_eq!((s.sides[0].cpu_level, s.sides[1].pad), (13, 1));
+            assert!((8..17).contains(&s.bgm));
+            seen.push(last);
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 9);
     }
 }

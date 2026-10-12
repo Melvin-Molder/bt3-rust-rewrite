@@ -4043,6 +4043,53 @@ mod tests {
         );
     }
 
+    /// The attract battle (mode 7): both fighters are the computer's, the fight starts without the intro talk and
+    /// pad 0's START ends it with reason 0, after which the battle leaves.
+    #[test]
+    fn real_attract_battle_plays_itself_until_start() {
+        let mut random = GameRandom::from_key(&[1]);
+        let mut last = -1;
+        let setup = BattleSetup::demo(&mut random, &mut last);
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        assert_eq!((battle.ai.level(0), battle.ai.level(1)), (13, 13));
+        let mut libc = LibcRandom::new(1);
+        let idle = [PadState::default(); 2];
+        let start_pos = battle.roster.chars.each_ref().map(|c| c.pose.pos);
+        let mut fought = 0;
+        for _ in 0..600 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                fought += 1;
+            }
+        }
+        assert!(fought > 300, "fought {fought} frames");
+        let moved = |side: usize| {
+            let (a, b) = (start_pos[side], battle.roster.chars[side].pose.pos);
+            ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        };
+        assert!(
+            moved(0) > 10.0 && moved(1) > 10.0,
+            "{} {}",
+            moved(0),
+            moved(1)
+        );
+        let mut exit = None;
+        let mut pads = idle;
+        pads[0].held = crate::btl_input::pad::START;
+        for _ in 0..600 {
+            let frame = battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+            pads = idle;
+            if frame.exit.is_some() {
+                exit = frame.exit;
+                break;
+            }
+        }
+        assert_eq!(battle.seq.winner, crate::battle_seq::ABORT);
+        assert_eq!(exit, Some(0));
+    }
+
     /// Mode 3: side 1's fallen fighter is replaced by the pool's next opponent (`BtlColl_NextPoolMember`), which
     /// switches in with its own character, CPU level and items; past the pool's end a K.O. ends the battle.
     #[test]

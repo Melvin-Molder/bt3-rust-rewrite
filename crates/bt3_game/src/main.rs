@@ -269,7 +269,10 @@ struct Game {
     /// HUD textures from this index on (the menu sheet) clamp at their edges (`CLAMP_1` 1 of the default
     /// environment); the others wrap.
     hud_clamp_from: usize,
-    demo_count: u32,
+    /// `gProgress->demoCount` / `demoPick`.
+    demo: char_select::DemoProgress,
+    /// `gProgress->mode` is the title's (1) while the attract battle runs: the title follows it.
+    in_demo: bool,
     movie_texture: Option<usize>,
     soundtrack: Option<Decoding>,
     soundtrack_source: Option<Handle<AudioSource>>,
@@ -494,7 +497,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             xfade_captures: 0,
             xfade_alpha: 0,
             hud_clamp_from: usize::MAX,
-            demo_count: 0,
+            demo: char_select::DemoProgress::default(),
+            in_demo: false,
             movie_texture,
             soundtrack,
             soundtrack_source: None,
@@ -1010,11 +1014,13 @@ fn run_frames(
                 let frame = screen.run_frame(
                     held,
                     pressed,
-                    &mut game.demo_count,
+                    &mut game.demo,
                     &mut game.random,
                     &mut game.font,
                 );
                 let result = screen.result();
+                // The setup Title_Idle made when the screen began to leave.
+                let demo = result.and_then(|_| screen.take_demo());
                 game.quads = frame.quads;
                 play_sounds(game, &mut commands, frame.sounds);
                 if let Some(result) = result {
@@ -1028,10 +1034,13 @@ fn run_frames(
                             game.save_loaded = true;
                             start_main_menu(game, &mut commands, &mut audio);
                         }
-                        TitleResult::Demo => {
-                            info!("the attract battle is not ported yet");
-                            game.scene = Scene::Black;
-                        }
+                        TitleResult::Demo => match demo {
+                            Some(setup) => {
+                                game.in_demo = true;
+                                start_battle(game, setup);
+                            }
+                            None => game.scene = Scene::Black,
+                        },
                     }
                 }
             }
@@ -1226,7 +1235,11 @@ fn leave_battle(
     game.hud_layer = None;
     game.xfade_alpha = 0;
     game.hud_clamp_from = usize::MAX;
-    if reason & 8 != 0 {
+    if std::mem::take(&mut game.in_demo) {
+        // Progress_Main with the title's mode: the result's reasons count only for an abort (winner bit 8), which
+        // the attract battle's START gives with reason 0.
+        start_title(game, commands, audio);
+    } else if reason & 8 != 0 {
         start_main_menu(game, commands, audio);
     } else if reason & 0x10 != 0 && game.duel.battle_type == 0 {
         start_char_select(game, commands);

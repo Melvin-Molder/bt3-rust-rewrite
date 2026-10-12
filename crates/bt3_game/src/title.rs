@@ -176,7 +176,7 @@ impl PadRepeat {
 pub enum TitleResult {
     /// 0: on to the main menu.
     MainMenu,
-    /// 1: `Demo_SetupBattle` picked an attract battle.
+    /// 1: `Demo_SetupBattle` set up an attract battle (`take_demo`).
     Demo,
     /// 2: the opening movie again.
     OpeningMovie,
@@ -269,6 +269,8 @@ pub struct TitleScreen {
     idle: i32,
     timer: i32,
     result: TitleResult,
+    /// `Demo_SetupBattle`'s setup when the screen leaves for the attract battle.
+    demo: Option<crate::char_select::BattleSetup>,
     cloud: [f32; 2],
     pad: PadRepeat,
     dialog: Dialog,
@@ -310,6 +312,7 @@ impl TitleScreen {
             idle: 0,
             timer: 0,
             result: TitleResult::Demo,
+            demo: None,
             cloud: [0.0; 2],
             pad: PadRepeat::default(),
             dialog,
@@ -317,6 +320,11 @@ impl TitleScreen {
             mc_state: 0,
             save_loaded,
         })
+    }
+
+    /// The attract battle `Title_Idle` set up.
+    pub fn take_demo(&mut self) -> Option<crate::char_select::BattleSetup> {
+        self.demo.take()
     }
 
     pub fn result(&self) -> Option<TitleResult> {
@@ -331,7 +339,7 @@ impl TitleScreen {
         &mut self,
         held: u32,
         pressed: u32,
-        demo_count: &mut u32,
+        demo: &mut crate::char_select::DemoProgress,
         random: &mut GameRandom,
         font: &mut Font,
     ) -> TitleFrame {
@@ -416,7 +424,7 @@ impl TitleScreen {
                         self.fade = ColorFade::start_out(true, FADE_FRAMES);
                     }
                 } else if self.mc_state == 0 {
-                    self.input(pressed, repeat, demo_count, random, &mut frame.sounds);
+                    self.input(pressed, repeat, demo, random, &mut frame.sounds);
                 }
             }
             Phase::Done(_) => {}
@@ -430,18 +438,21 @@ impl TitleScreen {
     }
 
     /// `Title_Idle`.
-    fn idle(&mut self, demo_count: &mut u32) {
+    fn idle(&mut self, demo: &mut crate::char_select::DemoProgress, random: &mut GameRandom) {
         self.idle += 1;
         if self.idle > IDLE_FRAMES {
             self.idle = 0;
             self.leave();
-            if *demo_count < 2 {
-                // Demo_SetupBattle (the battle itself is not ported).
+            if demo.count < 2 {
+                self.demo = Some(crate::char_select::BattleSetup::demo(
+                    random,
+                    &mut demo.pick,
+                ));
                 self.result = TitleResult::Demo;
-                *demo_count += 1;
+                demo.count += 1;
             } else {
                 self.result = TitleResult::OpeningMovie;
-                *demo_count = 0;
+                demo.count = 0;
             }
         }
     }
@@ -463,7 +474,7 @@ impl TitleScreen {
         &mut self,
         pressed: u32,
         repeat: u32,
-        demo_count: &mut u32,
+        demo: &mut crate::char_select::DemoProgress,
         random: &mut GameRandom,
         sounds: &mut Vec<TitleSound>,
     ) {
@@ -498,7 +509,7 @@ impl TitleScreen {
                     sounds.push(TitleSound::Voice(VOICE_BASE + self.voice + 6));
                     sounds.push(TitleSound::Effect(2, 0x38));
                 } else {
-                    self.idle(demo_count);
+                    self.idle(demo, random);
                 }
             }
             2 => {
@@ -536,7 +547,7 @@ impl TitleScreen {
                     }
                     sounds.push(TitleSound::Effect(1, 1));
                 } else {
-                    self.idle(demo_count);
+                    self.idle(demo, random);
                 }
             }
             _ => {}
@@ -676,7 +687,7 @@ mod tests {
         let mut font = crate::font::Font::new(Vec::new(), 20);
         let mut random = crate::rng::GameRandom::from_key(&[1, 2, 3, 4]);
         let mut title = TitleScreen::new(&data, false, &mut random).unwrap();
-        let mut demo = 0;
+        let mut demo = crate::char_select::DemoProgress::default();
         let mut frames = 0;
         while matches!(title.phase, Phase::Logo { .. }) {
             title.run_frame(0, 0, &mut demo, &mut random, &mut font);
@@ -772,6 +783,31 @@ mod tests {
         println!("closed after {closed_at:?} frames");
         assert!(title.leaving);
         assert_eq!(title.result, TitleResult::MainMenu);
+
+        // Left alone, the screen leaves for the attract battle twice, then for the opening movie.
+        let mut demo = crate::char_select::DemoProgress::default();
+        for round in 0..3 {
+            let mut title = TitleScreen::new(&data, false, &mut random).unwrap();
+            let mut result = None;
+            for _ in 0..4000 {
+                title.run_frame(0, 0, &mut demo, &mut random, &mut font);
+                result = title.result();
+                if result.is_some() {
+                    break;
+                }
+            }
+            let setup = title.take_demo();
+            if round < 2 {
+                assert_eq!(result, Some(TitleResult::Demo));
+                let setup = setup.unwrap();
+                assert_eq!((setup.mode, demo.count), (7, round + 1));
+                assert!((0..9).contains(&demo.pick));
+            } else {
+                assert_eq!(result, Some(TitleResult::OpeningMovie));
+                assert!(setup.is_none());
+                assert_eq!(demo.count, 0);
+            }
+        }
     }
 
     #[test]
