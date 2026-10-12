@@ -984,6 +984,9 @@ fn start_gauge(common: &[u8], chara: i32) -> SideGauge {
         max_power: 0,
         powered_up: false,
         dead: false,
+        stat_mask: 0,
+        stat_up: 0,
+        face_tint: false,
     }
 }
 

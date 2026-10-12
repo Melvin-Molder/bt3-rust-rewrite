@@ -1,9 +1,6 @@
 //! The HUD's gauge part (src/battle/hud_gauge_1.c, hud_gauge_2.c, hud_gauge_3.c: health, ki, blast stock,
 //! powered-up timer, status icons, face) and timer part (src/battle/hud_timer.c), drawn through the GS emulation
 //! of hud_gs.rs. One tree of nodes serves both players: side 1 is the same tree drawn mirrored (x' = 511 - x).
-//!
-//! Not ported yet: the status icons' change animation (`HudGauge_UpdateStatIcons` states 0..5) and the face tint
-//! (object flag 0x40000).
 
 use std::collections::HashMap;
 
@@ -38,6 +35,11 @@ pub(crate) struct SideGauge {
     pub(crate) max_power: i32,
     pub(crate) powered_up: bool,
     pub(crate) dead: bool,
+    /// The status icons (attack, defence, ki, speed: stat modifiers 0, 3, 1, 2) to show, and which are raises.
+    pub(crate) stat_mask: u32,
+    pub(crate) stat_up: u32,
+    /// Object flag 0x40000 (colour mode 2): the face drawn tinted.
+    pub(crate) face_tint: bool,
 }
 
 /// Draws sprites of one part: the node origin, the mirror of side 1, the textures.
@@ -172,7 +174,13 @@ pub(crate) struct GaugePart {
     blast_flash: [Ramp; 2],
     stat_mask: [u32; 2],
     stat_pos: [u32; 2],
+    stat_prev: [u32; 2],
+    /// `statState`: the change animation's step (-1 at rest), its ramp, and the icons' old and new places.
+    stat_state: [i32; 2],
+    stat_ramp: [Ramp; 2],
+    stat_from: [[i32; 4]; 2],
     stat_to: [[i32; 4]; 2],
+    face_tint: [bool; 2],
     ki_reserve: [i32; 2],
     hp_bar_fade: [Ramp; 2],
     slide: [Ramp; 2],
@@ -372,7 +380,12 @@ impl GaugePart {
             blast_flash: [Ramp::default(); 2],
             stat_mask: [0; 2],
             stat_pos: [0; 2],
+            stat_prev: [0; 2],
+            stat_state: [0; 2],
+            stat_ramp: [Ramp::default(); 2],
+            stat_from: [[0; 4]; 2],
             stat_to: [[0; 4]; 2],
+            face_tint: [false; 2],
             ki_reserve: [0; 2],
             hp_bar_fade: [Ramp::default(); 2],
             slide: [Ramp::default(); 2],
@@ -387,7 +400,7 @@ impl GaugePart {
         }
     }
 
-    /// The `HudGauge_Set*` calls of `Hud_PreUpdate` for one side (no stat modifiers, no ki reserve yet).
+    /// The `HudGauge_Set*` calls of `Hud_PreUpdate` for one side (no ki reserve yet).
     pub(crate) fn set_side(&mut self, side: usize, g: &SideGauge) {
         self.hp[side] = g.hp;
         // HudGauge_SetKi: gaining a bar restarts its lamp; reaching full ki restarts the pulse.
@@ -407,6 +420,30 @@ impl GaugePart {
         self.max_power[side] = g.max_power;
         self.powered_up[side] = g.powered_up;
         self.dead[side] = g.dead;
+        self.face_tint[side] = g.face_tint;
+        self.set_stat_icons(side, g.stat_mask, g.stat_up);
+    }
+
+    /// `HudGauge_SetStatIcons`: on a change of the icons shown (or of their brightness), the old places kept, the
+    /// shown icons laid out 24 apart and the change animation restarted. An icon keeps its brightness while it
+    /// is not shown.
+    pub(crate) fn set_stat_icons(&mut self, side: usize, mask: u32, up: u32) {
+        let pos = (mask & up) | (self.stat_prev[side] & self.stat_pos[side] & !mask);
+        if mask == self.stat_mask[side] && self.stat_pos[side] == pos {
+            return;
+        }
+        self.stat_prev[side] = self.stat_mask[side];
+        self.stat_mask[side] = mask;
+        self.stat_pos[side] = (mask & up) | (self.stat_prev[side] & self.stat_pos[side] & !mask);
+        self.stat_state[side] = 0;
+        self.stat_from[side] = self.stat_to[side];
+        let mut n = 0;
+        for i in 0..4 {
+            self.stat_to[side][i] = n * 24;
+            if mask & (1 << i) != 0 {
+                n += 1;
+            }
+        }
     }
 
     /// `HudGauge_ShakeHp`: the panel and the health node shake `count` frames by up to `amp`.
@@ -516,7 +553,11 @@ impl GaugePart {
                 face.set_rect(0, w, 0, h);
                 face.set_uv(0, w, 0, h);
             }
-            face.rgba = [0x80; 4];
+            face.rgba = if self.face_tint[side] {
+                [0x80, 0x50, 0x70, 0x80]
+            } else {
+                [0x80; 4]
+            };
             face.mirror = flip;
             paint.draw(&self.spr[64], at([16, 3], [0, 0]), 0, Some(side));
         }
@@ -772,40 +813,120 @@ impl GaugePart {
         }
     }
 
-    /// `HudGauge_UpdateStatIcons` at rest (state -1): the shown icons bright or dark, in their places.
+    /// `HudGauge_UpdateStatIcons`: after a change, the icons that went fade out (0.2 s), the ones that stay slide
+    /// to their new places (0.3 s, cubic ease-out), the new ones fade in (0.2 s); then (state -1) the shown icons
+    /// rest in their places. An icon is bright when it is a raise, dark otherwise.
     fn update_stat_icons(&mut self) {
         let side = self.side;
-        let (mask, pos, to) = (
+        let (mask, pos, prev) = (
             self.stat_mask[side],
             self.stat_pos[side],
-            self.stat_to[side],
+            self.stat_prev[side],
         );
-        for i in 0..4 {
-            let c = if pos & (1 << i) != 0 {
+        let removed = (mask ^ prev) & prev;
+        let added = (mask ^ prev) & mask;
+        let kept = mask & prev;
+        let (from, to) = (self.stat_from[side], self.stat_to[side]);
+        if self.stat_state[side] == 0 {
+            self.stat_state[side] = if removed != 0 {
+                0
+            } else if added != 0 {
+                2
+            } else {
+                -1
+            };
+        }
+        let paused = self.paused;
+        let ramp = &mut self.stat_ramp[side];
+        let step = |ramp: &mut Ramp| !paused && ramp.step();
+        // Per icon: shown, the icon's alpha factor, the frame's alpha, the shade shown, and its x.
+        let mut look = [(false, 1.0f32, 0x80u8, false, 0i32); 4];
+        let state = &mut self.stat_state[side];
+        match *state {
+            0 | 1 => {
+                if *state == 0 {
+                    ramp.start(0.2, 1.0, 0.0);
+                    *state = 1;
+                }
+                let done = step(ramp);
+                for (i, l) in look.iter_mut().enumerate() {
+                    let bit = 1 << i;
+                    *l = if removed & bit != 0 {
+                        (true, ramp.value, (ramp.value * 128.0) as u8, false, from[i])
+                    } else {
+                        (prev & bit != 0, 1.0, 0x80, prev & bit != 0, from[i])
+                    };
+                }
+                if done {
+                    *state += 1;
+                }
+            }
+            2 | 3 => {
+                if *state == 2 {
+                    ramp.start(0.3, 0.0, 1.0);
+                    *state = 3;
+                }
+                let done = step(ramp);
+                let t = 1.0 - (1.0 - ramp.value).powf(3.0);
+                for (i, l) in look.iter_mut().enumerate() {
+                    let on = kept & (1 << i) != 0;
+                    let x = (from[i] as f32 + (to[i] - from[i]) as f32 * t) as i32;
+                    *l = (on, 1.0, 0x80, on, x);
+                }
+                if done {
+                    *state = if added != 0 { 4 } else { -1 };
+                }
+            }
+            4 | 5 => {
+                if *state == 4 {
+                    ramp.start(0.2, 0.0, 1.0);
+                    *state = 5;
+                }
+                let done = step(ramp);
+                for (i, l) in look.iter_mut().enumerate() {
+                    let bit = 1 << i;
+                    *l = if added & bit != 0 {
+                        (true, ramp.value, (ramp.value * 128.0) as u8, false, to[i])
+                    } else {
+                        (mask & bit != 0, 1.0, 0x80, mask & bit != 0, to[i])
+                    };
+                }
+                if done {
+                    *state += 1;
+                }
+            }
+            _ => {
+                for (i, l) in look.iter_mut().enumerate() {
+                    let on = mask & (1 << i) != 0;
+                    *l = (on, 1.0, 0x80, on, to[i]);
+                }
+            }
+        }
+        for (i, &(shown, fade, frame_a, shaded, x)) in look.iter().enumerate() {
+            let c: [u8; 4] = if pos & (1 << i) != 0 {
                 [0x80, 0x80, 0x80, 0x80]
             } else {
                 [0x40, 0x40, 0x40, 0x80]
             };
-            let shown = mask & (1 << i) != 0;
             let icon = &mut self.spr[43 + i];
             icon.init_tex_sub(&self.sheet, 0x13 + i, 0);
             icon.show(shown);
-            icon.rgba = c;
+            icon.rgba = [c[0], c[1], c[2], (f32::from(c[3]) * fade) as u8];
             icon.move_by(5, -5);
-            icon.move_by(to[i], 0);
+            icon.move_by(x, 0);
             let frame = &mut self.spr[39 + i];
             frame.show(shown);
-            frame.set_color(0x80, 0x80, 0x80, 0x80);
+            frame.set_color(0x80, 0x80, 0x80, frame_a);
             frame.set_rect(0, 0x2A, 0, 0x16);
             frame.set_uv(0, 0x2A, 0x16, 0x2C);
             frame.move_by(0x66, 0x18);
-            frame.move_by(to[i], 0);
+            frame.move_by(x, 0);
             let shade = &mut self.spr[49 + i];
-            shade.show(shown);
+            shade.show(shaded);
             shade.set_rect(3, 0x27, 1, 0x15);
             shade.set_uv(0, 0x24, 0x2C, 0x40);
             shade.move_by(0x66, 0x18);
-            shade.move_by(to[i], 0);
+            shade.move_by(x, 0);
         }
     }
 
@@ -1169,5 +1290,65 @@ pub(crate) fn draw_gauges(
     }
     if let Some(timer) = timer {
         timer.run(layer, textures);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn part() -> GaugePart {
+        GaugePart::new(HudSheet {
+            base: 0,
+            sizes: vec![[64, 64]; 40],
+            views: Vec::new(),
+        })
+    }
+
+    /// Steps the icons until the change animation rests; each frame's icon 0 alpha (0 while hidden) and icon 1
+    /// x.
+    fn settle(g: &mut GaugePart) -> Vec<(u8, i16)> {
+        let mut seen = Vec::new();
+        for _ in 0..100 {
+            g.update_stat_icons();
+            let a = if g.spr[43].hidden {
+                0
+            } else {
+                g.spr[43].rgba[3]
+            };
+            seen.push((a, g.spr[44].rect[0]));
+            if g.stat_state[0] == -1 || g.stat_state[0] > 5 {
+                break;
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn stat_icons_fade_slide_and_fade() {
+        let mut g = part();
+        g.side = 0;
+        // A raise of the first icon: nothing to slide, then a 0.2 s fade-in at x 0, bright.
+        g.set_stat_icons(0, 0b01, 0b01);
+        let seen = settle(&mut g);
+        assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0), "{seen:?}");
+        assert_eq!(seen.last().unwrap().0, 0x80);
+        assert_eq!(g.spr[43].rgba[..3], [0x80; 3]);
+        // A lowered second icon joins at 24, dark.
+        g.set_stat_icons(0, 0b11, 0b01);
+        settle(&mut g);
+        assert!(!g.spr[44].hidden);
+        assert_eq!(g.spr[44].rgba, [0x40, 0x40, 0x40, 0x80]);
+        let rest = g.spr[44].rect[0];
+        // The first goes: it fades out, then the second slides 24 to the left, easing out.
+        g.set_stat_icons(0, 0b10, 0);
+        let seen = settle(&mut g);
+        let fade = seen.iter().take_while(|s| s.1 == rest).count();
+        assert!(fade >= 6, "{seen:?}");
+        assert_eq!(g.spr[44].rect[0], rest - 24);
+        assert!(g.spr[43].hidden);
+        // Unchanged: no new animation.
+        g.set_stat_icons(0, 0b10, 0);
+        assert_eq!(g.stat_state[0], -1);
     }
 }

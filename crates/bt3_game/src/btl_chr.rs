@@ -1103,6 +1103,17 @@ impl Chr {
     /// The HUD's view of the active member's gauges (`Hud_PreUpdate`).
     pub(crate) fn hud_gauge(&self) -> crate::hud_gauge::SideGauge {
         let g = &self.gauge;
+        // The status icons by stat modifier: 0, 3, 1, 2.
+        let (mut stat_mask, mut stat_up) = (0, 0);
+        for (i, stat) in [0, 3, 1, 2].into_iter().enumerate() {
+            let v = self.stat_mod(stat);
+            if v != 0 {
+                stat_mask |= 1 << i;
+                if v > 0 {
+                    stat_up |= 1 << i;
+                }
+            }
+        }
         crate::hud_gauge::SideGauge {
             hp: g.health,
             ki: g.ki,
@@ -1111,6 +1122,9 @@ impl Chr {
             max_power: g.max_power,
             powered_up: self.flags.test(6),
             dead: g.health <= 0,
+            stat_mask,
+            stat_up,
+            face_tint: self.obj.flags & 0x4_0000 != 0,
         }
     }
 
