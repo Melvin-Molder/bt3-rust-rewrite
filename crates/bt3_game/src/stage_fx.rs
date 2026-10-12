@@ -15,6 +15,8 @@ pub(crate) struct StageFx {
     pub scroll: Option<crate::stg_scroll::Scroll>,
     /// Kind 4.
     pub smoke: Option<crate::eft_smoke::Smoke>,
+    /// Kind 6.
+    pub geysers: Option<crate::eft_geyser::Geysers>,
     /// Kind 7: the water, then the bubbles.
     pub water: Option<crate::eft_water::Water>,
     pub bubbles: Option<crate::eft_bubble::Bubbles>,
@@ -58,6 +60,9 @@ impl StageFx {
             if let Some(s) = &mut self.smoke {
                 s.init(libc, vu0);
             }
+            if let Some(g) = &mut self.geysers {
+                g.init(self.smoke.as_mut(), libc, vu0);
+            }
         }
         for _ in 0..std::mem::take(&mut self.resets_pending) {
             if let Some(s) = &mut self.scroll {
@@ -80,6 +85,9 @@ impl StageFx {
         }
         if let Some(s) = &mut self.smoke {
             s.update(paused, libc, vu0);
+        }
+        if let Some(g) = &mut self.geysers {
+            g.update(paused, self.smoke.as_mut());
         }
         if let Some(water) = &mut self.water {
             water.update(&crate::btl_blast::water_chars(chars, data), paused, libc);
@@ -112,6 +120,9 @@ impl StageFx {
     pub(crate) fn draw(&self, ot: &mut OrderTable, ctx: &DrawCtx, chars: &[Chr; 2], light: V3) {
         if let Some(s) = &self.smoke {
             s.draw(ot, ctx, light);
+        }
+        if let Some(g) = &self.geysers {
+            g.draw(ot, ctx);
         }
         if let Some(w) = &self.water {
             w.draw(ot, ctx);

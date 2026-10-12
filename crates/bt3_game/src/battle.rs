@@ -1159,11 +1159,25 @@ impl BattleAssets {
         Some(crate::eft_smoke::Smoke::new(&self.stage.smoke, texture))
     }
 
+    /// `EftGeyser_MgrInit`: the geysers of kind 6, with stage flag 1 and the stage's records; texture 1 of the
+    /// set of pack entry 0x12.
+    pub(crate) fn new_geysers(&self) -> Option<crate::eft_geyser::Geysers> {
+        if self.stage.stage_flags & 1 == 0 || self.stage.geysers.is_empty() {
+            return None;
+        }
+        let texture = self.stage_pack12.as_ref().and_then(|t| t.get(1).copied());
+        Some(crate::eft_geyser::Geysers::new(
+            &self.stage.geysers,
+            texture,
+        ))
+    }
+
     /// `EftStage_CreateKinds`: the tasks of the kinds the stage has, their inits to run.
     pub(crate) fn new_stage_fx(&self) -> crate::stage_fx::StageFx {
         let mut fx = crate::stage_fx::StageFx::default();
         fx.scroll = self.new_scroll();
         fx.smoke = self.new_smoke();
+        fx.geysers = self.new_geysers();
         fx.water = self.new_water();
         fx.bubbles = self.new_bubbles();
         fx.bound = self.new_bound();
@@ -5244,6 +5258,29 @@ mod tests {
         // The emitters keep their particles going, and the starting camera sees them.
         assert!(battle.roster.scene.stage.smoke.as_ref().unwrap().count() > 20);
         assert!(drawn > 100, "{drawn}");
+        // Stage 3's nine geysers (stage flag 1): within 6 s each has erupted, with texture 1 of the set.
+        let column = battle.assets.stage_pack12.as_ref().unwrap()[1];
+        assert_eq!(battle.assets.stage.geysers.len(), 9);
+        let mut columns = 0;
+        for _ in 0..200 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            columns += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture == Some(column))
+                .count();
+        }
+        let states = battle.roster.scene.stage.geysers.as_ref().unwrap().states();
+        assert!(states.iter().all(|&s| s != 0), "{states:?}");
+        assert!(columns > 0);
     }
 
     #[test]

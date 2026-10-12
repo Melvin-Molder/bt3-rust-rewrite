@@ -42,6 +42,23 @@ pub struct StageResource {
     /// The MEF0 block's list 1 (stage pack entry 0x13, `BtlStage_GetFxResB2`): the smoke emitters, used with
     /// stage flag 2.
     pub smoke: Vec<StageSmoke>,
+    /// The MEF0 block's list 0 (`BtlStage_GetFxResA2`): the geysers, used with stage flag 1.
+    pub geysers: Vec<StageGeyser>,
+}
+
+/// `EftGeyserRec`: a geyser's column (its y and z negated as `BtlStage_BindMef` does).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StageGeyser {
+    pub pos: [f32; 3],
+    pub width: f32,
+    pub height: f32,
+    /// The texture's scroll a frame.
+    pub scroll: f32,
+    /// Frames at full height, of the fade in, and of the wait between two eruptions.
+    pub hold: u16,
+    pub fade: u16,
+    pub wait: u16,
+    pub rgba: [u8; 4],
 }
 
 /// `EftSmokeSrc`: a smoke emitter of the stage (its y and z negated as `BtlStage_BindMef` does).
@@ -290,6 +307,32 @@ impl StageResource {
             })
             .collect::<io::Result<Vec<_>>>()?;
 
+        let geysers = parse_mef_list(bytes, 0)?
+            .into_iter()
+            .map(|o| {
+                let h = |k: usize| u16::from_le_bytes([bytes[o + k], bytes[o + k + 1]]);
+                Ok(StageGeyser {
+                    pos: [
+                        read_f32(bytes, o)?,
+                        -read_f32(bytes, o + 4)?,
+                        -read_f32(bytes, o + 8)?,
+                    ],
+                    width: read_f32(bytes, o + 0xC)?,
+                    height: read_f32(bytes, o + 0x10)?,
+                    scroll: read_f32(bytes, o + 0x14)?,
+                    hold: h(0x18),
+                    fade: h(0x1A),
+                    wait: h(0x1C),
+                    rgba: [
+                        bytes[o + 0x1E],
+                        bytes[o + 0x1F],
+                        bytes[o + 0x20],
+                        bytes[o + 0x21],
+                    ],
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
         Ok(Self {
             stage_id,
             flags,
@@ -308,6 +351,7 @@ impl StageResource {
             dust,
             water_fx,
             smoke,
+            geysers,
         })
     }
 }
@@ -530,6 +574,7 @@ mod tests {
         assert_eq!(stage.water_level, Some(32.0));
         assert!(stage.water_fx);
         assert_eq!(stage.smoke.len(), 1);
+        assert!(stage.geysers.is_empty());
         let smoke = stage.smoke[0];
         assert_eq!((smoke.pos[1], smoke.damp), (-5.0, 0.9));
         assert_eq!(

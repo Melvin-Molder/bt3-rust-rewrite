@@ -17,17 +17,17 @@ const PARTS: usize = 40;
 
 /// `EftSmokeArg`.
 #[derive(Clone, Copy, Debug)]
-struct Arg {
-    pos: V3,
-    ambient: [f32; 3],
-    diffuse: [f32; 3],
-    size: f32,
-    alpha: f32,
-    speed: f32,
-    damp: f32,
-    life_base: i32,
-    life_range: i32,
-    rate: i32,
+pub(crate) struct SmokeArg {
+    pub pos: V3,
+    pub ambient: [f32; 3],
+    pub diffuse: [f32; 3],
+    pub size: f32,
+    pub alpha: f32,
+    pub speed: f32,
+    pub damp: f32,
+    pub life_base: i32,
+    pub life_range: i32,
+    pub rate: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -40,7 +40,7 @@ struct Part {
 /// `EftSmoke`: an emitter task.
 #[derive(Clone, Debug)]
 struct Emitter {
-    arg: Arg,
+    arg: SmokeArg,
     part: [Part; PARTS],
 }
 
@@ -49,6 +49,7 @@ struct Emitter {
 pub(crate) struct Smoke {
     texture: Option<usize>,
     emitters: Vec<Emitter>,
+    first_colors: Option<([f32; 3], [f32; 3])>,
 }
 
 impl Smoke {
@@ -58,7 +59,7 @@ impl Smoke {
         let emitters = records
             .iter()
             .map(|r| Emitter {
-                arg: Arg {
+                arg: SmokeArg {
                     pos: r.pos,
                     ambient: [0, 1, 2].map(|i| f32::from(r.ambient[i])),
                     diffuse: [0, 1, 2].map(|i| f32::from(r.diffuse[i])),
@@ -73,7 +74,17 @@ impl Smoke {
                 part: [Part::default(); PARTS],
             })
             .collect();
-        Self { texture, emitters }
+        let first_colors = records.first().map(|r| {
+            (
+                [0, 1, 2].map(|i| f32::from(r.ambient[i])),
+                [0, 1, 2].map(|i| f32::from(r.diffuse[i])),
+            )
+        });
+        Self {
+            texture,
+            emitters,
+            first_colors,
+        }
     }
 
     /// The particles alive.
@@ -89,11 +100,36 @@ impl Smoke {
     /// `EftSmoke_Init` of every emitter: 60 to 89 updates.
     pub(crate) fn init(&mut self, libc: &mut LibcRandom, vu0: &mut Vu0Random) {
         for e in &mut self.emitters {
-            let n = libc.rand() % 30 + 60;
-            for _ in 0..n {
-                e.update(libc, vu0);
-            }
+            e.init(libc, vu0);
         }
+    }
+
+    /// `EftSmoke_Create` (another task's emitter, its init run at once); its index.
+    pub(crate) fn create(
+        &mut self,
+        arg: SmokeArg,
+        libc: &mut LibcRandom,
+        vu0: &mut Vu0Random,
+    ) -> usize {
+        let mut e = Emitter {
+            arg,
+            part: [Part::default(); PARTS],
+        };
+        e.init(libc, vu0);
+        self.emitters.push(e);
+        self.emitters.len() - 1
+    }
+
+    /// `EftSmoke_SetPos`.
+    pub(crate) fn set_pos(&mut self, i: usize, pos: V3) {
+        if let Some(e) = self.emitters.get_mut(i) {
+            e.arg.pos = pos;
+        }
+    }
+
+    /// The first record's colours, which the geysers' emitters take (`BtlStage_GetFxResB2`).
+    pub(crate) fn colors(&self) -> Option<([f32; 3], [f32; 3])> {
+        self.first_colors
     }
 
     /// `EftSmoke_Update` of every emitter (not while time is stopped).
@@ -143,6 +179,14 @@ impl Smoke {
 }
 
 impl Emitter {
+    /// `EftSmoke_Init`: 60 to 89 updates, so that the smoke is already there.
+    fn init(&mut self, libc: &mut LibcRandom, vu0: &mut Vu0Random) {
+        let n = libc.rand() % 30 + 60;
+        for _ in 0..n {
+            self.update(libc, vu0);
+        }
+    }
+
     /// With a chance of 1 in the rate, the first free particle starts at the emitter going up in a cone; then
     /// every live particle moves, slows sideways and ages.
     fn update(&mut self, libc: &mut LibcRandom, vu0: &mut Vu0Random) {

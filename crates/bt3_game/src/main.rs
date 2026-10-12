@@ -35,6 +35,7 @@ mod eft_bubble;
 mod eft_burst;
 mod eft_chain;
 mod eft_gdust;
+mod eft_geyser;
 mod eft_link;
 mod eft_part10;
 mod eft_ptcl;
