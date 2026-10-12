@@ -531,6 +531,8 @@ pub(crate) struct Env<'a> {
     pub transform: &'a [crate::eft_impact::ImpactSet],
     /// The power-up glow's settings (common effect entry 7).
     pub glow: Option<&'a crate::eft_glow::GlowCfg>,
+    /// The streak fields' kinds and colours (common effect entries 0x24E..0x258).
+    pub streak: Option<&'a crate::eft_streak::StreakCfg>,
     /// The aura's settings (common effect entry 1).
     pub aura: Option<&'a crate::eft_aura::AuraCfg>,
     /// The body lightning's node pairs (common effect entry 4).

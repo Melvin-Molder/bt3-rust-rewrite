@@ -158,6 +158,11 @@ pub(crate) struct TechDef {
     /// `blurOn` / `blurOff`: which event (an index into 2, 4, .. 0x40; on 2 none) turns the stage blur on and off.
     pub blur_on: i32,
     pub blur_off: i32,
+    /// `subKind` / `subAngle` (degrees) / `subArg`: the streak fields a connected rush starts on the victim's events
+    /// 0x80 (none for a skill).
+    pub sub_kind: [i32; 8],
+    pub sub_angle: [f32; 8],
+    pub sub_arg: i32,
 }
 
 impl TechDef {
@@ -195,6 +200,9 @@ impl TechDef {
                 ground_scale: 1.0,
                 blur_on: s.blur_on(slot),
                 blur_off: s.blur_off(slot),
+                sub_kind: [-1; 8],
+                sub_angle: [0.0; 8],
+                sub_arg: 0,
             };
         }
         let t = data.tables.tech();
@@ -226,6 +234,9 @@ impl TechDef {
             ground_scale: t.ground_scale(slot),
             blur_on: t.blur_on(slot),
             blur_off: t.blur_off(slot),
+            sub_kind: std::array::from_fn(|n| t.sub_kind(slot, n)),
+            sub_angle: std::array::from_fn(|n| t.sub_angle(slot, n)),
+            sub_arg: t.sub_arg(slot),
         }
     }
 
@@ -330,6 +341,102 @@ struct Beam {
     blur_out: Option<([u8; 3], [f32; 3])>,
 }
 
+/// What a technique effect asks of the other effect modules (the screen flash, the delayed sounds, the streak
+/// fields), in order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TechReq {
+    /// `EftFlash_Start` of a connected rush's white flash; `wait` holds it until the rush finish's state 2.
+    Flash {
+        wait: bool,
+    },
+    /// `EftDelaySe_Start` of the fighter's node sounds: sound 0x47 at 0, 3, 10, 14 and 21 frames.
+    NodeSe(usize),
+    /// `EftStreak_Start` under the handle the item keeps, and `EftStreak_Stop`.
+    Streak {
+        handle: u32,
+        side: usize,
+        kind: i32,
+        color: i32,
+        angle: f32,
+    },
+    StreakStop(u32),
+}
+
+/// The requests of an update and the streak handles handed out.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TechOut {
+    pub(crate) reqs: Vec<TechReq>,
+    next_handle: u32,
+}
+
+/// The sub-effects a connected rush runs on its victim's events (`EFT_RUSHSHOT_STAGE_FX` / flag 0x80000, `stage`
+/// / `subCount`, `stageFx[]` / `subs[]`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct VictimFx {
+    count: usize,
+    handles: [u32; 8],
+    on: bool,
+}
+
+impl VictimFx {
+    /// `EftRushShot_UpdateStageFx` / `EftShotTech_UpdateSubs`: the victim's event 0x80 starts the definition's
+    /// next streak field (when its kind is not negative), its event 0x100 stops the last one started.
+    pub(crate) fn update_streaks(
+        &mut self,
+        def: &TechDef,
+        side: usize,
+        opp_events: u32,
+        out: &mut TechOut,
+    ) {
+        if opp_events & 0x80 != 0 {
+            let n = self.count;
+            if let (Some(&kind), Some(&deg)) = (def.sub_kind.get(n), def.sub_angle.get(n)) {
+                let angle = crate::btl_tech_volley::eft_wrap(deg * 3.141_592_7 / 180.0);
+                if kind >= 0 {
+                    out.next_handle = out.next_handle.wrapping_add(1).max(1);
+                    let handle = out.next_handle;
+                    out.reqs.push(TechReq::Streak {
+                        handle,
+                        side,
+                        kind,
+                        color: def.sub_arg,
+                        angle,
+                    });
+                    self.handles[n] = handle;
+                    self.on = true;
+                }
+            }
+            self.count += 1;
+        }
+        if opp_events & 0x100 != 0 {
+            let i = self.count.saturating_sub(1).min(7);
+            if self.on {
+                out.reqs.push(TechReq::StreakStop(self.handles[i]));
+                self.handles[i] = 0;
+                self.on = false;
+            }
+        }
+    }
+}
+
+/// `EftRushShot_UpdateFlash` / `EftShotTech_UpdateFlash` and `UpdateSparks` / `UpdateNodeFx`: the victim's event
+/// 0x40 flashes the screen white (not with definition flag 0x400000) and starts the fighter's node sounds.
+pub(crate) fn victim_flash(
+    def: &TechDef,
+    side: usize,
+    opp_events: u32,
+    wait: bool,
+    out: &mut TechOut,
+) {
+    if opp_events & 0x40 == 0 {
+        return;
+    }
+    if def.flags & 0x40_0000 == 0 {
+        out.reqs.push(TechReq::Flash { wait });
+    }
+    out.reqs.push(TechReq::NodeSe(side));
+}
+
 /// The technique layer (`gEftShot`, `gEftTechEvt`).
 #[derive(Clone, Debug)]
 pub(crate) struct TechFx {
@@ -342,6 +449,8 @@ pub(crate) struct TechFx {
     /// The last setting of view 0's stage blur this update (`EftBlast_UpdateBlur` and the others): the alphas of
     /// its centre, middle and corners, and its direction.
     pub(crate) blur: Option<([u8; 3], [f32; 3])>,
+    /// What the items asked of the other modules this update.
+    pub(crate) out: TechOut,
     events: [u32; 2],
     requests: [u32; 2],
     timelines: Vec<Timeline>,
@@ -375,6 +484,7 @@ impl Default for TechFx {
             cam_stop: false,
             tints: Vec::new(),
             blur: None,
+            out: TechOut::default(),
             events: [0; 2],
             requests: [0; 2],
             timelines: Vec::new(),
@@ -1554,6 +1664,7 @@ impl TechFx {
                         self.events[side],
                         self.events[side ^ 1],
                         self.cur_slot[side],
+                        &mut self.out,
                     );
                     if r.blur_out.is_some() {
                         self.blur = r.blur_out;
@@ -1669,6 +1780,7 @@ impl TechFx {
                         self.events[side],
                         self.events[side ^ 1],
                         self.cur_slot[side],
+                        &mut self.out,
                     );
                     if s.blur_out.is_some() {
                         self.blur = s.blur_out;

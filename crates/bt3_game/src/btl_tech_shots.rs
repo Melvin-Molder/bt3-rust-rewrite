@@ -76,6 +76,8 @@ pub(crate) struct ShotTech {
     blur: f32,
     blur_dir: [f32; 3],
     pub(crate) blur_out: Option<([u8; 3], [f32; 3])>,
+    /// The streak fields it started on the victim's events.
+    victim: crate::btl_tech_fx::VictimFx,
 }
 
 impl ShotTech {
@@ -111,6 +113,7 @@ impl ShotTech {
             blur: 0.0,
             blur_dir: [0.0; 3],
             blur_out: None,
+            victim: Default::default(),
         };
         if head_set.flags & 1 != 0 && head_set.move_kind == 2 {
             s.node = 0x15;
@@ -393,6 +396,7 @@ impl ShotTech {
         events: u32,
         opp_events: u32,
         cur_slot: i32,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) {
         let side = self.src.side;
         self.opp_events = opp_events;
@@ -451,10 +455,12 @@ impl ShotTech {
             if options & 0x40 != 0 {
                 self.dir = self.calc_dir(w);
             }
-            // EftShotTech_UpdateConnected: of its helpers the blur and the muzzle are ported (the others draw).
+            // EftShotTech_UpdateConnected: the flash and node sounds (technique 0x27C's flash waits for the rush
+            // finish), the blur, the streak fields and the muzzle.
+            let def = self.src.def;
+            crate::btl_tech_fx::victim_flash(&def, side, opp_events, def.id == 0x27C, out);
             // EftShotTech_UpdateBlur: with definition flag 0x200 the victim's event 0x10 aims the blur from node
             // 0x11 and starts its rise by tenths, its event 0x20 drops it; view 0's blur is set every frame.
-            let def = self.src.def;
             if def.flags & 0x200 != 0 {
                 if opp_events & 0x10 != 0 {
                     self.flags |= 0x400;
@@ -470,6 +476,7 @@ impl ShotTech {
             }
             let alphas = crate::btl_tech_fx::blur_alphas(self.blur, [8.0, 32.0, 128.0]);
             self.blur_out = Some((alphas, self.blur_dir));
+            self.victim.update_streaks(&def, side, opp_events, out);
             if options & 1 != 0 && test(0x20) {
                 (self.muzzle_pos, self.muzzle_dir) = muzzle(w, side);
             }

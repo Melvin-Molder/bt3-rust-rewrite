@@ -601,6 +601,18 @@ impl TechTable<'_> {
     pub fn item_speed(&self, slot: i32) -> f32 {
         self.f32_of(0x214, slot)
     }
+    /// `EftShotParam.subKind[n]` (+0xBA + 3n, a byte taken as signed): the streak field the n-th victim event 0x80
+    /// of a connected rush starts (< 0 none); `subAngle[n]` (+0xD4 + 12n) its angle in degrees; `subArg` (+0x134,
+    /// signed) its colour.
+    pub fn sub_kind(&self, slot: i32, n: usize) -> i32 {
+        self.s8_of(0xBA + n * 3, slot)
+    }
+    pub fn sub_angle(&self, slot: i32, n: usize) -> f32 {
+        self.f32_of(0xD4 + n * 12, slot)
+    }
+    pub fn sub_arg(&self, slot: i32) -> i32 {
+        self.s8_of(0x134, slot)
+    }
     /// The struggle power (+0x3C, `EftShotParam.power`).
     pub fn power(&self, slot: i32) -> f32 {
         self.f32_of(0x3C, slot)

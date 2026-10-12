@@ -325,6 +325,14 @@ pub(crate) struct Scene {
     pub spdlines: crate::eft_spdline::SpdLines,
     /// The vanish lines (`gEftShotFx`, layer 3; kept through a reset).
     pub shotfx: crate::eft_shotfx::ShotFx,
+    /// The streak fields of connected rushes (`gEftStreak`, layer 3).
+    pub streaks: crate::eft_streak::Streaks,
+    /// `gEftDelaySe`'s five tasks: (fighter, sound, frames left).
+    delay_se: Vec<(usize, i32, i32)>,
+    /// The sounds the delayed sounds played this update (`Snd_PlaySeEx(4, id, 0x7F, 0x40, 0)`).
+    pub se_out: Vec<i32>,
+    /// `EftCam_IsActive`, set by the battle before the update.
+    pub eft_cam_active: bool,
     /// The aura (`gEftAuraPool`, layer 3).
     pub auras: crate::eft_aura::Auras,
     /// The body lightning (`gEftBoltPool`, layer 3).
@@ -998,6 +1006,28 @@ impl Scene {
         }
     }
 
+    /// What a streak field reads of a fighter.
+    pub(crate) fn streak_chr(&self, w: &World, side: usize) -> crate::eft_streak::StreakChr {
+        let c = &w.chars[side];
+        crate::eft_streak::StreakChr {
+            in_technique: crate::btl_act::is_technique_id(c.act.current),
+            node3: c.obj.node_pos(3),
+            height: w.data[side].height(),
+        }
+    }
+
+    /// The delayed sounds waiting.
+    #[cfg(test)]
+    pub(crate) fn delay_se_pending(&self) -> usize {
+        self.delay_se.len()
+    }
+
+    /// `BtlScene_Reset(0)`'s part for the untagged tasks: the streak fields and the pending delayed sounds.
+    pub(crate) fn reset_untagged(&mut self) {
+        self.streaks.reset();
+        self.delay_se.clear();
+    }
+
     /// `BtlScene_Reset(2 / 3)`: every effect task of a fighter is reset (its technique items end as their term
     /// callbacks do, raising flag 0xA8 / 0xA9); the scene's generator restarts.
     pub(crate) fn reset_side(&mut self, chars: &mut [Chr; 2], side: usize) {
@@ -1078,6 +1108,40 @@ impl Scene {
         );
         for dir in self.tech.tints.drain(..) {
             self.tints.start(0, dir, 0.2);
+        }
+        for req in std::mem::take(&mut self.tech.out.reqs) {
+            use crate::btl_tech_fx::TechReq;
+            match req {
+                TechReq::Flash { wait } => {
+                    self.flashes.start(crate::eft_flash::FlashArg {
+                        color: [255.0; 4],
+                        fade_in: 0.5,
+                        hold: 0.0,
+                        fade_out: 1.0,
+                        wait,
+                    });
+                }
+                // EftDelaySe_Start of the node sound table (five tasks at most).
+                TechReq::NodeSe(side) => {
+                    for delay in [0, 3, 0xA, 0xE, 0x15] {
+                        if self.delay_se.len() < 5 {
+                            self.delay_se.push((side, 0x47, delay));
+                        }
+                    }
+                }
+                TechReq::Streak {
+                    handle,
+                    side,
+                    kind,
+                    color,
+                    angle,
+                } => {
+                    if let Some(cfg) = w.env.streak {
+                        self.streaks.start(cfg, handle, side, kind, color, angle);
+                    }
+                }
+                TechReq::StreakStop(handle) => self.streaks.stop(handle),
+            }
         }
         // The techniques' last setting of view 0's blur (EftBlast_UpdateBlur and the others).
         if let Some((alphas, dir)) = self.tech.blur.take() {
@@ -1242,6 +1306,25 @@ impl Scene {
             moved: w.chars[i].pose.moved,
         });
         self.spdlines.update(w.paused, &spd, w.libc);
+        if let Some(cfg) = w.env.streak {
+            let sc = std::array::from_fn(|s| self.streak_chr(w, s));
+            self.streaks
+                .update(cfg, &sc, self.eft_cam_active, w.paused, w.vu0);
+        }
+        // EftDelaySe_Update: each counts down while its fighter is not stopped, then plays.
+        let mut k = 0;
+        while k < self.delay_se.len() {
+            let (side, id, delay) = &mut self.delay_se[k];
+            if !crate::btl_tech_fx::stopped(w, *side) {
+                *delay -= 1;
+                if *delay <= 0 {
+                    self.se_out.push(*id);
+                    self.delay_se.remove(k);
+                    continue;
+                }
+            }
+            k += 1;
+        }
         let chars = &*w.chars;
         let (n0, n1) = (|n| chars[0].obj.node_pos(n), |n| chars[1].obj.node_pos(n));
         let shot = [

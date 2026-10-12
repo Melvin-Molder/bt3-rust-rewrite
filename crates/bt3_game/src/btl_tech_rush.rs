@@ -104,6 +104,8 @@ pub(crate) struct RushShot {
     fade: f32,
     fade_pos: [f32; 3],
     pub(crate) blur_out: Option<([u8; 3], [f32; 3])>,
+    /// The streak fields it started on the victim's events.
+    victim: crate::btl_tech_fx::VictimFx,
 }
 
 impl RushShot {
@@ -149,6 +151,7 @@ impl RushShot {
             fade: 0.0,
             fade_pos: [0.0; 3],
             blur_out: None,
+            victim: Default::default(),
         };
         if head_set.flags & 4 != 0 {
             s.speed = s.width2 * def.scale;
@@ -235,6 +238,7 @@ impl RushShot {
         events: u32,
         opp_events: u32,
         cur_slot: i32,
+        out: &mut crate::btl_tech_fx::TechOut,
     ) -> (Option<HitRec>, bool) {
         let side = self.src.side;
         self.blur_out = None;
@@ -315,8 +319,8 @@ impl RushShot {
                 _ => {}
             }
         }
-        // EftRushShot_UpdateAttached: the swarm, then the node it sits on (the victim's events' streaks, flash and
-        // sparks are not ported).
+        // EftRushShot_UpdateAttached: the swarm, then the node it sits on; once connected the blur, the streak fields,
+        // the flash and the node sounds of the victim's events.
         if self.kind == 1 {
             if self.flags & SUB != 0 {
                 self.update_swarm(w.libc);
@@ -345,6 +349,10 @@ impl RushShot {
             }
             let alphas = crate::btl_tech_fx::blur_alphas(self.fade, [32.0, 64.0, 128.0]);
             self.blur_out = Some((alphas, self.fade_pos));
+        }
+        if self.flags & CONNECTED != 0 {
+            self.victim.update_streaks(&def, side, opp_events, out);
+            crate::btl_tech_fx::victim_flash(&def, side, opp_events, false, out);
         }
         if test(EV_ABORT) {
             if self.flags & ENDED == 0 {

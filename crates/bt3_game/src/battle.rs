@@ -153,6 +153,9 @@ pub struct BattleAssets {
     pub(crate) bolt_textures: crate::eft_bolt::BoltTextures,
     /// `EftGlowMgr_Init`: the power-up glow's settings and textures.
     pub(crate) glow_cfg: Option<crate::eft_glow::GlowCfg>,
+    /// The streak fields' settings and their texture under each colour index's palette (`EftStreakMgr_Init`).
+    pub(crate) streak_cfg: Option<crate::eft_streak::StreakCfg>,
+    pub(crate) streak_textures: Vec<Option<usize>>,
     pub(crate) glow_textures: crate::eft_glow::GlowTextures,
     /// `gEftStage->sprite`: the stage pack's entry 0x14 texture (the sun the transformation of kind 5 shows),
     /// among the effect textures, on a stage that has it.
@@ -502,6 +505,8 @@ pub fn load(
         bolt_cfg: None,
         bolt_textures: crate::eft_bolt::BoltTextures::default(),
         glow_cfg: None,
+        streak_cfg: None,
+        streak_textures: Vec::new(),
         glow_textures: crate::eft_glow::GlowTextures::default(),
         stage_sun: None,
         stage_pack12: None,
@@ -735,6 +740,22 @@ pub fn load(
         assets
             .effect_textures
             .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+    }
+    // EftStreakMgr_Init: the ten kinds (common entries 0x24F..0x258), the colours (0x24E) and the texture set
+    // (0x24D): its first image under the palette of each colour index.
+    assets.streak_cfg = crate::eft_streak::StreakCfg::read(&common_fx);
+    if let Some(entry) =
+        bt3_data::eft_pack::common_entry(&common_fx, crate::eft_streak::TEXTURE_ENTRY)
+        && let Ok(res) = TextureResource::parse(entry)
+        && let Some(img) = res.entries.first()
+    {
+        for clut in res.entries.iter().take(crate::eft_streak::PALETTES) {
+            let t = bt3_data::gs::decode_sprite_texture_with_clut(img, clut).ok();
+            assets.streak_textures.push(t.map(|t| {
+                assets.effect_textures.push(t);
+                assets.effect_textures.len() - 1
+            }));
+        }
     }
     // EftTransformMgr_Init.
     let mut transform_sets = Vec::new();
@@ -1700,6 +1721,7 @@ impl BattleAssets {
             impact: &self.impact_sets,
             transform: &self.transform_sets,
             glow: self.glow_cfg.as_ref(),
+            streak: self.streak_cfg.as_ref(),
             aura: self.aura_cfg.as_ref(),
             bolt: self.bolt_cfg.as_ref(),
             change_allowed: self.change_allowed,
@@ -2494,6 +2516,7 @@ impl Battle {
         // them once more (the reload's stage swap) and makes the new stage's.
         let mut stage_fx = std::mem::take(&mut self.roster.scene.stage);
         stage_fx.reset();
+        self.roster.scene.reset_untagged();
         let start = self.assets.start_stage;
         if self.assets.stage_id != start
             && let Some(read) = self.loader.as_mut()
@@ -2760,6 +2783,7 @@ impl Battle {
         let loading = self.loading;
         let mut replay = std::mem::take(&mut self.replay);
         let menu_active = self.menu.as_ref().is_some_and(|m| m.active);
+        let eft_cam_active = self.eft_cam.is_active();
         self.with_roster(|roster, data, env| {
             // BtlChars_SampleInput, UpdateInput, UpdateMain and PostScene do nothing while paused or while a stage
             // loads; the effect scene runs with its time stopped.
@@ -2770,6 +2794,7 @@ impl Battle {
                 // BtlReplay_UpdateViewer, in UpdateMain after the cameras.
                 replay.update_viewer(viewer_pressed, paused, menu_active);
             }
+            roster.scene.eft_cam_active = eft_cam_active;
             roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
             if !paused && !loading {
                 roster.post_scene(data, env, &mut *input.libc);
@@ -2777,6 +2802,20 @@ impl Battle {
             false
         });
         self.replay = replay;
+        // The delayed sounds' plays of the scene update.
+        if !self.roster.scene.se_out.is_empty() {
+            let mut snd = self.assets.snd.lock().unwrap_or_else(|e| e.into_inner());
+            for id in self.roster.scene.se_out.drain(..) {
+                snd.play_se(
+                    crate::btl_snd::KIND_COMMON as usize,
+                    id,
+                    0x7F,
+                    0x40,
+                    0,
+                    input.sounds,
+                );
+            }
+        }
         self.hud.set_replay_mode(self.replay.hud_mode);
         self.check_stage_change();
         if !paused && !self.loading {
@@ -3383,6 +3422,20 @@ impl Battle {
                 .draw(&mut ot, &ctx, self.assets.spdline_texture, |chr| {
                     in_view(chr)
                 });
+            if let Some(cfg) = &self.assets.streak_cfg {
+                let scene = &self.roster.scene;
+                let sc = std::array::from_fn(|s| {
+                    let c = &self.roster.chars[s];
+                    crate::eft_streak::StreakChr {
+                        in_technique: false,
+                        node3: c.obj.node_pos(3),
+                        height: self.assets.fighters[s].tables.params.height(),
+                    }
+                });
+                scene
+                    .streaks
+                    .draw(cfg, &sc, &self.assets.streak_textures, &mut ot, &ctx);
+            }
             self.roster
                 .scene
                 .shotfx
@@ -9570,6 +9623,30 @@ mod tests {
             return;
         };
         assert!(connected && on > 0, "{on} {log:x?}");
+    }
+
+    #[test]
+    fn real_connected_rushes_start_streaks_flashes_and_node_sounds() {
+        // Character 3's 0x2E8 (a rush shot) and character 1's 0x1E2 (a shot technique) have streak fields (kinds 3
+        // and 0 / 3) for their victims' events 0x80; their events 0x40 flash the screen white and start the node
+        // sounds (0x47 five times).
+        for (chara, slot) in [(3, 4), (1, 3)] {
+            let (mut streaks, mut drawn, mut flash, mut node_se) = (0, 0, false, 0);
+            let Some((log, ..)) = run_technique_watched(chara, slot, 600, false, &mut |b| {
+                let s = &b.roster.scene;
+                streaks = streaks.max(s.streaks.count());
+                drawn = drawn.max(s.streaks.drawn());
+                flash |= s.flashes.phase().is_some();
+                node_se += s.delay_se_pending();
+            }) else {
+                return;
+            };
+            assert!(
+                streaks > 0 && drawn > 0,
+                "{chara}: {streaks} {drawn} {log:x?}"
+            );
+            assert!(flash && node_se > 0, "{chara}: {flash} {node_se}");
+        }
     }
 
     #[test]
