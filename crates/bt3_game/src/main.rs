@@ -39,6 +39,7 @@ mod eft_bubble;
 mod eft_burst;
 mod eft_chain;
 mod eft_charge;
+mod eft_flash;
 mod eft_gdust;
 mod eft_geyser;
 mod eft_glow;

@@ -350,6 +350,8 @@ pub(crate) struct Scene {
     /// The stage tint (`gStgTint`; a member of the screen effects' group, kept here for the requests that start
     /// it).
     pub tints: crate::stg_tint::Tints,
+    /// The full-screen flash and the blinding overlay (`gEftFlash`, `gEftBlind`, layer 3).
+    pub flashes: crate::eft_flash::Flashes,
 }
 
 /// A generator draw made outside the scene update.
@@ -1339,6 +1341,19 @@ impl Scene {
             in_technique: [0, 1].map(|s| crate::btl_act::is_technique_id(w.chars[s].act.current)),
         };
         self.fx.update(&fxw, w.libc, w.vu0);
+        // Layer 3's blinding overlay and full-screen flash.
+        let fc = std::array::from_fn(|s| {
+            let c = &w.chars[s];
+            crate::eft_flash::FlashChr {
+                flag8_action_104: c.flags.test(8) && c.act.current == 0x104,
+                variant: c.gauge.variant != 0,
+                in_rush: crate::btl_tech_fx::in_rush_sequence(c),
+                finish_phase: crate::btl_tech_fx::rush_finish_phase(c),
+                flag_2b: c.flags.test(0x2B),
+                blind: (c.blind_level as f32 / 90.0).clamp(0.0, 1.0),
+            }
+        });
+        self.flashes.update(&fc, w.paused, w.paused);
         self.clamp_to_stage(w.env);
         // EftDet_Update: nothing while paused.
         if !w.paused {

@@ -2722,6 +2722,8 @@ impl Battle {
                 .scene
                 .fx
                 .draw(&fxw, &mut ot, &ctx, |chr| demo || chr == 0);
+            // EftBlind_Draw, EftFlash_Draw.
+            self.roster.scene.flashes.draw(&mut ot);
             // EftBurst_IsBusy: the transition's first 150 frames.
             let busy = self.burst.as_ref().is_some_and(|b| b.frame < 150);
             self.roster
@@ -7276,6 +7278,25 @@ mod tests {
         assert!(opp.contains(&0xC6), "{opp:x?}");
         let frames = battle.assets.fighters[0].tables.skill().frames(0);
         assert!(blind > 0 && blind <= frames, "{blind} {frames}");
+        // Player 0 blinded: the grey overlay over the screen as strong as its blind level (a ratio of 90), gone
+        // once it wears off.
+        battle.roster.chars[0].blind_timer = 60;
+        let (mut peak, mut last) = (0, None);
+        for _ in 0..150 {
+            let f = battle.run_frame(false, pad(0), 0, &mut libc, &mut random, None, false);
+            last = f
+                .effects
+                .iter()
+                .find(|t| {
+                    t.texture.is_none()
+                        && t.vertices[0].rgba[..3] == [128, 128, 128]
+                        && t.vertices[0].position[..2] == [0.0, 0.0]
+                })
+                .map(|t| t.vertices[0].rgba[3]);
+            peak = peak.max(last.unwrap_or(0));
+        }
+        assert_eq!(peak, 255);
+        assert_eq!(last, None);
     }
 
     #[test]

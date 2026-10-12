@@ -81,6 +81,7 @@
 !/crates/bt3_game/src/eft_glow.rs
 !/crates/bt3_game/src/eft_aura.rs
 !/crates/bt3_game/src/eft_bolt.rs
+!/crates/bt3_game/src/eft_flash.rs
 !/crates/bt3_game/src/scr_warp.rs
 !/crates/bt3_game/src/btl_fx.rs
 !/crates/bt3_game/src/eft_geyser.rs

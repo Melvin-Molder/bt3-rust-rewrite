@@ -46,7 +46,7 @@ fn super_motion(motion: i32) -> Option<i32> {
 
 /// `BtlAct_GetMotionLevel`: the step 0..4 of a rush sequence's motion (attacker 0x17.., victim 0x1C.. of any
 /// class), 0 for any other.
-fn motion_level(motion: i32) -> i32 {
+pub(crate) fn motion_level(motion: i32) -> i32 {
     for base in [0x11C, 0x13E, 0x160, 0x121, 0x143, 0x165] {
         if (base..base + 5).contains(&motion) {
             return motion - base;

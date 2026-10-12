@@ -400,6 +400,31 @@ pub(crate) fn in_rush_sequence(chr: &Chr) -> bool {
     matches!(chr.act.current, 0x12D..=0x12F | 0x139..=0x13B)
 }
 
+/// `BtlCharApi_GetRushFinishPhase`: -1 outside a rush sequence; 0 when the side's model is not reloaded
+/// (attacker: `atk_reload`, the last step; victim: `def_reload`, the reload step); else 1 from that step's motion
+/// on, 2 before it.
+pub(crate) fn rush_finish_phase(chr: &Chr) -> i32 {
+    if !in_rush_sequence(chr) {
+        return -1;
+    }
+    let t = &chr.thr;
+    let mut level = -1;
+    if chr.player as i32 == t.atk_side {
+        if t.atk_reload {
+            level = t.step_count - 1;
+        }
+    } else if t.def_reload {
+        level = t.last_step;
+    }
+    if level < 0 {
+        0
+    } else if crate::btl_act::motion_level(chr.anim.cur) >= level {
+        1
+    } else {
+        2
+    }
+}
+
 /// `EftShot_AttrMaskFromBits`: event bits to animation attributes.
 fn attr_mask(bits: u32) -> u64 {
     let mut mask = u64::from(bits << 8) & 0x200;
