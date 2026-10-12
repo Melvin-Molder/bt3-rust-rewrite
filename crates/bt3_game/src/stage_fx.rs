@@ -13,6 +13,8 @@ use crate::rng::{LibcRandom, Vu0Random};
 pub(crate) struct StageFx {
     /// Kind 0.
     pub scroll: Option<crate::stg_scroll::Scroll>,
+    /// Kind 3.
+    pub storm: Option<crate::eft_storm::Storm>,
     /// Kind 4.
     pub smoke: Option<crate::eft_smoke::Smoke>,
     /// Kind 6.
@@ -22,10 +24,10 @@ pub(crate) struct StageFx {
     pub bubbles: Option<crate::eft_bubble::Bubbles>,
     /// Kind 8.
     pub bound: Option<crate::eft_bound::Bound>,
-    /// The inits still to run, the resets after them, and draws of the effects these replaced (taken first).
+    /// The inits still to run, the resets after them, and the tasks these replaced with their own (run first).
     init_pending: bool,
     resets_pending: u32,
-    pub burn: u32,
+    pub prev: Option<Box<StageFx>>,
 }
 
 impl StageFx {
@@ -43,19 +45,17 @@ impl StageFx {
         self.resets_pending += 1;
     }
 
-    /// The random draws a reset of these tasks makes (the sheet's, with a random direction).
-    pub(crate) fn reset_draws(&self) -> u32 {
-        u32::from(self.scroll.as_ref().is_some_and(|s| s.random()))
-    }
-
     /// The inits and resets waiting, with the frame's generators.
     pub(crate) fn run_pending(&mut self, libc: &mut LibcRandom, vu0: &mut Vu0Random) {
-        for _ in 0..std::mem::take(&mut self.burn) {
-            libc.rand();
+        if let Some(mut p) = self.prev.take() {
+            p.run_pending(libc, vu0);
         }
         if std::mem::take(&mut self.init_pending) {
             if let Some(s) = &mut self.scroll {
                 s.load(libc);
+            }
+            if let Some(s) = &mut self.storm {
+                s.init(libc);
             }
             if let Some(s) = &mut self.smoke {
                 s.init(libc, vu0);
@@ -67,6 +67,9 @@ impl StageFx {
         for _ in 0..std::mem::take(&mut self.resets_pending) {
             if let Some(s) = &mut self.scroll {
                 s.load(libc);
+            }
+            if let Some(s) = &mut self.storm {
+                s.reset(libc);
             }
         }
     }
@@ -82,6 +85,9 @@ impl StageFx {
     ) {
         if let Some(s) = &mut self.scroll {
             s.update(paused);
+        }
+        if let Some(s) = &mut self.storm {
+            s.update(paused, libc);
         }
         if let Some(s) = &mut self.smoke {
             s.update(paused, libc, vu0);
@@ -115,9 +121,19 @@ impl StageFx {
         }
     }
 
-    /// The kinds' draws into the effect pass (the sheet is drawn with the stage). `light`: the stage's light
-    /// direction.
-    pub(crate) fn draw(&self, ot: &mut OrderTable, ctx: &DrawCtx, chars: &[Chr; 2], light: V3) {
+    /// The kinds' draws into the effect pass (the sheet is drawn with the stage; the storm's rain moves and
+    /// draws random numbers). `light`: the stage's light direction.
+    pub(crate) fn draw(
+        &mut self,
+        ot: &mut OrderTable,
+        ctx: &DrawCtx,
+        chars: &[Chr; 2],
+        light: V3,
+        libc: &mut LibcRandom,
+    ) {
+        if let Some(s) = &mut self.storm {
+            s.draw(ot, ctx, libc);
+        }
         if let Some(s) = &self.smoke {
             s.draw(ot, ctx, light);
         }

@@ -128,6 +128,8 @@ pub struct BattleAssets {
     pub(crate) dust_textures: Vec<usize>,
     /// Stage pack entry 0x12's textures among the effect textures, on a stage that has the entry.
     pub(crate) stage_pack12: Option<Vec<usize>>,
+    /// Stage pack entry 0xE's textures (the storm's) among the effect textures.
+    pub(crate) stage_pack14: Option<Vec<usize>>,
     /// The boundary wall's parameters and texture (stage pack entries 0x15..0x17), on a stage with them.
     pub(crate) bound: Option<(bt3_data::stage::StageBound, Option<usize>)>,
     /// The scrolling sheet (stage pack entry 7) and its first texture among the stage textures.
@@ -281,6 +283,7 @@ pub fn load(
         collision,
         nav,
         pack12,
+        pack14,
         bound,
         scroll,
     } = load_stage(read, setup.stage)?;
@@ -347,6 +350,7 @@ pub fn load(
         ray_texture: None,
         dust_textures: Vec::new(),
         stage_pack12: None,
+        stage_pack14: None,
         bound: None,
         scroll,
         fighters: Vec::new(),
@@ -437,6 +441,7 @@ pub fn load(
         }
     }
     assets.stage_pack12 = pack12.map(|t| assets.push_effect_textures(t));
+    assets.stage_pack14 = pack14.map(|t| assets.push_effect_textures(t));
     assets.bound = bound.map(|(p, t)| (p, assets.push_effect_textures(t).first().copied()));
     for (index, side) in setup.sides.into_iter().enumerate() {
         let load = SideLoad {
@@ -757,6 +762,8 @@ pub(crate) struct LoadedStage {
     /// Stage pack entry 0x12's textures (`EftTexSet_Load32` of the water, `EftTexSet_Load8` of the smoke), when
     /// the entry is not empty.
     pack12: Option<Vec<RgbaTexture>>,
+    /// Stage pack entry 0xE's textures (`EftStorm_Init`), when the entry is not empty.
+    pack14: Option<Vec<RgbaTexture>>,
     /// `EftBoundMgr_Init`: the parameters (entry 23), colour (22) and textures (21), when all three are there.
     bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
     /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
@@ -798,6 +805,21 @@ fn load_stage(
         };
         word(n + 1).wrapping_sub(word(n))
     };
+    let entry_textures = |n: usize| -> Result<Option<Vec<RgbaTexture>>, String> {
+        if entry_size(n) <= 0 {
+            return Ok(None);
+        }
+        let res =
+            TextureResource::parse(pack_section(&stage_file, n).map_err(error)?).map_err(error)?;
+        Ok(Some(
+            res.entries
+                .iter()
+                .map(decode_sprite_texture)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(error)?,
+        ))
+    };
+    let pack14 = entry_textures(0xE)?;
     let pack12 = if entry_size(0x12) > 0 {
         let res = TextureResource::parse(pack_section(&stage_file, 0x12).map_err(error)?)
             .map_err(error)?;
@@ -847,6 +869,7 @@ fn load_stage(
         textures,
         cuts,
         pack12,
+        pack14,
         bound,
         scroll,
         collision: StageCollision::parse(&stage_file).map_err(error)?,
@@ -1176,6 +1199,8 @@ impl BattleAssets {
     pub(crate) fn new_stage_fx(&self) -> crate::stage_fx::StageFx {
         let mut fx = crate::stage_fx::StageFx::default();
         fx.scroll = self.new_scroll();
+        // EftStorm_Init: the textures of pack entry 0xE.
+        fx.storm = self.stage_pack14.clone().map(crate::eft_storm::Storm::new);
         fx.smoke = self.new_smoke();
         fx.geysers = self.new_geysers();
         fx.water = self.new_water();
@@ -1216,6 +1241,7 @@ impl BattleAssets {
         self.collision = s.collision;
         self.nav = s.nav;
         self.stage_pack12 = s.pack12.map(|t| self.push_effect_textures(t));
+        self.stage_pack14 = s.pack14.map(|t| self.push_effect_textures(t));
         self.bound = s
             .bound
             .map(|(p, t)| (p, self.push_effect_textures(t).first().copied()));
@@ -1755,9 +1781,9 @@ impl Battle {
             match load_stage(read, start) {
                 Ok(loaded) => {
                     self.assets.install_stage(loaded, start);
-                    let burn = stage_fx.burn + 2 * stage_fx.reset_draws();
-                    stage_fx = self.assets.new_stage_fx();
-                    stage_fx.burn = burn;
+                    stage_fx.reset();
+                    let old = std::mem::replace(&mut stage_fx, self.assets.new_stage_fx());
+                    stage_fx.prev = Some(Box::new(old));
                     self.assets
                         .reload_bank(read, 8, SND_STAGE_FILE + start.max(0) as u32);
                     self.light_dir =
@@ -2201,10 +2227,11 @@ impl Battle {
             // BtlCharApi_IsCamShown without camera priorities: the demo camera shows both, else side 0's view.
             let demo = self.demo.is_active();
             // Layer 0's stage effects, then the others.
-            self.roster
+            let roster = &mut self.roster;
+            roster
                 .scene
                 .stage
-                .draw(&mut ot, &ctx, &self.roster.chars, self.light_dir);
+                .draw(&mut ot, &ctx, &roster.chars, self.light_dir, &mut *libc);
             self.roster
                 .scene
                 .fx
@@ -5281,6 +5308,46 @@ mod tests {
         let states = battle.roster.scene.stage.geysers.as_ref().unwrap().states();
         assert!(states.iter().all(|&s| s != 0), "{states:?}");
         assert!(columns > 0);
+    }
+
+    #[test]
+    fn real_stage_15_storms() {
+        let mut setup = BattleSetup::default();
+        setup.stage = 15;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let textures = battle.assets.stage_pack14.clone().unwrap();
+        assert!(textures.len() >= 6);
+        assert!(battle.roster.scene.stage.storm.is_some());
+        let mut libc = LibcRandom::new(6);
+        let mut random = GameRandom::from_key(&[6]);
+        let (mut rain, mut bolts) = (0, 0);
+        for _ in 0..120 {
+            let frame = battle.run_frame(
+                false,
+                [PadState::default(); 2],
+                0,
+                &mut libc,
+                &mut random,
+                None,
+                false,
+            );
+            rain += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture.is_none() && t.vertices[0].rgba == [0x60, 0x60, 0x60, 0x20])
+                .count();
+            bolts += frame
+                .effects
+                .iter()
+                .filter(|t| t.texture.is_some_and(|i| textures.contains(&i)))
+                .count();
+        }
+        // 64 drops a frame (some off screen), and the lightning on the horizon ahead.
+        assert!(rain > 1000, "{rain}");
+        assert!(bolts > 0);
     }
 
     #[test]
