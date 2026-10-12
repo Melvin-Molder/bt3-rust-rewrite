@@ -336,6 +336,10 @@ impl Roster {
             // BtlChar_UpdateCamera: ChrCam_StartCut, then the controls (ChrCam_UpdateDemo is the battle's).
             crate::chr_cam::start_cut(me, opp, data[i], data[i ^ 1], env);
             cam_update_input(me, opp, data[i]);
+            // BtlObj_SetMoveVec, BtlObj_UpdateChains (the stage's wind), then the matrices again.
+            me.obj.chains.move_vec = me.pose.vel;
+            let wind = env.stage.wind.unwrap_or([0.0; 4]);
+            me.obj.update_chains(data[i].tables.chain.as_ref(), wind);
             me.obj.calc_matrices(&data[i].obj);
             // BtlFx_UpdateAll, in its order: the aura, then the technique shots and the ki blasts it starts.
             crate::btl_fx::update_aura(me, data[i], env, &mut self.scene.auras);
@@ -364,6 +368,7 @@ impl Roster {
             crate::btl_fx::screen_filter(me, &mut self.scene.blurs);
             crate::btl_fx::trigger_obj_1e_1f(me);
             crate::btl_fx::update_obj_flag80(me, data[i]);
+            crate::btl_fx::push_back_on_event_400(me, data[i]);
             crate::btl_fx::obj_mask_event_400(me, data[i]);
             self.scene.spawn_held_disc(me, data[i]);
             // BtlFx_UpdateChargeFx: the charge aura while request 7 holds, its burst on request 8.

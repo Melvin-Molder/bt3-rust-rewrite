@@ -215,6 +215,29 @@ pub(crate) fn obj_mask_event_400(me: &mut Chr, data: &SideData) {
     }
 }
 
+/// `BtlFx_PushBackOnEvent400`: in a rush sequence of a technique without flag 0x1000000, animation event 0x400
+/// raises flag 0x9F, while which the chains are pushed straight back (the partner object's are not ported).
+pub(crate) fn push_back_on_event_400(me: &mut Chr, data: &SideData) {
+    let cur = me.act.current;
+    if crate::btl_act::is_technique_id(cur)
+        && crate::btl_tech_fx::in_rush_sequence(me)
+        && data.tables.tech().flags_a(crate::btl_act::id_class(cur)) & 0x100_0000 == 0
+    {
+        if me.anim_test_attr(0x400) {
+            me.flags.set_held(0x9F);
+        }
+        if me.flags.test(0x9F) {
+            let a = me.pose.rot[1] + std::f32::consts::PI;
+            let v = [
+                crate::btl_tech_volley::mathf_sin(a),
+                0.0,
+                crate::btl_tech_volley::mathf_cos(a),
+            ];
+            me.obj.chains.add_push(v, 5.0);
+        }
+    }
+}
+
 /// `BtlFx_UpdateObjFlag80`: with parameter flag 0x200000, ability 0x79 shows model part 4 (object flag 0x80, the
 /// geometry on node 0x6F); without either it is cleared, but only while the object is drawn (flag 2).
 pub(crate) fn update_obj_flag80(me: &mut Chr, data: &SideData) {

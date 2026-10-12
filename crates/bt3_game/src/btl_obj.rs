@@ -253,6 +253,8 @@ pub(crate) struct Obj {
     pub color_modes: u32,
     /// `work->flash`: the colour flash and the mode-2 fade (`BtlObjFlash_*`, `BtlObjFade_*`).
     pub flash: ObjFlash,
+    /// The secondary motion: the model's chains, the pushes and sway on them (`chainA`, `chainB`, `push`, ..).
+    pub chains: crate::btl_obj_chain::Chains,
     /// `state.preset`: the colour preset row (`BtlObj_SetColorPreset`: the tint colour and two alphas the colour
     /// modes blend with). Kept, not drawn.
     pub preset: [f32; 5],
@@ -315,6 +317,7 @@ impl Obj {
             flags: 0x1200_0016,
             color_modes: 0,
             flash: ObjFlash::default(),
+            chains: crate::btl_obj_chain::Chains::default(),
             preset: [0.0; 5],
             color_a: data.model.header.flags & 0x100_0000 != 0,
             area: -1,
@@ -352,6 +355,26 @@ impl Obj {
             let p = apply(&inv, n.mtx[3]);
             n.prev_pos = [p[0] - r[0], p[1] - r[1], p[2] - r[2]];
         }
+    }
+
+    /// `BtlObj_InitChains`.
+    pub(crate) fn init_chains(
+        &mut self,
+        params: Option<&bt3_data::chara_data::ChainParams>,
+        data: &ObjData,
+    ) {
+        self.chains = crate::btl_obj_chain::Chains::new(params, &data.model.parts);
+    }
+
+    /// `BtlObj_UpdateChains`: the chains rewrite their nodes' rotations (the matrices are built again after).
+    pub(crate) fn update_chains(
+        &mut self,
+        params: Option<&bt3_data::chara_data::ChainParams>,
+        wind: [f32; 4],
+    ) {
+        let mut chains = std::mem::take(&mut self.chains);
+        chains.update(self, params, wind);
+        self.chains = chains;
     }
 
     /// `BtlObj_GetNodeVelocity`: node `id`'s movement in the object's frame since the snapshot; zero without it.
@@ -1353,5 +1376,27 @@ impl ObjFlash {
     /// `BtlObjFade_Get`: the fade when not 0.
     pub(crate) fn fade(&self) -> Option<f32> {
         (self.fade != 0.0).then_some(self.fade)
+    }
+}
+
+impl crate::btl_obj_chain::ChainNodes for Obj {
+    fn node_mtx(&self, id: u32) -> Option<(Mtx, Mtx)> {
+        self.node(id).map(|n| (n.parent, n.mtx))
+    }
+
+    fn velocity(&self, id: u32) -> [f32; 3] {
+        self.node_velocity(id)
+    }
+
+    fn world(&self) -> Mtx {
+        self.mtx
+    }
+
+    fn set_rot(&mut self, id: u32, rot: [f32; 4]) {
+        if let Some(i) = self.node_index.get(id as usize).copied().flatten()
+            && let Some(n) = self.nodes.get_mut(usize::from(i))
+        {
+            n.rot = rot;
+        }
     }
 }

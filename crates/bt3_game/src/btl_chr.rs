@@ -753,6 +753,7 @@ impl Chr {
         let mut obj = Obj::new(&data.obj, data.tables.params.radius());
         // BtlObj_InitFlags: the parameter's preset row (+3) in the model's table.
         obj.set_color_preset(i32::from(data.tables.params.u8_at(3) as i8), None);
+        obj.init_chains(data.tables.chain.as_ref(), &data.obj);
         let mut chr = Self {
             player,
             flags: Flags::default(),
@@ -1639,6 +1640,8 @@ impl Chr {
         let radius = data.tables.params.radius();
         let mut obj = Obj::new(&data.obj, radius);
         obj.set_color_preset(i32::from(data.tables.params.u8_at(3) as i8), None);
+        // BtlChar_OnModelLoaded's BtlObj_InitChains.
+        obj.init_chains(data.tables.chain.as_ref(), &data.obj);
         let old = std::mem::replace(&mut self.obj, obj);
         self.obj.pos = old.pos;
         self.obj.rot = old.rot;

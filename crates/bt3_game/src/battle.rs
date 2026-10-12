@@ -8661,4 +8661,46 @@ mod tests {
         };
         assert!(connected && on > 0, "{on} {log:x?}");
     }
+
+    #[test]
+    fn real_hair_chains_sway_and_bend_under_a_push() {
+        use crate::btl_input::pad::L2;
+        // Goku's hair (type A links 0x4F..0x56) and cloth (0x57..0x5A) from character file section 0x17.
+        let Some(mut battle) = fight_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let (a, b) = battle.roster.chars[0].obj.chains.nodes();
+        assert_eq!(a.len(), 12);
+        assert!(b.is_empty());
+        assert!(a.contains(&(0x58, 1)));
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let pads = |held: u32| {
+            [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ]
+        };
+        let rot = |b: &Battle| b.roster.chars[0].obj.node(0x4F).unwrap().rot;
+        // Idle: the hair hangs off the identity and keeps swaying a little.
+        let mut idle = Vec::new();
+        for _ in 0..20 {
+            battle.run_frame(false, pads(0), 0, &mut libc, &mut random, None, false);
+            idle.push(rot(&battle));
+        }
+        assert!(idle.iter().all(|q| *q != [0.0, 0.0, 0.0, 1.0]));
+        assert!(idle.windows(2).any(|w| w[0] != w[1]));
+        // Charging ki pushes the chains down and back: the hair turns further from its idle pose.
+        let angle = |q: [f32; 4]| 2.0 * q[3].clamp(-1.0, 1.0).acos();
+        let rest = angle(*idle.last().unwrap());
+        let mut most = 0.0f32;
+        for _ in 0..40 {
+            battle.run_frame(false, pads(L2), 0, &mut libc, &mut random, None, false);
+            most = most.max((angle(rot(&battle)) - rest).abs());
+        }
+        assert!(most > 0.01, "{most}");
+    }
 }

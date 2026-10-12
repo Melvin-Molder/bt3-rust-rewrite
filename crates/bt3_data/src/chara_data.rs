@@ -13,6 +13,8 @@ pub const ATTACK_SECTION: usize = 0x13;
 pub const KI_BLAST_SECTION: usize = 0x14;
 pub const MOVE_SECTION: usize = 0x15;
 /// The technique table (`mdl->super`, object + 0x92C: the AI's "skill table").
+/// `BObjChainParam` (`mdl->chain`): the secondary motion's chains.
+pub const CHAIN_SECTION: usize = 0x17;
 pub const SUPER_SECTION: usize = 0x18;
 /// The two-slot skill table (`mdl->skill`, object + 0x930: the AI's "move table").
 pub const SKILL_SECTION: usize = 0x19;
@@ -298,6 +300,77 @@ pub struct CharaTables {
     pub ai_param: Option<Vec<u8>>,
     /// The camera cuts the character's moves ask for (`ChrCam_RequestCut(chr, 0, n)`).
     pub cam_cuts: Vec<CamCutDef>,
+    /// The chains' parameters, `None` without the section.
+    pub chain: Option<ChainParams>,
+}
+
+/// `BObjChainParam` (0x350 bytes): sixteen slots of type A chains and eight of type B, each keyed by the node id
+/// of its links (ids from 0x47 up).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChainParams {
+    pub node_a: [u8; 16],
+    /// The rest direction as stored (`axisX`, `axisY`, `axisZ`).
+    pub axis: [[f32; 3]; 16],
+    /// 0, 1, 2: the hinge axis; other values none.
+    pub hinge: [u8; 16],
+    /// Degrees.
+    pub hinge_ofs: [i16; 16],
+    pub hinge_limit: [u8; 16],
+    pub inertia: [f32; 16],
+    pub damping: [f32; 16],
+    /// Degrees per frame.
+    pub speed: [i8; 16],
+    pub phase: [i16; 16],
+    pub swing_max: [u8; 16],
+    pub swing: [f32; 16],
+    pub follow: [f32; 16],
+    pub limit: [u8; 16],
+    pub rest: [f32; 16],
+    pub gravity: [f32; 16],
+    /// Percent.
+    pub stiff: [u8; 16],
+    pub node_b: [u8; 8],
+    pub yaw: [i8; 8],
+    pub gravity_b: [f32; 8],
+    pub swing_b: [f32; 8],
+    pub yaw_max: [i8; 8],
+    pub yaw_min: [i8; 8],
+}
+
+impl ChainParams {
+    pub fn parse(b: &[u8]) -> Option<Self> {
+        if b.len() < 0x350 {
+            return None;
+        }
+        let f = |o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let h = |o: usize| i16::from_le_bytes([b[o], b[o + 1]]);
+        let f16 = |base: usize| std::array::from_fn(|i| f(base + i * 4));
+        let f8 = |base: usize| std::array::from_fn(|i| f(base + i * 4));
+        Some(Self {
+            node_a: b[0..0x10].try_into().unwrap(),
+            axis: std::array::from_fn(|i| [f(0x10 + i * 4), f(0x50 + i * 4), f(0x90 + i * 4)]),
+            hinge: b[0xD0..0xE0].try_into().unwrap(),
+            hinge_ofs: std::array::from_fn(|i| h(0xE0 + i * 2)),
+            hinge_limit: b[0x100..0x110].try_into().unwrap(),
+            inertia: f16(0x110),
+            damping: f16(0x150),
+            speed: std::array::from_fn(|i| b[0x190 + i] as i8),
+            phase: std::array::from_fn(|i| h(0x1A0 + i * 2)),
+            swing_max: b[0x1C0..0x1D0].try_into().unwrap(),
+            swing: f16(0x1D0),
+            follow: f16(0x210),
+            limit: b[0x250..0x260].try_into().unwrap(),
+            rest: f16(0x260),
+            gravity: f16(0x2A0),
+            stiff: b[0x2E0..0x2F0].try_into().unwrap(),
+            node_b: b[0x2F0..0x2F8].try_into().unwrap(),
+            yaw: std::array::from_fn(|i| b[0x2F8 + i] as i8),
+            gravity_b: f8(0x300),
+            swing_b: f8(0x320),
+            yaw_max: std::array::from_fn(|i| b[0x340 + i] as i8),
+            yaw_min: std::array::from_fn(|i| b[0x348 + i] as i8),
+        })
+    }
 }
 
 /// `ChrCamCutDef` (0x24 bytes): a camera cut the fighter camera blends over its time.
@@ -426,6 +499,7 @@ impl CharaTables {
             cam_cuts: bounded_section(file, CAM_CUT_SECTION)
                 .map(CamCutDef::parse_table)
                 .unwrap_or_default(),
+            chain: bounded_section(file, CHAIN_SECTION).and_then(ChainParams::parse),
         })
     }
 }

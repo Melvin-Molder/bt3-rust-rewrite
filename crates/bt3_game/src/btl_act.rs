@@ -2015,6 +2015,16 @@ impl Ctx<'_, '_> {
                     self.snd(sound);
                     self.me.set_fx(7);
                     self.set(0xC);
+                    // The chains blown down and back (not for chara flags exactly 0x80).
+                    if self.data.tables.params.chara_flags() != 0x80 {
+                        let yaw = self.me.pose.rot[1];
+                        let dir = [
+                            -crate::btl_tech_volley::mathf_sin(yaw),
+                            -1.0,
+                            -crate::btl_tech_volley::mathf_cos(yaw),
+                        ];
+                        self.push_dir(dir, 0.3, 3.0);
+                    }
                     if self.flag(0xF) {
                         self.me.set_fx(0x36);
                     }
@@ -6803,6 +6813,7 @@ impl Ctx<'_, '_> {
             for f in [0xE6, 0xD2, 0x42, 0x43, 0x44, 0x45, 0x46, 0x134] {
                 self.set(f);
             }
+            self.push_angle(self.me.pose.rot[1] + PI, 1.0, 5.0);
             if self.me.action_frame >= 0x10 && self.test(0x33) {
                 self.me.clash_count_a += 1;
             }
@@ -6878,6 +6889,7 @@ impl Ctx<'_, '_> {
             ] {
                 self.set(f);
             }
+            self.push_angle(self.me.pose.rot[1] + PI, 1.0, 5.0);
             self.me.hold_action = true;
         }
         if phase == DECIDE && self.me.work[1] != 0 {
@@ -7409,10 +7421,45 @@ impl Ctx<'_, '_> {
         self.request_cut(0, cut);
     }
 
+    /// `BtlAct_PushAngle`: a push on the model's chains of `speed` along a yaw, kept at most `max`.
+    fn push_angle(&mut self, angle: f32, speed: f32, max: f32) {
+        use crate::btl_tech_volley::{mathf_cos, mathf_sin};
+        let v = [mathf_sin(angle) * speed, 0.0, mathf_cos(angle) * speed];
+        self.me.obj.chains.add_push(v, max);
+    }
+
+    /// `BtlAct_PushDir`: a push of `speed` along a direction (none for a null one).
+    fn push_dir(&mut self, dir: [f32; 3], speed: f32, max: f32) {
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if !(len < 0.0001) {
+            let v = dir.map(|c| c / len * speed);
+            self.me.obj.chains.add_push(v, max);
+        }
+    }
+
+    /// `BtlSuper_AddSway`: the charge loops sway the chains (0.2 a frame, at most 2).
+    fn super_add_sway(&mut self) {
+        self.me.obj.chains.add_sway(0.2, 2.0);
+    }
+
+    /// `BtlSuper_ShakeOnEvent`, then `BtlSuper_Recoil` (every call site pairs them): the recoil pushes the chains
+    /// straight back, always for hit direction kinds 0 and 9, on the fire motion (kind 0) for 1..4, 6 and 8.
+    fn shake_on_event(&mut self, cls: i32, kind: u32) {
+        self.shake_camera_on_event(cls, kind);
+        let push = match self.tech().hit_dir_kind(cls) {
+            0 | 9 => true,
+            1..=4 | 6 | 8 => kind == 0,
+            _ => false,
+        };
+        if push {
+            self.push_angle(self.me.pose.rot[1] + PI, 1.0, 5.0);
+        }
+    }
+
     /// `BtlSuper_ShakeOnEvent`: technique flag 0x4000000 shakes the camera at the fire event (kind 0: four frames
     /// before a single one, or on each of several), flag 0x8000000 every frame of the firing loop (kind 1); with
     /// flag 0x10000000 every camera near the fighter shakes. The rumble is not ported.
-    fn shake_on_event(&mut self, cls: i32, kind: u32) {
+    fn shake_camera_on_event(&mut self, cls: i32, kind: u32) {
         let flags = self.tech().flags_a(cls);
         let (strength, time) = match kind {
             0 if flags & 0x400_0000 != 0 => {
@@ -7539,6 +7586,7 @@ impl Ctx<'_, '_> {
                     self.me.anim_advance_loop(0);
                     self.super_hit_stop(false);
                     self.super_set_class(cls);
+                    self.super_add_sway();
                     if long || !change {
                         self.super_wait_flag(0xA7, cls, 2);
                     } else {
@@ -7654,6 +7702,7 @@ impl Ctx<'_, '_> {
                 }
                 1 => {
                     self.me.anim_advance_loop(0);
+                    self.super_add_sway();
                     aim = true;
                     match self.me.work[4] {
                         0 => {
@@ -7802,6 +7851,7 @@ impl Ctx<'_, '_> {
                 }
                 1 => {
                     self.me.anim_advance_loop(0);
+                    self.super_add_sway();
                     aim = true;
                     self.super_set_class(cls);
                     self.set(0x53);
@@ -7889,6 +7939,7 @@ impl Ctx<'_, '_> {
                 1 => {
                     self.me.anim_advance_loop(0);
                     self.super_hit_stop(false);
+                    self.super_add_sway();
                     self.super_set_class(cls);
                     self.super_boost_input();
                     aim = true;
@@ -9300,6 +9351,8 @@ impl Ctx<'_, '_> {
                     if self.me.anim_advance(0) {
                         self.me.flags.set_held(anim_flag::REQ_SUB);
                     }
+                    // BtlActChange_PushBack.
+                    self.push_angle(self.me.pose.rot[1] + PI, 0.4, 3.0);
                     if long {
                         for (ratio, sound) in [(0.4, 0x44), (0.5, 0x22), (0.8, 0x18)] {
                             if self.me.anim_passed_ratio(ratio) {
@@ -9311,6 +9364,7 @@ impl Ctx<'_, '_> {
                 0x178 => {
                     waiting = true;
                     self.me.anim_advance_loop(0);
+                    self.push_angle(self.me.pose.rot[1] + PI, 0.4, 3.0);
                     if self.change.is_loaded_for(self.me.player) {
                         self.change_loaded(0x179);
                     }

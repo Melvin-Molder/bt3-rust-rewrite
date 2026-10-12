@@ -31,6 +31,9 @@ pub struct StageResource {
     /// flip): the direction `BtlObj_UpdateAll` gives the battle objects' light every frame. `None` when the
     /// stage has no light.
     pub light_dir: Option<[f32; 3]>,
+    /// The first record of `StgDataA` +0x20 / +0x24 (`BtlStage_GetLightDir`), y and z negated as `BtlStage_Relocate`
+    /// does: the chains take it as the wind, its w the strength.
+    pub wind: Option<[f32; 4]>,
     /// The stage paths (`StgPathTable`, file word 0x18; `BtlStage_GetPath`): the clash C exchanges are placed on
     /// them and its camera looks along them.
     pub paths: Vec<StagePath>,
@@ -285,6 +288,19 @@ impl StageResource {
             Some(read_game_position(bytes, light + 0x10)?)
         };
 
+        let wind = if read_count(bytes, data_offset + 0x20, "stage wind")? == 0 {
+            None
+        } else {
+            let o = resolve_relative(
+                bytes,
+                data_offset,
+                read_u32(bytes, data_offset + 0x24)?,
+                0x10,
+                "stage wind",
+            )?;
+            let p = read_game_position(bytes, o)?;
+            Some([p[0], p[1], p[2], read_f32(bytes, o + 12)?])
+        };
         let paths = parse_paths(bytes)?;
         let dust = if read_count(bytes, data_offset + 0x68, "stage dust")? == 0 {
             None
@@ -460,6 +476,7 @@ impl StageResource {
             surf,
             light_colors,
             tint,
+            wind,
         })
     }
 }
