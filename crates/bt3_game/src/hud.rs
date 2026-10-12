@@ -1,8 +1,8 @@
 //! The battle HUD (src/battle/hud.c, hud_sprite.c, hud_notice_1.c, hud_notice_2.c): the manager's visibility
 //! bits, the team panel (hud_team.rs), the gauges and timer (hud_gauge.rs), the combo part (hud_combo.rs) and the
 //! notice part: the READY / FIGHT announcements, the finishes (K.O., the other K.O., the two spinning words of time
-//! up and the like), the winner's and the result's lower banners, with the announcer's lines. The prompts and
-//! caption are not ported yet.
+//! up and the like), the winner's and the result's lower banners, with the announcer's lines; and the caption of the
+//! attract demo. The prompts are not ported yet.
 //!
 //! The notices lean on the GS destination alpha: a band written only into the alpha plane lets the word through
 //! where it covers (TEST_2 0x3C000: DATE with DATM 1), and the FIGHT streak is added in proportion to the alpha
@@ -20,6 +20,7 @@ pub(crate) const HUD_FILE: u32 = 6;
 pub(crate) const SHEET_WORDS: [usize; 5] = [1, 4, 5, 2, 3];
 const NOTICE_SHEET: usize = 1;
 const COMBO_SHEET: usize = 2;
+const CAPTION_SHEET: usize = 4;
 /// `HudNotice_GetVoiceBase` with `SAVE_FLAG_VOICE`, which a fresh save has.
 const ANNOUNCER_BASE: u32 = 0x10B6C;
 const ANNOUNCER_LINES: u32 = 7;
@@ -1126,6 +1127,51 @@ impl NoticePart {
     }
 }
 
+/// `gHudCaption` (src/battle/hud_caption.c): sheet 4's texture 0 at the top (240, 19) and texture 1 at the bottom
+/// left (0, 386), whose alpha pulses 64..128 once a second (not frozen by the pause).
+#[derive(Debug)]
+struct CaptionPart {
+    sheet: HudSheet,
+    spr: [Sprite; 3],
+    pulse: Ramp,
+}
+
+impl CaptionPart {
+    /// `HudCaption_Init`.
+    fn new(sheet: HudSheet) -> Self {
+        let mut spr = [Sprite::default(); 3];
+        spr[1].init_tex(&sheet, 0);
+        spr[1].move_by(240, 19);
+        spr[2].init_tex(&sheet, 1);
+        spr[2].move_by(0, 386);
+        Self {
+            sheet,
+            spr,
+            pulse: Ramp::default(),
+        }
+    }
+
+    /// `HudCaption_Update` and `HudCaption_Draw` (the pulsing sprite first; it is left out during a replay).
+    fn run(&mut self, out: &mut Vec<HudPrim>) {
+        if self.pulse.step() {
+            self.pulse.start(1.0, 0.0, 1.0);
+        }
+        let s = crate::btl_tech_volley::mathf_sin(self.pulse.value * 3.141_592_7 * 2.0);
+        self.spr[2].set_color(0xFF, 0xFF, 0xFF, ((s + 1.0) * 0.5 * 64.0 + 64.0) as u8);
+        let node = Xf::translate(0.0, 0.0);
+        for spr in [&self.spr[2], &self.spr[1]] {
+            out.push(HudPrim {
+                texture: usize::try_from(spr.tex)
+                    .ok()
+                    .map(|tex| self.sheet.base + tex),
+                vertices: fan(&sprite_polygon(spr, &node, &self.sheet)),
+                rgba: spr.rgba,
+                blend: HudBlend::Alpha,
+            });
+        }
+    }
+}
+
 /// `gHud` with the parts ported so far.
 pub(crate) struct Hud {
     flags: u32,
@@ -1136,6 +1182,9 @@ pub(crate) struct Hud {
     gauge: GaugePart,
     timer: TimerPart,
     notice: NoticePart,
+    caption: CaptionPart,
+    /// `Battle_GetMode() == 7` (the attract demo): only the caption is drawn.
+    caption_only: bool,
     textures: HudTextures,
     layer: GsLayer,
     announcer: i32,
@@ -1184,6 +1233,8 @@ impl Hud {
             timer: TimerPart::new(&sheet0),
             gauge: GaugePart::new(sheet0),
             notice: NoticePart::new(sheets.get(NOTICE_SHEET).cloned().unwrap_or_default()),
+            caption: CaptionPart::new(sheets.get(CAPTION_SHEET).cloned().unwrap_or_default()),
+            caption_only: mode == 7,
             textures,
             layer: GsLayer::new(),
             announcer,
@@ -1308,6 +1359,11 @@ impl Hud {
     /// gauges of both sides, the clock, the combo part, the notice. A frame that is not `shown` runs the
     /// updates and draws nothing.
     pub(crate) fn draw(&mut self, libc: &mut LibcRandom, shown: bool) -> HudFrame {
+        if self.caption_only {
+            let mut prims = Vec::new();
+            self.caption.run(&mut prims);
+            return HudFrame { layer: None, prims };
+        }
         let mut layer = None;
         if self.flags & (SHOW_GAUGES | SHOW_TIMER) != 0 {
             draw_gauges(
@@ -1531,6 +1587,41 @@ mod tests {
                 .iter()
                 .any(|f| f.iter().any(|p| matches!(p.blend, HudBlend::AddMasked(15))))
         );
+    }
+
+    #[test]
+    fn attract_demo_shows_only_the_pulsing_caption() {
+        let caption = HudSheet {
+            base: 40,
+            sizes: vec![[32, 16], [128, 32]],
+            views: Vec::new(),
+        };
+        let sheets = [
+            HudSheet::default(),
+            sheet(),
+            HudSheet::default(),
+            HudSheet::default(),
+            caption,
+        ];
+        let mut hud = Hud::new(&sheets, HudTextures::default(), 0, 7);
+        let mut libc = LibcRandom::new(1);
+        hud.show_all(true);
+        hud.show_notice(0, &mut Vec::new());
+        let mut alphas = Vec::new();
+        for _ in 0..31 {
+            let prims = hud.draw(&mut libc, true).prims;
+            assert_eq!(
+                prims.iter().map(|p| p.texture).collect::<Vec<_>>(),
+                [Some(41), Some(40)]
+            );
+            assert_eq!(prims[1].vertices[0].pos, [240.0, 19.0]);
+            alphas.push(prims[0].rgba[3]);
+        }
+        // Once a second from the middle up towards 128, down towards 64 and back (sampled 30 times).
+        assert_eq!(alphas[0], 96);
+        assert!((126..=128).contains(alphas.iter().max().unwrap()));
+        assert!((64..=66).contains(alphas.iter().min().unwrap()));
+        assert_eq!(alphas[30], alphas[0]);
     }
 
     #[test]
