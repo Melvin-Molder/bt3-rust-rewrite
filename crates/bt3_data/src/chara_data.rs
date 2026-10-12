@@ -18,6 +18,8 @@ pub const SUPER_SECTION: usize = 0x18;
 pub const SKILL_SECTION: usize = 0x19;
 /// The character's own AI parameters (`mdl->aiParam`, object + 0x934).
 pub const AI_PARAM_SECTION: usize = 0x1B;
+/// The character's camera cut table (`mdl->unk920`, object + 0x938: `ChrCam_RequestCut`'s table 0).
+pub const CAM_CUT_SECTION: usize = 0x1C;
 /// `BTL_ATK_COUNT`.
 pub const ATTACK_COUNT: usize = 0xA3;
 const ATTACK_SIZE: usize = 0x30;
@@ -294,6 +296,54 @@ pub struct CharaTables {
     pub super_table: Vec<u8>,
     pub skill_table: Vec<u8>,
     pub ai_param: Option<Vec<u8>>,
+    /// The camera cuts the character's moves ask for (`ChrCam_RequestCut(chr, 0, n)`).
+    pub cam_cuts: Vec<CamCutDef>,
+}
+
+/// `ChrCamCutDef` (0x24 bytes): a camera cut the fighter camera blends over its time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CamCutDef {
+    /// The model node the camera orbits, moving towards `node_a2`; the node looked at, moving towards `node_c2`.
+    pub node_a: u8,
+    pub node_a2: u8,
+    pub node_c: u8,
+    pub node_c2: u8,
+    /// Degrees, relative to the fighter's facing, and what is added over the cut.
+    pub yaw: f32,
+    pub yaw_delta: f32,
+    pub pitch: f32,
+    pub pitch_delta: f32,
+    /// In body scales.
+    pub dist: f32,
+    pub dist_delta: f32,
+    pub seconds: f32,
+    /// `CHRCUT_F_*`.
+    pub cut_flags: u16,
+    /// `CHRCUTDEF_*`.
+    pub flags: u16,
+}
+
+impl CamCutDef {
+    /// Every whole 0x24-byte entry of a table.
+    pub fn parse_table(b: &[u8]) -> Vec<Self> {
+        b.chunks_exact(0x24)
+            .map(|c| Self {
+                node_a: c[0],
+                node_a2: c[1],
+                node_c: c[2],
+                node_c2: c[3],
+                yaw: f32_at(c, 4),
+                yaw_delta: f32_at(c, 8),
+                pitch: f32_at(c, 0xC),
+                pitch_delta: f32_at(c, 0x10),
+                dist: f32_at(c, 0x14),
+                dist_delta: f32_at(c, 0x18),
+                seconds: f32_at(c, 0x1C),
+                cut_flags: u16::from_le_bytes([c[0x20], c[0x21]]),
+                flags: u16::from_le_bytes([c[0x22], c[0x23]]),
+            })
+            .collect()
+    }
 }
 
 impl CharaTables {
@@ -373,6 +423,9 @@ impl CharaTables {
             super_table: raw(SUPER_SECTION).unwrap_or_default(),
             skill_table: raw(SKILL_SECTION).unwrap_or_default(),
             ai_param: raw(AI_PARAM_SECTION),
+            cam_cuts: bounded_section(file, CAM_CUT_SECTION)
+                .map(CamCutDef::parse_table)
+                .unwrap_or_default(),
         })
     }
 }
@@ -866,6 +919,8 @@ pub struct CommonTables {
     /// `tbl[5]` (word 9, roster + 0x34): the technique prompt rows, 0x14 bytes each (`BtlTechPromptRow`; byte 2 is
     /// the direction the technique's button command wants).
     pub prompt_rows: Vec<[u8; 0x14]>,
+    /// `tbl[1]` (word 5, roster + 0x24): the common camera cuts (`ChrCam_RequestCut(chr, 1, n)`).
+    pub cam_cuts: Vec<CamCutDef>,
 }
 
 impl CommonTables {
@@ -902,11 +957,13 @@ impl CommonTables {
             .chunks_exact(0x14)
             .map(|c| c.try_into().unwrap())
             .collect();
+        let cam_cuts = CamCutDef::parse_table(table(5)?);
         Ok(Self {
             motion_flags,
             attack_actions,
             charas,
             prompt_rows,
+            cam_cuts,
         })
     }
 }

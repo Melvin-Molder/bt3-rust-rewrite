@@ -80,9 +80,85 @@ pub(crate) struct DemoCam {
     anim: Option<CamAnim>,
     time: f32,
     flags: u32,
-    /// The fighter the animation is relative to (`obj`: its node 0).
+    /// The fighter the animation is relative to: its node 0 (`obj`), or with `chr_base` its object matrix
+    /// (`chr`).
     attached: Option<usize>,
+    chr_base: bool,
     base: Option<Mtx>,
+}
+
+/// `gEftCam`: a technique's camera animation on the demo camera, timed by its fighter's rush sequence.
+#[derive(Debug, Default)]
+pub(crate) struct EftCam {
+    active: bool,
+    hold: bool,
+    paused: bool,
+    side: Option<usize>,
+}
+
+impl EftCam {
+    /// `EftCam_Start`: `anim` on the demo camera attached to fighter `side` at its rush sequence frame `time`
+    /// (or in world space from 0), the time stepped by `update`.
+    pub(crate) fn start(
+        &mut self,
+        demo: &mut DemoCam,
+        anim: CamAnim,
+        side: Option<usize>,
+        time: f32,
+    ) {
+        demo.set_anim(anim);
+        if let Some(s) = side {
+            demo.attached = Some(s);
+            demo.chr_base = true;
+            demo.time = time;
+        } else {
+            demo.time = 0.0;
+        }
+        // DemoCam_Start.
+        demo.flags = DEMO_PLAYING;
+        self.side = side;
+        self.active = true;
+        self.hold = false;
+    }
+
+    /// The fighter whose rush times the cut.
+    pub(crate) fn side(&self) -> Option<usize> {
+        self.side
+    }
+
+    /// `EftCam_Stop`.
+    pub(crate) fn stop(&mut self, demo: &mut DemoCam) {
+        if self.active {
+            demo.stop();
+            self.active = false;
+        }
+    }
+
+    /// `EftCam_Update`: the time follows the fighter's rush sequence frame while it is in a technique (`frame`:
+    /// `None` outside one), or runs at 2.0 a frame; past the animation's length it ends unless held.
+    pub(crate) fn update(&mut self, demo: &mut DemoCam, frame: Option<f32>, battle_paused: bool) {
+        if !self.active || self.paused || battle_paused {
+            return;
+        }
+        let time = if self.side.is_some() {
+            match frame {
+                Some(f) => f,
+                None => return,
+            }
+        } else {
+            demo.time + 2.0
+        };
+        let length = demo.length();
+        if length < time {
+            demo.time = length;
+            if !self.hold {
+                demo.stop();
+                self.active = false;
+            }
+        } else {
+            demo.time = time;
+        }
+    }
 }
 
 impl DemoCam {
@@ -93,8 +169,29 @@ impl DemoCam {
     fn set_anim(&mut self, anim: CamAnim) {
         self.anim = Some(anim);
         self.attached = None;
+        self.chr_base = false;
         self.base = None;
         self.time = 0.0;
+    }
+
+    /// `DemoCam_GetLength`.
+    fn length(&self) -> f32 {
+        self.anim.as_ref().map_or(0.0, |a| a.length)
+    }
+
+    /// `DemoCam_PlayCharAnim0..2`: a fighter's camera animation, attached to its object matrix (0, 1) or its node
+    /// 0 (2), advancing by itself and holding its last frame.
+    pub(crate) fn play_char(&mut self, anim: CamAnim, side: usize, chr_base: bool) {
+        self.set_anim(anim);
+        self.attached = Some(side);
+        self.chr_base = chr_base;
+        self.time = 0.0;
+        self.flags = DEMO_PLAYING | DEMO_AUTO;
+    }
+
+    /// Whether the base is the attached fighter's object matrix rather than its node 0.
+    pub(crate) fn chr_base(&self) -> bool {
+        self.chr_base
     }
 
     /// `DemoCam_IsActive`: a pending stop resets the camera and gives false.
@@ -109,7 +206,8 @@ impl DemoCam {
         false
     }
 
-    fn stop(&mut self) {
+    /// `DemoCam_Stop`.
+    pub(crate) fn stop(&mut self) {
         if self.anim.is_some() {
             self.flags |= DEMO_STOP;
         }

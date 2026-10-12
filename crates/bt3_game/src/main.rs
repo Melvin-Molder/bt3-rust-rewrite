@@ -23,6 +23,7 @@ mod btl_tech_sweep;
 mod btl_tech_volley;
 mod btl_text;
 mod char_select;
+mod chr_cam;
 mod dialog;
 mod draw;
 mod duel_menu;

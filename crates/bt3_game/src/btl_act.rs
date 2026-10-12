@@ -55,6 +55,18 @@ fn motion_level(motion: i32) -> i32 {
     0
 }
 
+/// `BtlCharApi_GetRushSequenceFrame`: the motion's frame, plus every earlier step's frames in a rush sequence.
+pub(crate) fn rush_sequence_frame(chr: &Chr) -> f32 {
+    let mut frame = chr.obj.frame;
+    if matches!(chr.act.current, 0x12D..=0x12F | 0x139..=0x13B) {
+        let steps = motion_level(chr.anim.cur).clamp(0, 5) as usize;
+        for i in 0..steps {
+            frame += chr.step_frame[i] + 1.0;
+        }
+    }
+    frame
+}
+
 /// `BtlAct_GetLandingAction`: the victim's action after a rush, by the technique's landing kind.
 fn landing_action(kind: i32) -> i32 {
     match kind {
@@ -5784,7 +5796,8 @@ impl Ctx<'_, '_> {
 
     /// Actions 0xB7, 0xB9 (`BtlAct_Throw`): the thrower, motions 0x96 -> 0x98 (0xB9: 0x188 -> 0x18A) holding the
     /// victim (flag 0x8B); near the stage's edge facing out it turns round. The drain runs between the queue's
-    /// frames. The voice, the sounds and the camera cut are not ported.
+    /// frames. The camera cut 7 / 8 by the frame (not for attack flag 0x8000). The voice and the sounds are not
+    /// ported.
     fn throw(&mut self, phase: u32) {
         let alt = self.current() == 0xB9;
         if phase == ENTER {
@@ -5792,6 +5805,10 @@ impl Ctx<'_, '_> {
             self.play(if alt { 0x188 } else { 0x96 }, blend);
             self.held(0xE);
             self.setup_throw_damage(false);
+            if !alt && crate::btl_hit::attack_flags(self.me, self.data, self.env) & 0x8000 == 0 {
+                let cut = if self.frame_mod(2) != 0 { 7 } else { 8 };
+                self.request_cut(0, cut);
+            }
             if crate::btl_hit::launch_angle_a(self.me, self.data, self.env).abs() < deg(90.0) {
                 let radius = self.env.inner_radius();
                 let p = self.me.pose.pos;
@@ -5897,13 +5914,14 @@ impl Ctx<'_, '_> {
 
     /// Action 0xBB (`BtlAct_SlamThrow`): the thrower dives with the victim, motion 0x96, the loop 0x99 at 1500 km/h
     /// down, then 0x98 on the ground, at the stage's bottom, when the victim is gone, after 91 frames, or (parameter
-    /// flag 0x400) close above the water. The voices, the sound, the camera cuts and the vibration are not ported.
+    /// flag 0x400) close above the water, under the camera cuts 7 and 8. The voices, the sound and the vibration are not ported.
     fn slam_throw(&mut self, phase: u32) {
         if phase == ENTER {
             let blend = self.throw_blend();
             self.play(0x96, blend);
             self.setup_throw_damage(true);
             self.held(0xE);
+            self.request_cut(0, 7);
         }
         if phase == RUN {
             let mut rise = false;
@@ -5917,6 +5935,9 @@ impl Ctx<'_, '_> {
                 }
                 0x99 => {
                     self.me.anim_advance_loop(0);
+                    if self.me.anim_is_new() {
+                        self.request_cut(0, 8);
+                    }
                     self.set(0x8B);
                     self.me.set_fx(4);
                     rise = true;
@@ -6032,10 +6053,13 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0xBE (`BtlAct_DragDown`, forced by flag 0x7F): drags the opponent down head first at 2000 km/h
-    /// (motion 0x197), then 0x198 and the hop 0x28 once it is let go. The camera cut is not ported.
+    /// (motion 0x197), then 0x198 and the hop 0x28 once it is let go, under the common camera cut 0x18 / 0x19 (by the
+    /// camera's side) with the screen.
     fn drag_down(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x197, 0.0);
+            let cut = if self.me.cam.side < 0.0 { 0x18 } else { 0x19 };
+            self.request_cut(1, cut);
         }
         if phase == RUN {
             let (mut lean, mut speed) = (0.0, 0.0);
@@ -6066,6 +6090,9 @@ impl Ctx<'_, '_> {
                 self.set(f);
             }
             self.me.set_lean_x(lean * deg(-90.0));
+            if crate::chr_cam::is_cut_active(self.me) {
+                self.set(0xD3);
+            }
         }
         if phase == DECIDE
             && self.anim_id() == 0x197
@@ -6073,6 +6100,7 @@ impl Ctx<'_, '_> {
             && self.opp_seen_action() != 0xBF
         {
             self.request_anim(0x198, 0.0);
+            self.end_cut();
         }
     }
 
@@ -6135,7 +6163,7 @@ impl Ctx<'_, '_> {
     /// struggle (clash A). A beam (hit direction kind 1) holds motion 0x16C, else the firing loop, aimed up / down
     /// unless technique flag 0x1000; the score starts at the clash power / 20 and every direction input from frame
     /// 16 adds one. The clash's flags end it: 0xC3 (won) 0xB, 0xC2 (lost) 0x104, 0x72 (a catch connected) the rush
-    /// sequence. The abilities, camera shake, vibration and the chains' push are not ported.
+    /// sequence. The camera shakes. The abilities, vibration and the chains' push are not ported.
     fn clash_struggle(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -6171,6 +6199,7 @@ impl Ctx<'_, '_> {
                 self.set(f);
             }
             self.me.set_fx(0x10);
+            self.add_shake(5.0, 0.1);
             for f in [0xE6, 0xD2, 0x42, 0x43, 0x44, 0x45, 0x46, 0x134] {
                 self.set(f);
             }
@@ -6198,11 +6227,13 @@ impl Ctx<'_, '_> {
 
     /// Action 0x104 (`BtlAct_ClashLostHandler`, forced by flag 0xAB or the lost struggle): motion 0x172 under
     /// level 2 hit-stop, held to its end, then falling (0xD9); a fighter still in its undamaged model changes to the
-    /// damaged one, the motion played again on it to its end, put back where it stood. Not ported: the camera cut,
-    /// the chains' push and the stage timer.
+    /// damaged one, the motion played again on it to its end, put back where it stood, under the common camera cut 0x21 + player.
+    /// Not ported: the chains' push and the stage timer.
     fn clash_lost(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x172, 0.0);
+            let player = self.me.player as i32;
+            self.request_cut(1, player + 0x21);
             if self.me.gauge.variant == 0 {
                 self.me.work[0] |= 1;
                 self.set_form_current();
@@ -6676,8 +6707,79 @@ impl Ctx<'_, '_> {
         }
     }
 
-    /// The common start of the beam techniques: the start motion, the begin, facing the opponent, the start flags
-    /// and the ki. The camera cut, the sound and the head look are not ported.
+    /// `ChrCam_RequestCut`: camera cut `index` of table `table` (0 the character's, 1 the common one).
+    fn request_cut(&mut self, table: i32, index: i32) {
+        crate::chr_cam::request_cut(self.me, table, index);
+    }
+
+    /// `ChrCam_EndCut`.
+    fn end_cut(&mut self) {
+        crate::chr_cam::end_cut(self.me);
+    }
+
+    /// `ChrCam_AddShake`.
+    fn add_shake(&mut self, strength: f32, time: f32) {
+        crate::chr_cam::add_shake(self.me, strength, time);
+    }
+
+    /// `BtlCharApi_ShakeCamsNear`: every fighter camera (not frozen) whose eye is within `far` of `pos`, the
+    /// strength and time scaled by closeness (full at `near`).
+    fn shake_cams_near(&mut self, pos: [f32; 3], near: f32, far: f32, strength: f32, time: f32) {
+        for chr in [&mut *self.me, &mut *self.opp] {
+            if chr.is_frozen() {
+                continue;
+            }
+            let dist = length(sub(chr.cam.eye, pos));
+            if dist < far {
+                let rate = (1.0 - (dist - near) / (far - near)).clamp(0.0, 1.0);
+                crate::chr_cam::add_shake(chr, strength * rate, time * rate);
+            }
+        }
+    }
+
+    /// `BtlSuper_RequestCut`: the technique's camera cut, 0 / 1 / 2 of the character's table by class.
+    fn super_request_cut(&mut self, cls: i32) {
+        let cut = match cls {
+            3 => 1,
+            4 => 2,
+            _ => 0,
+        };
+        self.request_cut(0, cut);
+    }
+
+    /// `BtlSuper_ShakeOnEvent`: technique flag 0x4000000 shakes the camera at the fire event (kind 0: four frames
+    /// before a single one, or on each of several), flag 0x8000000 every frame of the firing loop (kind 1); with
+    /// flag 0x10000000 every camera near the fighter shakes. The rumble is not ported.
+    fn shake_on_event(&mut self, cls: i32, kind: u32) {
+        let flags = self.tech().flags_a(cls);
+        let (strength, time) = match kind {
+            0 if flags & 0x400_0000 != 0 => {
+                let n = self.query_event(0x400, 0, 3);
+                if n == 1 {
+                    let frame = (self.query_event(0x400, 0, 0) - 4).max(0);
+                    if !self.me.anim_passed_frame(frame as f32) {
+                        return;
+                    }
+                    (10.0, 0.2)
+                } else if n >= 2 && self.me.anim_test_attr(0x400) {
+                    (10.0, 0.1)
+                } else {
+                    return;
+                }
+            }
+            1 if flags & 0x800_0000 != 0 => (3.0, 0.1),
+            _ => return,
+        };
+        if flags & 0x1000_0000 != 0 {
+            let pos = self.me.pose.pos;
+            self.shake_cams_near(pos, 100.0, 1000.0, strength, time);
+        } else {
+            self.add_shake(strength, time);
+        }
+    }
+
+    /// The common start of the beam techniques: the start motion, the begin, facing the opponent, the start flags,
+    /// the camera cut and the ki. The sound and the head look are not ported.
     fn super_start(&mut self, cls: i32, blend: f32) {
         self.play(super_anim(cls, 0), blend);
         self.super_begin(cls, false);
@@ -6687,6 +6789,7 @@ impl Ctx<'_, '_> {
         self.me.turn_model_yaw(PI, 1.0);
         self.super_start_fx(cls);
         self.super_class_flag(cls, false);
+        self.super_request_cut(cls);
         let ki = self.tech().ki(cls);
         self.me.spend_ki(ki, true);
     }
@@ -6731,7 +6834,8 @@ impl Ctx<'_, '_> {
     /// each wait also ends after the original's own timeout of 150 frames. A catch (flag 0x73) goes to the closing
     /// motion 0x12A.., a sequence (0x72) to 0x12D..; a catching technique measures the sequence's motions while it
     /// fires. The self-destruct technique (flag 0x2000) of an undamaged fighter changes it to its damaged model
-    /// before the fire. Not ported: the shakes, vibration, sounds and cuts.
+    /// before the fire. The technique's camera cut ends with the fire motion; the camera shakes at the fire
+    /// (`BtlSuper_ShakeOnEvent`). Not ported: the vibration and sounds.
     fn super_beam(&mut self, phase: u32) {
         let cls = self.current_class();
         let long = (0x10C..=0x10E).contains(&self.current());
@@ -6779,6 +6883,10 @@ impl Ctx<'_, '_> {
                 }
                 2 => {
                     self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    self.shake_on_event(cls, 0);
+                    if self.me.anim_is_new() {
+                        self.end_cut();
+                    }
                     if long {
                         self.super_hit_stop(true);
                         self.super_set_class(cls);
@@ -6804,6 +6912,7 @@ impl Ctx<'_, '_> {
                 }
                 3 => {
                     self.me.anim_advance_loop(0);
+                    self.shake_on_event(cls, 1);
                     if long {
                         self.super_hit_stop(true);
                         self.super_wait_flag(0xA8, cls, 4);
@@ -6937,6 +7046,9 @@ impl Ctx<'_, '_> {
                         4 => {
                             self.super_hit_stop(true);
                             self.me.work[3] += 1;
+                            if self.me.work[3] == 1 {
+                                self.end_cut();
+                            }
                             if self.me.work[3] < 3 {
                                 self.set(0xB);
                             }
@@ -6949,6 +7061,7 @@ impl Ctx<'_, '_> {
                 }
                 2 => {
                     self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    self.shake_on_event(cls, 0);
                     let event = self.query_event(0x400, 0, 0) as f32;
                     let frame = self.me.obj.frame;
                     if frame < event - 4.0 {
@@ -6960,6 +7073,7 @@ impl Ctx<'_, '_> {
                 }
                 3 => {
                     self.me.anim_advance_loop(0);
+                    self.shake_on_event(cls, 1);
                     self.super_wait_flag(0xA8, cls, 6);
                 }
                 6 => {
@@ -7034,6 +7148,7 @@ impl Ctx<'_, '_> {
                 }
                 2 => {
                     self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    self.shake_on_event(cls, 0);
                     self.set(0x53);
                     if self.me.obj.frame < self.query_event(0x400, 0, 0) as f32 {
                         aim = true;
@@ -7041,6 +7156,7 @@ impl Ctx<'_, '_> {
                 }
                 3 => {
                     self.me.anim_advance_loop(0);
+                    self.shake_on_event(cls, 1);
                     self.super_wait_flag(0xA8, cls, 6);
                 }
                 6 => {
@@ -7100,6 +7216,7 @@ impl Ctx<'_, '_> {
                 }
                 2 => {
                     self.me.anim_advance_then(super_anim(cls, 3), 0.0, 0);
+                    self.shake_on_event(cls, 0);
                     if self.me.obj.frame < self.query_event(0x400, 0, 0) as f32 {
                         aim = true;
                         self.super_hit_stop(true);
@@ -7109,6 +7226,7 @@ impl Ctx<'_, '_> {
                         self.me.damage(self.env, self.data, recoil, 0x42B);
                         self.me.work[3] += 1;
                         self.me.work[2] = 0;
+                        self.end_cut();
                         if self.me.work[3] == 1 {
                             self.clear(0x9E);
                             self.clear(0x9D);
@@ -7117,6 +7235,7 @@ impl Ctx<'_, '_> {
                 }
                 3 => {
                     self.me.anim_advance_loop(0);
+                    self.shake_on_event(cls, 1);
                 }
                 6 => {
                     if self.me.anim_advance(0) {
@@ -7190,12 +7309,17 @@ impl Ctx<'_, '_> {
                     self.super_fit_to_event(0.1);
                     let next = if long { 4 } else { 3 };
                     self.me.anim_advance_then(super_anim(cls, next), 0.0, 0);
+                    self.shake_on_event(cls, 0);
+                    if long && self.me.anim_is_new() {
+                        self.end_cut();
+                    }
                     if !long && self.me.obj.frame < self.query_event(0x400, 0, 0) as f32 {
                         aim = true;
                     }
                 }
                 3 if !long => {
                     self.me.anim_advance_loop(0);
+                    self.shake_on_event(cls, 1);
                     self.super_wait_flag(0xA8, cls, 6);
                 }
                 4 if long => {
@@ -7226,8 +7350,8 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0x105 (`BtlAct_UltimateStartHandler`): before an Ultimate Blast, motion 0x16B under level 2 hit-stop
-    /// (the battle frozen round the pose); its end starts the queued technique. The camera cut, the sound and the
-    /// head look are not ported.
+    /// (the battle frozen round the pose); its end starts the queued technique, under the character's camera cut 3.
+    /// The sound and the head look are not ported.
     fn ultimate_start(&mut self, phase: u32) {
         let slot = self.current_class();
         if phase == ENTER {
@@ -7238,6 +7362,7 @@ impl Ctx<'_, '_> {
                 .turn_pitch(self.data, self.opp, self.opp_data, 5, PI);
             self.me.turn_model_yaw(PI, 1.0);
             self.super_class_flag(slot, true);
+            self.request_cut(0, 3);
             self.me.pose.speed = 0.0;
             self.me.pose.fall_speed = 0.0;
         }
@@ -7419,8 +7544,8 @@ impl Ctx<'_, '_> {
     }
 
     /// The start of a rush technique (dash, strike): the start motion, facing the opponent, the begin, the start
-    /// flags and half the ki (the sequence pays the other half). The camera cut, the sound and the head look are
-    /// not ported.
+    /// flags, the technique's camera cut and half the ki (the sequence pays the other half). The sound and the head
+    /// look are not ported.
     fn rush_start(&mut self, cls: i32) {
         self.play(super_anim(cls, 0), 0.15);
         self.me.turn_yaw(self.opp, 2, PI);
@@ -7430,6 +7555,7 @@ impl Ctx<'_, '_> {
         self.super_begin(cls, false);
         self.super_start_fx(cls);
         self.super_class_flag(cls, false);
+        self.super_request_cut(cls);
         let ki = self.tech().ki(cls) / 2;
         self.me.spend_ki(ki, true);
         self.held(0xE);
@@ -7440,7 +7566,7 @@ impl Ctx<'_, '_> {
     /// loop 3) at the technique's speed homing on the opponent (turn rates scaled down within 100 of it), live
     /// (flag 0x49) in the loop, the straight one from motion 2's third frame; the end motion 6 after 16 slow frames,
     /// the technique's time, the lost lock-on or a miss (0x63). Then 0xB, pushed back (0x64: 0xCF) or the sequence
-    /// (0x72). The vibration, sounds and camera cut are not ported.
+    /// (0x72). The camera cut ends with the dash. The vibration and sounds are not ported.
     fn tech_rush_dash(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -7468,6 +7594,7 @@ impl Ctx<'_, '_> {
                     self.super_set_class(cls);
                     if self.me.anim_is_new() {
                         self.set(0xD0);
+                        self.end_cut();
                     }
                     self.me.set_fx(4);
                     self.set(0x47);
@@ -7617,6 +7744,9 @@ impl Ctx<'_, '_> {
                 Some(2) => {
                     self.me.anim_advance_then(super_anim(cls, 6), 0.0, 0);
                     self.super_set_class(cls);
+                    if self.me.anim_is_new() {
+                        self.end_cut();
+                    }
                     if 0.5 < self.me.anim_progress() {
                         self.set(0x49);
                     }
@@ -7732,6 +7862,7 @@ impl Ctx<'_, '_> {
             self.me.turn_model_yaw(PI, 1.0);
             self.super_start_fx(cls);
             self.super_class_flag(cls, false);
+            self.super_request_cut(cls);
             let ki = self.tech().ki(cls);
             self.me.spend_ki(ki, true);
             self.held(0xE);
@@ -7754,6 +7885,9 @@ impl Ctx<'_, '_> {
                         self.set(0xD0);
                     }
                     self.super_set_class(cls);
+                    if self.me.anim_is_new() {
+                        self.end_cut();
+                    }
                     lean = self.me.anim_progress();
                 }
                 Some(3) => {
@@ -7844,7 +7978,8 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x12A..0x12C (`BtlAct_SuperRushFinishHandler`): the closing motion 0x15 of a catching technique,
     /// dealing its own hits (`BtlSuper_SetupRushDamage` from the motion), out of reach. Its end lands a fighter
-    /// within 5 of the ground. The camera cut and the stage timer (stages 4 / 27) are not ported.
+    /// within 5 of the ground. The character's camera cut 9 runs between the technique's two frames. The stage
+    /// timer (stages 4 / 27) is not ported.
     fn tech_rush_finish(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -7866,6 +8001,17 @@ impl Ctx<'_, '_> {
             if self.me.thr.hold_victim {
                 self.set(0x8B);
                 self.set(9);
+            }
+            // The technique's own cut over the closing motion.
+            let t = self.tech();
+            let (on, off) = (t.frames_22c(cls), t.frames_238(cls));
+            if on >= 0 && off >= 0 {
+                if self.me.action_frame == on {
+                    self.request_cut(0, 9);
+                }
+                if self.me.action_frame == off {
+                    self.end_cut();
+                }
             }
         }
         if phase == DECIDE && self.me.work[1] != 0 {
@@ -8462,27 +8608,31 @@ impl Ctx<'_, '_> {
 
     /// Actions 0xEC (`BtlAct_TransformA`) and 0xF0 (`BtlAct_TransformE`, the long presentation): the lead-in 0x177,
     /// the loop 0x178 until the new model is in memory (the request pushed on the second frame), the closing 0x179
-    /// put back at the saved placement (0xF5). The camera cuts, push-back, sounds, voices, shakes, vibration and
-    /// battle events are not ported.
+    /// put back at the saved placement (0xF5), under the character's camera cuts 4, 5 (while waiting) and 6 with
+    /// their shakes. The push-back, sounds, voices, vibration and battle events are not ported.
     fn transform_a(&mut self, phase: u32) {
         let long = self.current() == 0xF0;
         if phase == ENTER {
             self.change_enter(0x177, Some(0x178));
             self.held(0xE);
             self.set(0x29);
+            self.request_cut(0, 4);
         }
         if phase == RUN {
+            let mut waiting = false;
             if self.me.action_frame == 1 {
                 self.me.set_fx(0);
                 self.request_form();
             }
             match self.anim_id() {
                 0x177 => {
+                    waiting = true;
                     if self.me.anim_advance(0) {
                         self.me.flags.set_held(anim_flag::REQ_SUB);
                     }
                 }
                 0x178 => {
+                    waiting = true;
                     self.me.anim_advance_loop(0);
                     if self.change.is_loaded_for(self.me.player) {
                         self.change_loaded(0x179);
@@ -8494,13 +8644,28 @@ impl Ctx<'_, '_> {
                         self.set(0xF5);
                         self.set(0x55);
                         self.me.set_fx(1);
+                        self.request_cut(0, 6);
+                    }
+                    if !long && self.me.anim_was_new() {
+                        self.add_shake(5.0, 0.4);
                     }
                     if self.me.anim_advance(0) {
                         self.me.work[1] = 1;
                         self.me.set_fx(2);
                     }
-                    if long && self.me.anim_passed_ratio(0.75) {
-                        self.me.set_fx(0x18);
+                    if long {
+                        if self.me.anim_passed_ratio(0.12) && self.me.height_above_ground() < 5.0 {
+                            self.add_shake(5.0, 0.2);
+                        }
+                        if self.me.anim_passed_ratio(0.35) {
+                            self.add_shake(5.0, 0.2);
+                        }
+                        if self.me.anim_passed_ratio(0.63) {
+                            self.add_shake(5.0, 0.1);
+                        }
+                        if self.me.anim_passed_ratio(0.75) {
+                            self.me.set_fx(0x18);
+                        }
                     }
                 }
                 _ => {}
@@ -8514,6 +8679,9 @@ impl Ctx<'_, '_> {
             } else {
                 self.me.set_fx(0x10);
                 self.me.set_fx(0x14);
+            }
+            if waiting && !crate::chr_cam::is_cut_active(self.me) {
+                self.request_cut(0, 5);
             }
         }
         if phase == DECIDE && self.me.work[1] != 0 {
@@ -8531,6 +8699,7 @@ impl Ctx<'_, '_> {
             self.change_enter(0x18F, Some(0x190));
             self.held(0xE);
             self.set(0x29);
+            self.request_cut(1, 0);
             self.request_form();
         }
         if phase == RUN {
@@ -8640,6 +8809,7 @@ impl Ctx<'_, '_> {
     fn transform_d(&mut self, phase: u32) {
         if phase == ENTER {
             self.change_enter(0x2B, Some(0x17E));
+            self.request_cut(0, 4);
         }
         if phase == RUN {
             if self.me.action_frame == 1 {
@@ -8658,6 +8828,7 @@ impl Ctx<'_, '_> {
                 }
                 0x17E => {
                     if self.me.anim_is_new() {
+                        self.request_cut(0, 5);
                         self.set(0xF7);
                     }
                     self.me.anim_advance_loop(0);
@@ -8712,6 +8883,7 @@ impl Ctx<'_, '_> {
                 self.set(0x55);
             }
             self.set(0xDA);
+            self.end_cut();
             self.set(0xCD);
         }
     }
@@ -8806,8 +8978,8 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0xF3 (`BtlAct_SwitchLeave`): the member flies off (motion 0xEE, then 0x2F rising for 15 frames,
-    /// hidden from the 16th) while the next member's files load; from the 46th frame once they are in, 0xF4. The
-    /// camera cut, voice and sounds are not ported.
+    /// hidden from the 16th) while the next member's files load; from the 46th frame once they are in, 0xF4; under
+    /// the common camera cut 2. The voice and sounds are not ported.
     fn switch_leave(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0xEE, 0.0);
@@ -8818,6 +8990,7 @@ impl Ctx<'_, '_> {
             self.me.set_heading(yaw, 0.0);
             self.me.save_placement();
             self.set(0xF4);
+            self.request_cut(1, 2);
         }
         if phase == RUN {
             if self.me.action_frame == 1 {
@@ -8887,6 +9060,7 @@ impl Ctx<'_, '_> {
         if phase == ENTER {
             self.play(0x2D, 0.0);
             self.set(0xF4);
+            self.request_cut(1, 3);
         }
         if phase == RUN {
             match self.anim_id() {
@@ -8924,6 +9098,78 @@ impl Ctx<'_, '_> {
         }
     }
 
+    /// `BtlActSwitch_SetLeaveCut`: the camera circles the leaving member, or with it below the stage floor (or
+    /// after 0xEB, then also hidden: true) a point 5 above the stage's place.
+    fn switch_leave_cut(&mut self) -> bool {
+        let below = self.env.stage.bounds.bottom < self.me.pose.pos[1] || self.me.act.prev == 0xEB;
+        let h = self.data.height();
+        let spec = if below {
+            let (mut pos, _, _) = crate::btl_chr::stage_place(self.env);
+            pos[1] -= 5.0;
+            crate::chr_cam::CutSpec {
+                vec_a: pos,
+                vec_b: pos,
+                vec_c: pos,
+                node_a: -1,
+                val_a_delta: deg(-45.0),
+                val_b: -0.2,
+                val_c: 100.0,
+                node_a2: -1,
+                node_c: -1,
+                node_c2: -1,
+                time: 0x3C,
+                flags: 0xC5,
+                ..Default::default()
+            }
+        } else {
+            crate::chr_cam::CutSpec {
+                node_a: 3,
+                val_a_delta: deg(90.0),
+                val_b: -0.9,
+                val_b_delta: -0.4,
+                val_c: h * 1.5,
+                val_c_delta: h * 0.5,
+                node_a2: 3,
+                node_c: 3,
+                node_c2: 3,
+                time: 0x3C,
+                flags: 0xC5,
+                ..Default::default()
+            }
+        };
+        crate::chr_cam::set_cut(self.me, &spec);
+        below
+    }
+
+    /// `BtlActSwitch_SetEnterCut`: the camera behind the arriving member's start placement, looking at its node
+    /// 0x11.
+    fn switch_enter_cut(&mut self) {
+        let pos = self
+            .env
+            .stage
+            .starting_placements
+            .get(self.me.player)
+            .map_or([0.0; 3], |p| p.position);
+        let h = self.data.height();
+        let a = [pos[0], pos[1] - h * 0.3, pos[2]];
+        let b = [a[0], a[1] - h * 0.5, a[2]];
+        let spec = crate::chr_cam::CutSpec {
+            vec_a: a,
+            vec_b: a,
+            vec_c: b,
+            node_a: -1,
+            val_a: wrap_angle(self.me.pose.yaw + deg(180.0)),
+            val_c: h + 5.0,
+            node_a2: -1,
+            node_c: -1,
+            node_c2: 0x11,
+            time: 0xF,
+            flags: 0xC5,
+            ..Default::default()
+        };
+        crate::chr_cam::set_cut(self.me, &spec);
+    }
+
     /// Action 0xF6 (`BtlAct_KoSwitchLoad`): the defeated member stays down while the next one's files load; then
     /// 0xF7. Hidden when it lies below the stage floor or came from 0xEB.
     fn ko_switch_load(&mut self, phase: u32) {
@@ -8933,8 +9179,7 @@ impl Ctx<'_, '_> {
             self.me.pose.speed = 0.0;
             self.me.pose.fall_speed = 0.0;
             self.me.prepare_switch();
-            // BtlActSwitch_SetLeaveCut (the camera cut is not ported): hidden below the floor or after 0xEB.
-            if self.env.stage.bounds.bottom < self.me.pose.pos[1] || self.me.act.prev == 0xEB {
+            if self.switch_leave_cut() {
                 self.me.work[0] |= 1;
             }
             self.clear(0x10E);
@@ -9015,8 +9260,8 @@ impl Ctx<'_, '_> {
     }
 
     /// Action 0xF8 (`BtlAct_KoSwitchFlyIn`): the next member flies to its start placement at 2500 km/h (motion
-    /// 0x19), lands (0x2D), stands (0) 30 frames and asks for the round reset (flag 0xF9). The sounds, voice,
-    /// camera cut, shake and vibration are not ported.
+    /// 0x19), lands (0x2D), stands (0) 30 frames and asks for the round reset (flag 0xF9), under the enter cut
+    /// (`BtlActSwitch_SetEnterCut`) and a shake on landing. The sounds, voice and vibration are not ported.
     fn ko_switch_fly_in(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x19, 0.0);
@@ -9028,6 +9273,7 @@ impl Ctx<'_, '_> {
                 .map_or([0.0; 3], |p| p.position);
             self.me.turn_to_point(start, PI, PI);
             self.me.turn_model_yaw(PI, 1.0);
+            self.switch_enter_cut();
         }
         if phase == RUN {
             match self.anim_id() {
@@ -9062,6 +9308,7 @@ impl Ctx<'_, '_> {
                         self.request_anim(0x2D, 0.15);
                         self.me.set_fx(0x35);
                         self.me.pose.speed = 0.0;
+                        self.add_shake(3.0, 0.7);
                     }
                 }
                 0 => {
@@ -9312,8 +9559,8 @@ impl Ctx<'_, '_> {
     }
 
     /// Actions 0xFD / 0xFE (`BtlAct_SkillBasic`): the skill motion, the skill applied at the start (or at its end
-    /// with attribute 0x80), turned about with attributes 2 / 4; then action 0xB. The camera cut (0x40000) and the
-    /// model's colour mode (id 0x18) are not ported.
+    /// with attribute 0x80), turned about with attributes 2 / 4; then action 0xB; attribute 0x40000 asks for the
+    /// common camera cut 5. The model's colour mode (id 0x18) is not ported.
     fn skill_basic(&mut self, phase: u32) {
         let cls = self.current_class();
         let attr = self.skill().flags(cls);
@@ -9322,6 +9569,9 @@ impl Ctx<'_, '_> {
             self.me.set_fx(if cls == 0 { 0x3C } else { 0x3D });
             if attr & 0x80 == 0 {
                 self.apply_skill(cls);
+            }
+            if attr & 0x4_0000 != 0 {
+                self.request_cut(1, 5);
             }
             for bit in [2, 4] {
                 if attr & bit != 0 {
@@ -9559,12 +9809,13 @@ impl Ctx<'_, '_> {
 
     /// Actions 0xF1 / 0xF2 (`BtlAct_Fusion`): rising (motion 0x1F, then 0x20 held on its last frame) while the
     /// partner object and then the fused character load; the two-fighter motion 0x1A2 / 0x1A3 at the stage's
-    /// place, held until the fused character is in; the closing 0x1A4; put back at the saved placement. The
-    /// partner object, the camera cut, sounds, voice and vibration are not ported.
+    /// place, held until the fused character is in; the closing 0x1A4; put back at the saved placement; under
+    /// the common camera cut 1. The partner object, sounds, voice and vibration are not ported.
     fn fusion(&mut self, phase: u32) {
         let first = self.current() == 0xF1;
         if phase == ENTER {
             self.change_enter(0x1F, None);
+            self.request_cut(1, 1);
         }
         if phase == RUN {
             if self.me.action_frame == 1 {
@@ -9639,6 +9890,7 @@ impl Ctx<'_, '_> {
                 self.set(0x55);
             }
             self.set(0xDA);
+            self.end_cut();
             self.set(0xCD);
         }
     }

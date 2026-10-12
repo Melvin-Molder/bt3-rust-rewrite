@@ -448,6 +448,18 @@ pub fn common_entry(file: &[u8], idx: usize) -> Option<&[u8]> {
 /// `EftRayMgr_Init`: the ray bursts' texture set is common effect entry 10.
 pub const COMMON_RAY_TEXTURES: usize = 10;
 
+/// `EftShotTechMgr_Init` / `EftRushShotMgr_Init`: the camera animation a rush technique of slot `slot` (2..4)
+/// plays once it connects: sub-entry `slot - 1` of entry 8 of the character pack (`BtlScene_GetCharPackEntry`,
+/// entry 6 of the second animation file); `None` when it is empty.
+pub fn rush_cam(anim_file: &[u8], slot: usize) -> Option<&[u8]> {
+    if !(2..5).contains(&slot) {
+        return None;
+    }
+    let pack = pack_entry(anim_file, 6)?;
+    let cams = pack.get(entry_offset(pack, 8)..)?;
+    pack_entry(cams, slot - 1)
+}
+
 /// `BtlCharApi_GetPlayerEffectPack`: the effect pack of technique slot `slot` (0..4) is entry `slot + 1` of the
 /// character's second animation file (`BtlObj_RequestCharaModel`); `None` when it is empty.
 pub fn tech_pack(anim_file: &[u8], slot: usize) -> Option<&[u8]> {

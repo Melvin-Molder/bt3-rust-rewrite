@@ -65,6 +65,11 @@ fn rand01(libc: &mut LibcRandom) -> f32 {
 pub(crate) struct RushShot {
     id: u32,
     src: TechSrc,
+    /// `EFT_RUSHSHOT_SENT`: the camera cut of the connected rush was started (`EftRushShot_StartCam`);
+    /// `EFT_RUSHSHOT_SENT2`: stopped as the item ends (`cam_stop` asks for the `EftCam_Stop` this frame).
+    pub(crate) cam_sent: bool,
+    cam_stopped: bool,
+    pub(crate) cam_stop: bool,
     pub(crate) tag: Tag,
     flags: u32,
     state: u8,
@@ -105,6 +110,9 @@ impl RushShot {
         let mut s = Self {
             id,
             src,
+            cam_sent: false,
+            cam_stopped: false,
+            cam_stop: false,
             tag: Tag::default(),
             flags: 0,
             state: 0,
@@ -197,6 +205,11 @@ impl RushShot {
 
     /// `EftRushShot_Update`. Returns the record and whether the owner's timeline is to stop
     /// (`EftTechEvt_RequestStop`, as the rush connects).
+    /// The owner's rush has connected (`EFT_RUSHSHOT_CONNECTED`).
+    pub(crate) fn connected(&self) -> bool {
+        self.flags & CONNECTED != 0
+    }
+
     pub(crate) fn update(
         &mut self,
         w: &mut World,
@@ -328,6 +341,10 @@ impl RushShot {
         if self.flags & END != 0 {
             if self.flags & FAST_END != 0 || self.timer >= self.life {
                 self.flags |= KILL;
+            }
+            if self.cam_sent && !self.cam_stopped {
+                self.cam_stop = true;
+                self.cam_stopped = true;
             }
             return (None, stop);
         }

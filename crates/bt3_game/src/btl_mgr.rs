@@ -18,6 +18,7 @@ use crate::btl_clash::{Clash, place_on_path};
 use crate::btl_hit::Pair;
 use crate::btl_input::PadState;
 use crate::btl_obj::DEFAULT_STEP;
+use crate::rng::LibcRandom;
 
 /// `gBtlChars`.
 pub(crate) struct Roster {
@@ -312,6 +313,8 @@ impl Roster {
             if me.is_frozen() {
                 continue;
             }
+            // BtlChar_UpdateCamera: ChrCam_StartCut, then the controls (ChrCam_UpdateDemo is the battle's).
+            crate::chr_cam::start_cut(me, opp, data[i], data[i ^ 1], env);
             cam_update_input(me, opp, data[i]);
             me.obj.calc_matrices(&data[i].obj);
             // BtlFx_UpdateAll: only the technique shots and the ki blasts it starts are ported.
@@ -499,14 +502,14 @@ impl Roster {
     }
 
     /// `BtlChars_PostScene`: the fighter camera, the low-health state.
-    pub(crate) fn post_scene(&mut self, data: [&SideData; 2], env: &Env) {
+    pub(crate) fn post_scene(&mut self, data: [&SideData; 2], env: &Env, libc: &mut LibcRandom) {
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
             if me.is_frozen() {
                 continue;
             }
             me.obj_to_pose();
-            cam_update(me, opp, data[i], data[i ^ 1], env);
+            cam_update(me, opp, data[i], data[i ^ 1], env, libc);
             let g = &mut me.gauge;
             if g.health < 10000 {
                 g.low_health = true;
@@ -810,12 +813,35 @@ fn coll_update_ground(me: &mut Chr, height: f32, env: &Env) {
     }
 }
 
-/// `ChrCam_Update` with the lock-on and free cameras, smoothed by `ChrCam_GetRate`. No shake, no stage trace, no
-/// camera cuts.
-fn cam_update(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideData, env: &Env) {
+/// `ChrCam_Update`: the wanted pose (last frame's with flag 0xCC, the cut, the fixed camera with flags 0xDC /
+/// 0xB8, the lock-on camera or the free one), the shake, the stage's horizontal limit, the smoothing by
+/// `ChrCam_GetRate`, the eye kept behind the head (follow cameras). No stage trace.
+fn cam_update(
+    me: &mut Chr,
+    opp: &Chr,
+    data: &SideData,
+    opp_data: &SideData,
+    env: &Env,
+    libc: &mut LibcRandom,
+) {
     let height = data.height();
-    let (mut eye, rot, mut target) = if me.flags.test(5) {
-        crate::battle::lock_on_camera(&crate::battle::LockOn {
+    let time_stopped = env.gate.time_stopped;
+    let mut keep_behind = false;
+    let (mut eye, rot, mut target);
+    if me.flags.test(0xCC) {
+        (eye, rot, target) = (me.cam.pos, me.cam.rot, me.cam.target);
+        if me.flags.test_prev(0xD3) {
+            me.flags.set(0xD3);
+        }
+    } else if crate::chr_cam::is_cut_active(me) {
+        (eye, rot, target) = crate::chr_cam::calc_cut(me, opp, data);
+    } else if me.flags.test(0xDC) || me.flags.test(0xB8) {
+        let ofs;
+        (eye, rot, target, ofs) = crate::chr_cam::calc_fixed(me, opp, data, opp_data);
+        me.cam.yaw_ofs = ofs;
+        eye[1] += crate::chr_cam::bob(me, time_stopped);
+    } else if me.flags.test(5) {
+        (eye, rot, target) = crate::battle::lock_on_camera(&crate::battle::LockOn {
             pos: me.pose.pos,
             height,
             side_slope: data.cam_side_slope(),
@@ -824,23 +850,29 @@ fn cam_update(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideData, env
             stage_bottom: env.stage.bounds.bottom,
             yaw: me.cam.yaw,
             side: me.cam.side,
-        })
+        });
+        eye[1] += crate::chr_cam::bob(me, time_stopped);
+        keep_behind = true;
     } else {
         // ChrCam_CalcFree.
         let (ofs, pitch) = crate::battle::camera_offset(height);
         let look = [0.0, -(height * 0.7), 0.0];
         let p = me.pose.pos;
         let (s, c) = me.cam.yaw.sin_cos();
-        (
-            [
-                p[0] + s * (ofs[2] - look[2]) + look[2],
-                p[1] + (ofs[1] - look[1]) + look[1],
-                p[2] + c * (ofs[2] - look[2]) + look[2],
-            ],
-            [pitch, me.cam.yaw, 0.0],
-            [look[0] + p[0], look[1] + p[1], look[2] + p[2]],
-        )
-    };
+        eye = [
+            p[0] + s * (ofs[2] - look[2]) + look[2],
+            p[1] + (ofs[1] - look[1]) + look[1],
+            p[2] + c * (ofs[2] - look[2]) + look[2],
+        ];
+        rot = [pitch, me.cam.yaw, 0.0];
+        target = [look[0] + p[0], look[1] + p[1], look[2] + p[2]];
+        eye[1] += crate::chr_cam::bob(me, time_stopped);
+        keep_behind = true;
+    }
+    // CamShake_Calc / CamShake_Tick.
+    let (shake_pos, shake_rot) = me.cam.shake.calc(libc);
+    eye = crate::btl_chr::add(eye, shake_pos);
+    me.cam.shake.tick();
     let limit = env.stage.bounds.radius;
     for point in [&mut eye, &mut target] {
         let len = point[0].hypot(point[2]);
@@ -860,6 +892,8 @@ fn cam_update(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideData, env
         me.cam.rate = 0.25;
     } else if me.flags.test(0xD1) {
         me.cam.rate = 0.2;
+    } else if time_stopped {
+        me.cam.rate = 1.0;
     }
     let rate = me.cam.rate;
     if smooth {
@@ -869,9 +903,13 @@ fn cam_update(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideData, env
         me.cam.rate = calc_rate;
     }
     me.cam.target = target;
-    // ChrCam_KeepBehindHead.
-    let head = me.obj.node_pos(0x30);
-    crate::battle::keep_behind_head(head, height, &mut me.cam.eye, rot);
+    if keep_behind {
+        // ChrCam_KeepBehindHead.
+        let head = me.obj.node_pos(0x30);
+        crate::battle::keep_behind_head(head, height, &mut me.cam.eye, rot);
+    }
+    // BtlCam_TraceStage is not ported: the camera stands at its eye.
+    me.cam.pos = me.cam.eye;
     if smooth {
         let d: [f32; 3] =
             std::array::from_fn(|k| crate::btl_input::wrap_angle(rot[k] - me.cam.rot[k]));
@@ -880,4 +918,6 @@ fn cam_update(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideData, env
     } else {
         me.cam.rot = rot;
     }
+    me.cam.rot =
+        std::array::from_fn(|k| crate::btl_input::wrap_angle(me.cam.rot[k] + shake_rot[k]));
 }

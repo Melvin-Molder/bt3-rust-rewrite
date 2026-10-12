@@ -325,10 +325,19 @@ pub(crate) struct ChrCam {
     pub yaw_step: f32,
     /// Which side of the fighter the camera sits on, -limit..limit.
     pub side: f32,
+    /// `eye`: the wanted position, smoothed; `pos`: where the views take it (no stage trace: the eye).
     pub eye: [f32; 3],
+    pub pos: [f32; 3],
     pub rot: [f32; 3],
     pub target: [f32; 3],
     pub rate: f32,
+    pub shake: crate::chr_cam::CamShake,
+    /// `shakeOn`: the side's shake option is on (`BattleSide_GetOptionB == 0`); also the swing.
+    pub shake_on: bool,
+    /// `bob`: the phase of the vertical swing.
+    pub bob: f32,
+    /// `yawOfs`: what the fixed camera took off the yaw.
+    pub yaw_ofs: f32,
 }
 
 /// What a side's character files give the fighter.
@@ -631,6 +640,8 @@ pub(crate) struct Chr {
     pub snap_rot: [[f32; 3]; 7],
     pub snap_mask: u32,
     pub cam: ChrCam,
+    /// `cut` (fighter + 0x4C0): the camera cut a move set.
+    pub cut: crate::chr_cam::CamCut,
     pub dir_held: i32,
     /// Battle event 0x3C: this fighter landed the battle's first hit (`BtlChar_RaiseFirstClash`).
     pub first_hit: bool,
@@ -776,7 +787,11 @@ impl Chr {
             snap_pos: [[0.0; 3]; 7],
             snap_rot: [[0.0; 3]; 7],
             snap_mask: 0,
-            cam: ChrCam::default(),
+            cam: ChrCam {
+                shake_on: true,
+                ..ChrCam::default()
+            },
+            cut: crate::chr_cam::CamCut::default(),
             dir_held: -1,
             first_hit: false,
             took_damage: false,

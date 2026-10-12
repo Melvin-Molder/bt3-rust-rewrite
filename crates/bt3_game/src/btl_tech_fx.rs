@@ -283,6 +283,10 @@ struct Beam {
 /// The technique layer (`gEftShot`, `gEftTechEvt`).
 #[derive(Clone, Debug)]
 pub(crate) struct TechFx {
+    /// The camera cuts of connected rushes this frame (`EftCam_Start`): fighter and slot; and whether an item
+    /// whose cut runs ended (`EftCam_Stop`).
+    pub(crate) cam_requests: Vec<(usize, i32)>,
+    pub(crate) cam_stop: bool,
     events: [u32; 2],
     requests: [u32; 2],
     timelines: Vec<Timeline>,
@@ -309,6 +313,8 @@ pub(crate) struct TechFx {
 impl Default for TechFx {
     fn default() -> Self {
         Self {
+            cam_requests: Vec::new(),
+            cam_stop: false,
             events: [0; 2],
             requests: [0; 2],
             timelines: Vec::new(),
@@ -1416,6 +1422,12 @@ impl TechFx {
                 while k < self.rush_shots[side][slot].len() {
                     let r = &mut self.rush_shots[side][slot][k];
                     let (rec, stop) = r.update(w, fx, self.events[side], self.cur_slot[side]);
+                    // EftRushShot_StartCam / EftCam_Stop.
+                    if !r.cam_sent && r.connected() {
+                        r.cam_sent = true;
+                        self.cam_requests.push((side, slot as i32));
+                    }
+                    self.cam_stop |= std::mem::take(&mut r.cam_stop);
                     if let Some(rec) = rec
                         && records.len() < max
                     {
@@ -1515,6 +1527,12 @@ impl TechFx {
                         self.events[side ^ 1],
                         self.cur_slot[side],
                     );
+                    // EftShotTech_StartCam / EftCam_Stop.
+                    if !s.cam_sent && s.connected() {
+                        s.cam_sent = true;
+                        self.cam_requests.push((side, slot as i32));
+                    }
+                    self.cam_stop |= std::mem::take(&mut s.cam_stop);
                     if s.dead() {
                         // EftShotTech_Term.
                         w.chars[side].flags.set_held(0xA8);

@@ -57,6 +57,8 @@ const IDLE_MOTION: usize = 0;
 /// `BtlObj_BindTables`: `mdl.camAnims[0]` (character file section 0x29) and `mdl.unk924`, the talk table
 /// (section 0x16, read as `BtlSeqObj.talkTbl`).
 const ENTRANCE_CUT_SECTION: usize = 0x29;
+/// `mdl->charCamAnims` (object + 0x908..): the camera animations flags 0xD7..0xD9 play (`DemoCam_PlayCharAnim0..2`).
+const CHAR_CAM_SECTION: usize = 0x25;
 const TALK_TABLE_SECTION: usize = 0x16;
 /// `BtlObj_BindTables`: `mdl.unkA4` is section 0x2D + `gProgress->language`, which the US game leaves at 0.
 const SKILL_TEXT_SECTION: usize = 0x2D;
@@ -188,6 +190,10 @@ pub(crate) struct FighterModel {
     pub(crate) entry: CharaEntry,
     /// `mdl.camAnims`: character file sections 0x29..0x2B (entrance, win, lose).
     pub(crate) cam_cuts: [Option<CamAnim>; 3],
+    /// `DemoCam_PlayCharAnim0..2`'s animations (model sections 0x25..0x27).
+    pub(crate) char_cams: [Option<CamAnim>; 3],
+    /// The camera animations of the rush techniques of slots 2..4 (`EftCam_Start` once they connect).
+    pub(crate) rush_cams: [Option<CamAnim>; 3],
     pub(crate) talk: Vec<u8>,
     /// `BtlMember_LoadParams` at the start of the battle.
     pub(crate) gauge: SideGauge,
@@ -411,6 +417,12 @@ pub(crate) fn load_side(
             .transpose()
             .map_err(error)?;
     }
+    for (i, cam) in fighter.char_cams.iter_mut().enumerate() {
+        *cam = pack_section(&file, CHAR_CAM_SECTION + i)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| CamAnim::parse(s).ok());
+    }
     fighter.talk = pack_section(&file, TALK_TABLE_SECTION)
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
@@ -439,6 +451,9 @@ pub(crate) fn load_side(
     // BtlRes_Request: the second animation file is chara * 10 + 0x599.
     let anim_file = read(MOTION_FILE + 1 + side.anim1_chara.max(0) as u32 * 10)?;
     fighter.effect = EffectPack::parse(&anim_file);
+    for (i, cam) in fighter.rush_cams.iter_mut().enumerate() {
+        *cam = bt3_data::eft_pack::rush_cam(&anim_file, i + 2).and_then(|s| CamAnim::parse(s).ok());
+    }
     for slot in 0..5 {
         let Some(pack) = tech_pack(&anim_file, slot) else {
             continue;
@@ -748,6 +763,8 @@ fn load_fighter(
         tables: CharaTables::default(),
         entry: CharaEntry::default(),
         cam_cuts: [None, None, None],
+        char_cams: [None, None, None],
+        rush_cams: [None, None, None],
         talk: Vec::new(),
         gauge: SideGauge::default(),
         effect: None,
@@ -802,6 +819,8 @@ pub struct Battle {
     light_dir: [f32; 3],
     pub(crate) seq: Seq,
     pub(crate) demo: DemoCam,
+    /// `gEftCam`: a rush technique's camera animation.
+    pub(crate) eft_cam: crate::battle_seq::EftCam,
     pub(crate) xfade: ScrXfade,
     pub(crate) hud: Hud,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
@@ -947,6 +966,7 @@ impl Battle {
             light_dir,
             seq,
             demo: DemoCam::default(),
+            eft_cam: crate::battle_seq::EftCam::default(),
             xfade: ScrXfade::default(),
             hud,
             fade: Fade::start_in(1.0),
@@ -1103,6 +1123,57 @@ impl Battle {
         );
     }
 
+    /// The demo camera's requests of this frame: `ChrCam_UpdateDemo` (flag 0xDA stops it, 0xD7..0xD9 play the
+    /// fighter's camera animations 0..2), `EftCam_Update`, and the cuts of the rushes that connected
+    /// (`EftShotTech_StartCam` / `EftRushShot_StartCam`: the character's camera of the technique's slot, timed by
+    /// its rush sequence).
+    fn update_demo_requests(&mut self) {
+        for side in 0..2 {
+            let c = &self.roster.chars[side];
+            if c.is_frozen() {
+                continue;
+            }
+            let f = &c.flags;
+            if f.test(0xDA) {
+                self.demo.stop();
+            }
+            for (flag, n) in [(0xD7, 0), (0xD8, 1), (0xD9, 2)] {
+                if f.test(flag)
+                    && let Some(anim) = &self.assets.fighters[side].char_cams[n]
+                {
+                    self.demo.play_char(anim.clone(), side, n < 2);
+                }
+            }
+        }
+        let frame = |c: &crate::btl_chr::Chr| {
+            crate::btl_act::is_technique_id(c.act.current)
+                .then(|| crate::btl_act::rush_sequence_frame(c))
+        };
+        let eft_frame = self
+            .eft_cam_side()
+            .and_then(|s| frame(&self.roster.chars[s]));
+        self.eft_cam.update(&mut self.demo, eft_frame, false);
+        for (side, slot) in std::mem::take(&mut self.roster.scene.tech.cam_requests) {
+            let anim = usize::try_from(slot - 2)
+                .ok()
+                .and_then(|i| self.assets.fighters[side].rush_cams.get(i))
+                .and_then(Option::as_ref);
+            if let Some(anim) = anim {
+                let time = crate::btl_act::rush_sequence_frame(&self.roster.chars[side]);
+                self.eft_cam
+                    .start(&mut self.demo, anim.clone(), Some(side), time);
+            }
+        }
+        if std::mem::take(&mut self.roster.scene.tech.cam_stop) {
+            self.eft_cam.stop(&mut self.demo);
+        }
+    }
+
+    /// The fighter the running `EftCam` follows.
+    fn eft_cam_side(&self) -> Option<usize> {
+        self.eft_cam.side()
+    }
+
     /// `Battle_Restart` for a rematch: `Battle_ResetWork` (sounds stopped, the battle music again, the result
     /// cleared), `StgFx_Reset` (the cross-fade), `BtlGame_Reset` (the menus, the HUD, the sequence),
     /// `BtlChar_ResetAll` and the 1 s fade-in. The AI is not reset, as in the original.
@@ -1149,6 +1220,7 @@ impl Battle {
         );
         self.seq = Seq::new(self.assets.mode, self.assets.time_limit);
         self.demo = DemoCam::default();
+        self.eft_cam = crate::battle_seq::EftCam::default();
         self.roster = {
             let data = [
                 side_data(&self.assets.fighters[0]),
@@ -1301,16 +1373,29 @@ impl Battle {
             }
             roster.update_scene(data, env, &mut *input.libc, &mut vu0, paused);
             if !paused {
-                roster.post_scene(data, env);
+                roster.post_scene(data, env, &mut *input.libc);
             }
             false
         });
         self.poll_changes();
         self.vu0 = vu0;
-        let cam = self.roster.chars[0].cam;
-        let mut view = View::new(cam.eye, cam.rot);
+        if !paused {
+            self.update_demo_requests();
+        }
+        // BtlCam_UpdateOverride: the camera with flag 0xD3 (a cut's priority) takes the screen; on a tie the
+        // default view, side 0's.
+        let pri = [0, 1].map(|s| self.roster.chars[s].flags.test(0xD3));
+        let view_side = if pri[1] && !pri[0] { 1 } else { 0 };
+        let cam = self.roster.chars[view_side].cam;
+        let mut view = View::new(cam.pos, cam.rot);
         if self.demo.is_active() {
-            let base = self.demo.attached().map(|side| self.roots[side]);
+            let base = self.demo.attached().map(|side| {
+                if self.demo.chr_base() {
+                    self.roster.chars[side].obj.mtx
+                } else {
+                    self.roots[side]
+                }
+            });
             if let Some(demo) = self.demo.update(base, paused) {
                 view = demo;
             }
@@ -1745,13 +1830,13 @@ pub(crate) fn mul(a: &Mtx, b: &Mtx) -> Mtx {
 }
 
 /// `Vec4_RotateEuler` with only an X angle (`Vu0Cur_RotateX`).
-fn rotate_x(v: [f32; 3], angle: f32) -> [f32; 3] {
+pub(crate) fn rotate_x(v: [f32; 3], angle: f32) -> [f32; 3] {
     let (s, c) = angle.sin_cos();
     [v[0], c * v[1] - s * v[2], s * v[1] + c * v[2]]
 }
 
 /// `Vec4_RotateEuler` with only a Y angle (`Vu0Cur_RotateY`).
-fn rotate_y(v: [f32; 3], angle: f32) -> [f32; 3] {
+pub(crate) fn rotate_y(v: [f32; 3], angle: f32) -> [f32; 3] {
     let (s, c) = angle.sin_cos();
     [c * v[0] + s * v[2], v[1], -s * v[0] + c * v[2]]
 }
@@ -3882,6 +3967,17 @@ mod tests {
         frames: usize,
         near: bool,
     ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3], [i32; 4])> {
+        run_technique_watched(chara, slot, frames, near, &mut |_| {})
+    }
+
+    /// `run_technique`, calling `watch` after every frame of the technique.
+    fn run_technique_watched(
+        chara: i32,
+        slot: i32,
+        frames: usize,
+        near: bool,
+        watch: &mut dyn FnMut(&Battle),
+    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 3], [i32; 4])> {
         use crate::btl_input::pad::{DOWN, L2, START, TRIANGLE, UP};
         let mut setup = BattleSetup::default();
         setup.sides[0].chara = chara;
@@ -3950,6 +4046,7 @@ mod tests {
                 _ => 0,
             };
             frame(&mut battle, p1);
+            watch(&battle);
             let r = &battle.roster;
             let (a, b) = (r.chars[0].act.current, r.chars[1].act.current);
             let live: usize = r.scene.fx.counts(None).iter().sum();
@@ -4342,6 +4439,75 @@ mod tests {
             }
         }
         acts
+    }
+
+    #[test]
+    fn real_technique_cameras() {
+        // Character 1's Blast 2 (slot 2, a beam) takes the camera with his cut 0 (1.2 s, held, priority: flag 0xD3) from the
+        // start until the fire motion; the view is his camera's.
+        let mut cut_frames = 0;
+        let mut ended_after_cut = false;
+        let mut was_cut = false;
+        let watch = &mut |b: &Battle| {
+            let c = &b.roster.chars[0];
+            let cut = crate::chr_cam::is_cut_active(c);
+            if cut {
+                cut_frames += 1;
+                assert!(c.flags.test(0xD3));
+            }
+            ended_after_cut |= was_cut && !cut;
+            was_cut = cut;
+        };
+        let Some((log, ..)) = run_technique_watched(1, 2, 200, false, watch) else {
+            return;
+        };
+        assert!(
+            log.iter().any(|l| (0x106..=0x108).contains(&l.1)),
+            "{log:x?}"
+        );
+        assert!(cut_frames > 10, "{cut_frames}");
+        assert!(ended_after_cut);
+        // A rush technique that connects plays the character's camera animation of its slot on the demo
+        // camera, timed by the rush sequence (Goku's slot 3).
+        let mut demo = false;
+        let watch = &mut |b: &Battle| {
+            demo |= b.eft_cam.side() == Some(0);
+        };
+        let Some((log, dmg, ..)) = run_technique_watched(0, 3, 700, true, watch) else {
+            return;
+        };
+        assert!(dmg > 0, "{log:x?}");
+        assert!(demo, "{log:x?}");
+        // Transformations: character 1's 0xEC under its cuts 4 / 5 / 6; character 29's 0xEE plays its model's
+        // camera animation (flag 0xD7) on the demo camera.
+        use crate::btl_input::pad::R3;
+        for (chara, action, want_demo) in [(1, 0xEC, false), (29, 0xEE, true)] {
+            let mut battle = transform_battle(chara, true).unwrap();
+            battle.roster.chars[0].gauge.blast = 300_000;
+            let mut libc = LibcRandom::new(1);
+            let mut random = GameRandom::from_key(&[1]);
+            let (mut seen, mut cut, mut demo) = (false, false, false);
+            for i in 0..400 {
+                let held = if (2..4).contains(&i) { R3 } else { 0 };
+                let pads = [
+                    PadState {
+                        held,
+                        ..PadState::default()
+                    },
+                    PadState::default(),
+                ];
+                battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+                let c = &battle.roster.chars[0];
+                if c.act.current == action {
+                    seen = true;
+                    cut |= crate::chr_cam::is_cut_active(c);
+                    demo |= battle.demo.is_active();
+                }
+            }
+            assert!(seen, "{chara}");
+            assert!(cut || demo, "{chara}");
+            assert_eq!(demo, want_demo, "{chara}");
+        }
     }
 
     #[test]

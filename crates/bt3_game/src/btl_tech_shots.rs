@@ -40,6 +40,11 @@ fn norm(v: [f32; 3]) -> [f32; 3] {
 #[derive(Clone, Debug)]
 pub(crate) struct ShotTech {
     src: TechSrc,
+    /// `flags & 0x20`: the camera cut of the connected rush was started (`EftShotTech_StartCam`); `flags & 0x40`:
+    /// stopped as the item ended (`cam_stop` asks for the `EftCam_Stop` this frame).
+    pub(crate) cam_sent: bool,
+    cam_stopped: bool,
+    pub(crate) cam_stop: bool,
     flags: u32,
     state: u8,
     phase: u8,
@@ -71,6 +76,9 @@ impl ShotTech {
     pub(crate) fn new(src: TechSrc, data: &crate::btl_chr::SideData, head_set: SetHead) -> Self {
         let mut s = Self {
             src,
+            cam_sent: false,
+            cam_stopped: false,
+            cam_stop: false,
             flags: 0,
             state: 0,
             phase: 0,
@@ -361,6 +369,11 @@ impl ShotTech {
     }
 
     /// `EftShotTech_Update`.
+    /// The owner's rush has connected (`flags & 0x800`).
+    pub(crate) fn connected(&self) -> bool {
+        self.flags & 0x800 != 0
+    }
+
     pub(crate) fn update(
         &mut self,
         w: &mut World,
@@ -451,6 +464,10 @@ impl ShotTech {
             return;
         }
         if self.flags & 1 != 0 {
+            if self.cam_sent && !self.cam_stopped {
+                self.cam_stop = true;
+                self.cam_stopped = true;
+            }
             self.flags |= 2;
         }
     }
