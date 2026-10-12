@@ -321,6 +321,8 @@ pub(crate) struct Scene {
     pub gdust: crate::eft_gdust::GndDust,
     /// The speed lines (`gEftSpdLine`, layer 3; kept through a reset).
     pub spdlines: crate::eft_spdline::SpdLines,
+    /// The vanish lines (`gEftShotFx`, layer 3; kept through a reset).
+    pub shotfx: crate::eft_shotfx::ShotFx,
     /// The stage effects of layer 0.
     pub stage: crate::stage_fx::StageFx,
 }
@@ -1084,12 +1086,27 @@ impl Scene {
                 }
             }
         }
-        // Layer 3: the speed lines, the struggle, the discs, the blast objects, then the particle modules.
+        // Layer 3: the speed lines, the vanish lines, the struggle, the discs, the blast objects, then the particle modules.
         let spd = std::array::from_fn(|i| crate::eft_spdline::SpdChr {
             height: w.data[i].height(),
             moved: w.chars[i].pose.moved,
         });
         self.spdlines.update(w.paused, &spd, w.libc);
+        let chars = &*w.chars;
+        let (n0, n1) = (|n| chars[0].obj.node_pos(n), |n| chars[1].obj.node_pos(n));
+        let shot = [
+            crate::eft_shotfx::ShotChr {
+                height: w.data[0].height(),
+                node_pos: &n0,
+            },
+            crate::eft_shotfx::ShotChr {
+                height: w.data[1].height(),
+                node_pos: &n1,
+            },
+        ];
+        let tables = w.env.fx;
+        self.shotfx
+            .update(w.paused, &shot, &tables.shotfx, &tables.sin_coef, w.libc);
         if !w.paused {
             self.step_struggle(w);
         }

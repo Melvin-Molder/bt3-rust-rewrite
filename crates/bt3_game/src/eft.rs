@@ -471,6 +471,63 @@ pub(crate) fn queue_tri_clip(ot: &mut OrderTable, ctx: &DrawCtx, tri: [ClipVtx; 
     }
 }
 
+/// A strip of four corners projected straight to the GS (`Vu0Cur_ProjectPointsStq`) and queued as two triangles
+/// at a quarter of their depths' sum (>> 8), uv 0..1 across and down; nothing when a corner is behind the camera or
+/// off the GS area.
+pub(crate) fn queue_projected_quad(
+    ot: &mut OrderTable,
+    ctx: &DrawCtx,
+    corners: &[V3; 4],
+    rgba: [u8; 4],
+    texture: Option<usize>,
+    layer: u8,
+) {
+    let uv = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+    let mut scr = [(0i32, 0i32, 0i32, 0.0f32); 4];
+    for (k, c) in corners.iter().enumerate() {
+        let p = apply(&ctx.world2screen, point(*c));
+        let q = 1.0 / p[3];
+        scr[k] = (
+            (p[0] * q * 16.0) as i32,
+            (p[1] * q * 16.0) as i32,
+            (p[2] * q) as i32,
+            q,
+        );
+        let s = scr[k];
+        if s.2 <= 0 || s.0 > 0xFFEF || s.0 <= 0 || s.1 > 0xFFEF || s.1 <= 0 {
+            return;
+        }
+    }
+    let z = scr
+        .iter()
+        .fold(0i32, |s, v| s.wrapping_add(v.2))
+        .wrapping_shr(10);
+    let vert = |k: usize| EffectVertex {
+        position: [
+            scr[k].0 as f32 / 16.0 - OFFSET_X,
+            scr[k].1 as f32 / 16.0 - OFFSET_Y,
+            (scr[k].2 & 0xFF_FFFF) as f32,
+        ],
+        stq: [uv[k][0] * scr[k].3, uv[k][1] * scr[k].3, scr[k].3],
+        rgba,
+    };
+    let l = if layer >= 2 { layer - 2 } else { layer };
+    for k in 0..2 {
+        ot.add(
+            depth_slot(z),
+            usize::from(l),
+            EffectTri {
+                texture,
+                blend: EffectBlend::of(usize::from(l), layer >= 2),
+                clamp: false,
+                zwrite: false,
+                alpha_ref: 0,
+                vertices: [vert(k), vert(k + 1), vert(k + 2)],
+            },
+        );
+    }
+}
+
 /// `EftGfx_DrawSprite`: a camera-facing quad of half size (w, h) world units at `pos` (in pixels, (s32)w *
 /// screen distance / depth, then taken as 1/16 pixel offsets as the original adds them to the 12.4 position),
 /// rotated by `rot`; nothing below 2 or when a corner is off screen. Queued at the centre's depth slot.

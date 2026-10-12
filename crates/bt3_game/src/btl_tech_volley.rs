@@ -59,6 +59,8 @@ const OP_FRONT: i32 = 6;
 pub(crate) struct FxTables {
     pub sin_coef: [f32; 4],
     pub aim_scripts: [Vec<AimStep>; 2],
+    /// The vanish lines' body segments and column slices.
+    pub shotfx: crate::eft_shotfx::Tables,
 }
 
 impl FxTables {
@@ -85,6 +87,7 @@ impl FxTables {
         Ok(Self {
             sin_coef: [c[0], c[1], c[2], c[3]],
             aim_scripts,
+            shotfx: crate::eft_shotfx::Tables::read(elf)?,
         })
     }
 }

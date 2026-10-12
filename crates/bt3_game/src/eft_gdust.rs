@@ -10,10 +10,8 @@
 
 use bt3_data::stage::StageDust;
 
-use crate::battle::apply;
 use crate::eft::{
-    DrawCtx, EffectBlend, EffectTri, EffectVertex, OFFSET_X, OFFSET_Y, OrderTable, V3, V4, add,
-    cross, depth_slot, dot, draw_sprite, norm, point, scale3, sub, wrap_angle,
+    DrawCtx, OrderTable, V3, V4, add, cross, dot, draw_sprite, norm, scale3, sub, wrap_angle,
 };
 use crate::rng::{LibcRandom, Vu0Random};
 
@@ -1057,55 +1055,14 @@ fn draw_along(
         [-hw, 0.0, 0.0],
         [hw, 0.0, 0.0],
     ];
-    let uv = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
-    let mut scr = [(0i32, 0i32, 0i32, 0.0f32); 4];
-    for (k, c) in corners.iter().enumerate() {
-        let w = add(
+    let world = corners.map(|c| {
+        add(
             add(add(scale3(x, c[0]), scale3(y, c[1])), scale3(z, c[2])),
             pos,
-        );
-        let p = apply(&ctx.world2screen, point(w));
-        let q = 1.0 / p[3];
-        scr[k] = (
-            (p[0] * q * 16.0) as i32,
-            (p[1] * q * 16.0) as i32,
-            (p[2] * q) as i32,
-            q,
-        );
-        let s = scr[k];
-        if s.2 <= 0 || s.0 > 0xFFEF || s.0 <= 0 || s.1 > 0xFFEF || s.1 <= 0 {
-            return;
-        }
-    }
-    let z = scr
-        .iter()
-        .fold(0i32, |s, v| s.wrapping_add(v.2))
-        .wrapping_shr(10);
+        )
+    });
     let rgba = color.map(|c| c as i32 as u8);
-    let vert = |k: usize| EffectVertex {
-        position: [
-            scr[k].0 as f32 / 16.0 - OFFSET_X,
-            scr[k].1 as f32 / 16.0 - OFFSET_Y,
-            (scr[k].2 & 0xFF_FFFF) as f32,
-        ],
-        stq: [uv[k][0] * scr[k].3, uv[k][1] * scr[k].3, scr[k].3],
-        rgba,
-    };
-    let l = if layer >= 2 { layer - 2 } else { layer };
-    for k in 0..2 {
-        ot.add(
-            depth_slot(z),
-            usize::from(l),
-            EffectTri {
-                texture,
-                blend: EffectBlend::of(usize::from(l), layer >= 2),
-                clamp: false,
-                zwrite: false,
-                alpha_ref: 0,
-                vertices: [vert(k), vert(k + 1), vert(k + 2)],
-            },
-        );
-    }
+    crate::eft::queue_projected_quad(ot, ctx, &world, rgba, texture, layer);
 }
 
 #[cfg(test)]

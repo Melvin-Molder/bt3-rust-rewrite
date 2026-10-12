@@ -126,7 +126,8 @@ pub struct BattleAssets {
     pub(crate) ray_texture: Option<usize>,
     /// `gEftGndDust->tex`: the ground dust's texture set (common effect entry 0xB) among the effect textures.
     pub(crate) dust_textures: Vec<usize>,
-    /// `gEftSpdLine->tex[0]`: the speed lines' texture (common effect entry 0x237) among the effect textures.
+    /// `gEftSpdLine->tex[0]` / `gEftShotFx->tex[0]`: the speed and vanish lines' texture (common effect entry 0x237)
+    /// among the effect textures.
     pub(crate) spdline_texture: Option<usize>,
     /// Stage pack entry 0x12's textures among the effect textures, on a stage that has the entry.
     pub(crate) stage_pack12: Option<Vec<usize>>,
@@ -2395,13 +2396,17 @@ impl Battle {
                 self.seq.paused,
                 &mut *libc,
             );
-            // Layer 3: the speed lines, then the particle modules.
+            // Layer 3: the speed lines, the vanish lines, then the particle modules.
             self.roster
                 .scene
                 .spdlines
                 .draw(&mut ot, &ctx, self.assets.spdline_texture, |chr| {
                     demo || chr == 0
                 });
+            self.roster
+                .scene
+                .shotfx
+                .draw(&mut ot, &ctx, self.assets.spdline_texture);
             self.roster
                 .scene
                 .fx
@@ -3288,7 +3293,9 @@ mod tests {
         roster.chars[0].pose.dir = [0.0, 0.0, 1.0];
         // Request 0x15: the screen's speed lines, a mode 2 ray burst.
         roster.chars[0].set_fx(0x15);
-        crate::btl_mgr::speed_fx(
+        // Request 0xC: the vanish lines.
+        roster.chars[0].set_fx(0xC);
+        crate::btl_mgr::movement_fx(
             &roster.chars[0],
             &roster.chars[1],
             &data[0],
@@ -3296,6 +3303,8 @@ mod tests {
             &mut libc,
         );
         let (trails, streaks) = roster.scene.spdlines.counts();
+        // The vanish starts; its lines come with the scene's update.
+        assert_eq!(roster.scene.shotfx.count(), 0);
         assert!(trails >= 11, "{trails}");
         assert_eq!(streaks, 0);
         assert_eq!(roster.scene.fx.rays_of_mode(crate::eft_ray::MODE_TECH), 1);
@@ -3304,6 +3313,17 @@ mod tests {
             battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
         }
         assert_eq!(battle.roster.scene.spdlines.counts().0, 0);
+        // Body lines on the first two updates and the column on the second.
+        assert!(battle.roster.scene.shotfx.count() > 0);
+        // The vanish lines' tables: body segments up to the row of node 4 (row 20), six column slices.
+        let t = &battle.assets.fx_tables.shotfx;
+        assert_eq!((t.segs.len(), t.rows.len()), (20, 6));
+        assert!(t.segs.iter().all(|s| s.count > 0 && s.spacing > 0.0));
+        assert!(
+            t.rows
+                .iter()
+                .all(|r| r.count > 0 && (0.0..=1.0).contains(&r.from))
+        );
         assert_eq!(
             battle
                 .roster
@@ -3352,10 +3372,11 @@ mod tests {
         let mut pressed = 0u32;
         let mut min_gap = start_gap;
         let mut dust = 0;
-        let (mut trails, mut streaks, mut speed_rays) = (0, 0, 0);
+        let (mut trails, mut streaks, mut speed_rays, mut vanish) = (0, 0, 0, 0);
         for _ in 0..5400 {
             battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
             dust = dust.max(battle.roster.scene.gdust.fighter_parts());
+            vanish = vanish.max(battle.roster.scene.shotfx.count());
             let (t, s) = battle.roster.scene.spdlines.counts();
             trails = trails.max(t);
             streaks = streaks.max(s);
@@ -3382,6 +3403,8 @@ mod tests {
         assert!(dust > 0);
         // Dashes leave trails, fast limbs streaks (event 8).
         assert!(trails > 0 && streaks > 0, "{trails} {streaks} {speed_rays}");
+        // The CPU's vanishes draw their lines.
+        assert!(vanish > 0);
         assert!(min_gap < start_gap - 10.0, "the CPU did not close in");
         assert!(
             battle.roster.chars[0].gauge.health < health,

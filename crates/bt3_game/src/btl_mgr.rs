@@ -351,7 +351,7 @@ impl Roster {
             );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame);
             self.scene.spawn_held_disc(me, data[i]);
-            speed_fx(me, opp, data[i], &mut self.scene, libc);
+            movement_fx(me, opp, data[i], &mut self.scene, libc);
             ground_fx(me, data[i], env, &mut self.scene.gdust, libc, vu0);
             water_fx(
                 me,
@@ -605,12 +605,14 @@ impl Roster {
     }
 }
 
-/// `BtlFx_SpawnPartFxEvent8`, `BtlFx_SpawnFastMoveFx` and `BtlFx_SpawnSpeedLines`: animation event 8 sends
+/// `BtlFxObj_HandleFlagEvents`' event bit 42 and `BtlFx_SpawnBurstReqC`'s requests 0xC..0xF start the vanish
+/// lines (kind 0, and kinds 0..3). `BtlFx_SpawnPartFxEvent8`, `BtlFx_SpawnFastMoveFx` and `BtlFx_SpawnSpeedLines`:
+/// animation event 8 sends
 /// streaks from each model part its value names, along the part's movement turned into the world; request 0xB,
 /// moving faster than half the reference speed, leaves trails behind the body; request 0x15 starts the screen's
 /// speed lines (a mode 2 ray burst), longer lived the farther the opponent is off the camera's heading, their
 /// inner end farther in with the distance.
-pub(crate) fn speed_fx(
+pub(crate) fn movement_fx(
     me: &Chr,
     opp: &Chr,
     data: &SideData,
@@ -618,6 +620,14 @@ pub(crate) fn speed_fx(
     libc: &mut crate::rng::LibcRandom,
 ) {
     let side = me.player;
+    if me.obj.test_event(0x400_0000_0000) {
+        scene.shotfx.start(side, 0);
+    }
+    for (bit, kind) in [(0xC, 0), (0xD, 1), (0xE, 2), (0xF, 3)] {
+        if me.test_fx(bit) {
+            scene.shotfx.start(side, kind);
+        }
+    }
     let height = data.height();
     if me.anim_test_attr(8) {
         let bits = me.obj.event_arg(8);
