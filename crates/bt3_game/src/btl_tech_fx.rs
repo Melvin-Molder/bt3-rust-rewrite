@@ -11,7 +11,8 @@
 //! The prop shot of type 6 (`EftPropShot_*`) is the same item as the beam with its differences; the volley of
 //! type 1 is in `btl_tech_volley`.
 //!
-//! The sweep of type 3 and the follow of type 7 are in `btl_tech_sweep`, the ring shot of type 4 in `btl_tech_ring`, the multi of type 5
+//! The sweep of type 3 and the follow of type 7 are in `btl_tech_sweep`, the rush shot of type 9 in
+//! `btl_tech_rush` with the thrown object of type 8, the ring shot of type 4 in `btl_tech_ring`, the multi of type 5
 //! (its pieces are discs) in `btl_tech_disc`.
 //!
 //! Every item drives the emitters of its slot's set (header entry 4 of the slot's effect pack) through the particle
@@ -19,7 +20,7 @@
 //! events), keeps them alive in its post-update (`EftEmit_UpdateAlive`, a fighter hit marking the phase 6 ones,
 //! `EftEmit_MarkKind6`) and kills them when the scene resets its fighter (`EftEmit_KillAll`).
 //!
-//! Not ported: the skills' shots (slots 0, 1); the items of effect types 2, 8 and 9 (their timeline runs, so
+//! Not ported: the skills' shots (slots 0, 1); the items of effect type 2 (their timeline runs, so
 //! flag 0xA7 comes, but flag 0xA8 is left to the actions' timeout); the prop shots' models, stage blur, flash and
 //! sound; abilities; the battle events.
 
@@ -37,6 +38,7 @@ use crate::btl_input::wrap_angle;
 use crate::btl_obj::mask_to_node;
 use crate::btl_tech_disc::{Discs, Multi};
 use crate::btl_tech_ring::Ring;
+use crate::btl_tech_rush::{ObjTech, RushShot};
 use crate::btl_tech_sweep::{Follow, Sweep};
 use crate::btl_tech_volley::{Shots, Volley, scene_rand_f};
 use crate::eft::{EmitState, Modules, Nodes, SetAssets, spawn};
@@ -248,6 +250,8 @@ pub(crate) struct TechFx {
     volleys: [[Vec<Volley>; 5]; 2],
     sweeps: [[Vec<Sweep>; 5]; 2],
     follows: [[Vec<Follow>; 5]; 2],
+    rush_shots: [[Vec<RushShot>; 5]; 2],
+    obj_techs: [[Vec<ObjTech>; 5]; 2],
     multis: [[Vec<Multi>; 5]; 2],
     rings: [[Vec<Ring>; 5]; 2],
     /// The discs: ki blasts of types 4 / 5 and the multis' pieces (layer 3).
@@ -269,6 +273,8 @@ impl Default for TechFx {
             volleys: Default::default(),
             sweeps: Default::default(),
             follows: Default::default(),
+            rush_shots: Default::default(),
+            obj_techs: Default::default(),
             multis: Default::default(),
             rings: Default::default(),
             discs: Discs::default(),
@@ -554,7 +560,7 @@ pub(crate) fn reset_parts(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drive_parts(
+pub(crate) fn drive_parts(
     fx: &mut Modules,
     w: &mut World,
     src: &TechSrc,
@@ -564,7 +570,7 @@ fn drive_parts(
     dir: [f32; 3],
     scale: f32,
     skip: impl Fn(&EmitSet, u8, usize) -> bool,
-    flags_of: impl Fn(&mut EmitState, &EmitSet, u8, usize) -> u32,
+    mut flags_of: impl FnMut(&mut EmitState, &EmitSet, u8, usize) -> u32,
 ) {
     let side = src.side;
     let Some((set, assets)) = slot_set(w.data[side], src.slot) else {
@@ -659,7 +665,13 @@ pub(crate) fn update_trail_width(width: &mut f32, t: &mut f32, h: &SetHead) {
 
 /// `EftEmit_UpdateTrailWidth` / `EftEmit_UpdateWidth2`: a width animated from key 0 to key 1 over `split` of
 /// `time` seconds, then to key 2.
-fn step_width(width: &mut f32, t: &mut f32, keys: [f32; 3], time: f32, split: f32) -> bool {
+pub(crate) fn step_width(
+    width: &mut f32,
+    t: &mut f32,
+    keys: [f32; 3],
+    time: f32,
+    split: f32,
+) -> bool {
     if !(0.0 < time) {
         return false;
     }
@@ -1087,6 +1099,20 @@ impl TechFx {
                     items.push(Sweep::new(*next_id, src, me, opp, data, set));
                 }
             }
+            8 => {
+                let items = &mut self.obj_techs[side][slot as usize];
+                if items.len() < ITEMS {
+                    *next_id += 1;
+                    items.push(ObjTech::new(*next_id, src, data, set));
+                }
+            }
+            9 => {
+                let items = &mut self.rush_shots[side][slot as usize];
+                if items.len() < ITEMS {
+                    *next_id += 1;
+                    items.push(RushShot::new(*next_id, src, data, set));
+                }
+            }
             7 => {
                 let items = &mut self.follows[side][slot as usize];
                 if items.len() < ITEMS {
@@ -1165,6 +1191,24 @@ impl TechFx {
             .find(|f| f.id() == id)
         {
             return Some(&mut f.tag);
+        }
+        if let Some(r) = self
+            .rush_shots
+            .iter_mut()
+            .flatten()
+            .flatten()
+            .find(|r| r.id() == id)
+        {
+            return Some(&mut r.tag);
+        }
+        if let Some(o) = self
+            .obj_techs
+            .iter_mut()
+            .flatten()
+            .flatten()
+            .find(|o| o.id() == id)
+        {
+            return Some(&mut o.tag);
         }
         self.beams
             .iter_mut()
@@ -1261,6 +1305,46 @@ impl TechFx {
                         // EftFollow_Term.
                         w.chars[side].flags.set_held(0xA8);
                         self.follows[side][slot].remove(k);
+                    } else {
+                        k += 1;
+                    }
+                }
+                let mut k = 0;
+                while k < self.rush_shots[side][slot].len() {
+                    let r = &mut self.rush_shots[side][slot][k];
+                    let (rec, stop) = r.update(w, fx, self.events[side], self.cur_slot[side]);
+                    if let Some(rec) = rec
+                        && records.len() < max
+                    {
+                        records.push(rec);
+                    }
+                    if r.dead() {
+                        // EftRushShot_Term (the stage tint is not ported).
+                        if r.src().def.kind != 0 {
+                            w.chars[side].flags.set_held(0xA8);
+                        }
+                        self.rush_shots[side][slot].remove(k);
+                    } else {
+                        k += 1;
+                    }
+                    if stop {
+                        self.request_stop(side);
+                    }
+                }
+                let mut k = 0;
+                while k < self.obj_techs[side][slot].len() {
+                    let o = &mut self.obj_techs[side][slot][k];
+                    if let Some(rec) = o.update(w, fx, self.events[side], self.cur_slot[side])
+                        && records.len() < max
+                    {
+                        records.push(rec);
+                    }
+                    if o.dead() {
+                        // EftObjTech_Term.
+                        if o.src().def.kind != 0 {
+                            w.chars[side].flags.set_held(0xA8);
+                        }
+                        self.obj_techs[side][slot].remove(k);
                     } else {
                         k += 1;
                     }
@@ -1376,6 +1460,18 @@ impl TechFx {
             for mut f in self.follows[side][slot].drain(..) {
                 f.kill_parts(fx);
                 held.set_held(0xA8);
+            }
+            for mut r in self.rush_shots[side][slot].drain(..) {
+                r.kill_parts(fx);
+                if r.src().def.kind != 0 {
+                    held.set_held(0xA8);
+                }
+            }
+            for mut o in self.obj_techs[side][slot].drain(..) {
+                o.kill_parts(fx);
+                if o.src().def.kind != 0 {
+                    held.set_held(0xA8);
+                }
             }
             for mut r in self.rings[side][slot].drain(..) {
                 r.kill_parts(fx);
@@ -1499,6 +1595,17 @@ impl TechFx {
                 }
                 for f in &mut self.follows[side][slot] {
                     f.post_update(w, fx);
+                }
+                for r in &mut self.rush_shots[side][slot] {
+                    r.post_update(w, fx);
+                }
+                let mut stop = false;
+                for o in &mut self.obj_techs[side][slot] {
+                    stop |= o.post_update(w, fx);
+                }
+                if stop {
+                    // EftTechEvt_RequestStop.
+                    self.request_stop(side);
                 }
                 for r in &mut self.rings[side][slot] {
                     r.post_update(w, fx, &self.shots);

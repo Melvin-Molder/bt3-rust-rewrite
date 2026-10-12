@@ -61,11 +61,11 @@ const T_END: u32 = 0x3F;
 
 // EFT_HIT_FLAG_*.
 const H_KIND9: u32 = 0x8;
-const H_LAST: u32 = 0x10;
+pub(crate) const H_LAST: u32 = 0x10;
 const H_ALWAYS: u32 = 0x20;
 const H_NEVER: u32 = 0x40;
 const H_NO_MODE1: u32 = 0x80;
-const H_NO_LAST: u32 = 0x800;
+pub(crate) const H_NO_LAST: u32 = 0x800;
 const T_TURN: u32 = 0xC0;
 
 // EFT_KIBLAST_*.

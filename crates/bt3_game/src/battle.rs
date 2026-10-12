@@ -3523,7 +3523,7 @@ mod tests {
         slot: i32,
         frames: usize,
         near: bool,
-    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32)> {
+    ) -> Option<(Vec<(usize, i32, i32)>, i32, i32, [usize; 2])> {
         use crate::btl_input::pad::{DOWN, L2, START, TRIANGLE, UP};
         let mut setup = BattleSetup::default();
         setup.sides[0].chara = chara;
@@ -3577,6 +3577,7 @@ mod tests {
         };
         let health = battle.roster.chars[1].gauge.health;
         let mut log: Vec<(usize, i32, i32)> = Vec::new();
+        let mut parts = [0usize; 2];
         for i in 0..frames {
             let p1 = match i {
                 2..4 => L2,
@@ -3586,12 +3587,59 @@ mod tests {
             frame(&mut battle, p1);
             let r = &battle.roster;
             let (a, b) = (r.chars[0].act.current, r.chars[1].act.current);
+            let live: usize = r.scene.fx.counts(None).iter().sum();
+            parts = [parts[0].max(live), live];
             if log.last().map(|l| (l.1, l.2)) != Some((a, b)) {
                 log.push((i, a, b));
             }
         }
         let table = battle.assets.fighters[0].tables.tech().damage(slot);
-        Some((log, health - battle.roster.chars[1].gauge.health, table))
+        Some((
+            log,
+            health - battle.roster.chars[1].gauge.health,
+            table,
+            parts,
+        ))
+    }
+
+    #[test]
+    fn real_catching_technique_effects() {
+        // The rush shot (type 9) of character 65's slot 3 catches (reaction 0x22) into the sequence; character
+        // 94's (technique 0x19D, reaction 0x1D) and the thrown objects (type 8) of characters 49 (0x167), 115
+        // (0x168) and 55 (0x162, held in the hand: from beside the opponent) catch it while the attacker closes in
+        // 0x12A.. (the looped catch 0x1E held until the attacker leaves its technique, flag 0xAF), and character
+        // 150's object (0x1F3) is thrown again at the caught victim for the technique's second reaction (15:
+        // 0xCF). Each deals the table damage.
+        let has = |log: &[(usize, i32, i32)], a: &[i32], b: &[i32]| {
+            log.iter().any(|(_, x, y)| a.contains(x) && b.contains(y))
+        };
+        let Some((log, dmg, table, parts)) = run_technique(65, 3, 400, false) else {
+            return;
+        };
+        assert!(has(&log, &[0x12E], &[0x13A]), "{log:x?}");
+        assert_eq!(dmg, table);
+        assert!(parts[0] > 0 && parts[1] == 0, "{parts:?}");
+        for (chara, slot, near) in [
+            (94, 3, false),
+            (49, 3, false),
+            (115, 2, false),
+            (55, 3, true),
+            (150, 3, false),
+        ] {
+            let (log, dmg, table, parts) = run_technique(chara, slot, 400, near).unwrap();
+            assert!(parts[0] > 0 && parts[1] == 0, "{chara}: {parts:?}");
+            let (fin, caught) = if slot == 2 {
+                (0x12A, 0x133)
+            } else {
+                (0x12B, 0x134)
+            };
+            assert!(has(&log, &[fin], &[caught]), "{chara}: {log:x?}");
+            assert!(dmg >= table, "{chara}: {dmg} {table} {log:x?}");
+            if chara == 150 {
+                assert!(has(&log, &[fin], &[0xCF]), "{log:x?}");
+            }
+            assert_eq!(log.last().map(|l| l.2), Some(0xB), "{chara}: {log:x?}");
+        }
     }
 
     #[test]
@@ -3611,7 +3659,7 @@ mod tests {
             (0, 3, false, 0x11F),
             (133, 3, true, 0x122),
         ] {
-            let Some((log, dmg, table)) = run_technique(chara, slot, 700, near) else {
+            let Some((log, dmg, table, _)) = run_technique(chara, slot, 700, near) else {
                 return;
             };
             assert!(has(&log, dash, None), "{chara}: {log:x?}");
@@ -3627,7 +3675,7 @@ mod tests {
                 "{chara}: {log:x?}"
             );
         }
-        let Some((log, dmg, table)) = run_technique(61, 2, 300, false) else {
+        let Some((log, dmg, table, _)) = run_technique(61, 2, 300, false) else {
             return;
         };
         assert!(has(&log, 0x124, Some(0x136)), "{log:x?}");

@@ -214,9 +214,11 @@ impl Roster {
             me.obj.calc_matrices(&data[i].obj);
             me.obj_to_pose();
         }
-        for chr in &mut self.chars {
-            if !chr.is_frozen() {
-                chr.flags.set_stage(6);
+        for i in 0..2 {
+            let (me, opp) = split(&mut self.chars, i);
+            if !me.is_frozen() {
+                me.flags.set_stage(6);
+                mirror_flags(me, opp);
             }
         }
         self.update_hold(data);
@@ -640,6 +642,44 @@ fn update_fighter_stage(me: &mut Chr, data: &SideData, env: &Env, keep_sphere: b
         me.obj.body.push = [0.0; 3];
     }
     me.obj.area = zone;
+}
+
+/// `BtlOpp_MirrorFlags` (`BtlChar_UpdateStage6`): what the opponent is doing, as this fighter's flags 0xAC..0xB9
+/// and 0xD6 (in a technique: 0xAF; dead: 0xB1). The camera cut its flag 0x27 ends is not ported.
+fn mirror_flags(me: &mut Chr, opp: &Chr) {
+    me.flags.clear_range(0xAC, 0xB9);
+    for (o, m) in [(0xB, 0xAC), (0x1A, 0xAD), (0x3F, 0xAE), (0x85, 0xB3)] {
+        if opp.flags.test(o) {
+            me.flags.set_held(m);
+        }
+    }
+    if crate::btl_act::is_technique_id(opp.act.current) {
+        me.flags.set_held(0xAF);
+    }
+    if (0xFD..0x103).contains(&opp.act.current) {
+        me.flags.set_held(0xB0);
+    }
+    if opp.is_dead() {
+        me.flags.set_held(0xB1);
+    }
+    if opp.flags.test(0xCC) {
+        me.flags.set_held(0xB4);
+    }
+    if opp.flags.test(0x26) {
+        me.flags.set_held(0xB2);
+    }
+    for (o, m) in [
+        (0x90, 0xB5),
+        (0x16, 0xB6),
+        (0x17, 0xB7),
+        (0x28, 0xD6),
+        (0xDC, 0xB8),
+        (0x92, 0xB9),
+    ] {
+        if opp.flags.test(o) {
+            me.flags.set(m);
+        }
+    }
 }
 
 /// `StgGround_UpdateFighter`: the ground under the object's position, below the body sphere's centre.
