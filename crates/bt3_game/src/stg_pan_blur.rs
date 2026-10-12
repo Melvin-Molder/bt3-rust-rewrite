@@ -182,6 +182,7 @@ impl PanBlur {
             [0x80; 4],
         );
         back.mask = Some(mask(strength_alpha));
+        back.region = Some([0, 0, qw as u16, qh as u16]);
         ops.push(back);
         ops
     }

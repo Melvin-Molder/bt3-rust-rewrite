@@ -170,6 +170,8 @@ impl Blurs {
             target: PostBuf::Frame,
             blend: true,
             mask: None,
+            add: false,
+            region: None,
             tris: Vec::new(),
         };
         let centre = [cx, cy, hx, hy];

@@ -111,6 +111,7 @@ mod stage_fx;
 mod stg_amb;
 mod stg_blur;
 mod stg_depth;
+mod stg_glare;
 mod stg_haze;
 mod stg_obj;
 mod stg_pan_blur;

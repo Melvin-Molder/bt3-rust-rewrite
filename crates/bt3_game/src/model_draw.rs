@@ -34,11 +34,11 @@ const GS_EFFECT_SHADER: Handle<Shader> = uuid_handle!("d41c7e2a-5b93-4f06-8e1d-3
 const GS_DEPTH_SHADER: Handle<Shader> = uuid_handle!("8a1f3c52-6d07-4b9e-a2c4-5e9d0b7f1c36");
 const GS_DEPTH_CLUT_SHADER: Handle<Shader> = uuid_handle!("3b6e9d14-2f8a-4c71-b5e0-9a4d7c2e8f15");
 /// The layer of the camera that draws the depth buffer's spare byte.
-const DEPTH_LAYER: usize = 12;
+const DEPTH_LAYER: usize = 2;
 /// The fighters' camera (`BtlObjDraw_Draw` and after): its layer and order, between `StgFx_DrawPre`'s post chain
 /// and `StgFx_DrawPost`'s. It draws the stage's depth again first (depth only), as the GS depth buffer keeps it.
-const FIGHTER_LAYER: usize = 21;
-pub const FIGHTER_ORDER: isize = 20;
+const FIGHTER_LAYER: usize = 4;
+pub const FIGHTER_ORDER: isize = 30;
 /// The stage's depth before everything else of the fighters' camera.
 const STAGE_Z_SORT: f32 = -1000.0;
 /// `StgFx_DrawPre`'s depth tint: after the stage, before the back tints.
@@ -960,11 +960,11 @@ fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         RenderTarget::from(images[0].clone()),
         RenderLayers::layer(FIGHTER_LAYER),
     ));
-    // The HUD after the post chains (orders 1..12 and 21..32), the window last.
+    // The HUD after the post chains (orders 1..28 and 31..42), the window last.
     commands.spawn((
         Camera2d,
         Camera {
-            order: 40,
+            order: 50,
             clear_color: ClearColorConfig::None,
             ..default()
         },
@@ -975,7 +975,7 @@ fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         Camera2d,
         Camera {
-            order: 50,
+            order: 60,
             ..default()
         },
         RenderLayers::layer(DISPLAY_LAYER),

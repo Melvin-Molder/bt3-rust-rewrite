@@ -188,6 +188,8 @@ impl ScrWarps {
             target: PostBuf::Frame,
             blend: true,
             mask: None,
+            add: false,
+            region: None,
             tris: Vec::new(),
         };
         for o in self.objs.iter().flatten().filter(mine) {

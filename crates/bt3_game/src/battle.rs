@@ -1804,6 +1804,8 @@ pub struct Battle {
     pub(crate) fog: crate::stg_depth::Fog,
     /// `gStgPanBlur`: the pan blur of each view.
     pub(crate) pan_blur: crate::stg_pan_blur::PanBlur,
+    /// `gStgGlare`: the sky glare.
+    pub(crate) glare: crate::stg_glare::Glare,
     pub(crate) hud: Hud,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
     pub(crate) fade: Fade,
@@ -2147,6 +2149,8 @@ impl Battle {
         let depth_tints = crate::stg_depth::DepthTints::new(&assets.stage.depth_tints);
         let haze = crate::stg_haze::Haze::new(assets.stage.haze.as_ref());
         let fog = crate::stg_depth::Fog::new(assets.stage.fog.as_ref());
+        let mut glare = crate::stg_glare::Glare::default();
+        glare.load(assets.stage.glare.as_ref());
         let ai = {
             let data = [
                 side_data(&assets.fighters[0]),
@@ -2198,6 +2202,7 @@ impl Battle {
             haze,
             fog,
             pan_blur: crate::stg_pan_blur::PanBlur::default(),
+            glare,
             hud,
             fade: Fade::start_in(1.0),
             roots,
@@ -2433,6 +2438,7 @@ impl Battle {
                                 crate::stg_depth::DepthTints::new(&self.assets.stage.depth_tints);
                             self.haze = crate::stg_haze::Haze::new(self.assets.stage.haze.as_ref());
                             self.fog = crate::stg_depth::Fog::new(self.assets.stage.fog.as_ref());
+                            self.glare.load(self.assets.stage.glare.as_ref());
                             self.light_dir =
                                 normalize(self.assets.stage.light_dir.unwrap_or(DEFAULT_LIGHT));
                             self.with_roster(|roster, data, env| {
@@ -2890,6 +2896,7 @@ impl Battle {
         self.depth_tints = crate::stg_depth::DepthTints::new(&self.assets.stage.depth_tints);
         self.haze = crate::stg_haze::Haze::new(self.assets.stage.haze.as_ref());
         self.fog = crate::stg_depth::Fog::new(self.assets.stage.fog.as_ref());
+        self.glare.load(self.assets.stage.glare.as_ref());
         self.roots = std::array::from_fn(|side| self.roster.chars[side].obj.mtx);
         // BtlChar_ResetAll's BtlReplay_Rewind / BtlReplay_ResetViewer.
         self.replay.rewind();
@@ -3329,6 +3336,21 @@ impl Battle {
         // strength by its fighter camera's height.
         let mut pre = Vec::new();
         if !self.loading {
+            // StgGlare_Update / StgGlare_Draw: the level follows whether the stage light's point is on the shown
+            // view (in front of the camera, inside its scissor).
+            let v = &views[0].0;
+            let on_view = self.assets.stage.light_point.is_some_and(|p| {
+                let s = apply(&v.world2screen, [p[0], p[1], p[2], 1.0]);
+                let q = 1.0 / s[3];
+                let (x, y, z) = (
+                    (s[0] * q) as i32 as f32 - 1792.0,
+                    (s[1] * q) as i32 as f32 - 1824.0,
+                    (s[2] * q) as i32,
+                );
+                z > 0 && x >= v.cols[0] && x <= v.cols[1] && (0.0..=448.0).contains(&y)
+            });
+            self.glare.update(on_view);
+            pre.extend(self.glare.draw());
             pre.extend(self.fog.draw());
             if self.assets.stage.stage_flags & 8 != 0 {
                 let cams = [0, 1].map(|s| {
@@ -8013,6 +8035,13 @@ mod tests {
                 "{stage}"
             );
             assert!(!f.pre.iter().any(|o| o.source == crate::post::PostBuf::Wide));
+            // Both stages' glare records have bit 0: the glow is added over the frame.
+            assert!(
+                f.pre
+                    .iter()
+                    .any(|o| o.add && o.target == crate::post::PostBuf::Frame),
+                "{stage}"
+            );
             if let Some(d) = f.depth_tint {
                 assert!(d.additive);
                 assert_eq!(d.clut[0], [0, 0, 0, 0x80]);

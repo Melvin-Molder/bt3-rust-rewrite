@@ -24,11 +24,11 @@ use crate::post::{PostBuf, PostOp};
 
 const GS_POST_SHADER: Handle<Shader> = uuid_handle!("5e2a9c41-7b3d-4f8a-9e16-c2d84a0f7b35");
 /// The render layers of each chain's cameras (one each) and how many there are: a blur of three passes takes five.
-const POST_LAYER_BASE: [usize; 2] = [42, 30];
-const POST_CAMERAS: usize = 12;
+const POST_LAYER_BASE: [usize; 2] = [17, 5];
+const POST_CAMERAS: [usize; 2] = [28, 12];
 /// The camera orders of the chains: the pre chain after the stage camera (0), the post chain after the fighters'
 /// camera (`model_draw::FIGHTER_ORDER`).
-const POST_ORDER_BASE: [isize; 2] = [1, 21];
+const POST_ORDER_BASE: [isize; 2] = [1, 31];
 
 /// One op's triangles: the source buffer, copied or blended (ALPHA 0x44), in the order of its group.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -37,26 +37,33 @@ pub struct GsPostMaterial {
     #[texture(0)]
     #[sampler(1)]
     texture: Handle<Image>,
-    /// The depth byte's plane and the op's mask (alpha by byte value), with x of `params` 1 when masked.
+    /// The depth byte's plane and the op's mask (alpha by byte value), with x of `params` 1 when masked and y, z
+    /// the plane's pixels per target pixel.
     #[texture(2)]
     plane: Handle<Image>,
     #[texture(3)]
     mask: Handle<Image>,
     #[uniform(4)]
     params: Vec4,
+    /// The source texels read (x0, y0, x1, y1).
+    #[uniform(5)]
+    region: Vec4,
     blend: bool,
+    add: bool,
     order: u16,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GsPostKey {
     blend: bool,
+    add: bool,
 }
 
 impl From<&GsPostMaterial> for GsPostKey {
     fn from(material: &GsPostMaterial) -> Self {
         Self {
             blend: material.blend,
+            add: material.add,
         }
     }
 }
@@ -81,11 +88,20 @@ impl Material2d for GsPostMaterial {
         _layout: &MeshVertexBufferLayoutRef,
         key: Material2dKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        let blend = key.bind_group_data.blend.then_some(BlendState {
-            color: BlendComponent {
-                src_factor: BlendFactor::SrcAlpha,
-                dst_factor: BlendFactor::OneMinusSrcAlpha,
-                operation: BlendOperation::Add,
+        let k = key.bind_group_data;
+        let blend = (k.blend || k.add).then_some(BlendState {
+            color: if k.add {
+                BlendComponent {
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::Add,
+                }
+            } else {
+                BlendComponent {
+                    src_factor: BlendFactor::SrcAlpha,
+                    dst_factor: BlendFactor::OneMinusSrcAlpha,
+                    operation: BlendOperation::Add,
+                }
             },
             alpha: BlendComponent {
                 src_factor: BlendFactor::Zero,
@@ -109,12 +125,22 @@ impl Material2d for GsPostMaterial {
 #[derive(Resource)]
 pub struct WorkBuffers([Handle<Image>; 2], Handle<Image>);
 
-/// The materials made so far, by source image, blend, order and mask image; the mask images (one per masked op
-/// of the frame, by its rank).
+/// The materials made so far, by source image, blend, order, mask image and target; the mask images, by their
+/// alphas (made once, never changed: a material keeps the texture it was made with).
 #[derive(Resource, Default)]
 pub struct PostMaterials(
-    HashMap<(AssetId<Image>, bool, u16, Option<AssetId<Image>>), Handle<GsPostMaterial>>,
-    Vec<Handle<Image>>,
+    HashMap<PostKey, Handle<GsPostMaterial>>,
+    HashMap<Box<[u8; 256]>, Handle<Image>>,
+);
+
+type PostKey = (
+    AssetId<Image>,
+    bool,
+    bool,
+    u16,
+    Option<AssetId<Image>>,
+    PostBuf,
+    Option<[u16; 4]>,
 );
 
 /// A post camera: its chain, its place in the chain and the image it draws into.
@@ -148,7 +174,7 @@ fn spawn_post_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>)
         None,
     ));
     for chain in 0..2 {
-        for i in 0..POST_CAMERAS {
+        for i in 0..POST_CAMERAS[chain] {
             commands.spawn((
                 Camera2d,
                 Camera {
@@ -232,29 +258,28 @@ pub fn sync_post(
             None => camera.is_active = false,
         }
     }
-    let mut masks = 0;
     for (chain, groups) in chains.iter().enumerate() {
-        for (n, group) in groups.iter().enumerate().take(POST_CAMERAS) {
+        for (n, group) in groups.iter().enumerate().take(POST_CAMERAS[chain]) {
             for (k, op) in group.iter().enumerate() {
                 let texture = image(op.source);
-                // A masked op's alphas go into the frame's next mask image (created the first time).
+                // A masked op's alphas: their image (made the first time they are seen).
                 let mask = op.mask.as_ref().map(|alphas| {
-                    if cache.1.len() <= masks {
-                        cache.1.push(images.add(mask_image()));
-                    }
-                    let handle = cache.1[masks].clone();
-                    masks += 1;
-                    if let Some(mut image) = images.get_mut(&handle) {
-                        image.data = Some(alphas.iter().flat_map(|&a| [0, 0, 0, a]).collect());
-                    }
-                    handle
+                    cache
+                        .1
+                        .entry(alphas.clone())
+                        .or_insert_with(|| images.add(mask_image(alphas)))
+                        .clone()
                 });
                 let key = (
                     texture.id(),
                     op.blend,
+                    op.add,
                     k as u16,
                     mask.as_ref().map(Handle::id),
+                    op.target,
+                    op.region,
                 );
+                let [tw, th] = op.target.size();
                 let material = cache
                     .0
                     .entry(key)
@@ -265,11 +290,23 @@ pub fn sync_post(
                             mask: mask.clone().unwrap_or_else(|| plane.image()),
                             params: Vec4::new(
                                 if mask.is_some() { 1.0 } else { 0.0 },
-                                0.0,
-                                0.0,
+                                512.0 / tw,
+                                448.0 / th,
                                 0.0,
                             ),
+                            region: {
+                                let [sw, sh] = op.source.size();
+                                op.region.map_or(Vec4::new(0.0, 0.0, sw, sh), |r| {
+                                    Vec4::new(
+                                        f32::from(r[0]),
+                                        f32::from(r[1]),
+                                        f32::from(r[2]),
+                                        f32::from(r[3]),
+                                    )
+                                })
+                            },
                             blend: op.blend || mask.is_some(),
+                            add: op.add,
                             order: k as u16,
                         })
                     })
@@ -287,8 +324,8 @@ pub fn sync_post(
 }
 
 /// A 256 x 1 table of alphas by byte value.
-fn mask_image() -> Image {
-    Image::new_fill(
+fn mask_image(alphas: &[u8; 256]) -> Image {
+    let mut image = Image::new_fill(
         bevy::render::render_resource::Extent3d {
             width: 256,
             height: 1,
@@ -298,7 +335,9 @@ fn mask_image() -> Image {
         &[0, 0, 0, 0],
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::default(),
-    )
+    );
+    image.data = Some(alphas.iter().flat_map(|&a| [0, 0, 0, a]).collect());
+    image
 }
 
 /// The op's triangles in its target camera's space (pixels, y up, centred), texels normalised by the source.
@@ -342,6 +381,8 @@ mod tests {
             target: t,
             blend: false,
             mask: None,
+            add: false,
+            region: None,
             tris: Vec::new(),
         };
         let ops = [

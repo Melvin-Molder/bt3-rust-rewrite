@@ -15,10 +15,12 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var post_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var post_sampler: sampler;
 // A masked op (params.x 1) is blended by the alpha its mask gives the depth byte at the target pixel (the frame's
-// alpha after a depth CLUT pass), 0x80 = 1.0.
+// alpha after a depth CLUT pass), 0x80 = 1.0; params.yz scale a target pixel to the plane's.
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var plane: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var mask: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> params: vec4<f32>;
+// The source texels read (x0, y0, x1, y1): the GS's region clamp.
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var<uniform> region: vec4<f32>;
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let low = c / 12.92;
@@ -33,7 +35,9 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 }
 
 fn texel(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
-    return linear_to_srgb(textureLoad(post_texture, clamp(p, vec2<i32>(0), size - 1), 0).rgb);
+    let lo = max(vec2<i32>(region.xy), vec2<i32>(0));
+    let hi = min(vec2<i32>(region.zw), size) - 1;
+    return linear_to_srgb(textureLoad(post_texture, clamp(p, lo, hi), 0).rgb);
 }
 
 @fragment
@@ -51,7 +55,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let rgb = min(raw * in.color.rgb / 128.0, vec3<f32>(1.0));
     var alpha = in.color.a / 128.0;
     if params.x > 0.5 {
-        let byte = textureLoad(plane, vec2<i32>(in.position.xy), 0).r;
+        let byte = textureLoad(plane, vec2<i32>(in.position.xy * params.yz), 0).r;
         alpha = textureLoad(mask, vec2<i32>(i32(round(byte * 255.0)), 0), 0).a * 255.0 / 128.0;
     }
     color = vec4<f32>(srgb_to_linear(rgb), min(alpha, 1.0));

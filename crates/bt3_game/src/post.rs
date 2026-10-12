@@ -46,6 +46,10 @@ pub struct PostOp {
     /// spare byte left it in the frame (`GfxPost_DrawDepthClut` under the frame mask): the alpha of each byte value
     /// (0x80 = 1.0), read at each target pixel.
     pub mask: Option<Box<[u8; 256]>>,
+    /// Added to the target (ALPHA 0x68 with FIX 0x80: `Cs + Cd`) instead of copied or blended.
+    pub add: bool,
+    /// The texels the source is read in (`CLAMP_1` REGION_CLAMP: x0, y0, x1, y1), else the whole buffer.
+    pub region: Option<[u16; 4]>,
     pub tris: Vec<[PostVertex; 3]>,
 }
 
@@ -70,6 +74,8 @@ impl PostOp {
             target,
             blend,
             mask: None,
+            add: false,
+            region: None,
             tris: vec![[c[0], c[1], c[2]], [c[1], c[2], c[3]]],
         }
     }

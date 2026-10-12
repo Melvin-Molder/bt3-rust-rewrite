@@ -124,6 +124,8 @@ impl View {
             target: PostBuf::Frame,
             blend: true,
             mask: Some(mask),
+            add: false,
+            region: None,
             tris: Vec::new(),
         };
         if cols < 2 || rows < 2 {

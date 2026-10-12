@@ -30,6 +30,9 @@ pub struct StageResource {
     /// `StgLight.dir` of the first light record (`BtlStage_GetLightVecB`, with `BtlStage_Relocate`'s y / z sign
     /// flip): the direction `BtlObj_UpdateAll` gives the battle objects' light every frame. `None` when the
     /// stage has no light.
+    /// `StgLight.dirA` of the first light record (`BtlStage_GetLightVecA`, signs as `light_dir`): the point the sky
+    /// glare follows on screen.
+    pub light_point: Option<[f32; 3]>,
     pub light_dir: Option<[f32; 3]>,
     /// The first record of `StgDataA` +0x20 / +0x24 (`BtlStage_GetLightDir`), y and z negated as `BtlStage_Relocate`
     /// does: the chains take it as the wind, its w the strength.
@@ -297,8 +300,8 @@ impl StageResource {
             .and_then(|o| read_u32(bytes, o))
             .unwrap_or(0);
         let light_count = read_count(bytes, data_offset + 0x18, "stage light")?;
-        let light_dir = if light_count == 0 {
-            None
+        let (light_dir, light_point) = if light_count == 0 {
+            (None, None)
         } else {
             let light = resolve_relative(
                 bytes,
@@ -307,7 +310,10 @@ impl StageResource {
                 0x20,
                 "stage light",
             )?;
-            Some(read_game_position(bytes, light + 0x10)?)
+            (
+                Some(read_game_position(bytes, light + 0x10)?),
+                Some(read_game_position(bytes, light)?),
+            )
         };
 
         let wind = if read_count(bytes, data_offset + 0x20, "stage wind")? == 0 {
@@ -533,6 +539,7 @@ impl StageResource {
             alternate_starting_placements,
             places,
             light_dir,
+            light_point,
             paths,
             dust,
             water_fx,
