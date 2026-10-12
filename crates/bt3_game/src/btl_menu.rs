@@ -22,6 +22,9 @@ pub(crate) const RESULT_VERSUS: u32 = 0x2C_5408;
 /// `gPauseMenuReplayRec` / `gPauseMenuResultReplayRec`: the trees while the battle's own replay plays.
 pub(crate) const PAUSE_REPLAY: u32 = 0x2C_5560;
 pub(crate) const RESULT_REPLAY: u32 = 0x2C_56E8;
+/// `gPauseMenuReplayPlay` / `gPauseMenuResultReplayPlay`: the trees while a replay from the memory card plays.
+pub(crate) const PAUSE_REPLAY_PLAY: u32 = 0x2C_57B0;
+pub(crate) const RESULT_REPLAY_PLAY: u32 = 0x2C_5878;
 /// `gPauseMenuMode2` .. `gPauseMenuMode7`: the pause menus of battle modes 2..7 (which have no result menu).
 pub(crate) const PAUSE_MODES: [u32; 6] = [
     0x2C_5B00, 0x2C_5BF8, 0x2C_5D20, 0x2C_5E48, 0x2C_5FD0, 0x2C_6038,

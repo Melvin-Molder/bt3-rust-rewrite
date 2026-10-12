@@ -1,4 +1,5 @@
-//! `gSaveData` (src/sys/save.c): the fields the ported screens read, as `Save_SetDefaults` writes them.
+//! `gSaveData` (src/sys/save.c): the fields the ported screens read, as `Save_SetDefaults` writes them, over the
+//! whole 0x4000-byte block the memory card saves (`image`, laid out as include/sys/save.h has it).
 
 /// `SAVE_CHARA_COUNT`, `SAVE_STAGE_COUNT`, `SAVE_BGM_COUNT`.
 const CHARA_COUNT: usize = 161;
@@ -15,6 +16,38 @@ const LOCKED_STAGES: [u32; 8] = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1F, 0x20]
 
 /// `Save_ResetRules`: time, COM level, referee, two transformation switches and destructible stages.
 pub const DEFAULT_RULES: [i32; 6] = [3, 2, 2, 0, 0, 0];
+
+/// `SAVE_SIZE`.
+pub const SIZE: usize = 0x4000;
+/// `ITEM_INFO_INITIAL`: an item owned in a new save.
+const ITEM_INFO_INITIAL: i32 = 2;
+/// `SAVE_ITEM_COUNT`.
+const ITEM_COUNT: usize = 350;
+const CUSTOM_COUNT: usize = 97;
+const REC_COUNT: usize = 14;
+
+// Offsets in the block.
+const OFS_LEVEL: usize = 0xC;
+const OFS_SLOT: usize = 0x10;
+const OFS_MISSION_PAGES: usize = 0x20C;
+const OFS_RANK: usize = 0x77C;
+const OFS_CHARA_BITS: usize = 0xC10;
+const OFS_STAGE_BITS: usize = 0xC28;
+const OFS_BGM_BITS: usize = 0xC30;
+const OFS_RULE: usize = 0xC34;
+const OFS_FLAGS: usize = 0x1608;
+const OFS_KEY: usize = 0x160C;
+const OFS_KEY_EDIT: usize = 0x164C;
+const OFS_BGM_VOLUME: usize = 0x16A8;
+const OFS_SE_VOLUME: usize = 0x16AC;
+const OFS_CUSTOM: usize = 0x1808;
+const OFS_REC: usize = 0x2D40;
+const OFS_ITEM: usize = 0x2EC8;
+/// `SAVE_FLAG_DEFAULT` and `SAVE_VOLUME_DEFAULT`.
+const FLAG_DEFAULT: i32 = 7;
+const VOLUME_DEFAULT: i32 = 9;
+/// Each pad's default key assignment.
+const DEFAULT_KEYS: [i32; 8] = [2, 1, 0, 3, 4, 5, 6, 7];
 
 #[derive(Clone, Debug)]
 pub struct SaveData {
@@ -33,10 +66,24 @@ pub struct SaveData {
     /// save: items are equipped in the customisation menu) and the level.
     pub custom_items: Vec<[[u16; 8]; 3]>,
     pub custom_level: Vec<u16>,
+    /// The whole block, with what the typed fields do not cover.
+    pub image: Vec<u8>,
 }
 
 impl Default for SaveData {
+    /// `Save_SetDefaults` without the item table: no item owned.
     fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
+fn put(b: &mut [u8], at: usize, v: i32) {
+    b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+impl SaveData {
+    /// `Save_SetDefaults`: a new save; the items flagged `ITEM_INFO_INITIAL` in the item table are owned (and new).
+    pub fn new(items: &[bt3_data::chara_data::ItemInfo]) -> Self {
         let mut chara_bits = [0; 3];
         for id in (0..CHARA_COUNT).filter(|id| !LOCKED_CHARAS.contains(id)) {
             chara_bits[id / 64] |= 1 << (id % 64);
@@ -44,21 +91,106 @@ impl Default for SaveData {
         let stage_bits = (0..STAGE_COUNT)
             .filter(|i| !LOCKED_STAGES.contains(i))
             .fold(0, |bits, i| bits | 1 << i);
-        Self {
+        let mut b = vec![0u8; SIZE];
+        put(&mut b, OFS_SLOT, 3);
+        put(&mut b, OFS_SLOT + 4, 1);
+        put(&mut b, OFS_SLOT + 0xC, 1);
+        put(&mut b, OFS_LEVEL, 1);
+        for (i, item) in items.iter().take(ITEM_COUNT).enumerate() {
+            if item.flags & ITEM_INFO_INITIAL != 0 {
+                b[OFS_ITEM + i] |= 3;
+            }
+        }
+        put(&mut b, OFS_MISSION_PAGES, 5);
+        put(&mut b, OFS_RANK, 99);
+        for pad in 0..2 {
+            for (k, v) in DEFAULT_KEYS.iter().enumerate() {
+                put(&mut b, OFS_KEY + pad * 0x20 + k * 4, *v);
+                put(&mut b, OFS_KEY_EDIT + pad * 0x20 + k * 4, *v);
+            }
+        }
+        put(&mut b, OFS_FLAGS, FLAG_DEFAULT);
+        put(&mut b, OFS_BGM_VOLUME, VOLUME_DEFAULT);
+        put(&mut b, OFS_SE_VOLUME, VOLUME_DEFAULT);
+        let mut save = Self {
             chara_bits,
             stage_bits,
             bgm_bits: (1 << BGM_COUNT) - 1,
             rules: DEFAULT_RULES,
-            rec_chara: [-1; 14],
-            rec_items: [[0; 8]; 14],
-            rec_level: [0; 14],
-            custom_items: vec![[[0; 8]; 3]; 97],
-            custom_level: vec![0; 97],
+            rec_chara: [-1; REC_COUNT],
+            rec_items: [[0; 8]; REC_COUNT],
+            rec_level: [0; REC_COUNT],
+            custom_items: vec![[[0; 8]; 3]; CUSTOM_COUNT],
+            custom_level: vec![0; CUSTOM_COUNT],
+            image: b,
+        };
+        save.image = save.to_image();
+        save
+    }
+
+    /// The block with the typed fields written in and its checksum (`McCard_Checksum(.., 1)`).
+    pub fn to_image(&self) -> Vec<u8> {
+        let mut b = self.image.clone();
+        b.resize(SIZE, 0);
+        for (i, w) in self.chara_bits.iter().enumerate() {
+            let at = OFS_CHARA_BITS + i * 8;
+            b[at..at + 8].copy_from_slice(&w.to_le_bytes());
+        }
+        b[OFS_STAGE_BITS..OFS_STAGE_BITS + 8].copy_from_slice(&self.stage_bits.to_le_bytes());
+        b[OFS_BGM_BITS..OFS_BGM_BITS + 4].copy_from_slice(&self.bgm_bits.to_le_bytes());
+        for (i, r) in self.rules.iter().enumerate() {
+            put(&mut b, OFS_RULE + i * 4, *r);
+        }
+        for (i, (sets, level)) in self.custom_items.iter().zip(&self.custom_level).enumerate() {
+            let at = OFS_CUSTOM + i * 0x38;
+            for (k, id) in sets.iter().flatten().enumerate() {
+                b[at + k * 2..at + k * 2 + 2].copy_from_slice(&id.to_le_bytes());
+            }
+            b[at + 0x34..at + 0x36].copy_from_slice(&level.to_le_bytes());
+        }
+        for i in 0..REC_COUNT {
+            let at = OFS_REC + i * 0x1C;
+            for (k, id) in self.rec_items[i].iter().enumerate() {
+                b[at + k * 2..at + k * 2 + 2].copy_from_slice(&id.to_le_bytes());
+            }
+            b[at + 0x14..at + 0x16].copy_from_slice(&self.rec_level[i].to_le_bytes());
+            put(&mut b, at + 0x18, self.rec_chara[i]);
+        }
+        crate::memcard::checksum(&mut b, true);
+        b
+    }
+
+    /// The save of a block the card gave back.
+    pub fn from_image(img: &[u8]) -> Self {
+        let mut b = img.to_vec();
+        b.resize(SIZE, 0);
+        let u16_at = |at: usize| u16::from_le_bytes([b[at], b[at + 1]]);
+        let i32_at = |at: usize| i32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        Self {
+            chara_bits: std::array::from_fn(|i| u64_at(OFS_CHARA_BITS + i * 8)),
+            stage_bits: u64_at(OFS_STAGE_BITS),
+            bgm_bits: i32_at(OFS_BGM_BITS) as u32,
+            rules: std::array::from_fn(|i| i32_at(OFS_RULE + i * 4)),
+            rec_chara: std::array::from_fn(|i| i32_at(OFS_REC + i * 0x1C + 0x18)),
+            rec_items: std::array::from_fn(|i| {
+                std::array::from_fn(|k| u16_at(OFS_REC + i * 0x1C + k * 2))
+            }),
+            rec_level: std::array::from_fn(|i| u16_at(OFS_REC + i * 0x1C + 0x14)),
+            custom_items: (0..CUSTOM_COUNT)
+                .map(|i| {
+                    std::array::from_fn(|set| {
+                        std::array::from_fn(|k| u16_at(OFS_CUSTOM + i * 0x38 + (set * 8 + k) * 2))
+                    })
+                })
+                .collect(),
+            custom_level: (0..CUSTOM_COUNT)
+                .map(|i| u16_at(OFS_CUSTOM + i * 0x38 + 0x34))
+                .collect(),
+            image: b.clone(),
         }
     }
-}
 
-impl SaveData {
     /// `CHARA_UNLOCKED(id)`.
     pub fn chara_unlocked(&self, id: i32) -> bool {
         let id = id as usize;
@@ -87,5 +219,37 @@ mod tests {
         assert!(!save.chara_unlocked(0xA1));
         assert!(save.stage_unlocked(0) && !save.stage_unlocked(0x11) && !save.stage_unlocked(0x23));
         assert!(save.bgm_unlocked(19) && !save.bgm_unlocked(20));
+    }
+
+    /// The block as the card stores it: the defaults at their offsets, a checksum that holds, and the fields
+    /// back from it.
+    #[test]
+    fn the_block_round_trips_through_its_image() {
+        let items = [
+            bt3_data::chara_data::ItemInfo::default(),
+            bt3_data::chara_data::ItemInfo {
+                flags: 2,
+                ..Default::default()
+            },
+        ];
+        let mut save = SaveData::new(&items);
+        save.rules[0] = 4;
+        save.custom_items[5][1][2] = 0x33;
+        save.rec_chara[3] = 12;
+        let mut img = save.to_image();
+        assert_eq!(img.len(), super::SIZE);
+        assert!(!crate::memcard::checksum(&mut img, false));
+        let word = |at: usize| i32::from_le_bytes(img[at..at + 4].try_into().unwrap());
+        assert_eq!(
+            (word(0x1608), word(0x16A8), word(0x77C), word(0xC34)),
+            (7, 9, 99, 4)
+        );
+        assert_eq!((img[0x2EC8], img[0x2EC9]), (0, 3));
+        let back = SaveData::from_image(&img);
+        assert_eq!(back.rules, save.rules);
+        assert_eq!(back.custom_items[5][1][2], 0x33);
+        assert_eq!(back.rec_chara, save.rec_chara);
+        assert_eq!(back.chara_bits, save.chara_bits);
+        assert_eq!(back.to_image(), img);
     }
 }

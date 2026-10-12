@@ -242,6 +242,9 @@ pub struct BattleAssets {
     /// The pause and result menus while the battle's replay plays (`gPauseMenuReplayRec`,
     /// `gPauseMenuResultReplayRec`).
     pub(crate) replay_menus: Option<(Tree, Tree)>,
+    /// The trees while a replay loaded from the memory card plays (`gPauseMenuReplayPlay`,
+    /// `gPauseMenuResultReplayPlay`).
+    pub(crate) replay_play_menus: Option<(Tree, Tree)>,
     pub(crate) menu_sheet: HudSheet,
     pub(crate) menu_texts: MenuTexts,
 }
@@ -432,6 +435,14 @@ pub fn load(
         }
         _ => None,
     };
+    let replay_play_menus = if setup.mode == 0 {
+        Some((
+            Tree::read(elf, crate::btl_menu::PAUSE_REPLAY_PLAY).map_err(error)?,
+            Tree::read(elf, crate::btl_menu::RESULT_REPLAY_PLAY).map_err(error)?,
+        ))
+    } else {
+        None
+    };
     let replay_menus = if setup.mode == 0 {
         Some((
             Tree::read(elf, crate::btl_menu::PAUSE_REPLAY).map_err(error)?,
@@ -558,6 +569,7 @@ pub fn load(
         bgm: setup.bgm,
         menus,
         replay_menus,
+        replay_play_menus,
         menu_sheet,
         menu_texts,
     };
@@ -2344,6 +2356,38 @@ impl Battle {
         self.ai.reset_one(&mut ctx, side, level, kind);
     }
 
+    /// `PauseMenu_GetMenu`'s trees in versus: the plain ones, the replay's while it plays, or those of a replay
+    /// from the memory card.
+    fn select_menu_trees(&mut self) {
+        let trees = if !self.replay.active {
+            self.assets.menus.clone()
+        } else if !self.replay.loaded {
+            self.assets.replay_menus.clone()
+        } else {
+            self.assets.replay_play_menus.clone()
+        };
+        if let (Some(menu), Some((pause, result))) = (&mut self.menu, trees) {
+            menu.trees = [pause, result];
+        }
+    }
+
+    /// `BattleReplay_Load` before the battle starts: the replay plays from the first round (`BtlGame_Reset`'s
+    /// latch and the menus of a replay from the memory card).
+    pub fn play_replay(&mut self, replay: crate::btl_replay::Replay) {
+        self.replay = replay;
+        self.replay.rewind();
+        self.hud.set_replay(self.replay.active);
+        self.select_menu_trees();
+        if let Some(menu) = &mut self.menu {
+            menu.reset();
+        }
+    }
+
+    /// The battle's replay and whether it came from the memory card.
+    pub fn replay(&self) -> &crate::btl_replay::Replay {
+        &self.replay
+    }
+
     /// `BtlAiMgr_SetLevel(side, level)` from the CPU level menu.
     pub(crate) fn set_ai_level(&mut self, side: usize, level: i32) {
         let data = [
@@ -2464,15 +2508,7 @@ impl Battle {
         objs.unwrap_or_else(|e| e.into_inner())
             .reset_stage(&mut self.vu0);
         self.amb.start(self.assets.stage_id);
-        // PauseMenu_GetMenu: the replay's trees while it plays.
-        let trees = if self.replay.active {
-            self.assets.replay_menus.clone()
-        } else {
-            self.assets.menus.clone()
-        };
-        if let (Some(menu), Some((pause, result))) = (&mut self.menu, trees) {
-            menu.trees = [pause, result];
-        }
+        self.select_menu_trees();
         if let Some(menu) = &mut self.menu {
             menu.reset();
         }
@@ -9633,6 +9669,77 @@ mod tests {
         }
         assert!(battle.replay.ran_out());
         assert_eq!(battle.seq.reason, crate::btl_replay::REASON_END);
+    }
+
+    /// A replay saved to the memory card and loaded back (`BattleReplay_Load`): a new battle plays the same fight
+    /// from it, with the menus of a loaded replay (continue, quit; the result menu's "watch again"), pad 2's
+    /// START ignored.
+    #[test]
+    fn real_loaded_replays_play_the_recorded_fight() {
+        use crate::btl_input::pad::{RIGHT, START};
+        let setup = BattleSetup::default();
+        let Some(mut battle) = fight_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let walk = [
+            PadState {
+                held: RIGHT,
+                ..PadState::default()
+            },
+            PadState::default(),
+        ];
+        for _ in 0..60 {
+            battle.run_frame(false, walk, 0, &mut libc, &mut random, None, false);
+        }
+        let recorded = battle.replay.len(0);
+        let walked = battle.roster.chars[0].pose.pos;
+        let mut finished = setup.clone();
+        finished.finish();
+        let block = battle.replay.to_block(&finished);
+        let (loaded_setup, loaded) = crate::btl_replay::Replay::from_block(&block).unwrap();
+        assert_eq!(loaded_setup, finished);
+
+        let mut battle = real_battle(&loaded_setup).unwrap();
+        battle.play_replay(loaded);
+        let menu = battle.menu.as_ref().unwrap();
+        assert_eq!(menu.trees[0].item_ids(), [1, 0x16, 0x1A, 1, 0, 1]);
+        assert_eq!(menu.trees[1].item_ids(), [1, 0x19, 0x1A, 1, 0, 1]);
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let mut frames = 0;
+        let mut tried_pad2 = false;
+        while battle.replay.pos(0) < recorded && frames < 1500 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let held = if skip && frames % 2 == 0 { START } else { 0 };
+            let start = held & START != 0 && battle.prev_held[0] & START == 0;
+            let mut pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            // Pad 2 presses START once in the fight: nothing opens.
+            if battle.seq.state == SeqState::Fight && !tried_pad2 {
+                pads[1].held = START;
+                tried_pad2 = true;
+            }
+            battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
+            assert!(!battle.seq.pause_menu);
+            frames += 1;
+        }
+        assert!(tried_pad2);
+        assert_eq!(battle.replay.pos(0), recorded);
+        assert!(battle.hud.is_replay());
+        let replayed = battle.roster.chars[0].pose.pos;
+        for k in 0..3 {
+            assert!(
+                (walked[k] - replayed[k]).abs() < 1e-3,
+                "{walked:?} {replayed:?}"
+            );
+        }
     }
 
     #[test]

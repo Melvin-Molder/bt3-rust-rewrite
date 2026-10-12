@@ -374,6 +374,12 @@ impl Dialog {
         self.play_cursor_plate("fl_on_start");
     }
 
+    /// The choice under the cursor (0 the first).
+    #[cfg(test)]
+    pub fn cursor(&self) -> i32 {
+        self.cursor
+    }
+
     pub fn is_closed(&self) -> bool {
         self.flags & FLAG_CLOSED != 0
     }

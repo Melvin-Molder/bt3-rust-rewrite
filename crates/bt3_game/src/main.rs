@@ -1,6 +1,7 @@
 mod anim;
 mod battle;
 mod battle_seq;
+mod boot_card;
 mod btl_act;
 mod btl_ai;
 mod btl_blast;
@@ -32,6 +33,7 @@ mod btl_vib;
 mod char_select;
 mod chr_cam;
 mod clip;
+mod dc_menu;
 mod dialog;
 mod draw;
 mod duel_menu;
@@ -81,12 +83,14 @@ mod loading;
 mod logo;
 mod main_menu;
 mod mcflow;
+mod memcard;
 mod menu_res;
 mod model_draw;
 mod movie;
 mod obj_shadow;
 mod post;
 mod post_draw;
+mod replay_menu;
 mod rng;
 mod save;
 mod scr_warp;
@@ -158,6 +162,12 @@ const BOOT_FILE_ID: u32 = 5;
 const VBLANK_SECONDS: f32 = 1001.0 / 60000.0;
 
 enum Scene {
+    /// `BootCard_Run`: the memory card check before the logos.
+    BootCard(Box<boot_card::BootCardScreen>),
+    /// `Dc_Main` mode 53: the Data Center's top menu.
+    DcMenu(Box<dc_menu::DcMenuScreen>),
+    /// `Dc_Main` mode 56: the replay list.
+    ReplayMenu(Box<replay_menu::ReplayMenuScreen>),
     Logos(LogoSequence),
     Movie(MoviePlayer, VideoStream),
     Title(Box<TitleScreen>),
@@ -181,11 +191,14 @@ struct BattleLoad {
 }
 
 impl Scene {
-    /// `Logo_Show`, `Title_Run` and `MainMenu_Run` end their frames with `Gfx_EndFrame(1)`; `Movie_Run` and
+    /// `BootCard_Run`, `Logo_Show`, `Title_Run` and `MainMenu_Run` end their frames with `Gfx_EndFrame(1)`; `Movie_Run` and
     /// `Load_RunBlocking` use 2.
     fn frame_seconds(&self) -> f32 {
         match self {
-            Scene::Logos(_)
+            Scene::BootCard(_)
+            | Scene::DcMenu(_)
+            | Scene::ReplayMenu(_)
+            | Scene::Logos(_)
             | Scene::Title(_)
             | Scene::MainMenu(_)
             | Scene::DuelMenu(_)
@@ -294,6 +307,21 @@ struct Game {
     /// Portraits and stage pictures by file: their first texture.
     pictures: HashMap<u32, usize>,
     save: save::SaveData,
+    /// The memory card (`gMcCardPort` over the emulated libmc) and the parts of `gProgress` its flows use.
+    card: memcard::McCard,
+    progress: mcflow::Progress,
+    /// `McFlow_Init`'s resources: common file base + 0x1D, unpacked (the save icons).
+    card_res: Option<Vec<u8>>,
+    /// The Data Center's screens (archive 8, sections 1 and 4) and its fields of `gProgress`.
+    dc_menu: Option<dc_menu::DcMenuData>,
+    replay_menu: Option<replay_menu::ReplayMenuData>,
+    dc: dc_menu::DcProgress,
+    /// The last battle's setup and replay (`gBattleReplay`), which the replay list saves.
+    last_battle: Option<(BattleSetup, btl_replay::Replay)>,
+    /// A replay loaded from the memory card for the battle being set up; the battle plays it.
+    pending_replay: Option<btl_replay::Replay>,
+    /// `gProgress->mode` is the replay list's (56): the battle came from it and goes back to it.
+    in_replay_list: bool,
     /// Menu music by file, once decoded, and the file being decoded.
     bgm_sources: HashMap<u32, Handle<AudioSource>>,
     pending_bgm: Option<(u32, Decoding)>,
@@ -348,6 +376,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut skip_to_menu = false;
     let mut skip_to_battle = false;
     let mut battle_mode = (0, 0);
+    let mut memcard_dir = PathBuf::from("memcard");
     let mut battle_split = false;
     let mut log_fps = false;
     let mut arguments = std::env::args_os().skip(1);
@@ -371,6 +400,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("--mode requires a battle mode of 0 or 2 to 7")?;
             skip_to_title = true;
             skip_to_battle = true;
+        } else if argument == "--memcard" {
+            memcard_dir = PathBuf::from(arguments.next().ok_or("--memcard requires a folder")?);
         } else if argument == "--split" {
             battle_split = true;
             skip_to_title = true;
@@ -397,6 +428,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer = SystemTime::now().duration_since(UNIX_EPOCH)?.subsec_nanos();
     let (game_random, libc_random) = rng::init_from_timer(timer);
     let mut image = Iso9660::open(&image_path)?;
+    // Save_Init's defaults need the item table (common file 4); McFlow_Init's icons are common file base + 0x1D.
+    let chr_table = read_file(&mut image, 4)
+        .map(|file| bt3_data::chara_data::ChrTable::parse(&file, 0xA1))
+        .unwrap_or_default();
+    let new_save = save::SaveData::new(&chr_table.items);
+    let card_res = read_file(&mut image, duel_menu::ARCHIVE_FILE_ID + 0x1D)
+        .ok()
+        .and_then(|pack| bpe::decode(&pack).ok());
     let (scene, mut textures, title, random, libc_random) = match forced_type {
         Some(_) => {
             let screen = LoadingScreen::new(game_random, libc_random, None, forced_type);
@@ -439,7 +478,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         textures.len() - 1
     });
     let font = load_fonts(&mut image, &mut textures)?;
-    let samplers = vec![Sampling::Nearest; textures.len()];
+    // BootCard_Init: the dialog of section 2 of menu archive 0 (its section 1), its textures filtered.
+    let mut linear = Vec::new();
+    let boot_dialog = if boot {
+        match load_boot_dialog(&mut image) {
+            Ok(assets) => {
+                let indices = assets
+                    .textures
+                    .into_iter()
+                    .map(|texture| {
+                        texture.map(|texture| {
+                            textures.push(texture.clone());
+                            textures.push(texture);
+                            linear.push(textures.len() - 2);
+                            textures.len() - 2
+                        })
+                    })
+                    .collect();
+                dialog::Dialog::new(&assets.fod, assets.titles, indices, None, 0).ok()
+            }
+            Err(error) => {
+                error!("cannot load the memory card check: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut samplers = vec![Sampling::Nearest; textures.len()];
+    for i in linear {
+        samplers[i] = Sampling::Linear;
+        samplers[i + 1] = Sampling::LinearRepeat;
+    }
+    let scene = match (scene, boot_dialog) {
+        (Scene::Logos(_), Some(dialog)) => Scene::BootCard(Box::new(
+            boot_card::BootCardScreen::new(dialog, card_res.as_deref()),
+        )),
+        (scene, _) => scene,
+    };
     let soundtrack = boot.then(|| {
         let path = image_path.clone();
         std::thread::spawn(move || {
@@ -521,9 +597,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             duel: DuelProgress::default(),
             char_select: None,
             char_progress: CharSelProgress::default(),
-            chr_table: Default::default(),
+            chr_table,
             pictures: HashMap::new(),
-            save: save::SaveData::default(),
+            save: new_save,
+            card: memcard::McCard::new(memcard::Libmc::new(Some(memcard_dir))),
+            progress: mcflow::Progress::default(),
+            card_res,
+            dc_menu: None,
+            replay_menu: None,
+            dc: dc_menu::DcProgress::default(),
+            last_battle: None,
+            pending_replay: None,
+            in_replay_list: false,
             bgm_sources: HashMap::new(),
             pending_bgm: None,
             save_loaded: false,
@@ -591,6 +676,15 @@ fn load_screen_textures(
 }
 
 /// `FirstRun_Main`: section 3 of archive 0 is BPE-packed; its sections hold the six pictures.
+/// `BootCard_Init`'s dialog: section 1 of the unpacked section 2 of menu archive 0.
+fn load_boot_dialog(
+    image: &mut Iso9660,
+) -> Result<dialog::DialogAssets, Box<dyn std::error::Error>> {
+    let archive = read_file(image, LOGO_ARCHIVE_FILE_ID)?;
+    let res = bpe::decode(pack_section(&archive, boot_card::ARCHIVE_SECTION)?)?;
+    dialog::DialogAssets::parse(pack_section(&res, boot_card::DIALOG_SECTION)?)
+}
+
 fn load_logo_textures(image: &mut Iso9660) -> Result<Vec<RgbaTexture>, Box<dyn std::error::Error>> {
     let archive = read_file(image, LOGO_ARCHIVE_FILE_ID)?;
     let pictures = bpe::decode(pack_section(&archive, 3)?)?;
@@ -828,6 +922,11 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 game.pending_bgm = None;
                 play_bgm(game, commands, file_id);
             }
+            TitleSound::VoiceFadeOutStep => {
+                if let Some(player) = &mut game.voice[0] {
+                    player.level = sound::fade_out_step(player.level);
+                }
+            }
             TitleSound::BgmFadeOutStep => {
                 if let Some(player) = &mut game.bgm {
                     player.level = sound::fade_out_step(player.level);
@@ -1023,6 +1122,93 @@ fn run_frames(
             1
         };
         match &mut game.scene {
+            Scene::BootCard(screen) => {
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
+                let frame = screen.run_frame(held, pressed, &mut game.font, &mut mc);
+                let done = screen.is_done();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    game.scene = Scene::Logos(LogoSequence::new());
+                }
+            }
+            Scene::DcMenu(screen) => {
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.dc,
+                    &mut game.random,
+                    &mut game.font,
+                    &mut mc,
+                );
+                let result = screen.result();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(next) = result {
+                    stop_all(game, &mut commands);
+                    match next {
+                        56 => start_replay_menu(game, &mut commands),
+                        0 => {
+                            game.dc.visits += 1;
+                            start_main_menu(game, &mut commands, &mut audio);
+                        }
+                        mode => {
+                            // Dc_Main runs the password screen and the list (not ported), then the top menu.
+                            info!("progress mode {mode} is not ported yet");
+                            start_dc_menu(game, &mut commands);
+                        }
+                    }
+                }
+            }
+            Scene::ReplayMenu(screen) => {
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
+                let frame = screen.run_frame(held, pressed, &mut game.font, &mut mc);
+                let result = screen.result();
+                let cursor = screen.cursor();
+                let loaded = result.and_then(|_| screen.take_loaded());
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    game.dc.replay_cursor = cursor;
+                    stop_all(game, &mut commands);
+                    match (result, loaded) {
+                        (replay_menu::ReplayMenuResult::Play, Some((setup, replay))) => {
+                            // Dc_Main leaves for the battle with the loaded replay.
+                            game.dc.visits += 1;
+                            game.in_replay_list = true;
+                            game.pending_replay = Some(replay);
+                            start_battle(game, setup);
+                        }
+                        (replay_menu::ReplayMenuResult::Select(39), _) => {
+                            game.dc.visits += 1;
+                            start_char_select(game, &mut commands);
+                        }
+                        (replay_menu::ReplayMenuResult::Select(mode), _) => {
+                            game.dc.visits += 1;
+                            info!("progress mode {mode} (team select) is not ported yet");
+                            game.scene = Scene::Black;
+                        }
+                        _ => start_dc_menu(game, &mut commands),
+                    }
+                }
+            }
             Scene::Logos(logos) => {
                 game.quads = into_screen(logos.run_frame(cross || start));
                 if logos.is_finished() {
@@ -1042,12 +1228,19 @@ fn run_frames(
                 }
             }
             Scene::Title(screen) => {
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
                 let frame = screen.run_frame(
                     held,
                     pressed,
                     &mut game.demo,
                     &mut game.random,
                     &mut game.font,
+                    &mut mc,
                 );
                 let result = screen.result();
                 // The setup Title_Idle made when the screen began to leave.
@@ -1087,6 +1280,12 @@ fn run_frames(
                     match result {
                         MainMenuResult::Title => start_title(game, &mut commands, &mut audio),
                         MainMenuResult::Mode(38) => start_duel_menu(game, &mut commands),
+                        MainMenuResult::Mode(53) => {
+                            // Dc_Main: the top menu's and the list's cursors start over.
+                            game.dc.cursor = -1;
+                            game.dc.replay_cursor = 0;
+                            start_dc_menu(game, &mut commands);
+                        }
                         MainMenuResult::Mode(mode) => {
                             info!("progress mode {mode} is not ported yet");
                             game.scene = Scene::Black;
@@ -1251,6 +1450,10 @@ fn leave_battle(
     stop_all(game, commands);
     if let Scene::Battle(battle) = &game.scene {
         game.vu0_random = battle.vu0;
+        // gBattleReplay: what the replay list saves.
+        if let Some((_, replay)) = &mut game.last_battle {
+            *replay = battle.replay().clone();
+        }
     }
     // BtlLoad_Term: the battle's sample banks.
     for mask in [4, 8, 0x10, 0x20] {
@@ -1266,7 +1469,17 @@ fn leave_battle(
     game.hud_layer = None;
     game.xfade_alpha = 0;
     game.hud_clamp_from = usize::MAX;
-    if std::mem::take(&mut game.in_demo) {
+    if reason & 0x1000 != 0 {
+        // Progress_Main: "Save Replay Data" goes to the replay list in its save mode.
+        game.progress.replay_flags |= 1;
+        game.dc.cursor = -1;
+        game.dc.replay_cursor = 0;
+        start_replay_menu(game, commands);
+    } else if std::mem::take(&mut game.in_replay_list) && reason & (8 | 0x10 | 0x80 | 0x800) == 0 {
+        // A replay from the list goes back to it (the progress mode is still 56).
+        game.in_replay_list = true;
+        start_replay_menu(game, commands);
+    } else if std::mem::take(&mut game.in_demo) {
         // Progress_Main with the title's mode: the result's reasons count only for an abort (winner bit 8), which
         // the attract battle's START gives with reason 0.
         start_title(game, commands, audio);
@@ -1333,6 +1546,10 @@ fn quick_battle_setup(game: &mut Game) -> Result<BattleSetup, Box<dyn std::error
 
 fn start_battle(game: &mut Game, setup: BattleSetup) {
     info!("battle setup {setup:?}");
+    // BattleSetup_FinishEx copies the finished setup into the replay block.
+    let mut finished = setup.clone();
+    finished.finish();
+    game.last_battle = Some((finished, btl_replay::Replay::default()));
     let game_random = std::mem::replace(&mut game.random, GameRandom::from_key(&[0]));
     let libc_random = std::mem::replace(&mut game.libc_random, LibcRandom::new(0));
     let screen = LoadingScreen::new(game_random, libc_random, game.last_loading_type, None);
@@ -1409,6 +1626,9 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     game.hud_textures = assets.hud_textures.clone();
     game.hud_clamp_from = assets.menu_sheet.base;
     let mut battle = battle::Battle::new(assets);
+    if let Some(replay) = game.pending_replay.take() {
+        battle.play_replay(replay);
+    }
     battle.vu0 = game.vu0_random;
     battle.chara_bits = game.save.chara_bits;
     battle.assets.chara_bits = game.save.chara_bits;
@@ -1583,6 +1803,7 @@ fn start_title(game: &mut Game, commands: &mut Commands, audio: &mut Assets<Audi
                     dialog_fod,
                     dialog_titles,
                     layout,
+                    card_res: game.card_res.clone(),
                 });
             }
             Err(error) => {
@@ -1593,7 +1814,9 @@ fn start_title(game: &mut Game, commands: &mut Commands, audio: &mut Assets<Audi
         }
     }
     let data = game.title.as_ref().expect("title assets are loaded");
-    let screen = match TitleScreen::new(data, game.save_loaded, &mut game.random) {
+    // gProgress->flags & MPROG_SAVE_LOADED: a save was loaded at boot.
+    let loaded = game.save_loaded || game.progress.flags & mcflow::PROGRESS_SAVE_LOADED != 0;
+    let screen = match TitleScreen::new(data, loaded, &mut game.random) {
         Ok(screen) => screen,
         Err(error) => {
             error!("cannot start the title movie: {error}");
@@ -1715,6 +1938,103 @@ fn start_duel_menu(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the duel menu: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `gMenuArc8` (file `gProgress->baseFile + 0xB`), unpacked section `section`.
+fn load_dc_section(iso_path: &Path, section: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut image = Iso9660::open(iso_path)?;
+    let archive = read_file(&mut image, dc_menu::ARCHIVE_FILE_ID)?;
+    Ok(bpe::decode(pack_section(&archive, section)?)?)
+}
+
+/// `Dc_Main` mode 53: `Bgm_Play(DC_BGM)`, then `DcMenu_Run(1)`.
+fn start_dc_menu(game: &mut Game, commands: &mut Commands) {
+    if game.dc_menu.is_none() {
+        match load_dc_section(&game.iso_path, dc_menu::ARCHIVE_SECTION)
+            .and_then(|res| dc_menu::DcMenuAssets::parse(&res))
+        {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout = dc_menu::DcMenuLayout::new(background, dialog, |key| firsts[&key]);
+                game.dc_menu = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the Data Center: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .dc_menu
+        .as_ref()
+        .expect("Data Center assets are loaded");
+    match dc_menu::DcMenuScreen::new(data, game.card_res.as_deref()) {
+        Ok(screen) => {
+            play_bgm(game, commands, dc_menu::BGM_FILE_ID);
+            game.scene = Scene::DcMenu(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the Data Center: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Dc_Main` mode 56: `Bgm_Play(DC_BGM)`, then `ReplayMenu_Run(4)` (saving the last battle's replay when the
+/// progress block's replay flag asks for it).
+fn start_replay_menu(game: &mut Game, commands: &mut Commands) {
+    if game.replay_menu.is_none() {
+        match load_dc_section(&game.iso_path, replay_menu::ARCHIVE_SECTION)
+            .and_then(|res| replay_menu::ReplayMenuAssets::parse(&res))
+        {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout =
+                    replay_menu::ReplayMenuLayout::new(background, dialog, |key| firsts[&key]);
+                game.replay_menu = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the replay list: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .replay_menu
+        .as_ref()
+        .expect("replay list assets are loaded");
+    let rep = game.last_battle.as_ref().map(|(s, r)| (s, r));
+    let mut mc = mcflow::McEnv {
+        card: &mut game.card,
+        save: &mut game.save,
+        progress: &mut game.progress,
+        items: &game.chr_table.items,
+    };
+    match replay_menu::ReplayMenuScreen::new(
+        data,
+        game.card_res.as_deref(),
+        rep,
+        game.dc.replay_cursor,
+        game.duel.battle_type,
+        &mut mc,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, dc_menu::BGM_FILE_ID);
+            game.scene = Scene::ReplayMenu(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the replay list: {error}");
             game.scene = Scene::Black;
         }
     }

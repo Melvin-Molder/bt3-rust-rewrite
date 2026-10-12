@@ -116,6 +116,10 @@
 !/crates/bt3_game/src/btl_vib.rs
 !/crates/bt3_game/src/btl_replay.rs
 !/crates/bt3_game/src/clip.rs
+!/crates/bt3_game/src/memcard.rs
+!/crates/bt3_game/src/boot_card.rs
+!/crates/bt3_game/src/dc_menu.rs
+!/crates/bt3_game/src/replay_menu.rs
 !/crates/bt3_game/src/model_draw.rs
 !/crates/bt3_game/src/gs_model.wgsl
 !/crates/bt3_game/src/gs_effect.wgsl

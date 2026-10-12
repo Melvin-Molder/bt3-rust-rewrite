@@ -142,6 +142,8 @@ pub struct TitleData {
     pub dialog_fod: Vec<u8>,
     pub dialog_titles: Vec<u8>,
     pub layout: TextureLayout,
+    /// `McFlow_Init`'s card resources (common file base + 0x1D, unpacked): the save icons.
+    pub card_res: Option<Vec<u8>>,
 }
 
 /// `Pad_CalcRepeat` with `gPad[0]`'s timer and last buttons.
@@ -202,6 +204,8 @@ pub enum TitleSound {
     BgmFadeOutStep,
     /// `Voice_FadeOutStep(0)` and `Bgm_FadeOutStep()`.
     FadeOutStep,
+    /// `Voice_FadeOutStep(0)` alone.
+    VoiceFadeOutStep,
     /// `Snd_PlaySe(bank, id)`.
     Effect(u32, u32),
     /// `Snd_PlaySeEx(mask, id, volume, pan, pitch)`, the sound known by `handle`.
@@ -276,8 +280,6 @@ pub struct TitleScreen {
     dialog: Dialog,
     mcflow: McFlow,
     mc_state: i32,
-    /// `gProgress->flags & MPROG_SAVE_LOADED`.
-    save_loaded: bool,
 }
 
 impl TitleScreen {
@@ -289,7 +291,7 @@ impl TitleScreen {
     ) -> Result<Self, Box<dyn Error>> {
         let mut flash = Flash::create(&data.fod)?;
         flash.play(1);
-        // Dialog_Init(MPACK_AT(res, 12), NULL, 0); McFlow_Init only loads the save icons.
+        // Dialog_Init(MPACK_AT(res, 12), NULL, 0); McFlow_Init (its replay block is not saved from here).
         let dialog = Dialog::new(
             &data.dialog_fod,
             data.dialog_titles.clone(),
@@ -316,9 +318,8 @@ impl TitleScreen {
             cloud: [0.0; 2],
             pad: PadRepeat::default(),
             dialog,
-            mcflow: McFlow::default(),
+            mcflow: McFlow::new(data.card_res.as_deref(), None),
             mc_state: 0,
-            save_loaded,
         })
     }
 
@@ -342,6 +343,7 @@ impl TitleScreen {
         demo: &mut crate::char_select::DemoProgress,
         random: &mut GameRandom,
         font: &mut Font,
+        mc: &mut mcflow::McEnv,
     ) -> TitleFrame {
         let mut frame = TitleFrame {
             quads: Vec::new(),
@@ -385,24 +387,26 @@ impl TitleScreen {
                 }
                 self.draw(&mut frame.quads);
                 let mut effects = Vec::new();
-                let (state, done) = self.mcflow.update(
-                    &mut self.dialog,
-                    font,
-                    self.save_loaded,
-                    Pad { pressed, repeat },
-                    &mut effects,
-                    &mut frame.quads,
-                );
+                let mut io = mcflow::McIo {
+                    dialog: &mut self.dialog,
+                    pad: Pad { pressed, repeat },
+                    sounds: &mut effects,
+                };
+                let (state, events) = self.mcflow.update(mc, &mut io, font, &mut frame.quads);
                 self.mc_state = state;
-                match done {
-                    // Title_OnCardDone.
-                    Some(mcflow::Done::Done) => {
-                        self.result = TitleResult::MainMenu;
-                        self.leave();
+                for event in events {
+                    match event {
+                        // Title_OnCardDone.
+                        mcflow::Event::Done(mcflow::Done::Done) => {
+                            self.result = TitleResult::MainMenu;
+                            self.leave();
+                        }
+                        // Title_OnCardCancel.
+                        mcflow::Event::Done(mcflow::Done::NotDone) => {
+                            self.clip_goto(2, "fl_on_start")
+                        }
+                        _ => {}
                     }
-                    // Title_OnCardCancel.
-                    Some(mcflow::Done::NotDone) => self.clip_goto(2, "fl_on_start"),
-                    _ => {}
                 }
                 frame.sounds.extend(
                     effects
@@ -424,7 +428,7 @@ impl TitleScreen {
                         self.fade = ColorFade::start_out(true, FADE_FRAMES);
                     }
                 } else if self.mc_state == 0 {
-                    self.input(pressed, repeat, demo, random, &mut frame.sounds);
+                    self.input(pressed, repeat, demo, random, &mut frame.sounds, mc);
                 }
             }
             Phase::Done(_) => {}
@@ -477,6 +481,7 @@ impl TitleScreen {
         demo: &mut crate::char_select::DemoProgress,
         random: &mut GameRandom,
         sounds: &mut Vec<TitleSound>,
+        mc: &mut mcflow::McEnv,
     ) {
         if self.state == 0 && pressed & PAD_START != 0 {
             self.flash.goto_label("fl_skip", true);
@@ -540,7 +545,7 @@ impl TitleScreen {
                     self.clip_goto(2, "fl_ok");
                     if self.cursor == 0 {
                         // McFlow_Start(3) with Title_OnCardDone / Title_OnCardCancel.
-                        self.mcflow.start(mcflow::MODE_NEW_SAVE);
+                        self.mcflow.start(mcflow::MODE_NEW_SAVE, mc);
                     } else {
                         self.result = TitleResult::MainMenu;
                         self.leave();
@@ -678,7 +683,18 @@ mod tests {
             flash,
             dialog,
         };
+        // An empty card slot: the new game's flow takes its "no memory card" path.
+        let mut card = crate::memcard::McCard::new(crate::memcard::Libmc::new(None));
+        let mut save = crate::save::SaveData::default();
+        let mut progress = crate::mcflow::Progress::default();
+        let mut mc = crate::mcflow::McEnv {
+            card: &mut card,
+            save: &mut save,
+            progress: &mut progress,
+            items: &[],
+        };
         let data = TitleData {
+            card_res: None,
             fod: assets.fod.clone(),
             dialog_fod: assets.dialog.fod.clone(),
             dialog_titles: assets.dialog.titles.clone(),
@@ -690,13 +706,13 @@ mod tests {
         let mut demo = crate::char_select::DemoProgress::default();
         let mut frames = 0;
         while matches!(title.phase, Phase::Logo { .. }) {
-            title.run_frame(0, 0, &mut demo, &mut random, &mut font);
+            title.run_frame(0, 0, &mut demo, &mut random, &mut font, &mut mc);
             frames += 1;
         }
         println!("logo loop: {frames} frames");
         let mut pad_at = None;
         for frame in 0..1000 {
-            let out = title.run_frame(0, 0, &mut demo, &mut random, &mut font);
+            let out = title.run_frame(0, 0, &mut demo, &mut random, &mut font, &mut mc);
             if frame % 50 == 0 || (pad_at.is_none() && title.started) {
                 let xs: Vec<f32> = out
                     .quads
@@ -716,13 +732,20 @@ mod tests {
             }
         }
         assert!(pad_at.is_some(), "the movie never enabled the pad");
-        let out = title.run_frame(PAD_START, PAD_START, &mut demo, &mut random, &mut font);
+        let out = title.run_frame(
+            PAD_START,
+            PAD_START,
+            &mut demo,
+            &mut random,
+            &mut font,
+            &mut mc,
+        );
         assert_eq!(title.state, 2);
         println!("after start: {:?}", out.sounds);
         for _ in 0..120 {
-            title.run_frame(0, 0, &mut demo, &mut random, &mut font);
+            title.run_frame(0, 0, &mut demo, &mut random, &mut font, &mut mc);
         }
-        let out = title.run_frame(0, 0, &mut demo, &mut random, &mut font);
+        let out = title.run_frame(0, 0, &mut demo, &mut random, &mut font, &mut mc);
         println!("menu open: {} quads", out.quads.len());
         for q in out
             .quads
@@ -739,7 +762,7 @@ mod tests {
         macro_rules! step {
             ($bits:expr) => {
                 title
-                    .run_frame($bits, $bits, &mut demo, &mut random, &mut font)
+                    .run_frame($bits, $bits, &mut demo, &mut random, &mut font, &mut mc)
                     .sounds
             };
         }
@@ -790,7 +813,7 @@ mod tests {
             let mut title = TitleScreen::new(&data, false, &mut random).unwrap();
             let mut result = None;
             for _ in 0..4000 {
-                title.run_frame(0, 0, &mut demo, &mut random, &mut font);
+                title.run_frame(0, 0, &mut demo, &mut random, &mut font, &mut mc);
                 result = title.result();
                 if result.is_some() {
                     break;

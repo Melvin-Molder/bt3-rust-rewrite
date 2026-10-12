@@ -722,6 +722,10 @@ impl Battle {
         let count = if self.assets.screen_mode == 1 { 2 } else { 1 };
         for i in 0..count {
             if input.menu[i].start {
+                // BtlSeqFight_Update: while a replay from the memory card plays, pad 2's START does nothing.
+                if self.replay.active && self.replay.loaded && i == 1 {
+                    return false;
+                }
                 self.seq.result_pad = i;
                 return true;
             }
