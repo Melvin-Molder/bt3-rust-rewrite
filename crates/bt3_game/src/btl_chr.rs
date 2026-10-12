@@ -451,6 +451,8 @@ pub(crate) struct SideData<'a> {
     pub charge_assets: Option<&'a crate::eft::SetAssets>,
     /// The technique slots' effect packs (`BtlCharApi_GetPlayerEffectPack`).
     pub tech_packs: [Option<&'a crate::btl_tech_fx::TechPack>; 5],
+    /// The partner object's files while one is attached (`BtlRes` slot of `FxPartner.res`).
+    pub partner: Option<&'a crate::btl_partner::PartnerModel>,
     /// The costume of the side's character (`BtlMember_GetActive()->costume`).
     pub costume: i32,
     /// The side's character (`BtlMember_GetActive()->chara`).
@@ -632,6 +634,8 @@ pub(crate) struct Chr {
     pub input: Input,
     pub pose: Pose,
     pub obj: Obj,
+    /// `FxPartner`: the partner object a rush sequence or a fusion brings in.
+    pub partner: Option<Box<crate::btl_partner::Partner>>,
     pub act: ActState,
     pub prev_action: i32,
     /// `prev964`: last frame's action frame counter.
@@ -839,6 +843,7 @@ impl Chr {
             input: Input::default(),
             pose: Pose::default(),
             obj,
+            partner: None,
             act: ActState {
                 current: 0,
                 request: 0,

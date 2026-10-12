@@ -9011,8 +9011,9 @@ impl Ctx<'_, '_> {
     /// (`BtlSuper_SetupRushDamage`). At the end the attacker finishes (0x8C, `BtlSuper_Finish`; a self-destruct
     /// technique leaves it 1 health) and the victim lands (`BtlAct_GetLandingAction`), stands (failed: 0xB) or
     /// stays down (0xEB). Models are reloaded through the change queue: the damaged variants of `def_reload` /
-    /// `atk_reload`, and technique 0x280's random character (`BtlAct_SetFormRandom`). Not ported: the partner
-    /// objects (their requests are served without an object), the stage timer.
+    /// `atk_reload`, and technique 0x280's random character (`BtlAct_SetFormRandom`). The partner object of the
+    /// technique plays the steps after its own (`level - partner_step` from model animation 0) and goes at the
+    /// end. Not ported: the stage timer.
     fn rush_sequence(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -9104,14 +9105,21 @@ impl Ctx<'_, '_> {
                     }
                 }
             } else {
-                // The partner object is in once its step is over (BtlChange_SetDone; its animations are not
-                // ported).
-                if self.me.work[0] & 2 != 0
-                    && thr.partner_step < level
-                    && self.me.anim_is_new()
-                    && level == thr.partner_step + 1
-                {
-                    self.change.set_done(self.me.player);
+                // The partner object is in once its step is over (BtlChange_SetDone); it plays a step of its own
+                // with each of the attacker's (technique 0x2E8's linked to the owner's lip tables, its flag 0x80
+                // with ability 0x79).
+                if self.me.work[0] & 2 != 0 && thr.partner_step < level {
+                    if self.me.anim_is_new() {
+                        if level == thr.partner_step + 1 {
+                            self.change.set_done(self.me.player);
+                            if thr.tech == 0x2E8 && self.me.has_ability(0x79) {
+                                crate::btl_partner::set_flag80(self.me, self.data.partner, true);
+                            }
+                        }
+                        let anim = level - thr.partner_step + 0x19D;
+                        crate::btl_partner::play_anim(self.me, self.data.partner, anim);
+                    }
+                    crate::btl_partner::step_anim(self.me);
                 }
                 self.me.anim_advance(0);
                 let ok_b = if thr.def_reload && thr.last_step == level {
@@ -9204,6 +9212,9 @@ impl Ctx<'_, '_> {
                     self.me.pose.pos[1] += self.me.height_above_ground();
                 } else {
                     self.held(0xE);
+                }
+                if self.me.work[0] & 2 != 0 {
+                    crate::btl_partner::release(self.me);
                 }
             }
         }
@@ -9717,8 +9728,8 @@ impl Ctx<'_, '_> {
     /// Action 0xEF (`BtlAct_TransformD`): with an extra object (requested before the character): rising in the
     /// lead-in 0x2B, the loop 0x17E for at least 61 frames and until the object is in memory, then 0x177 at the
     /// stage's place until the character is, then the closing 0x179; sound 0x18, voice kind 0x26 in the loop,
-    /// streamed sound 0x8D36 and voice kind 0x22 in the closing. The extra object itself (its model and animation)
-    /// is not ported.
+    /// streamed sound 0x8D36 and voice kind 0x22 in the closing. The extra object plays its animation 0x1A2 with
+    /// 0x177 and goes with the closing.
     fn transform_d(&mut self, phase: u32) {
         if phase == ENTER {
             self.change_enter(0x2B, Some(0x17E));
@@ -9758,6 +9769,7 @@ impl Ctx<'_, '_> {
                 0x177 => {
                     if self.me.anim_is_new() {
                         self.change.set_done(self.me.player);
+                        crate::btl_partner::play_anim(self.me, self.data.partner, 0x1A2);
                         self.set(0xF4);
                         self.set(0xD7);
                         self.me.set_fx(0);
@@ -9765,6 +9777,7 @@ impl Ctx<'_, '_> {
                     if self.me.anim_advance(0) && self.change.is_loaded_for(self.me.player) {
                         self.change_loaded(0x179);
                     }
+                    crate::btl_partner::step_anim(self.me);
                     self.me.brake_vertical();
                     self.me.set_fx(0x14);
                     self.set(0x12F);
@@ -9772,6 +9785,7 @@ impl Ctx<'_, '_> {
                 0x179 => {
                     if self.me.anim_is_new() {
                         self.set(0xF4);
+                        crate::btl_partner::release(self.me);
                         self.set(0xD9);
                         self.snd_stream(0x8D36);
                         self.me.set_fx(1);
@@ -10708,7 +10722,8 @@ impl Ctx<'_, '_> {
     /// partner object and then the fused character load; the two-fighter motion 0x1A2 / 0x1A3 at the stage's
     /// place, held until the fused character is in; the closing 0x1A4; put back at the saved placement; under
     /// the common camera cut 1; sound 0x31, then streamed sound 0x8D36 (0xF1) / 0x8D38 and voice kind 0x22 in the
-    /// closing, with the pad's vibration. The partner object is not ported.
+    /// closing, with the pad's vibration. The partner object plays the two-fighter motion's animation (its flag 0x80
+    /// with the partner member's ability 0x79) and goes with the closing.
     fn fusion(&mut self, phase: u32) {
         let first = self.current() == 0xF1;
         if phase == ENTER {
@@ -10749,6 +10764,12 @@ impl Ctx<'_, '_> {
                 0x1A2 | 0x1A3 => {
                     if self.me.anim_is_new() {
                         self.change.set_done(self.me.player);
+                        let a = self.anim_id();
+                        crate::btl_partner::play_anim(self.me, self.data.partner, a);
+                        let partner = self.me.form.partner;
+                        if partner >= 0 && self.me.has_ability_of(partner as usize, 0x79) {
+                            crate::btl_partner::set_flag80(self.me, self.data.partner, true);
+                        }
                         self.me.set_fx(0);
                         self.set(0xF4);
                         self.set(if first { 0xD7 } else { 0xD8 });
@@ -10757,12 +10778,14 @@ impl Ctx<'_, '_> {
                     if self.me.anim_advance(0) && self.change.is_loaded_for(self.me.player) {
                         self.change_loaded(0x1A4);
                     }
+                    crate::btl_partner::step_anim(self.me);
                     self.me.brake_vertical();
                     self.me.set_fx(0x14);
                 }
                 0x1A4 => {
                     if self.me.anim_is_new() {
                         self.set(0xF4);
+                        crate::btl_partner::release(self.me);
                         self.set(0xD9);
                         self.me.set_fx(1);
                         self.me.vibrate(1.0, 0.5);

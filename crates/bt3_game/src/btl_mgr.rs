@@ -155,12 +155,13 @@ impl Roster {
     }
 
     /// `BtlChars_CheckRoundReset`: a fighter's flag 0xF9 (the arriving member stands) puts both back at their start
-    /// placements in action 0xF9 (`BtlChar_ResetRound`) and resets the effect scene. The partners are not ported.
+    /// placements in action 0xF9 (`BtlChar_ResetRound`, which releases a partner) and resets the effect scene.
     fn check_round_reset(&mut self, data: [&SideData; 2], env: &Env) {
         if !self.chars.iter().any(|c| c.flags.test(0xF9)) {
             return;
         }
         for (i, chr) in self.chars.iter_mut().enumerate() {
+            crate::btl_partner::release(chr);
             chr.flags.clear(0xE);
             chr.flags.set_held(0xF);
             chr.flags.set_held(5);
@@ -299,6 +300,8 @@ impl Roster {
             if !me.is_frozen() {
                 me.flags.set_stage(6);
                 mirror_flags(me, opp);
+                let wind = env.stage.wind.unwrap_or([0.0; 4]);
+                crate::btl_partner::update(me, data[i].partner, wind);
             }
         }
         self.update_hold(data);
@@ -471,6 +474,7 @@ impl Roster {
                 continue;
             }
             me.flags.set_stage(10);
+            crate::btl_partner::update_events(me);
             crate::btl_snd::after_hit_sounds(me, data[i], env, frame);
             crate::btl_fx::trigger_obj_1d(me);
             let impacts = &mut self.scene.impacts;

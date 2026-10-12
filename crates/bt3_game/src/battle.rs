@@ -280,7 +280,7 @@ pub(crate) struct FighterModel {
     /// The characters its two animation files are of (`BtlRes_Reload`'s files 8 and 9).
     pub(crate) anim_chara: i32,
     pub(crate) anim1_chara: i32,
-    model: CharaModel,
+    pub(crate) model: CharaModel,
     /// Per part, per batch: the material texture and the shading row.
     batch_textures: Vec<Vec<[usize; 2]>>,
     /// What the model gives its face (`None` without eyes or a mouth), and how the face draws.
@@ -319,6 +319,8 @@ pub(crate) struct FighterModel {
     pub(crate) tech_packs: [Option<TechPack>; 5],
     /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
     pub(crate) skill_text: Option<Vec<u16>>,
+    /// The attached partner object's files (`BtlPartner_Attach`), dropped once the fighter releases it.
+    pub(crate) partner: Option<Box<FighterModel>>,
 }
 
 /// The face's meshes and textures as the draw uses them (`ObjDraw_UploadTextures` puts the face texture of the
@@ -1530,6 +1532,27 @@ pub(crate) fn load_effect_model(
     })
 }
 
+/// `BtlLoad_StepObject`'s file as a battle object binds it: the model, textures and face as a fighter's, its tables
+/// when it has them (an object file has none), its model animations (sections 0x1D..0x24) as its motions, its
+/// character `(file - 0x590) / 10` (`BtlObj_Setup`).
+fn load_partner(
+    file: &[u8],
+    id: u32,
+    ramp: &[u8],
+    assets: &mut BattleAssets,
+) -> Result<FighterModel, String> {
+    let mut m = load_fighter(file, ramp, assets)?;
+    m.tables = CharaTables::parse(file).unwrap_or_default();
+    m.motions = (0..crate::eft_obj::MODEL_ANIMS)
+        .map(|i| {
+            bt3_data::pack_entry(file, MODEL_MOTION_SECTION + i)
+                .and_then(|b| bt3_data::motion::Motion::parse(b).ok())
+        })
+        .collect();
+    m.chara = (id as i32 - CHARA_FILE as i32) / 10;
+    Ok(m)
+}
+
 /// `BtlObjMdl_BindFiles` and `ObjDraw_UploadTextures`: a batch's TEX0_1 is its material texture at
 /// `tbp 0x3480 + tbpOfs`, `cbp 0x3C00 + cbpOfs` once `MdlTex_RebaseChain` moved it, and its TEX0_2 reads the
 /// CLUT that `TexFile_UploadRange(clutFirst, clutCount)` put at `0x3D00 + tbpOfs`.
@@ -1636,6 +1659,7 @@ fn load_fighter(
         charge_assets: None,
         tech_packs: Default::default(),
         skill_text: None,
+        partner: None,
     })
 }
 
@@ -1828,6 +1852,8 @@ struct ChangeJob {
     load: SideLoad,
     /// `voiceChara`: the character whose voice bank loads.
     voice_chara: i32,
+    /// An object request's battle object type (`BtlObj_Create`'s).
+    slot: i32,
     state: u8,
     model: Option<FighterModel>,
 }
@@ -1853,6 +1879,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         rush_burst_assets: f.rush_burst_assets.as_ref(),
         charge_assets: f.charge_assets.as_ref(),
         tech_packs: std::array::from_fn(|i| f.tech_packs[i].as_ref()),
+        partner: f.partner.as_deref(),
         costume: f.costume,
         chara: f.chara,
     }
@@ -2443,6 +2470,7 @@ impl Battle {
                     model_only,
                     load,
                     voice_chara: req.voice_chara,
+                    slot: req.slot,
                     state: 0,
                     model: None,
                 });
@@ -2452,15 +2480,40 @@ impl Battle {
     }
 
     /// One step of the loader's change job (after the frame, as `Job_Run`): the files are read at once, the next
-    /// step reports them in, and the swap waits until the fighter is ready and the battle is not paused. The extra
-    /// objects (partners) are not ported: their job only reports in.
+    /// step reports them in, and the swap waits until the fighter is ready and the battle is not paused. An object
+    /// request (`BtlLoad_StepObject`) loads the partner's file and attaches its object instead. A partner the
+    /// fighter released frees its files (`BtlRes_Free`).
     fn step_change_job(&mut self, paused: bool) {
+        for side in 0..2 {
+            if self.roster.chars[side].partner.is_none() {
+                self.assets.fighters[side].partner = None;
+            }
+        }
         let Some(job) = &mut self.change_job else {
             return;
         };
         match job.state {
             0 => {
-                if !job.object {
+                if job.object {
+                    let (side, load) = (job.side, job.load);
+                    let id = crate::btl_partner::file_id(load.chara, load.costume, load.variant);
+                    let mut model = None;
+                    if let Some(read) = self.loader.as_mut() {
+                        let ramp = std::mem::take(&mut self.assets.ramp);
+                        match read(id)
+                            .and_then(|file| load_partner(&file, id, &ramp, &mut self.assets))
+                        {
+                            Ok(m) => model = Some(m),
+                            Err(e) => {
+                                bevy::log::error!("cannot load the partner of side {side}: {e}")
+                            }
+                        }
+                        self.assets.ramp = ramp;
+                    }
+                    if let Some(job) = &mut self.change_job {
+                        job.model = model;
+                    }
+                } else {
                     let (side, load) = (job.side, job.load);
                     let mut model = None;
                     if let Some(read) = self.loader.as_mut() {
@@ -2495,7 +2548,16 @@ impl Battle {
                     return;
                 }
                 let job = self.change_job.take().unwrap();
-                if let Some(model) = job.model {
+                if job.object {
+                    // BtlObj_Create of the request's type, BtlCtrl_AttachPartner (unless one is attached).
+                    let chr = &mut self.roster.chars[job.side];
+                    if let Some(model) = job.model
+                        && chr.partner.is_none()
+                    {
+                        chr.partner = Some(Box::new(crate::btl_partner::create(&model, job.slot)));
+                        self.assets.fighters[job.side].partner = Some(Box::new(model));
+                    }
+                } else if let Some(model) = job.model {
                     self.swap_side(job.side, model, job.model_only, job.voice_chara);
                 }
             }
@@ -2521,7 +2583,10 @@ impl Battle {
         if let Some(menu) = &mut self.menu {
             menu.scripts[side] = model.skill_text.clone();
         }
+        // The partner's files are a resource slot of their own: they stay through the change.
+        let partner = self.assets.fighters[side].partner.take();
         self.assets.fighters[side] = model;
+        self.assets.fighters[side].partner = partner;
         let data = [
             side_data(&self.assets.fighters[0]),
             side_data(&self.assets.fighters[1]),
@@ -3383,17 +3448,18 @@ impl Battle {
             ));
         }
         let mut groups: HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>> = HashMap::new();
-        for side in 0..2 {
-            let model = &self.assets.fighters[side];
-            let Some((light, look)) = model_look(
-                &self.roster.chars[side].obj,
-                model.model.header.flags,
-                self.light_dir,
-                &view,
-            ) else {
+        // The fighters, then their partner objects while drawn (flag 2), as `BtlObjDraw_Draw` draws them.
+        let fighters = (0..2).map(|s| (&self.assets.fighters[s], &self.roster.chars[s].obj));
+        let partners = (0..2).filter_map(|s| {
+            let obj = &self.roster.chars[s].partner.as_ref()?.obj;
+            (obj.flags & 2 != 0).then_some((self.assets.fighters[s].partner.as_deref()?, obj))
+        });
+        for (model, obj) in fighters.chain(partners) {
+            let Some((light, look)) =
+                model_look(obj, model.model.header.flags, self.light_dir, &view)
+            else {
                 continue;
             };
-            let obj = &self.roster.chars[side].obj;
             let parts = model
                 .model
                 .parts
@@ -8366,7 +8432,8 @@ mod tests {
         use crate::btl_input::pad::{LEFT, R3};
         // Character 44 with character 46 on its team holds R3 with left: fusion 0 (character 48, two stocks,
         // sequence 1: action 0xF1). The partner object and then the fused character load; the two-fighter motion
-        // 0x1A2 is the model file's own; the fused fighter has both members' health and the partner leaves.
+        // 0x1A2 is the model file's own, the partner object (character 46's model, type 2) showing its own
+        // animation 0x1A2 beside it; the fused fighter has both members' health and the partner leaves.
         let mut setup = BattleSetup::default();
         setup.sides[0].chara = 44;
         setup.sides[0].team[0] = (46, 0);
@@ -8403,6 +8470,7 @@ mod tests {
         battle.roster.chars[0].gauge.blast = 300_000;
         let before = [0, 1].map(|i| battle.roster.chars[0].member_gauge(i).health);
         let mut acts = Vec::new();
+        let (mut partner_shown, mut partner_frames) = (0, 0.0f32);
         for i in 0..340 {
             let held = if (2..20).contains(&i) { LEFT | R3 } else { 0 };
             battle.run_frame(false, pads(held), 0, &mut libc, &mut random, None, false);
@@ -8410,7 +8478,20 @@ mod tests {
             if acts.last() != Some(&a) {
                 acts.push(a);
             }
+            if let Some(p) = &battle.roster.chars[0].partner {
+                assert_eq!(
+                    battle.assets.fighters[0].partner.as_ref().unwrap().chara,
+                    46
+                );
+                partner_shown += usize::from(p.obj.flags & 2 != 0);
+                partner_frames = partner_frames.max(p.obj.frame);
+            }
         }
+        assert!(
+            partner_shown > 0 && partner_frames > 10.0,
+            "{partner_shown} {partner_frames}"
+        );
+        assert!(battle.roster.chars[0].partner.is_none());
         assert_eq!(acts[..3], [0xB, 0xF1, 0xB], "{acts:x?}");
         let c = &battle.roster.chars[0];
         assert_eq!(battle.assets.fighters[0].chara, 48);
@@ -9076,6 +9157,43 @@ mod tests {
             } else {
                 assert!(dmg > 0, "{chara}: {log:x?}");
             }
+        }
+    }
+
+    #[test]
+    fn real_rush_partners_come_in_play_their_steps_and_go() {
+        // The rush techniques that bring a partner object: character 3's 0x2E8 (character 4's model, from step 1),
+        // character 16's 0x2B0 (object 0x10B, from step 0) and character 65's 0x1C1 (object 0x112, type 3). Each
+        // is loaded through the change queue, put on the attacker, shown by its animation's events and stepped
+        // by hand through its model animations, then released with its files.
+        for (chara, slot, partner) in [(3, 4, 4), (16, 4, 0x10B), (65, 3, 0x112)] {
+            let (mut attached, mut shown, mut frames, mut files) = (false, 0, Vec::new(), false);
+            let mut last = None;
+            let Some((log, ..)) = run_technique_watched(chara, slot, 900, false, &mut |b| {
+                let c = &b.roster.chars[0];
+                if let Some(p) = &c.partner {
+                    attached = true;
+                    shown += usize::from(p.obj.flags & 2 != 0);
+                    if p.obj.layers[0].motion.is_some() {
+                        frames.push(p.obj.frame);
+                    }
+                    let m = b.assets.fighters[0].partner.as_ref();
+                    files |= m.is_some_and(|m| {
+                        m.chara == (crate::btl_partner::file_id(partner, 0, 0) as i32 - 0x590) / 10
+                    });
+                }
+                last = Some(c.partner.is_some() || b.assets.fighters[0].partner.is_some());
+            }) else {
+                return;
+            };
+            assert!(attached, "{chara}: {log:x?}");
+            assert!(files, "{chara}");
+            assert!(shown > 0, "{chara}");
+            assert!(
+                frames.windows(2).any(|w| w[1] > w[0]),
+                "{chara}: {frames:?}"
+            );
+            assert_eq!(last, Some(false), "{chara}");
         }
     }
 

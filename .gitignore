@@ -104,6 +104,7 @@
 !/crates/bt3_game/src/eft_ribbon.rs
 !/crates/bt3_game/src/eft_smoke.rs
 !/crates/bt3_game/src/eft_spdline.rs
+!/crates/bt3_game/src/btl_partner.rs
 !/crates/bt3_game/src/eft_spark.rs
 !/crates/bt3_game/src/gfx_water.rs
 !/crates/bt3_game/src/eft_streak.rs

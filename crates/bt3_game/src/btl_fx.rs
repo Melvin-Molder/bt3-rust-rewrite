@@ -241,7 +241,11 @@ pub(crate) fn update_mouth_flag96(me: &mut Chr) {
 /// `BtlFxObj_HandleSubStateEvents` (`BtlFx_UpdateObjEvents`, the motion pass): motion events 1 << 56..58 hold
 /// mouth shapes 5..7 (modes 9..11), 1 << 59 forces eye frame 2, 1 << 60 ends a held shape and the forced eyes.
 pub(crate) fn face_events(me: &mut Chr) {
-    let obj = &mut me.obj;
+    obj_face_events(&mut me.obj);
+}
+
+/// `BtlFxObj_HandleSubStateEvents` of any object (the partner's too).
+pub(crate) fn obj_face_events(obj: &mut crate::btl_obj::Obj) {
     for (bit, mode) in [(56, 9), (57, 0xA), (58, 0xB)] {
         if obj.test_event(1 << bit) {
             obj.set_mouth(mode);

@@ -54,6 +54,10 @@ fn bounded_section(file: &[u8], n: usize) -> Option<&[u8]> {
 pub struct CharaParams(Vec<u8>);
 
 impl CharaParams {
+    /// Whether the file has no parameter block (an object file).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
     pub fn u8_at(&self, o: usize) -> u8 {
         self.0.get(o).copied().unwrap_or(0)
     }
