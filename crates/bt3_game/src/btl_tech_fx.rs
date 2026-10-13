@@ -60,13 +60,16 @@ pub(crate) struct TechPack {
     /// A thrown object's rings (definition flag 0x40000): the mesh of pack entry 1's entry 1 and the textures of
     /// its texture set, entry 2 (`EftMesh_Init`, `EftTexSet_Load32`).
     pub ring: Option<RingAssets>,
+    /// The multi technique's texture set of techniques 0x158 and 0x202 (pack entry 1, `EftMultiMgr_Init`) among the
+    /// effect textures.
+    pub pack_tex: Option<Vec<Option<usize>>>,
 }
 
 /// The rings' mesh and textures.
 #[derive(Clone, Debug)]
 pub(crate) struct RingAssets {
     pub mesh: bt3_data::eft_mesh::EffectMesh,
-    pub textures: Vec<usize>,
+    pub textures: Vec<Option<usize>>,
 }
 
 // EFT_TECH_EVT_*: a fighter's technique events of the frame.

@@ -106,8 +106,7 @@ pub(crate) struct Arg {
     /// `kind` / `level` of the request: `BtlKiBlast_GetCurrentKind`, 0..12.
     pub kind: i32,
     pub kind_type: i8,
-    /// `unk1B`: ki blast record byte 3 (the hit record's `unk4`; not read yet).
-    #[allow(dead_code)]
+    /// `unk1B`: ki blast record byte 3 (the hit record's `unk4`; a disc's texture pair).
     pub unk1b: u8,
     pub life: i32,
     pub speed: f32,
@@ -386,6 +385,8 @@ pub(crate) struct Scene {
 enum Deferred {
     /// libc `rand()`.
     Libc,
+    /// A disc's spin: libc `rand()`.
+    DiscSpin(u32),
     /// A bomb's throw: three VU0 draws, then two libc ones.
     Bomb(usize, u32),
 }
@@ -611,7 +612,7 @@ fn record<'a>(data: &'a SideData, kind: i32) -> &'a KiBlastRecord {
 }
 
 /// `BtlKiBlast_GetCurrent`.
-fn current<'a>(me: &Chr, data: &'a SideData) -> &'a KiBlastRecord {
+pub(crate) fn current<'a>(me: &Chr, data: &'a SideData) -> &'a KiBlastRecord {
     record(data, current_kind(me).max(0))
 }
 
@@ -899,8 +900,8 @@ impl Scene {
 
     /// The disc's libc draws, in order with the others.
     fn defer_disc_draws(&mut self) {
-        for _ in 0..std::mem::take(&mut self.tech.discs.pending_rand) {
-            self.deferred.push(Deferred::Libc);
+        for id in std::mem::take(&mut self.tech.discs.pending_spin) {
+            self.deferred.push(Deferred::DiscSpin(id));
         }
     }
 
@@ -1207,6 +1208,10 @@ impl Scene {
             match d {
                 Deferred::Libc => {
                     w.libc.rand();
+                }
+                Deferred::DiscSpin(id) => {
+                    let r = w.libc.rand();
+                    self.tech.discs.set_spin(id, r);
                 }
                 Deferred::Bomb(side, id) => {
                     if let Some(o) = self.ki_objs[side][1].iter_mut().find(|o| o.id == id) {

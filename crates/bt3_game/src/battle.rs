@@ -172,6 +172,12 @@ pub struct BattleAssets {
     /// `gEftSpdLine->tex[0]` / `gEftShotFx->tex[0]`: the speed and vanish lines' texture (common effect entry 0x237)
     /// among the effect textures.
     pub(crate) spdline_texture: Option<usize>,
+    /// The discs' models (common effect entries 0x239 / 0x23B, `EftDiscMgr_Init`) and their texture sets' entries
+    /// (0x238 / 0x23A) among the effect textures (`None` for an entry that is only a CLUT); set 0x238's entries
+    /// also under each entry's CLUT (`[entry][clut]`, `EftDisc_StepTex`; `None` when the pair does not decode).
+    pub(crate) disc_meshes: [Option<bt3_data::eft_mesh::EffectMesh>; 2],
+    pub(crate) disc_textures: [Vec<Option<usize>>; 2],
+    pub(crate) disc_clut_textures: Vec<Vec<Option<usize>>>,
     /// The two fighters' shadow pages among the effect textures (`ObjShadow` page 0x150, drawn every frame).
     /// The ground shadows' pages: the fighters', then their partner objects'.
     pub(crate) shadow_pages: [usize; 4],
@@ -530,6 +536,9 @@ pub fn load(
         ray_texture: None,
         dust_textures: Vec::new(),
         spdline_texture: None,
+        disc_meshes: [None, None],
+        disc_textures: [Vec::new(), Vec::new()],
+        disc_clut_textures: Vec::new(),
         shadow_pages: [0; 4],
         impact_sets: Vec::new(),
         transform_sets: Vec::new(),
@@ -683,6 +692,31 @@ pub fn load(
         assets
             .effect_textures
             .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
+    }
+    // EftDiscMgr_Init: the discs' texture sets (EftTexSet_Load32 of common entries 0x238 / 0x23A) and models
+    // (EftMesh_Init of 0x239 / 0x23B).
+    for (k, (tex, mesh)) in [(0x238, 0x239), (0x23A, 0x23B)].into_iter().enumerate() {
+        assets.disc_meshes[k] = bt3_data::eft_pack::common_entry(&common_fx, mesh)
+            .and_then(|m| bt3_data::eft_mesh::EffectMesh::parse(m).ok());
+        let Some(res) = bt3_data::eft_pack::common_entry(&common_fx, tex)
+            .and_then(|t| TextureResource::parse(t).ok())
+        else {
+            continue;
+        };
+        // Entries 1..3 of set 0x238 are only palettes, the disc's texture pairs for entry 0.
+        for e in &res.entries {
+            let t = image_texture(e, e, &mut assets.effect_textures).map_err(error)?;
+            assets.disc_textures[k].push(t);
+        }
+        if k == 0 {
+            for e in &res.entries {
+                let mut row = Vec::new();
+                for c in &res.entries {
+                    row.push(image_texture(e, c, &mut assets.effect_textures).unwrap_or(None));
+                }
+                assets.disc_clut_textures.push(row);
+            }
+        }
     }
     // The shadow pages, written by every frame's draw.
     for page in &mut assets.shadow_pages {
@@ -994,7 +1028,7 @@ pub(crate) fn load_side(
                 (Some(mesh), Some(tex)) => {
                     let mut textures = Vec::new();
                     for e in &tex.entries {
-                        textures.push(assets.effect_textures.len());
+                        textures.push(Some(assets.effect_textures.len()));
                         assets
                             .effect_textures
                             .push(bt3_data::gs::decode_sprite_texture(e).map_err(error)?);
@@ -1006,12 +1040,29 @@ pub(crate) fn load_side(
         } else {
             None
         };
+        // EftMultiMgr_Init: techniques 0x158 and 0x202 load pack entry 1 as their pieces' texture set.
+        let pack_tex = if matches!(def.id, 0x158 | 0x202) {
+            match bt3_data::pack_entry(pack, 1).and_then(|t| TextureResource::parse(t).ok()) {
+                Some(res) => {
+                    let mut textures = Vec::new();
+                    for e in &res.entries {
+                        textures
+                            .push(image_texture(e, e, &mut assets.effect_textures).map_err(error)?);
+                    }
+                    Some(textures)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         fighter.tech_packs[slot] = Some(TechPack {
             blast,
             assets: set_assets,
             places,
             model,
             ring,
+            pack_tex,
         });
     }
     if let Some(pack) = &fighter.effect {
@@ -4273,13 +4324,85 @@ impl Battle {
                     continue;
                 };
                 for m in mtxs {
-                    crate::eft::draw_mesh_plain(&mut ot, &ctx, &ring.mesh, m, &ring.textures, 1);
+                    crate::eft::draw_mesh_plain(
+                        &mut ot,
+                        &ctx,
+                        &ring.mesh,
+                        m,
+                        &ring.textures,
+                        1,
+                        [1.0; 4],
+                    );
                 }
             }
             self.roster
                 .scene
                 .shotfx
                 .draw(&mut ot, &ctx, self.assets.spdline_texture);
+            // EftDisc_Draw (layer 3, after the vanish lines): the model on layer 1 in colour (127, 127, 127, alpha),
+            // unless its fighter hides it (BtlScene_IsEffectHidden: type 1 for a piece, 0 for a ki blast disc).
+            {
+                let chars = &self.roster.chars;
+                let any_frozen = chars.iter().any(|c| c.is_frozen());
+                let hidden0 = chars.iter().any(|c| {
+                    (crate::chr_cam::is_cut_active(c) && c.flags.test(0xD3))
+                        || crate::btl_tech_fx::in_rush_sequence(c)
+                });
+                let discs = &self.roster.scene.tech.discs;
+                let mut textures = Vec::new();
+                for d in discs.draws() {
+                    let owner = &chars[d.owner];
+                    let hidden = if d.piece {
+                        crate::btl_tech_fx::effect_hidden_1(owner)
+                    } else {
+                        (owner.obj.flags & 2 == 0 && any_frozen)
+                            || matches!(owner.act.current, 0xEC..=0xF8 | 0x103 | 0x104)
+                            || hidden0
+                    };
+                    let k = usize::from(d.model_b);
+                    let Some(mesh) = &self.assets.disc_meshes[k] else {
+                        continue;
+                    };
+                    if hidden {
+                        continue;
+                    }
+                    textures.clear();
+                    match d.pack_tex {
+                        Some((side, slot)) => {
+                            if let Some(t) = self.assets.fighters[side].tech_packs[slot as usize]
+                                .as_ref()
+                                .and_then(|p| p.pack_tex.as_ref())
+                            {
+                                textures.extend_from_slice(t);
+                            }
+                        }
+                        None if k == 0 => {
+                            for (e, &own) in self.assets.disc_textures[0].iter().enumerate() {
+                                let c = discs.clut_a(e);
+                                textures.push(
+                                    self.assets
+                                        .disc_clut_textures
+                                        .get(e)
+                                        .and_then(|row| row.get(c).copied().flatten())
+                                        .or(own),
+                                );
+                            }
+                        }
+                        None => textures.extend_from_slice(&self.assets.disc_textures[1]),
+                    }
+                    let a = f32::from(d.alpha) / 128.0;
+                    let c = 127.0 / 128.0;
+                    crate::eft::draw_mesh_plain(
+                        &mut ot,
+                        &ctx,
+                        mesh,
+                        &d.mtx,
+                        &textures,
+                        1,
+                        [c, c, c, a],
+                    );
+                }
+            }
             // EftTransform_Draw: kind 5's sun sprite (EftStage_DrawSprite, 16 wide), on a stage that has one.
             if self.assets.stage_sun.is_some() {
                 for pos in self.roster.scene.transforms.sprites() {
@@ -4328,6 +4451,20 @@ impl Battle {
             effects,
         }
     }
+}
+
+/// An effect texture entry's image through `clut`'s palette, added to the effect textures; `None` for an entry
+/// without pixels (only a CLUT).
+fn image_texture(
+    e: &bt3_data::tex::TextureEntry<'_>,
+    clut: &bt3_data::tex::TextureEntry<'_>,
+    textures: &mut Vec<RgbaTexture>,
+) -> std::io::Result<Option<usize>> {
+    if e.pixel_data.is_none() {
+        return Ok(None);
+    }
+    textures.push(bt3_data::gs::decode_sprite_texture_with_clut(e, clut)?);
+    Ok(Some(textures.len() - 1))
 }
 
 /// `BtlObjDraw_Draw` of one model object: its shown parts, the face's mouth mesh for the mouth part and the face
@@ -7921,7 +8058,8 @@ pub(crate) mod tests {
         use crate::btl_input::pad::{START, TRIANGLE};
         // The charged ki blast (0xAF) of character 25 is of type 4: request 0x17 grows a disc in the hand while it
         // charges, the fire event throws it. Character 39's is of type 5: the fire event sends a disc from the
-        // event's node. Each hits the idle P2 once, knocking it away, and is gone.
+        // event's node. Each hits the idle P2 once, knocking it away, and is gone. Its model is drawn from the
+        // common entries, its alpha growing in (the held disc over 0.3 s).
         for (chara, held_at, hit) in [(25, Some(6), (39, 1430)), (39, None, (34, 1550))] {
             let mut setup = BattleSetup::default();
             setup.sides[0].chara = chara;
@@ -7941,9 +8079,33 @@ pub(crate) mod tests {
                     PadState::default(),
                 ]
             };
+            let a = &battle.assets;
+            assert!(a.disc_meshes.iter().all(Option::is_some));
+            assert!(a.disc_textures.iter().all(|t| !t.is_empty()));
+            // Set 0x238: entry 0's image under its four palettes (entries 0..3); the models draw images only.
+            let rows = &a.disc_clut_textures;
+            assert!(rows[0][..4].iter().all(Option::is_some));
+            for (mesh, tex) in a.disc_meshes.iter().flatten().zip(&a.disc_textures) {
+                assert!(mesh.tris.iter().all(|t| {
+                    usize::try_from(t.tex).map_or(true, |i| tex.get(i).is_some_and(Option::is_some))
+                }));
+            }
+            let disc_tex: Vec<usize> = a
+                .disc_textures
+                .iter()
+                .flatten()
+                .chain(rows.iter().flatten())
+                .flatten()
+                .copied()
+                .collect();
             let mut frame = |battle: &mut Battle, held: u32| {
                 let start = held & START != 0 && battle.prev_held[0] & START == 0;
-                battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+                let out =
+                    battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+                out.effects
+                    .iter()
+                    .filter(|t| t.texture.is_some_and(|x| disc_tex.contains(&x)))
+                    .count()
             };
             for i in 0..200 {
                 let skip =
@@ -7955,10 +8117,17 @@ pub(crate) mod tests {
             }
             let mut health = battle.roster.chars[1].gauge.health;
             let (mut first_disc, mut hits) = (None, Vec::new());
+            let (mut alphas, mut drawn) = (Vec::new(), 0);
             for i in 0..80 {
-                frame(&mut battle, if i < 60 { TRIANGLE } else { 0 });
+                let tris = frame(&mut battle, if i < 60 { TRIANGLE } else { 0 });
+                drawn = drawn.max(tris);
                 if first_disc.is_none() && !battle.roster.scene.tech.discs.of(0).is_empty() {
                     first_disc = Some(i);
+                }
+                if let Some(d) = battle.roster.scene.tech.discs.draws().next()
+                    && alphas.last() != Some(&d.alpha)
+                {
+                    alphas.push(d.alpha);
                 }
                 let o = &battle.roster.chars[1];
                 if o.gauge.health < health {
@@ -7967,7 +8136,12 @@ pub(crate) mod tests {
                 }
             }
             assert_eq!(hits, [(hit.0, hit.1, 0xF)], "character {chara}");
+            assert!(drawn > 0, "character {chara}");
+            assert!(alphas.contains(&127), "character {chara}: {alphas:?}");
             if let Some(at) = held_at {
+                // 0.3 s: 9 frames of growth.
+                assert!(alphas.len() >= 9, "character {chara}: {alphas:?}");
+                assert!(alphas.windows(2).take(8).all(|w| w[0] < w[1]), "{alphas:?}");
                 assert_eq!(first_disc, Some(at), "character {chara}");
             } else {
                 assert!(

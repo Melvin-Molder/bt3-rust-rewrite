@@ -3557,17 +3557,19 @@ mod tests {
     }
 }
 
-/// `EftMesh_DrawPlain` of an effect mesh under `mtx` (colour and uv scale 1, no uv offset, no depth offset):
-/// every triangle projected (`Vu0Cur_ProjectPointsStq`), dropped when its first point's depth slot is out of
-/// range or a point is off the GS area, or its three alphas are below 0.1; textured by the owner's texture
-/// `tri.tex` (untextured below 0), queued in its first point's depth slot on `layer`.
+/// `EftMesh_DrawPlain` of an effect mesh under `mtx` (uv scale 1, no uv offset, no depth offset), its vertex
+/// colours times `color` (`EftMesh_SetColor` / 128): every triangle projected (`Vu0Cur_ProjectPointsStq`), dropped
+/// when its first point's depth slot is out of range or a point is off the GS area, or its three alphas are below
+/// 0.1; textured by the owner's texture `tri.tex` (untextured below 0), queued in its first point's depth slot on
+/// `layer`.
 pub(crate) fn draw_mesh_plain(
     ot: &mut OrderTable,
     ctx: &DrawCtx,
     mesh: &bt3_data::eft_mesh::EffectMesh,
     mtx: &Mtx,
-    textures: &[usize],
+    textures: &[Option<usize>],
     layer: i32,
+    color: [f32; 4],
 ) {
     for tri in &mesh.tris {
         let mut scr = [(0i32, 0i32, 0i32, 0.0f32); 3];
@@ -3585,7 +3587,8 @@ pub(crate) fn draw_mesh_plain(
                 (p[2] * q) as i32,
                 q,
             );
-            alpha[k] = v.color[3];
+            let rgba: [f32; 4] = std::array::from_fn(|i| v.color[i] * color[i]);
+            alpha[k] = rgba[3];
             verts[k] = EffectVertex {
                 position: [
                     scr[k].0 as f32 / 16.0 - OFFSET_X,
@@ -3593,7 +3596,7 @@ pub(crate) fn draw_mesh_plain(
                     (scr[k].2 & 0xFF_FFFF) as f32,
                 ],
                 stq: [v.uv[0] * q, v.uv[1] * q, q],
-                rgba: v.color.map(|c| c as i32 as u8),
+                rgba: rgba.map(|c| c as i32 as u8),
             };
         }
         let z = scr[0].2 >> 8;
@@ -3608,7 +3611,7 @@ pub(crate) fn draw_mesh_plain(
         }
         let texture = usize::try_from(tri.tex)
             .ok()
-            .and_then(|t| textures.get(t).copied());
+            .and_then(|t| textures.get(t).copied().flatten());
         // Below 0 the original draws on layer 0 without blending; the meshes drawn here use 1.
         let l = if layer >= 2 { layer - 2 } else { layer.max(0) } as usize;
         let blend = EffectBlend::of(l, layer >= 2);

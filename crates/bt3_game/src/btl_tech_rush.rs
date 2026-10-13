@@ -11,14 +11,14 @@
 //! ABORT at once; its end raises flag 0xA8 for a technique.
 //!
 //! Its emitters are driven at its head along its direction (`EftRushShot_Draw`; technique 0x19D's once attached
-//! keep the parts that run by themselves going). The swarm of models of a definition with flag 0x20000 is not
-//! drawn, but its libc `rand()` draws are kept (`EftRushShot_UpdateModels`).
+//! keep the parts that run by themselves going). A definition with flag 0x20000 brings a swarm of seven model
+//! objects that hover round it, each drawn from libc `rand()` (`EftRushShot_UpdateModels`).
 //!
 //! Once connected it darkens the stage (the stage tint's slot 0) and, with definition flag 0x200, blurs it between
 //! the victim's events 0x10 and 0x20.
 //!
 //! The camera cut, the streaks, the flash and the sparks' sounds the victim's events start run with the other
-//! technique items. Not ported: the swarm's models.
+//! technique items.
 
 use bt3_data::eft_pack::{EmitSet, SetHead};
 

@@ -11,16 +11,22 @@
 //!
 //! A piece drives its technique set's emitters on node slot 5 (`EftDisc_SpawnParts`).
 //!
-//! Not ported: the model, its textures, rolls, banks and fades (drawing; their libc `rand()` draws are kept), and
-//! the character change that kills a ki blast disc.
+//! A ki blast disc dies when its fighter changes (`BtlCharApi_IsChanging`).
+//!
+//! The model (`EftDisc_Draw`, layer 1): common effect entry 0x239 with texture set 0x238 for kinds 0..2, 0x23B with
+//! 0x23A for kinds 3 / 4 (techniques 0x158 and 0x202 give a piece their pack's set, `EftDisc_SetModelTex`); its
+//! alpha grows in and fades out, it spins (libc `rand()`), banks toward the opponent and unrolls. A disc of kinds
+//! 0..2 lends its pair's CLUT to entry `tex_a` of its set (`EftDisc_StepTex`): the first such disc of the frame
+//! sets it, and it stays until another changes it.
 
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_4, PI};
 
 use bt3_data::eft_pack::{EmitSet, SetHead};
 
+use crate::battle::{IDENTITY, Mtx, mul};
 use crate::btl_blast::{Arg, HitRec, Tag, World};
 use crate::btl_chr::{Chr, SideData, add, dot, length, scale3, sub};
-use crate::btl_obj::node_side;
+use crate::btl_obj::{node_side, rot_x, rot_y, rot_z};
 use crate::btl_tech_fx::{
     EV_ABORT, EV_END, EV_FIRE, EV_START, EmitNodes, T_HIT_CHAR, T_MULTI, TechSrc, aim_dir,
     aim_dir_keep, emit_state, in_rush_sequence, parts_alive, reset_parts, stopped, update_parts,
@@ -41,7 +47,9 @@ const D_END: u32 = 0x2;
 const D_DEAD: u32 = 0x4;
 const D_HELD: u32 = 0x8;
 const D_FLYING: u32 = 0x20;
+const D_SHOWN: u32 = 0x40;
 const D_PIECE: u32 = 0x80;
+const D_REQ200: u32 = 0x200;
 const D_LOST: u32 = 0x400;
 const D_GROWN: u32 = 0x800;
 const D_AUTO: u32 = 0x1000;
@@ -58,8 +66,16 @@ struct DiscArg {
     /// Seconds.
     life: f32,
     grow: f32,
+    /// The part of the life after which it fades out.
+    fade: f32,
     turn: f32,
     bank: f32,
+    /// The roll, in turns, and the seconds over which it unrolls.
+    roll: f32,
+    roll_time: f32,
+    /// The texture entry and the entry whose CLUT it takes (`texB`: 0..3 by the ki blast's level).
+    tex_a: u8,
+    tex_b: u8,
     owner: usize,
     /// 0 held ki blast, 1 thrown ki blast, 2 held technique piece, 3 ki blast from a node, 4 technique piece.
     kind: u8,
@@ -87,6 +103,36 @@ pub(crate) struct Disc {
     trail_time: f32,
     /// A piece's emitters (its technique slot's set).
     emit: Option<EmitState>,
+    /// Its look: the texture set (the technique pack's after `EftDisc_SetModelTex`), the alpha (0..127) and growth,
+    /// the spin added each frame to one of two angles, the bank, the roll and its unrolling, the fade, the matrix.
+    pack_tex: bool,
+    alpha: f32,
+    grown: f32,
+    spin: f32,
+    rot_x: f32,
+    rot_y: f32,
+    bank_angle: f32,
+    roll: f32,
+    roll_left: f32,
+    roll_time: f32,
+    fade_time: f32,
+    fade_left: f32,
+    mtx: Mtx,
+}
+
+/// A disc's model as `EftDisc_Draw` queues it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DiscDraw {
+    pub owner: usize,
+    /// A technique piece (hidden as the effects of type 1, else of type 0).
+    pub piece: bool,
+    /// Model and set 0x23B / 0x23A (kinds 3, 4), else 0x239 / 0x238.
+    pub model_b: bool,
+    /// Its technique pack's texture set instead (`EftDisc_SetModelTex`): the side and slot.
+    pub pack_tex: Option<(usize, i32)>,
+    pub mtx: Mtx,
+    /// `EftMesh_SetColor(127, 127, 127, alpha)`.
+    pub alpha: u8,
 }
 
 /// A held list entry (`EftDiscNode`): 1 used, 0x10 thrown at once, 0x20 thrown.
@@ -105,8 +151,12 @@ pub(crate) struct Discs {
     head: [Option<usize>; 2],
     tail: [Option<usize>; 2],
     cursor: usize,
-    /// libc `rand()` draws made outside the scene update, taken at its start.
-    pub pending_rand: u32,
+    /// The discs whose spin's libc `rand()` is drawn outside the scene update, at its start.
+    pub pending_spin: Vec<u32>,
+    /// Which entry's CLUT each entry of set 0x238 is drawn with (`EftDisc_StepTex`; `None` its own), and the entries
+    /// stepped this frame.
+    clut_a: [Option<u8>; 16],
+    stepped_a: u32,
 }
 
 /// `EftDisc_Home`: `EftAim_Home` with a banking term: the turn is reduced by |cur.y to.z - cur.z to.y| times
@@ -185,6 +235,40 @@ impl Discs {
                 .iter()
                 .any(|d| d.id == id && d.flags & D_ALIVE != 0)
         })
+    }
+
+    /// `EftDisc_Init`'s spin of kinds 0..2 from its libc `rand()`: 0.1 to 0.11 turns of pi a frame.
+    pub(crate) fn set_spin(&mut self, id: u32, r: i32) {
+        if let Some(d) = self.list.iter_mut().find(|d| d.id == id) {
+            d.spin = (r as f32 / 2_147_483_647.0 * 0.01 + 0.1) * PI;
+        }
+    }
+
+    /// `EftDisc_Draw` of every disc not dead, its model shown (whether its fighter hides it is the caller's).
+    pub(crate) fn draws(&self) -> impl Iterator<Item = DiscDraw> + '_ {
+        self.list
+            .iter()
+            .filter(|d| d.flags & D_DEAD == 0 && d.flags & D_SHOWN != 0)
+            .map(|d| DiscDraw {
+                owner: d.arg.owner,
+                piece: d.flags & D_PIECE != 0,
+                model_b: d.arg.kind >= 3,
+                pack_tex: d
+                    .pack_tex
+                    .then(|| d.arg.src.map(|s| (s.side, s.slot)))
+                    .flatten(),
+                mtx: d.mtx,
+                alpha: d.alpha as u8,
+            })
+    }
+
+    /// The entry whose CLUT entry `entry` of set 0x238 is drawn with.
+    pub(crate) fn clut_a(&self, entry: usize) -> usize {
+        self.clut_a
+            .get(entry)
+            .copied()
+            .flatten()
+            .map_or(entry, usize::from)
     }
 
     pub(crate) fn tag_mut(&mut self, id: u32) -> Option<&mut Tag> {
@@ -280,6 +364,12 @@ impl Discs {
         *next_id += 1;
         let id = *next_id;
         let head_set = set.map(|s| s.head).unwrap_or_default();
+        let life = arg.life * 30.0;
+        let (roll_left, roll_time) = if arg.roll_time < 0.0 {
+            (-1.0, 1.0)
+        } else {
+            (arg.roll_time * 30.0, arg.roll_time * 30.0)
+        };
         let mut d = Disc {
             id,
             arg,
@@ -287,7 +377,7 @@ impl Discs {
             flags: 0,
             atk: Arg::default(),
             prev: [0.0; 3],
-            life: arg.life * 30.0,
+            life,
             age: 0.0,
             grow_time: arg.grow * 30.0,
             timer: 0.0,
@@ -296,11 +386,26 @@ impl Discs {
             trail_width: head_set.width[0],
             trail_time: 0.0,
             emit: None,
+            pack_tex: false,
+            alpha: 0.0,
+            grown: 0.0,
+            spin: 0.0,
+            rot_x: 0.0,
+            rot_y: 0.0,
+            bank_angle: 0.0,
+            roll: eft_wrap(arg.roll * 6.283_185_3),
+            roll_left,
+            roll_time,
+            fade_time: life * (1.0 - arg.fade),
+            fade_left: life * (1.0 - arg.fade),
+            mtx: IDENTITY,
         };
+        if arg.kind < 3 && !arg.hand {
+            d.roll = -d.roll;
+        }
         match arg.kind {
             0 | 1 => {
-                // The spin (libc rand()) only turns the model.
-                self.pending_rand += 1;
+                self.pending_spin.push(id);
                 if !self.push_held(id, arg.owner, arg.kind) {
                     d.flags |= D_DEAD;
                 }
@@ -311,11 +416,18 @@ impl Discs {
                 d.size *= 1.5;
             }
             2 => {
-                self.pending_rand += 1;
+                self.pending_spin.push(id);
                 d.flags |= D_PIECE | D_HELD;
             }
-            3 => d.flags |= D_FLYING,
-            4 => d.flags |= D_PIECE | D_FLYING,
+            3 | 4 => {
+                d.rot_y = PI;
+                d.grown = 1.0;
+                d.flags |= if arg.kind == 3 {
+                    D_FLYING
+                } else {
+                    D_PIECE | D_FLYING
+                };
+            }
             _ => {}
         }
         if d.flags & D_PIECE != 0 {
@@ -336,8 +448,13 @@ impl Discs {
             speed: atk.speed,
             life: atk.life as f32 / 30.0,
             grow: 0.0,
+            fade: 0.7,
             turn: atk.turn,
             bank: 1.5,
+            roll: 0.0,
+            roll_time: 0.0,
+            tex_a: 0,
+            tex_b: level_pair(atk.unk1b),
             owner: atk.owner,
             kind,
             last_hit: false,
@@ -362,8 +479,14 @@ impl Discs {
             speed: 0.0,
             life: 1.0,
             grow: 0.3,
+            fade: 0.7,
             turn: 1.0,
             bank: 1.5,
+            roll: 0.0,
+            roll_time: 0.0,
+            tex_a: 0,
+            // BtlKiBlast_GetUnk3: the ki blast record's byte 3.
+            tex_b: level_pair(crate::btl_blast::current(me, data).unk3()),
             owner: me.player,
             kind: 0,
             last_hit: false,
@@ -398,8 +521,11 @@ impl Discs {
                 self.set_held_atk(owner, atk);
                 let d = self.find(id).expect("alive");
                 d.arg.dir = atk.dir;
+                d.arg.life = atk.life as f32 / 30.0;
                 d.life = atk.life as f32;
                 d.age = 0.0;
+                d.fade_time = atk.life as f32 * (1.0 - d.arg.fade);
+                d.fade_left = d.fade_time;
                 d.arg.speed = atk.speed;
                 d.arg.turn = atk.turn;
                 d.flags |= D_FLYING;
@@ -433,6 +559,8 @@ impl Discs {
         arg.life = atk.life as f32;
         arg.grow = 0.05;
         arg.bank = 0.0;
+        arg.roll = -0.42;
+        arg.tex_b = 0;
         arg.hand = false;
         if let Some(id) = self.create(arg, data, None, next_id)
             && let Some(d) = self.find(Some(id))
@@ -450,6 +578,8 @@ impl Discs {
         records: &mut Vec<HitRec>,
         max: usize,
     ) {
+        // EftDiscMgr_Update: no entry stepped yet this frame.
+        self.stepped_a = 0;
         let mut i = 0;
         while i < self.list.len() {
             let owner = self.list[i].arg.owner;
@@ -458,6 +588,16 @@ impl Discs {
                 && records.len() < max
             {
                 records.push(rec);
+            }
+            // EftDisc_StepTex: a disc of kinds 0..2 on set 0x238 gives its entry its pair's CLUT (the other sets'
+            // pieces only take entry 0's own).
+            let d = &self.list[i];
+            if d.flags & D_DEAD == 0 && d.arg.kind < 3 && !d.pack_tex {
+                let a = usize::from(d.arg.tex_a);
+                if a < self.clut_a.len() && self.stepped_a & (1 << a) == 0 {
+                    self.clut_a[a] = Some(d.arg.tex_b);
+                    self.stepped_a |= 1 << a;
+                }
             }
             if self.list[i].flags & D_ALIVE == 0 {
                 let d = self.list.remove(i);
@@ -533,6 +673,10 @@ impl Disc {
         let owner = self.arg.owner;
         let mut hold = false;
         if self.flags & D_PIECE == 0 {
+            // BtlCharApi_IsChanging.
+            if matches!(w.chars[owner].act.current, 0xEC..=0xF8 | 0x103 | 0x104) {
+                self.flags |= D_DEAD;
+            }
             if self.arg.kind == 0 && self.flags & D_HELD != 0 && !w.chars[owner].flags.test(0x8E) {
                 self.flags |= D_LOST | D_DEAD;
             }
@@ -543,9 +687,16 @@ impl Disc {
             return None;
         }
         let me = &w.chars[owner];
+        let mut pitch = 0.0;
         if self.flags & D_HELD != 0 {
             if self.arg.kind < 3 {
-                if !(self.timer < self.grow_time) {
+                if self.timer < self.grow_time {
+                    let t = (self.timer / self.grow_time).clamp(0.0, 1.0);
+                    self.grown = t;
+                    self.alpha = t * 127.0;
+                } else {
+                    self.alpha = 127.0;
+                    self.grown = 1.0;
                     self.flags |= D_GROWN;
                 }
                 let (a, b) = if self.arg.hand {
@@ -572,11 +723,53 @@ impl Disc {
                 me.obj.node_pos(0x11)
             };
             a.pos = add(a.pos, scale3(a.dir, a.speed));
+            pitch = eft_wrap((-a.dir[1]).clamp(-1.0, 1.0).asin());
+            if a.kind >= 3 {
+                self.alpha = if self.timer < self.grow_time {
+                    (self.timer / self.grow_time).clamp(0.0, 1.0) * 127.0
+                } else {
+                    127.0
+                };
+            }
+            if self.life - self.fade_time <= self.age || self.flags & D_END != 0 {
+                self.alpha = (self.fade_left / self.fade_time).clamp(0.0, 1.0) * 127.0;
+                self.fade_left -= 1.0;
+            }
+            if self.arg.kind < 3 {
+                // The roll unwinds over its time; the bank leans toward the opponent ahead (when locked on).
+                if 0.0 < self.roll_left {
+                    self.roll *= (self.roll_left / self.roll_time).clamp(0.0, 1.0);
+                    self.roll_left -= 1.0;
+                }
+                if me.flags.test(5) {
+                    let opp = &w.chars[owner ^ 1];
+                    let to = crate::btl_blast::norm(sub(opp.obj.node_pos(3), self.arg.pos));
+                    let d = self.arg.dir;
+                    if 0.0 <= dot(d, to) {
+                        let side = d[2] * to[0] - d[0] * to[2];
+                        self.bank_angle = (side * PI * 1.2).clamp(-FRAC_PI_4, FRAC_PI_4);
+                    }
+                }
+            }
             self.age += 1.0;
             if self.life <= self.age {
                 self.flags |= D_DEAD;
             }
             self.flags |= D_MOVED;
+        }
+        if self.grown <= 0.0 || self.alpha <= 0.0 {
+            self.flags &= !D_SHOWN;
+        } else {
+            self.flags |= D_SHOWN;
+        }
+        if self.arg.kind < 3 {
+            self.rot_y = eft_wrap(-(self.rot_y + self.spin));
+        } else {
+            self.rot_x = eft_wrap(self.rot_x + self.spin);
+        }
+        self.mtx = self.model_mtx(pitch);
+        if self.flags & D_END != 0 && self.flags & D_SHOWN == 0 {
+            self.flags |= D_DEAD;
         }
         let mut rec = None;
         if self.flags & D_PIECE != 0 {
@@ -608,12 +801,32 @@ impl Disc {
             &EmitNodes::default(),
             events,
             self.flags & (D_END | D_DEAD) != 0,
-            false,
+            self.flags & D_REQ200 != 0,
             a.pos,
             a.dir,
             a.scale,
             piece_skip(self.flags),
         );
+    }
+
+    /// The model's matrix: its size, the spin, the bank and roll, the pitch and yaw of its direction, its place.
+    fn model_mtx(&self, pitch: f32) -> Mtx {
+        let a = &self.arg;
+        let yaw = eft_wrap(a.dir[0].atan2(a.dir[2]));
+        let s = a.scale * self.size * self.grown;
+        let mut m = IDENTITY;
+        for (i, row) in m.iter_mut().enumerate().take(3) {
+            row[i] *= s;
+        }
+        let m = mul(&m, &rot_y(self.rot_y));
+        let m = mul(&m, &rot_x(self.rot_x));
+        let m = mul(&m, &rot_z(eft_wrap(self.bank_angle + self.roll)));
+        let m = mul(&m, &rot_x(pitch));
+        let mut m = mul(&m, &rot_y(yaw));
+        for k in 0..3 {
+            m[3][k] += a.pos[k];
+        }
+        m
     }
 
     /// `EftDisc_AddHit`: two spheres at its position and its last one.
@@ -670,6 +883,16 @@ fn piece_skip(flags: u32) -> impl Fn(&EmitSet, u8, usize) -> bool {
     }
 }
 
+/// The texture pair of a ki blast's level (1, 2, 4, 6: pairs 0..3; others 0).
+fn level_pair(level: u8) -> u8 {
+    match level {
+        2 => 1,
+        4 => 2,
+        6 => 3,
+        _ => 0,
+    }
+}
+
 /// `EftMath_WrapAngle`.
 fn eft_wrap(a: f32) -> f32 {
     const TWO_PI: f32 = 6.283_185_3;
@@ -699,6 +922,9 @@ pub(crate) struct Multi {
     life: f32,
     release_scale: f32,
     dir: [f32; 3],
+    /// The hand (node 0x15) at the last START and at the FIRE that fires a piece from the muzzle: the piece's roll.
+    fire_hand: [f32; 3],
+    release_hand: [f32; 3],
     /// Where its emitters are driven (`head`, the muzzle from the FIRE).
     head: [f32; 3],
     nodes: EmitNodes,
@@ -725,6 +951,8 @@ impl Multi {
             life: f32::from(set.head.end_frames),
             release_scale: 0.0,
             dir: [0.0; 3],
+            fire_hand: [0.0; 3],
+            release_hand: [0.0; 3],
             head: [0.0; 3],
             nodes: EmitNodes::default(),
             emit: emit_state(data, src.slot),
@@ -886,23 +1114,39 @@ impl Multi {
                     .iter_mut()
                     .find(|p| discs.alive(p.0) && p.1 & 2 == 0)
             {
-                // EftDisc_Release: a piece flies along its fighter's aim from where it is; its scale is drawing.
+                // EftDisc_Release: a piece flies along its fighter's aim from where it is, shown at once; then
+                // EftDisc_SetScale.
                 if let Some(d) = discs.find(p.0) {
+                    if d.grown <= 0.0 || d.alpha <= 0.0 {
+                        d.grown = 1.0;
+                        d.alpha = 127.0;
+                        d.flags |= D_SHOWN;
+                    }
                     d.arg.dir = aim_dir_keep(w, d.arg.owner, d.arg.pos);
                     d.flags |= D_FLYING;
                     d.flags &= !D_HELD;
+                    d.arg.scale = self.release_scale;
                 }
                 p.1 |= 2;
             }
-        } else if release {
-            // The hand positions only roll the model.
-            self.fire_piece(w, discs, next_id);
+        } else {
+            let hand = w.chars[self.src.side].obj.node_pos(0x15);
+            if fire {
+                self.fire_hand = hand;
+            }
+            if release {
+                self.release_hand = hand;
+                self.fire_piece(w, discs, next_id);
+            }
         }
         for p in &self.pieces {
-            if self.flags & 1 != 0
-                && let Some(d) = discs.find(p.0)
-            {
-                d.flags |= D_DEAD;
+            if let Some(d) = discs.find(p.0) {
+                if self.flags & 4 != 0 {
+                    d.flags |= D_REQ200;
+                }
+                if self.flags & 1 != 0 {
+                    d.flags |= D_DEAD;
+                }
             }
         }
         let mut alive = false;
@@ -933,8 +1177,13 @@ impl Multi {
             speed: def.speed,
             life: def.life as f32 / 30.0,
             grow: 0.1,
+            fade: 0.9,
             turn: def.homing,
             bank: 3.5,
+            roll: 0.0,
+            roll_time: 0.0,
+            tex_a: 0,
+            tex_b: 0,
             owner: side,
             kind: 2,
             last_hit: false,
@@ -944,15 +1193,18 @@ impl Multi {
             let c = self.count;
             match def.id {
                 0x157 => {
+                    arg.tex_b = 1;
                     arg.grow = if c == 0 { 0.25 } else { 0.04 };
                     arg.hand = if c < 2 { true } else { c & 1 != 0 };
                     self.release_scale = 4.0;
                 }
                 0x193 => {
+                    arg.tex_b = 2;
                     arg.hand = c % 2 == 0;
                     self.release_scale = 1.0;
                 }
                 0x194 => {
+                    arg.tex_b = 3;
                     arg.grow = if c == 0 { 0.2 } else { 0.04 };
                     arg.hand = c % 2 == 0;
                     self.release_scale = 5.0;
@@ -968,19 +1220,37 @@ impl Multi {
             arg.kind = 4;
             arg.grow = 0.0;
             arg.pos = self.nodes.pos(1);
-            arg.last_hit = def.id == 0x1A3;
+            // The roll: the hand's way from the START to the FIRE, in the fighter's frame.
+            let d = sub(self.fire_hand, self.release_hand);
+            let yaw = w.chars[side].pose.rot[1];
+            let d = crate::battle::apply(&rot_y(-yaw), [d[0], d[1], d[2], 0.0]);
+            let d = crate::btl_blast::norm([d[0], d[1], d[2]]);
+            arg.roll = d[0].atan2(-d[1]) / 6.283_185_3;
+            match def.id {
+                0x1A3 => arg.last_hit = true,
+                0x202 => arg.roll = 0.0,
+                _ => {}
+            }
         }
         let id = discs.create(arg, w.data[side], Some(&self.set), next_id);
-        for _ in 0..std::mem::take(&mut discs.pending_rand) {
-            w.libc.rand();
+        for d in std::mem::take(&mut discs.pending_spin) {
+            let r = w.libc.rand();
+            discs.set_spin(d, r);
         }
         self.pieces[k].0 = id;
         if id.is_none() {
             return;
         }
-        if def.id == 0x202 {
-            // The spin (libc rand()) only turns the model.
-            w.libc.rand();
+        // EftDisc_SetModelTex: the pack's texture set (EftMultiMgr_Init loads it for these two).
+        if matches!(def.id, 0x158 | 0x202)
+            && let Some(d) = discs.find(id)
+        {
+            d.pack_tex = true;
+            d.arg.tex_a = 0;
+            d.arg.tex_b = 0;
+            if def.id == 0x202 {
+                d.spin = (w.libc.rand() as f32 / 2_147_483_647.0 * 0.01 + 0.13) * -PI;
+            }
         }
         self.pieces[k].1 |= 1;
         self.count += 1;

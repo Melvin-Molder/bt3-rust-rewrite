@@ -95,7 +95,7 @@ depth, blends in the GS's colour space) are left out.
 - [x] Throws: the motions played from the opponent's table (table flag 0x20000000), a clash win's throw, the throw break (`BtlHit_CheckThrowBreak`)
 - [x] The battle events fired by hits, clashes and techniques (all of `BtlEvent_Raise`'s ids, the KO's 0x51..0x53 by the damage's kind)
 - [x] The technique camera cuts
-- [ ] Technique effects: the rush swarm's models; the disc's model
+- [x] Technique effects: the rush swarm's models; the disc's model (`EftDisc_Draw`, `EftDisc_StepTex`), the multi's piece scale, roll and abort flag
 - [ ] The ki objects' models, fragments and explosions
 - [ ] The stage timer of stages 4 / 27, the body sphere's stage push-out, a stage change's transition effects
 - [ ] The camera's stage trace (`BtlCam_TraceStage`)
