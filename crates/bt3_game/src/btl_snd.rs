@@ -97,6 +97,9 @@ pub(crate) struct CharSound {
     /// `BtlScript_IsTextShown` in mode 1: the story script shows a line's text (the fighters' sounds are quieter and
     /// their voices are not cut).
     pub(crate) script_text: bool,
+    /// `BtlScript_IsSlotBusy(side, window)`: a story line in each side's slots. A busy window 0 mutes the side's
+    /// character bank (`Snd_PlaySeEx` of mask 0x10 / 0x20); either window refuses the side's voices (`Adx_Play`).
+    pub(crate) slot_busy: [[bool; 2]; 2],
 }
 
 impl CharSound {
@@ -172,6 +175,10 @@ impl CharSound {
         if self.loop_bits[kind].is_empty() || !(0..0x100).contains(&id) {
             return -1;
         }
+        // Snd_PlaySeEx: banks 0x10 / 0x20 are muted while their side's script slot 0 is busy.
+        if kind >= 2 && self.slot_busy[kind - 2][0] {
+            return -1;
+        }
         self.next_handle = self.next_handle.wrapping_add(1).max(1);
         out.push(TitleSound::SeEx {
             mask: BANK_MASK[kind],
@@ -208,7 +215,10 @@ impl CharSound {
             if self.script_text {
                 vol = (vol - 0x20).max(0);
             }
+            // Adx_Play: a voice player is left alone while its side's script slots are busy.
+            let voice_busy = self.slot_busy[owner].contains(&true);
             match req.kind {
+                5..=7 if voice_busy => {}
                 KIND_STREAM => out.push(TitleSound::StreamSeEx {
                     player: owner as u32,
                     id: req.id as u32,
@@ -783,6 +793,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_story_line_mutes_its_sides_voices_and_bank() {
+        // BtlScript_IsSlotBusy: side 0's slot 0 holds a line: its voices are not played, nor its bank's sounds
+        // (Snd_PlaySeEx of mask 0x10 gives -1); side 1 plays.
+        let mut s = CharSound::default();
+        s.loop_bits = std::array::from_fn(|_| vec![false; 0x100]);
+        s.slot_busy = [[true, false], [false, false]];
+        s.request([0.0; 3], 0, 7, 200.0, 1500.0, 0x9000);
+        s.request([0.0; 3], 1, 7, 200.0, 1500.0, 0x9001);
+        let mut out = Vec::new();
+        s.play_requests(&IDENTITY, true, [0; 2], &mut out);
+        assert!(
+            matches!(out[..], [TitleSound::VoiceEx { player: 1, .. }]),
+            "{out:?}"
+        );
+        assert_eq!(s.play_se(2, 1, 0x40, 0, 0, &mut out), -1);
+        assert!(s.play_se(3, 1, 0x40, 0, 0, &mut out) > 0);
     }
 
     #[test]

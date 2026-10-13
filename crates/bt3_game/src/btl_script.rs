@@ -226,6 +226,13 @@ struct SetupHost<'a> {
 }
 
 impl BtlScript {
+    /// `BtlScript_IsSlotBusy`: a line in `side`'s slot `window`.
+    pub(crate) fn slot_busy(&self, side: usize, window: usize) -> bool {
+        self.voice
+            .get(side * 2 + window)
+            .is_some_and(Option::is_some)
+    }
+
     /// `BtlScript_InitWork`.
     fn new(voice_set: bool) -> Self {
         Self {
@@ -1516,8 +1523,12 @@ impl ScriptHost<'_> {
                 let done = !gsc.find_option(b'w');
                 let active = self.b.active_member(side) == member;
                 self.s.set_text(usize::from(!active), line);
-                self.b
-                    .play_voice(channel as usize, self.s.voice_file(line), self.sounds);
+                // Adx_Play: not while the channel's side has a line in its slots.
+                let ch = channel as usize & 1;
+                if !self.s.slot_busy(ch, 0) && !self.s.slot_busy(ch, 1) {
+                    self.b
+                        .play_voice(channel as usize, self.s.voice_file(line), self.sounds);
+                }
                 let lip = active && self.s.lip(line).is_some();
                 let w = gsc.work();
                 w[0] = channel & 1;
@@ -1981,7 +1992,9 @@ impl GscCommands for ScriptHost<'_> {
                     let line = gsc.int();
                     let done = !gsc.find_option(b'w');
                     gsc.work()[0] = 0;
-                    self.b.play_voice(0, self.s.voice_file(line), self.sounds);
+                    if !self.s.slot_busy(0, 0) && !self.s.slot_busy(0, 1) {
+                        self.b.play_voice(0, self.s.voice_file(line), self.sounds);
+                    }
                     done
                 }
                 PHASE_UPDATE => self.b.voice_stopped(gsc.work()[0] as usize),

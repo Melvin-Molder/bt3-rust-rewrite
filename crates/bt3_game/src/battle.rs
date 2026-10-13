@@ -3779,16 +3779,18 @@ impl Battle {
                         self.assets.fighters.get(i).map_or(0, |f| f.chara)
                     }
                 });
-                self.assets
-                    .snd
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .play_requests(
-                        &view.world2view,
-                        self.assets.screen_mode == 1,
-                        charas,
-                        input.sounds,
-                    );
+                let mut snd = self.assets.snd.lock().unwrap_or_else(|e| e.into_inner());
+                snd.slot_busy = std::array::from_fn(|side| {
+                    std::array::from_fn(|w| {
+                        self.script.as_ref().is_some_and(|s| s.slot_busy(side, w))
+                    })
+                });
+                snd.play_requests(
+                    &view.world2view,
+                    self.assets.screen_mode == 1,
+                    charas,
+                    input.sounds,
+                );
             }
         }
         // BtlObj_UpdateAll (not while paused): per fighter the face (blink and mouth), the colour flash and the

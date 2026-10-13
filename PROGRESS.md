@@ -155,6 +155,17 @@ Of the 3,375 C functions no Rust source names, 726 are unreachable in the execut
 - [x] `BtlChars_UpdateObjFlag2` / `ClearObjFlag2`: vanished, hidden and close-up fighters, and both while a stage loads, are not drawn
 - [x] `BtlFx_HandleEvent1` (the spark of an attack with flag 0x80000), `BtlFx_SpawnReq18` (the ray burst of request 0x18), `BtlFx_UpdateObjFlagReq3` (request 3's black body)
 
+### Complete check of the ported functions (2026-10-13)
+
+For every C function the port names, its callees and the constants it tests were compared with the Rust that implements it (and the Rust functions that calls in the same file, two levels down); plumbing (vectors, DMA, GS packets, pools) and accessors were left out, the rest read by hand. Gaps found and ported:
+
+- [x] `BtlChar_ResetObjWork`: the chains start over as time-stop ends
+- [x] `BtlColl_UpdateGround` on stages 4 / 27: flag 0x17 dropped over low ground, held flag 7 (read, never set) from contacts and landings
+- [x] `Snd_SetPause` (SOUNDS.IRX RPC 6: the paused banks' hsyn port volume 0), `Snd_StopBankAndResume` at restart, `Snd_Reset` at the battle's end
+- [x] `BtlFx_SpawnPartFlashes` plays common sound 0x4B; a projectile's impact dust is at its owner's scale
+- [x] `EftStage_SetDrawOn`: from a transformation's flash to its end the stage's scroll, weather, smoke, geysers, bubbles and bound are not drawn
+- [x] `BtlScript_IsSlotBusy` in `Snd_PlaySeEx` / `Adx_Play`: a story line in a side's slots mutes its character bank and refuses its other voices
+
 ### Unreachable in the original (nothing to port)
 
 Checked against the executable and the ISO: `GfxLens_*` (no caller), `EftTrail_*` (no caller), `EftCharNull_Start` (no caller), `EftZap` (no emitter set has kind 12), the water swirls (`EftWater_AddBurst` has no caller), the geyser's steam (no stage has the steam manager), the stage timer of stages 4 / 27 (read only by `BtlCharApi_GetMgrTimerRatio`, never called), the story AI override (fighter word +0x1290 never written), the technique names of pad status 1, story script command 1701 and command 8's stage change (no story script uses them; ported anyway).
