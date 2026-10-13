@@ -599,15 +599,45 @@ impl Default for TechFx {
     }
 }
 
-/// `BtlScene_IsEffectHidden(chr, 0)`: the fighter hidden while any fighter is frozen, or changing; or a camera cut
-/// with flag 0xD3 running on either fighter (`BtlCharApi_AnyCamPriority`), or either in a rush sequence.
-pub(crate) fn effect_hidden_0(chars: &[Chr; 2], side: usize) -> bool {
-    let c = &chars[side];
-    (c.obj.flags & 2 == 0 && chars.iter().any(|c| c.is_frozen()))
-        || matches!(c.act.current, 0xEC..=0xF8 | 0x103 | 0x104)
-        || chars.iter().any(|c| {
+/// `BtlScene_IsEffectHidden(chr, kind)`: whether the effects of kind `kind` (the `BtlScene_IsEffectStopped` kind
+/// they were made with) of fighter `side` are not drawn. A hidden fighter (object flag 2 off) hides kind 0 while
+/// any fighter is frozen, kind 1 outside its rush sequence, kinds 3 and 6 always, the others while it is frozen or
+/// the stage is not ready (`stage_ready`: `BtlStage_IsReady`); kind 4 also hides in its rush sequence; a changing
+/// fighter (`BtlCharApi_IsChanging`) hides all but kinds 5 and 6; kind 0 also hides while either fighter has a
+/// camera cut with flag 0xD3 (`BtlCharApi_AnyCamPriority`) or is in a rush sequence.
+pub(crate) fn effect_hidden(chars: &[Chr; 2], stage_ready: bool, side: usize, kind: u8) -> bool {
+    let Some(c) = chars.get(side) else {
+        return false;
+    };
+    let hidden = c.obj.flags & 2 == 0;
+    let mut result = false;
+    if hidden {
+        result = match kind {
+            0 => chars.iter().any(Chr::is_frozen),
+            1 => !in_rush_sequence(c),
+            3 | 6 => true,
+            _ => c.is_frozen() || !stage_ready,
+        };
+    }
+    if kind == 4 && (hidden || in_rush_sequence(c)) {
+        result = true;
+    }
+    if matches!(c.act.current, 0xEC..=0xF8 | 0x103 | 0x104) && !matches!(kind, 5 | 6) {
+        result = true;
+    }
+    if kind == 0
+        && chars.iter().any(|c| {
             (crate::chr_cam::is_cut_active(c) && c.flags.test(0xD3)) || in_rush_sequence(c)
         })
+    {
+        result = true;
+    }
+    result
+}
+
+/// `BtlScene_IsEffectHidden(chr, 0)` (the stage's readiness does not enter it).
+pub(crate) fn effect_hidden_0(chars: &[Chr; 2], side: usize) -> bool {
+    effect_hidden(chars, true, side, 0)
 }
 
 /// `BtlScene_IsEffectHidden(chr, 1)`: the fighter hidden (object flag 2 off) outside a rush sequence, or changing.

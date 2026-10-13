@@ -1680,6 +1680,8 @@ impl Scene {
             in_technique: [0, 1].map(|s| crate::btl_act::is_technique_id(w.chars[s].act.current)),
             eft_cam: self.eft_cam_active,
             rush_seq: [0, 1].map(|s| crate::btl_tech_fx::in_rush_sequence(&w.chars[s])),
+            // The update does not draw.
+            hidden: [[false; 7]; 2],
         };
         self.fx.update(&fxw, w.libc, w.vu0);
         // Layer 3's blinding overlay and full-screen flash.

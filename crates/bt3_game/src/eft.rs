@@ -1512,6 +1512,8 @@ pub(crate) struct FxWorld<'a> {
     pub eft_cam: bool,
     /// `BtlCharApi_IsInRushSequence` of each fighter.
     pub rush_seq: [bool; 2],
+    /// `BtlScene_IsEffectHidden(chr, kind)` of each fighter and kind 0..6 (drawing).
+    pub hidden: [[bool; 7]; 2],
 }
 
 impl FxWorld<'_> {
@@ -2051,6 +2053,14 @@ impl Modules {
         ctx: &DrawCtx,
         cam_shown: impl Fn(usize) -> bool,
     ) {
+        // BtlScene_IsEffectHidden of an object's fighter by the kind it was made with.
+        let hidden = |chr: usize, kind: u8| {
+            w.hidden
+                .get(chr)
+                .and_then(|k| k.get(usize::from(kind)))
+                .copied()
+                .unwrap_or(false)
+        };
         for p in self.anim.iter().filter(|p| p.updated) {
             let Some(assets) = w.sets[p.set.side][p.set.list] else {
                 continue;
@@ -2058,7 +2068,10 @@ impl Modules {
             let Some(pack) = assets.spr[p.pair].as_ref() else {
                 continue;
             };
-            // EftAnimPart_Draw: the draw flags by mode (BtlScene_IsEffectHidden: no fighter hides).
+            // EftAnimPart_Draw: none while its fighter's effects hide; the draw flags by mode.
+            if hidden(p.chr, p.set.stop_kind()) {
+                continue;
+            }
             let other = !cam_shown(p.chr);
             let flags = match p.mode {
                 1 | 3 => {
@@ -2086,13 +2099,18 @@ impl Modules {
                 p.draw(flags, pack, tex, ot, ctx);
             }
         }
-        // EftRibbon_Draw (BtlScene_IsEffectHidden: no fighter hides).
+        // EftRibbon_Draw: none while its fighter's effects hide.
         for r in self.ribbons.iter().filter(|r| r.updated) {
-            let _ = r.chr();
+            if hidden(r.chr(), r.set.stop_kind()) {
+                continue;
+            }
             r.draw(ot, ctx);
         }
-        // EftPtcl_Draw: a front emitter only while its fighter is in view.
+        // EftPtcl_Draw: none while its fighter's effects hide; a front emitter only while its fighter is in view.
         for e in &self.ptcls {
+            if hidden(e.chr(), e.set.stop_kind()) {
+                continue;
+            }
             if e.flags & W_FRONT != 0 && !cam_shown(e.chr()) {
                 continue;
             }
@@ -2102,8 +2120,12 @@ impl Modules {
                 e.draw(def, ot, ctx);
             }
         }
-        // EftQuad_Draw: a view-only emitter only while its fighter is in view.
+        // EftQuad_Draw: none while its fighter's effects hide; a view-only emitter only while its fighter is in
+        // view.
         for e in &self.quads {
+            if hidden(e.chr(), e.set.stop_kind()) {
+                continue;
+            }
             if e.flags & E_VIEW_ONLY != 0 && !cam_shown(e.chr()) {
                 continue;
             }
@@ -2117,8 +2139,11 @@ impl Modules {
                 e.draw(def, &self.quad_pool, table, ot, ctx);
             }
         }
-        // EftBill_Draw: a front sprite only while its fighter is in view.
+        // EftBill_Draw: none while its fighter's effects hide; a front sprite only while its fighter is in view.
         for b in &self.bills {
+            if hidden(b.chr(), b.set.stop_kind()) {
+                continue;
+            }
             if b.flags & B_FRONT != 0 && !cam_shown(b.chr()) {
                 continue;
             }
@@ -2128,9 +2153,11 @@ impl Modules {
                 b.draw(def, ot, ctx);
             }
         }
-        // EftChain_Draw: a front chain only while its fighter is in view (BtlScene_IsEffectHidden: no fighter
-        // hides).
+        // EftChain_Draw: none while its fighter's effects hide; a front chain only while its fighter is in view.
         for c in &self.chains {
+            if hidden(c.chr(), c.set.stop_kind()) {
+                continue;
+            }
             if c.flags & C_FRONT != 0 && !cam_shown(c.chr()) {
                 continue;
             }
@@ -2140,6 +2167,7 @@ impl Modules {
                 c.draw(p, ot, ctx);
             }
         }
+        // EftPart10_Draw and EftLink_Draw draw whether or not their fighter's effects hide.
         // EftPart10_Draw.
         for e in &self.part10s {
             if let Some((def, _)) =
@@ -2156,16 +2184,22 @@ impl Modules {
                 l.draw(def, &self.link_pool, ot, ctx);
             }
         }
-        // EftRays_Draw (BtlScene_IsEffectHidden: no fighter hides).
+        // EftRays_Draw: none while its fighter's effects hide.
         for r in &self.rays_parts {
+            if hidden(r.chr(), r.set.stop_kind()) {
+                continue;
+            }
             if let Some(def) = w.sets[r.set.side][r.set.list].and_then(|s| s.rays[r.pair].as_ref())
             {
                 r.draw(def, ot, ctx);
             }
         }
-        // EftRay_Draw (BtlScene_IsEffectHidden: no fighter hides; no camera cut runs).
+        // EftRay_Draw: none while its fighter's effects of kind 2 hide (no camera cut runs).
         for r in &self.rays {
             let chr = r.chr();
+            if hidden(chr, 2) {
+                continue;
+            }
             r.draw(
                 w.ray_texture,
                 cam_shown(chr),

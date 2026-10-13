@@ -106,6 +106,7 @@ depth, blends in the GS's colour space) are left out.
 - [x] `SndOpt_Apply` for the sound options loaded from the card (the main loop takes the save's options every frame: the music volume, stereo or mono)
 - [x] `EftZap` (effect kind 12) and the water swirls (`EftWaterMist_*`), if anything reaches them: nothing does (no emitter set on the disc has kind 12; nothing calls `EftWater_AddBurst`)
 - [x] The body effect of request 0x1A (`EftBodyFx`, common effect set 0x23F on the fighter's body)
+- [x] The particle modules' hidden test when they draw (`BtlScene_IsEffectHidden` of each object's fighter by the kind it was made with; the rings and links draw regardless)
 
 ## By function
 

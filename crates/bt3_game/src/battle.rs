@@ -4250,6 +4250,16 @@ impl Battle {
                 in_technique: [false; 2],
                 eft_cam: false,
                 rush_seq: [false; 2],
+                hidden: std::array::from_fn(|s| {
+                    std::array::from_fn(|k| {
+                        crate::btl_tech_fx::effect_hidden(
+                            &self.roster.chars,
+                            !self.loading,
+                            s,
+                            k as u8,
+                        )
+                    })
+                }),
             };
             let in_view = |chr: usize| sv.in_view(chr);
             // Layer 0's stage effects, then the others.
@@ -8201,6 +8211,43 @@ pub(crate) mod tests {
         assert!(on > 30, "{on}");
         assert!(most > 0);
         assert!(gone.is_some());
+    }
+
+    #[test]
+    fn real_effects_hide_as_the_scene_says() {
+        // BtlScene_IsEffectHidden on the battle's fighters: nothing hides at the start; a hidden fighter (object
+        // flag 2 off) hides its technique effects (kind 1) and those of kinds 3 / 6, its ki blast effects (kind 0)
+        // only while a fighter is frozen; a changing fighter hides all but kinds 5 / 6; a rush sequence of either
+        // hides every fighter's kind 0, and its own kind 4 and kind 1 (not while hidden).
+        use crate::btl_tech_fx::effect_hidden;
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        let Some(battle) = real_battle(&setup) else {
+            return;
+        };
+        let base = battle.roster.chars.clone();
+        let kinds = |c: &[crate::btl_chr::Chr; 2], side, ready| -> Vec<u8> {
+            (0..7)
+                .filter(|&k| effect_hidden(c, ready, side, k))
+                .collect()
+        };
+        assert_eq!(kinds(&base, 0, true), []);
+        // The stage not ready: a fighter in view is not hidden.
+        assert_eq!(kinds(&base, 0, false), []);
+        let mut c = base.clone();
+        c[0].obj.flags &= !2;
+        assert_eq!(kinds(&c, 0, true), [1, 3, 4, 6]);
+        assert_eq!(kinds(&c, 0, false), [1, 2, 3, 4, 5, 6]);
+        c[1].freeze = 3;
+        assert_eq!(kinds(&c, 0, true), [0, 1, 3, 4, 6]);
+        assert_eq!(kinds(&c, 1, true), []);
+        let mut c = base.clone();
+        c[0].act.current = 0xEC;
+        assert_eq!(kinds(&c, 0, true), [0, 1, 2, 3, 4]);
+        let mut c = base.clone();
+        c[1].act.current = 0x12D;
+        assert_eq!(kinds(&c, 0, true), [0]);
+        assert_eq!(kinds(&c, 1, true), [0, 4]);
     }
 
     #[test]
