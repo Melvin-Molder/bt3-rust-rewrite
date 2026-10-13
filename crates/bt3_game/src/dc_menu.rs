@@ -9,12 +9,13 @@ use bt3_data::gs::RgbaTexture;
 use bt3_data::pack_section;
 
 use crate::anim::{self, LipSync, VOICE_PLAYEND};
-use crate::dialog::{Dialog, DialogAssets, Pad};
+use crate::dc_save::DcSave;
+use crate::dialog::{Dialog, DialogAssets};
 use crate::draw::ScreenQuad;
 use crate::flash::{FLASH_PAD, Flash, Uv, screen_quad};
 use crate::font::Font;
 use crate::logo::{ColorFade, picture_quads};
-use crate::mcflow::{self, McEnv, McFlow, McIo};
+use crate::mcflow::McEnv;
 use crate::menu_res::{FileKey, ImageTexture, decode_files, decode_picture, image_indices, tex};
 use crate::rng::GameRandom;
 use crate::title::{PAD_CROSS, PAD_DOWN, PAD_UP, PadRepeat, TitleFrame, TitleSound};
@@ -168,15 +169,6 @@ impl Default for DcProgress {
     }
 }
 
-/// `DcSave`: the system save flow run on leaving.
-struct DcSave {
-    dialog: Dialog,
-    mcflow: McFlow,
-    started: bool,
-    done: bool,
-    state: i32,
-}
-
 /// `DcMenu` and the frame loop of `DcMenu_Run`.
 pub struct DcMenuScreen {
     layout: DcMenuLayout,
@@ -229,13 +221,7 @@ impl DcMenuScreen {
             fade: ColorFade::start_in(true, FADE_FRAMES),
             pad: PadRepeat::default(),
             lip: LipSync::default(),
-            save: DcSave {
-                dialog,
-                mcflow: McFlow::new(card_res, None),
-                started: false,
-                done: false,
-                state: 0,
-            },
+            save: DcSave::new(dialog, card_res),
             blink: 0,
             talk: 0,
             scroll: 0.0,
@@ -291,7 +277,7 @@ impl DcMenuScreen {
         if self.check_leave(&mut frame.sounds) {
             dc.cursor = self.cursor;
             // DcSave_Term: a save that was started flips the "save changed" flag back.
-            if self.save.started {
+            if self.save.is_started() {
                 dc.dirty = !dc.dirty;
             }
             self.done = Some(self.result);
@@ -396,7 +382,7 @@ impl DcMenuScreen {
         let eye = self.flash.find(None, "mc_guide_blma_eye");
         anim::blink(&mut self.flash, eye, &mut self.blink, 0, random);
         let mouth = self.flash.find(None, "mc_guide_blma_mouth");
-        if voice_stat != VOICE_PLAYEND && !self.save.started {
+        if voice_stat != VOICE_PLAYEND && !self.save.is_started() {
             anim::talk(
                 &mut self.flash,
                 mouth,
@@ -449,24 +435,14 @@ impl DcMenuScreen {
                 .map(|q| screen_quad(q, textures)),
         );
         self.msg.draw(self.voice_line, font, &mut frame.quads);
-        // DcSave_Update.
-        if self.save.started {
-            let mut effects = Vec::new();
-            let mut io = McIo {
-                dialog: &mut self.save.dialog,
-                pad: Pad { pressed, repeat },
-                sounds: &mut effects,
-            };
-            let (state, events) = self.save.mcflow.update(mc, &mut io, font, &mut frame.quads);
-            self.save.state = state;
-            // DcSave_OnDone, for both outcomes.
-            if events.iter().any(|e| matches!(e, mcflow::Event::Done(_))) {
-                self.save.done = true;
-            }
-            frame
-                .sounds
-                .extend(effects.into_iter().map(|(b, id)| TitleSound::Effect(b, id)));
-        }
+        self.save.update(
+            pressed,
+            repeat,
+            font,
+            mc,
+            &mut frame.quads,
+            &mut frame.sounds,
+        );
     }
 
     /// `DcMenu_UpdateVoice`: the line being said decides which follows when it ends or confirm is pressed.
@@ -525,7 +501,7 @@ impl DcMenuScreen {
         if self.flash.flags() & FLASH_PAD == 0 || self.flags & CHOSEN != 0 {
             return;
         }
-        if self.save.started && self.save.state != 0 {
+        if self.save.state() != 0 {
             return;
         }
         if repeat & (PAD_UP | PAD_DOWN) != 0 {
@@ -554,9 +530,7 @@ impl DcMenuScreen {
             self.flags |= CHOSEN;
             sounds.push(TitleSound::Effect(1, 2));
             if dc.dirty {
-                // DcSave_Start.
-                self.save.mcflow.start(mcflow::MODE_SAVE, mc);
-                self.save.started = !self.save.started;
+                self.save.start(mc);
             }
         }
         self.update_voice(pressed, voice_stat, random, sounds);
@@ -567,14 +541,14 @@ impl DcMenuScreen {
         if self.flags & CHOSEN == 0 {
             return false;
         }
-        if self.flags & LEAVING == 0 && (!self.save.started || self.save.done) {
+        if self.flags & LEAVING == 0 && self.save.is_done() {
             self.flags |= LEAVING;
             self.flash.goto_label("fl_out", true);
             self.icon.close();
             self.msg.close();
             self.fade = ColorFade::start_out(true, FADE_FRAMES);
         }
-        if self.save.started {
+        if self.save.is_started() {
             sounds.push(TitleSound::VoiceFadeOutStep);
         }
         if self.flags & LEAVING != 0 {
@@ -622,7 +596,7 @@ mod tests {
         });
         let mut card = McCard::new(Libmc::new(None));
         let mut save = crate::save::SaveData::default();
-        let mut progress = mcflow::Progress::default();
+        let mut progress = crate::mcflow::Progress::default();
         let mut mc = McEnv {
             card: &mut card,
             save: &mut save,

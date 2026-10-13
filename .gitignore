@@ -51,6 +51,8 @@
 !/crates/bt3_game/src/sound.rs
 !/crates/bt3_game/src/title.rs
 !/crates/bt3_game/src/training.rs
+!/crates/bt3_game/src/dc_save.rs
+!/crates/bt3_game/src/evo_top.rs
 !/crates/bt3_game/src/shen.rs
 !/crates/bt3_game/src/shen_scene.rs
 !/crates/bt3_game/src/font.rs

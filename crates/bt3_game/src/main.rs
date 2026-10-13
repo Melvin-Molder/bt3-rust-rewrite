@@ -41,6 +41,7 @@ mod clip;
 mod dc_list;
 mod dc_menu;
 mod dc_password;
+mod dc_save;
 mod dialog;
 mod draw;
 mod duel_menu;
@@ -80,6 +81,7 @@ mod eft_surf;
 mod eft_transform;
 mod eft_water;
 mod eft_weather;
+mod evo_top;
 mod fade;
 mod flash;
 mod font;
@@ -201,6 +203,8 @@ enum Scene {
     Options(Box<options::OptionScreen>),
     /// `TrainMode_Main`, progress mode 44: the training menu.
     Training(Box<training::TrainScreen>),
+    /// `EvoMode_Main` mode 48: Evolution Z's top menu.
+    EvoTop(Box<evo_top::EvoTopScreen>),
     /// `Shen_Main` mode 70: the wish screen; mode 71: its save screen.
     Shen(Box<shen::ShenScreen>),
     ShenSave(Box<shen::ShenSaveScreen>),
@@ -268,6 +272,7 @@ impl Scene {
             | Scene::HistOutro(_)
             | Scene::Options(_)
             | Scene::Training(_)
+            | Scene::EvoTop(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -419,6 +424,11 @@ struct Game {
     train_mode: Option<i32>,
     /// `gMenuArc12`'s wish screen, and whether its backdrop's textures went to the renderer.
     shen: Option<shen::ShenData>,
+    /// `gMenuArc7`'s top menu of Evolution Z; `gProgress + 0x7D0`, the plate it was left on (-1 when the mode is
+    /// entered); whether `EvoMode_Main` started its music.
+    evo_top: Option<evo_top::EvoTopData>,
+    evo_cursor: i32,
+    evo_bgm: bool,
     shen_textures: bool,
     /// The character reference's model viewer (`ChrView`) while the screen runs, and the model texture revision
     /// of it the renderer has.
@@ -790,6 +800,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             train_char_select: None,
             train_mode: None,
             shen: None,
+            evo_top: None,
+            evo_cursor: -1,
+            evo_bgm: false,
             shen_textures: false,
             chr_view: None,
             chr_view_rev: None,
@@ -1457,6 +1470,47 @@ fn run_frames(
                     game.scene = Scene::Logos(LogoSequence::new());
                 }
             }
+            Scene::EvoTop(screen) => {
+                let dirty = game.dc.dirty;
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    dirty,
+                    &mut game.random,
+                    &mut game.font,
+                    &mut mc,
+                );
+                let result = screen.result();
+                let (cursor, save_started) = (screen.cursor(), screen.save_started());
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // EvoTop_Leave: the cursor kept; DcSave_Term: a started save flips the flag back.
+                    game.evo_cursor = cursor;
+                    if save_started {
+                        game.dc.dirty = !game.dc.dirty;
+                    }
+                    match result {
+                        0 => {
+                            // EvoMode_Main: Adx_StopAll, back to the main menu.
+                            game.evo_bgm = false;
+                            stop_all(game, &mut commands);
+                            start_main_menu(game, &mut commands, &mut audio);
+                        }
+                        mode => {
+                            info!("Evolution Z mode {} is not ported yet", 48 + mode);
+                            start_evo_top(game, &mut commands);
+                        }
+                    }
+                }
+            }
             Scene::Shen(screen) => {
                 let frame = screen.run_frame(
                     held,
@@ -1859,6 +1913,11 @@ fn run_frames(
                         MainMenuResult::Mode(60) => start_char_ref(game, &mut commands),
                         MainMenuResult::Mode(44) => start_training(game, &mut commands),
                         MainMenuResult::Mode(70) => start_shen(game, &mut commands),
+                        MainMenuResult::Mode(48) => {
+                            // EvoMode_Main: the cursor starts over.
+                            game.evo_cursor = -1;
+                            start_evo_top(game, &mut commands);
+                        }
                         MainMenuResult::Mode(mode) => {
                             info!("progress mode {mode} is not ported yet");
                             game.scene = Scene::Black;
@@ -2847,6 +2906,58 @@ fn start_char_ref(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the character reference: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `EvoMode_Main` mode 48: the music once, then `EvoTop_Run(1)` from `gMenuArc7`.
+fn start_evo_top(game: &mut Game, commands: &mut Commands) {
+    if game.evo_top.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, evo_top::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    evo_top::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| evo_top::EvoTopAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout = evo_top::EvoTopLayout::new(background, dialog, |key| firsts[&key]);
+                game.evo_top = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load Evolution Z's menu: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.evo_top.clone().expect("Evolution Z's menu is loaded");
+    let mut sounds = Vec::new();
+    match evo_top::EvoTopScreen::new(
+        &data,
+        game.evo_cursor,
+        game.card_res.as_deref(),
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            if !std::mem::replace(&mut game.evo_bgm, true) {
+                play_bgm(game, commands, evo_top::BGM_FILE_ID);
+            }
+            game.scene = Scene::EvoTop(Box::new(screen));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start Evolution Z's menu: {error}");
             game.scene = Scene::Black;
         }
     }
