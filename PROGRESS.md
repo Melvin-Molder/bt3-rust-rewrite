@@ -128,7 +128,7 @@ executable (callers and address references) and the ISO, and from the port's own
 
 ### Sound driver
 
-- [ ] SE tones with a noise voice, LFO, exclusive group or transpose, and the SE sequence events the port stops on (`se.rs` warns): first find whether any bank on the disc uses them
+- [x] SE tones with a noise voice, LFO, exclusive group or transpose, and the SE sequence events the port stops on: none of the 361 banks the game loads (the common, menu, stage and both voice sets' character banks) has any, which a real-ISO test checks; nothing to port
 
 ### System and front end
 

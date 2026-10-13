@@ -5,7 +5,8 @@
 //! hardware documentation (psx-spx, "Sound Processing Unit").
 //!
 //! Only what the game's banks use is implemented: note-on / note-off events, SE timbres without LFO, transpose or
-//! exclusive groups. Anything else in the data stops the sequence and is reported.
+//! exclusive groups. None of the 361 banks the game loads has anything else (a real-ISO test checks); anything else
+//! in the data would stop the sequence and be reported.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -959,6 +960,77 @@ impl Source for SeSource {
 #[cfg(test)]
 mod tests {
     use super::{GAUSS, SpuVoice, pan_levels, velocity_curve, voice_pitch};
+
+    /// Every SE bank the game loads (`Snd_LoadBank`: the common banks, each stage's, each character's of both voice
+    /// sets), from the ISO in `rom/`: no tone wants a noise voice, LFO, exclusive group or transpose, and every
+    /// sequence is note events alone, as the driver here assumes.
+    #[test]
+    fn real_banks_use_only_what_is_emulated() {
+        use bt3_data::Iso9660;
+        use bt3_data::afs::{AfsArchive, partition_entry_for_id};
+        use bt3_data::snd::SeBank;
+
+        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = Iso9660::open(&iso) else {
+            eprintln!("skipped: no ISO at {}", iso.display());
+            return;
+        };
+        let mut read = |id: u32| {
+            let location = partition_entry_for_id(id);
+            let archive =
+                AfsArchive::open(&mut image, format!("DATA/PZS3US{}.AFS", location.partition))
+                    .unwrap();
+            archive.read_entry(&mut image, location.index).unwrap()
+        };
+        let ids = (0x14A..0x14E + 0x40).chain(0xBDA..0xBDA + 2 * 0xA1);
+        let mut found = Vec::new();
+        for id in ids {
+            let file = read(id);
+            let Ok(bank) = SeBank::parse(&file) else {
+                continue;
+            };
+            found.push(id);
+            for set in bank.timbre_sets.iter().flatten() {
+                for tone in set.iter().flatten().flat_map(|t| &t.tones) {
+                    assert!(usize::from(tone.vag) < bank.vags.len(), "{id:#X}: noise");
+                    assert!(
+                        tone.lfo_mode & 0x77 == 0
+                            && tone.exclusive_group == 0
+                            && tone.semitone == 0
+                            && tone.fine == 0,
+                        "{id:#X}: {tone:?}"
+                    );
+                }
+            }
+            for seq in bank
+                .sesq
+                .sets
+                .iter()
+                .flatten()
+                .flat_map(|s| &s.sequences)
+                .flatten()
+            {
+                // A delta time, then events each followed by theirs.
+                let mut cursor = 0;
+                super::read_vlq(&seq.data, &mut cursor).unwrap();
+                loop {
+                    let status = seq.data[cursor];
+                    cursor += 1;
+                    if status == 0xFF {
+                        break;
+                    }
+                    assert!(
+                        (0x90..=0xAF).contains(&status),
+                        "{id:#X}: event {status:#X}"
+                    );
+                    cursor += 3;
+                    super::read_vlq(&seq.data, &mut cursor).unwrap();
+                }
+            }
+        }
+        println!("{} banks: {:X?}", found.len(), found);
+    }
 
     /// Renders the title's sound effects from the ISO in `rom/`, when it is there.
     #[test]
