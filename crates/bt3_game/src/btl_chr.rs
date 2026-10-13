@@ -451,6 +451,8 @@ pub(crate) struct SideData<'a> {
     pub shock_assets: Option<&'a crate::eft::SetAssets>,
     /// The rush-finish burst's set's assets.
     pub rush_burst_assets: Option<&'a crate::eft::SetAssets>,
+    /// The character body effect's set's assets (`EftCharaFxMgr_Init`).
+    pub chara_fx_assets: Option<&'a crate::eft::SetAssets>,
     /// The charge aura's set's assets.
     pub charge_assets: Option<&'a crate::eft::SetAssets>,
     /// The technique slots' effect packs (`BtlCharApi_GetPlayerEffectPack`).
@@ -491,6 +493,7 @@ impl<'a> SideData<'a> {
             crate::eft_shock::LIST => self.shock_assets,
             crate::eft_rushburst::LIST => self.rush_burst_assets,
             crate::eft_charge::LIST => self.charge_assets,
+            crate::eft_chara_fx::LIST => self.chara_fx_assets,
             _ => None,
         })
     }
@@ -1886,15 +1889,20 @@ impl Chr {
         self.obj.reset_body();
     }
 
-    /// `BtlChar_PlaceAtStart` (`BtlStage_GetStartPlace(player, ..., 0)`): the stage's starting place, facing its
-    /// target.
+    /// `BtlChar_PlaceAtStart` (`BtlStage_GetStartPlace(player, ..., 0)`): the player's starting place of the stage,
+    /// on the ground, facing its target.
     pub(crate) fn place_at_start(&mut self, data: &SideData, env: &Env) {
-        let place = env.stage.starting_placements.get(self.player);
-        let pos = place.map_or([0.0; 3], |p| p.position);
-        let target = place.map_or([0.0, 0.0, 1.0], |p| p.target);
-        let yaw = (target[0] - pos[0]).atan2(target[2] - pos[2]);
-        let area = env.col.find_zone_near(-1, pos) as i32;
-        self.place(data, pos, [0.0, yaw, 0.0], area);
+        let (pos, rot, area) = drop_place(env, env.stage.starting_placements.get(self.player));
+        self.place(data, pos, rot, area);
+    }
+
+    /// `BtlChar_PlaceRestart` (flag 0xF3, the result poses): `BtlStage_GetStartPlace(player, ..., 1)`, the stage's
+    /// first alternate starting place (for either player), on the ground.
+    pub(crate) fn place_restart(&mut self, data: &SideData, env: &Env) {
+        if self.flags.test(0xF3) {
+            let (pos, rot, area) = drop_place(env, env.stage.alternate_starting_placements.first());
+            self.place(data, pos, rot, area);
+        }
     }
 
     /// `BtlChar_OnStageLoaded` after a stage change: the pose cleared and the fighter put at its starting place on
@@ -3961,7 +3969,15 @@ pub(crate) fn approach(cur: f32, target: f32, step: f32) -> f32 {
 /// `BtlStage_GetPlace`: the stage's first place, dropped onto the ground from y = -700 (`BtlStage_ProbeGround`:
 /// the ground under a unit box there; no ground leaves the probe's maximum), facing its target; and its zone.
 pub(crate) fn stage_place(env: &Env) -> ([f32; 3], [f32; 3], i32) {
-    let place = env.stage.places.first();
+    drop_place(env, env.stage.places.first())
+}
+
+/// A stage placement dropped onto the ground from y -700 (`BtlStage_GetPlace`, `BtlStage_GetStartPlace`), facing its
+/// target; its zone.
+fn drop_place(
+    env: &Env,
+    place: Option<&bt3_data::stage::StagePlacement>,
+) -> ([f32; 3], [f32; 3], i32) {
     let p = place.map_or([0.0; 3], |p| p.position);
     let t = place.map_or([0.0; 3], |p| p.target);
     let yaw = (t[0] - p[0]).atan2(t[2] - p[2]);

@@ -55,6 +55,76 @@ pub struct Vertex {
     pub st: [f32; 2],
 }
 
+/// One vertex of the seam section (`ObjSeamVtx`, 0x70 bytes): skinned on the CPU between a node and its parent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeamVertex {
+    /// x, y, z and the weight of the node (against its parent) in w.
+    pub position: [f32; 4],
+    pub normal: [f32; 3],
+    /// The node (the part with this node gives the pivots).
+    pub node: u32,
+    pub st: [f32; 2],
+}
+
+/// The seam section (`ObjSeamSec` at header +0x70): triangles between parts, drawn after them with the TEX0 values
+/// of the first triangle (relative to the model's own texture and shading blocks).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Seams {
+    pub vertices: Vec<SeamVertex>,
+    pub tris: Vec<[u32; 3]>,
+    /// The base texture's and the shading ramp's TEX0.
+    pub tex0: [u64; 2],
+}
+
+impl Seams {
+    fn parse(model: &[u8], offset: usize) -> io::Result<Option<Self>> {
+        if offset == 0 {
+            return Ok(None);
+        }
+        let sec = model
+            .get(offset..offset + 0x10)
+            .ok_or_else(|| invalid_data("seam section outside the model"))?;
+        let (vtx_count, tri_count) = (u32_at(sec, 0) as usize, u32_at(sec, 4) as usize);
+        let (vtx_ofs, tri_ofs) = (u32_at(sec, 8) as usize, u32_at(sec, 0xC) as usize);
+        if vtx_count == 0 || tri_count == 0 {
+            return Ok(None);
+        }
+        let verts = model
+            .get(vtx_ofs..vtx_ofs + vtx_count * 0x70)
+            .ok_or_else(|| invalid_data("seam vertices outside the model"))?;
+        let tris = model
+            .get(tri_ofs..tri_ofs + tri_count * 0x20)
+            .ok_or_else(|| invalid_data("seam triangles outside the model"))?;
+        let f = |b: &[u8], o: usize| f32::from_bits(u32_at(b, o));
+        let vertices = verts
+            .chunks_exact(0x70)
+            .map(|v| SeamVertex {
+                position: [f(v, 0), f(v, 4), f(v, 8), f(v, 0xC)],
+                normal: [f(v, 0x10), f(v, 0x14), f(v, 0x18)],
+                node: u32_at(v, 0x1C),
+                st: [f(v, 0x20), f(v, 0x24)],
+            })
+            .collect::<Vec<_>>();
+        let u64_at =
+            |b: &[u8], o: usize| u64::from(u32_at(b, o)) | (u64::from(u32_at(b, o + 4)) << 32);
+        let tex0 = [u64_at(tris, 0x10), u64_at(tris, 0x18)];
+        let tris = tris
+            .chunks_exact(0x20)
+            .map(|t| [u32_at(t, 0), u32_at(t, 4), u32_at(t, 8)])
+            .collect::<Vec<_>>();
+        if tris.iter().flatten().any(|&i| i as usize >= vertices.len()) {
+            return Err(invalid_data(
+                "seam triangle names a vertex past the section",
+            ));
+        }
+        Ok(Some(Self {
+            vertices,
+            tris,
+            tex0,
+        }))
+    }
+}
+
 /// One mesh record (`ObjDrawPart`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPart {
@@ -84,6 +154,7 @@ pub struct CharaModel {
     /// block minus these is the texture entry's `tbpOfs` / `cbpOfs`.
     pub min_tbp: u32,
     pub min_cbp: u32,
+    pub seams: Option<Seams>,
 }
 
 impl CharaModel {
@@ -152,11 +223,13 @@ impl CharaModel {
             min_tbp = min_tbp.min(tex0_tbp(batch.tex0[0]));
             min_cbp = min_cbp.min(tex0_cbp(batch.tex0[0]));
         }
+        let seams = Seams::parse(model, header.seam_offset as usize)?;
         Ok(Self {
             header,
             parts,
             min_tbp,
             min_cbp,
+            seams,
         })
     }
 

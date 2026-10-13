@@ -419,6 +419,8 @@ pub struct EffectPack {
     pub rush_burst_set: Option<EmitSet>,
     /// The shock's animation and texture set (`EftShockMgr_Init`, kind 4): entries 1 and 2 of entry 6.
     pub shock: Option<(Vec<u8>, Vec<u8>)>,
+    /// The body effect's emitter set (`EftCharaFxMgr_Init`, kind 7): entry 9, its header entry 1.
+    pub chara_fx_set: Option<EmitSet>,
 }
 
 /// `BObjFile_GetEntry`: entry `n` of a pack, `None` when it is empty.
@@ -446,6 +448,7 @@ impl EffectPack {
             absorb_set: set(0xB),
             rush_burst_set: set(7),
             charge_set: set(2),
+            chara_fx_set: set(9),
             shock: pack_entry(pack, 6).and_then(|p| {
                 let at = |n: usize| p.get(entry_offset(p, n)..).map(<[u8]>::to_vec);
                 at(1).zip(at(2))

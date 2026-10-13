@@ -1521,6 +1521,7 @@ mod tests {
             parts: Vec::new(),
             min_tbp: 0,
             min_cbp: 0,
+            seams: None,
         }
     }
 

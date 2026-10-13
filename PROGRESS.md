@@ -115,15 +115,15 @@ executable (callers and address references) and the ISO, and from the port's own
 
 ### Battle
 
-- [ ] Blade trails (`EftBlade_*`, src/battle/eft_char_parts.c, layer 3 entry 6): the sword trails of the eight characters in `gEftBladeDef` (0x3E, 0x8A, 0x27, 0x28, ...). Its manager's init also creates both fighters' tasks with one libc `rand()` each at the battle's start, draws the port does not make
-- [ ] The ki blast's charge glow, the fighter effect kind 3 (`EftBlastCharge_*`, src/battle/eft_struggle.c): request 0x17 of a ki blast that is not a disc (`BtlFx_SpawnHitSparkReq17`'s other branch)
-- [ ] The character body effect, the fighter effect kind 7 (`EftCharaFx_*`, src/battle/eft_trail.c, `BtlFx_UpdateCharaFx`): characters 0x37, 0x98 and 0x99, from their pack's entry 9
-- [ ] The lost clash: `BtlAnim_EnableHandle` (the root's axes zeroed) when the motion plays again on the damaged model (src/battle/btl_act_super.c, `BtlAct_ClashLostHandler`)
-- [ ] The result poses' placement: flag 0xF3 puts the fighter at its second start place (`BtlChar_PlaceRestart`); the win and lose poses set it
-- [ ] `BtlOpp_MirrorFlags`: the opponent's flag 0x27 ends this fighter's camera cut (`ChrCam_EndCut`)
-- [ ] `BtlCharApi_IsCamShown`'s clash test: a fighter in clash A, B or C is not the one on screen (`BtlScene_IsCharInView`)
-- [ ] Model seams (`ObjSeam_*`, src/battle/obj_render.c): the CPU-skinned triangles between two nodes of a model with a seam section (header +0x70), drawn with the base texture and the shading ramp
-- [ ] The objects' distance fade (`BtlObjDraw_DrawModelFade`, `BtlObjDraw_DrawFadeLists`, `BtlObj_CalcViewColor`): the fade texture over the parts with flag 1 (check first that it does not depend on how the GS blends)
+- [x] Blade trails (`EftBlade_*`, src/battle/eft_char_parts.c, layer 3 entry 6): the sword trails of the eight characters in `gEftBladeDef` (0x3E, 0x8A, 0x27, 0x28, ...). Its manager's init draws libc `rand()` three times per fighter at the scene's start, after the stage effects' kinds
+- [x] The ki blast's charge glow, the fighter effect kind 3 (`EftBlastCharge_*`, src/battle/eft_struggle.c): request 0x17 of a ki blast that is not a disc (`BtlFx_SpawnHitSparkReq17`'s other branch)
+- [x] The character body effect, the fighter effect kind 7 (`EftCharaFx_*`, src/battle/eft_trail.c, `BtlFx_UpdateCharaFx`): characters 0x37, 0x98 and 0x99, from their pack's entry 9
+- [x] The lost clash: `BtlAnim_EnableHandle` (the root's axes zeroed) when the motion plays again on the damaged model (src/battle/btl_act_super.c, `BtlAct_ClashLostHandler`)
+- [x] The result poses' placement: flag 0xF3 puts the fighter at its second start place (`BtlChar_PlaceRestart`); the win and lose poses set it
+- [x] `BtlOpp_MirrorFlags`: the opponent's flag 0x27 ends this fighter's camera cut (`ChrCam_EndCut`)
+- [x] `BtlCharApi_IsCamShown`'s clash test: a fighter in clash A, B or C is not the one on screen (`BtlScene_IsCharInView`)
+- [x] Model seams (`ObjSeam_*`, src/battle/obj_render.c): the CPU-skinned triangles between two nodes of a model with a seam section (header +0x70), drawn with the base texture and the shading ramp (73 of the disc's 767 models have one)
+- [x] The objects' distance fade (`BtlObjDraw_DrawModelFade`): left out, as it depends on how the PS2 renders: a model with flag 1 draws its fade texture into the frame's alpha alone (FRAME_1 masking RGB), alpha-tested against the view's fade (40..120 units), blended through GS context 2's destination alpha
 - [ ] The streamed sounds' pan on the ADX players (CRI_ADXI.IRX's stereo and balance handling still to read)
 
 ### Sound driver

@@ -30,6 +30,8 @@ pub(crate) struct EffectModel {
     pub alpha: [u8; 16],
     pub model: CharaModel,
     pub batch_textures: Vec<Vec<[usize; 2]>>,
+    /// The seam section's material texture and shading row.
+    pub seam_textures: Option<[usize; 2]>,
     pub anims: Vec<Option<Motion>>,
 }
 

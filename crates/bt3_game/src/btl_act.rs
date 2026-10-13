@@ -7273,8 +7273,9 @@ impl Ctx<'_, '_> {
                             }
                         }
                         _ => {
-                            // BtlAnim_EnableHandle (the root's axes zeroed) is not ported.
                             self.me.anim_jump_to_end();
+                            // BtlAnim_EnableHandle: the motion's root axes zeroed.
+                            self.me.obj.zero_root(&self.data.obj);
                             self.change.set_done(self.me.player);
                             self.set(0xF5);
                             self.set(0x55);

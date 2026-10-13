@@ -305,6 +305,8 @@ pub(crate) struct FighterModel {
     pub(crate) model: CharaModel,
     /// Per part, per batch: the material texture and the shading row.
     batch_textures: Vec<Vec<[usize; 2]>>,
+    /// The seam section's material texture and shading row (`ObjSeam_Draw`).
+    seam_textures: Option<[usize; 2]>,
     /// What the model gives its face (`None` without eyes or a mouth), and how the face draws.
     pub(crate) face: Option<std::sync::Arc<crate::btl_face::FaceModel>>,
     face_draw: FaceDraw,
@@ -335,6 +337,8 @@ pub(crate) struct FighterModel {
     pub(crate) shock_assets: Option<SetAssets>,
     /// The rush-finish burst's set's assets (`EftRushBurstMgr_Init`).
     pub(crate) rush_burst_assets: Option<SetAssets>,
+    /// The character body effect's set's assets (`EftCharaFxMgr_Init`).
+    pub(crate) chara_fx_assets: Option<SetAssets>,
     /// The charge aura's set's assets (`EftChargeMgr_Init`).
     pub(crate) charge_assets: Option<SetAssets>,
     /// The technique slots' effect packs (`effectPacks`, the second animation file's entries 1..5).
@@ -1121,6 +1125,10 @@ pub(crate) fn load_side(
             fighter.charge_assets =
                 Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
         }
+        if let Some(set) = &pack.chara_fx_set {
+            fighter.chara_fx_assets =
+                Some(SetAssets::load(set, &mut assets.effect_textures).map_err(error)?);
+        }
         // EftShockMgr_Init: EftTexSet_Load32 of entry 2; the parts animate entry 1.
         if let Some((anim, tex)) = &pack.shock
             && let Ok(spr) = bt3_data::eft_pack::SprPack::parse(anim)
@@ -1589,6 +1597,7 @@ fn bind_model_textures(
 ) -> Result<
     (
         Vec<Vec<[usize; 2]>>,
+        Option<[usize; 2]>,
         Materials,
         HashMap<u32, usize>,
         [u8; 16],
@@ -1662,7 +1671,13 @@ fn bind_model_textures(
                 .collect()
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok((batch_textures, materials, shades, alpha))
+    // ObjSeam_Draw: the first seam triangle's TEX0 values, relative to the model's texture and shading blocks.
+    let seam_textures = model.seams.as_ref().and_then(|s| {
+        let base = *materials.get(&(tex0_tbp(s.tex0[0]), tex0_cbp(s.tex0[0])))?;
+        let shade = *shades.get(&tex0_cbp(s.tex0[1]))?;
+        Some([base, shade])
+    });
+    Ok((batch_textures, seam_textures, materials, shades, alpha))
 }
 
 /// A batch's material texture (its TEX0_1's blocks less the model's lowest) and shading row (its TEX0_2's CLUT).
@@ -1696,7 +1711,8 @@ pub(crate) fn load_effect_model(
     let model = CharaModel::from_file(pack).map_err(error)?;
     let textures = TextureResource::parse(pack_section(pack, TEXTURE_SECTION).map_err(error)?)
         .map_err(error)?;
-    let (batch_textures, _, _, alpha) = bind_model_textures(&model, &textures, ramp, assets)?;
+    let (batch_textures, seam_textures, _, _, alpha) =
+        bind_model_textures(&model, &textures, ramp, assets)?;
     let anims = (0..crate::eft_obj::MODEL_ANIMS)
         .map(|i| {
             bt3_data::pack_entry(pack, 0x1D + i)
@@ -1708,6 +1724,7 @@ pub(crate) fn load_effect_model(
         alpha,
         model,
         batch_textures,
+        seam_textures,
         anims,
     })
 }
@@ -1752,7 +1769,7 @@ fn load_fighter(
             .get(usize::from(i))
             .ok_or_else(|| format!("texture {i} is missing"))
     };
-    let (batch_textures, materials, shades, alpha) =
+    let (batch_textures, seam_textures, materials, shades, alpha) =
         bind_model_textures(&model, &textures, ramp, assets)?;
     // BtlObj_BindTables / BtlObj_CreateFace: the face's meshes, textures and lip tracks (of the voice set of the
     // options).
@@ -1826,6 +1843,7 @@ fn load_fighter(
         anim1_chara: 0,
         model,
         batch_textures,
+        seam_textures,
         face: Some(face),
         face_draw,
         motions: Vec::new(),
@@ -1842,6 +1860,7 @@ fn load_fighter(
         absorb_assets: None,
         shock_assets: None,
         rush_burst_assets: None,
+        chara_fx_assets: None,
         charge_assets: None,
         tech_packs: Default::default(),
         ki_models: [None, None],
@@ -2045,6 +2064,8 @@ pub(crate) struct SceneView {
     pub index: usize,
     demo: bool,
     eft_cam: bool,
+    /// `BtlCharApi_IsInClashA` (0x130..0x132) or `IsInClashBC` (0xFA / 0xFC) of each fighter.
+    clash: [bool; 2],
     pri: [bool; 2],
     replay: bool,
     default_view: usize,
@@ -2059,6 +2080,12 @@ impl SceneView {
             index,
             demo,
             eft_cam: battle.eft_cam.is_active(),
+            clash: [0, 1].map(|s| {
+                matches!(
+                    battle.roster.chars[s].act.current,
+                    0x130..=0x132 | 0xFA | 0xFC
+                )
+            }),
             pri: [0, 1].map(|s| battle.roster.chars[s].flags.test(0xD3)),
             replay: battle.replay.active,
             default_view: battle.replay.default_view(),
@@ -2066,15 +2093,18 @@ impl SceneView {
     }
 
     /// `BtlScene_IsCharInView`: in split screen's two views, the view's own fighter; otherwise in split screen
-    /// everything under an effect camera, else `BtlCharApi_IsCamShown` (the demo camera shows both, then the camera
-    /// priorities, then everyone in split screen without a replay, else the default view's fighter; the clashes'
-    /// test is not ported).
+    /// everything under an effect camera, else `BtlCharApi_IsCamShown` (a fighter in a clash is not shown; the demo
+    /// camera shows both, then the camera priorities, then everyone in split screen without a replay, else the
+    /// default view's fighter).
     pub(crate) fn in_view(&self, chr: usize) -> bool {
         if self.two {
             return chr == self.index;
         }
         if self.split && self.eft_cam {
             return true;
+        }
+        if self.clash[chr & 1] {
+            return false;
         }
         if self.demo {
             return true;
@@ -2278,6 +2308,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         absorb_assets: f.absorb_assets.as_ref(),
         shock_assets: f.shock_assets.as_ref(),
         rush_burst_assets: f.rush_burst_assets.as_ref(),
+        chara_fx_assets: f.chara_fx_assets.as_ref(),
         charge_assets: f.charge_assets.as_ref(),
         tech_packs: std::array::from_fn(|i| f.tech_packs[i].as_ref()),
         ki_models: std::array::from_fn(|i| f.ki_models[i].as_ref()),
@@ -3437,6 +3468,8 @@ impl Battle {
             .unwrap_or_else(|e| e.into_inner())
             .run_pending_resets(&mut self.vu0);
         self.roster.scene.stage.run_pending(libc, &mut self.vu0);
+        // EftBladeMgr_Init, after the stage effects' kinds in the scene's start (layer 0, then layer 3).
+        self.roster.scene.blades.run_init_draws(libc);
         let menu = std::array::from_fn(|i| {
             use crate::btl_input::pad::{CROSS, DOWN, LEFT, RIGHT, START, TRIANGLE, UP};
             let (held, prev) = (pads[i].held, self.prev_held[i]);
@@ -4401,6 +4434,22 @@ impl Battle {
                 .scene
                 .shotfx
                 .draw(&mut ot, &ctx, self.assets.spdline_texture);
+            // EftBlade_Draw (layer 3 entry 6, after the vanish lines).
+            {
+                let chars = &self.roster.chars;
+                let mtx = [0, 1].map(|s| move |n: u32| chars[s].obj.node(n).map(|m| m.mtx));
+                let data = [0, 1].map(|s| side_data(&self.assets.fighters[s]));
+                self.roster.scene.blades.draw(
+                    std::array::from_fn(|s| crate::eft_blade::BladeChr {
+                        chara: data[s].chara,
+                        weapon_out: false,
+                        hidden: chars[s].obj.flags & 2 == 0,
+                        node_mtx: &mtx[s],
+                    }),
+                    &mut ot,
+                    &ctx,
+                );
+            }
             // EftKiObj_Draw (layer 3, the ki blast lists of kind 1): the thrown objects' fragments, unless their
             // fighter's effects hide.
             {
@@ -4586,6 +4635,9 @@ pub(crate) fn draw_effect_model(
             );
         }
     }
+    if let (Some(seams), Some(textures)) = (&m.model.seams, m.seam_textures) {
+        draw_seams(&m.model, seams, textures, obj, light, keys[0], view, groups);
+    }
 }
 
 /// An object of a fighter's model in a view (`chara`: a fighter, which the camera may be inside of).
@@ -4648,6 +4700,97 @@ pub(crate) fn draw_model(
                 view,
                 groups,
             );
+        }
+    }
+    if let (Some(seams), Some(mut textures)) = (&model.model.seams, model.seam_textures) {
+        // The face frame stands in the face texture's place for the seams too.
+        if let Some((to, from)) = swap
+            && textures[0] == from
+        {
+            textures[0] = to;
+        }
+        draw_seams(
+            &model.model,
+            seams,
+            textures,
+            obj,
+            light,
+            keys[0],
+            view,
+            groups,
+        );
+    }
+}
+
+/// `ObjSeam_Transform` and `ObjSeam_Draw`: the seam vertices skinned on the CPU like the parts' (between the
+/// node of the part with their node and its parent, by the weight in w), shaded by the same light; a triangle with
+/// a corner outside the GS's guard band (x or y outside 0..4096) is not drawn. Drawn after the parts with the
+/// body's look, the first triangle's base texture and shading ramp.
+#[allow(clippy::too_many_arguments)]
+fn draw_seams(
+    model: &CharaModel,
+    seams: &bt3_data::model::Seams,
+    textures: [usize; 2],
+    obj: &crate::btl_obj::Obj,
+    light_dir: [f32; 3],
+    key: BatchKey,
+    view: &View,
+    groups: &mut BatchGroups,
+) {
+    let neg_light = scale3(normalize(light_dir), -1.0);
+    let screen: Vec<Option<ScreenVertex>> = seams
+        .vertices
+        .iter()
+        .map(|v| {
+            let i = model
+                .parts
+                .iter()
+                .position(|p| u32::from(p.node) == v.node)?;
+            let (part, node) = (&model.parts[i], obj.nodes.get(i)?);
+            let [x, y, z, w] = v.position;
+            let pa = apply(
+                &node.mtx,
+                [
+                    x - part.offset_a[0],
+                    y - part.offset_a[1],
+                    z - part.offset_a[2],
+                    1.0,
+                ],
+            );
+            let pb = apply(
+                &node.parent,
+                [
+                    x - part.offset_b[0],
+                    y - part.offset_b[1],
+                    z - part.offset_b[2],
+                    1.0,
+                ],
+            );
+            let p: [f32; 4] = std::array::from_fn(|k| pb[k] + (pa[k] - pb[k]) * w);
+            let la = dot(neg_light, rotate(&node.mtx, v.normal));
+            let lb = dot(neg_light, rotate(&node.parent, v.normal));
+            let u = 0.5 + 0.5 * (lb + (la - lb) * w);
+            let s = apply(&view.world2screen, [p[0], p[1], p[2], 1.0]);
+            let q = 1.0 / s[3];
+            let (sx, sy) = (s[0] * q, s[1] * q);
+            if !(0.0..=4096.0).contains(&sx) || !(0.0..=4096.0).contains(&sy) {
+                return None;
+            }
+            Some(ScreenVertex {
+                position: [
+                    (sx * 16.0).trunc() / 16.0 - OFFSET_X,
+                    (sy * 16.0).trunc() / 16.0 - OFFSET_Y,
+                    (s[2] * q).trunc(),
+                ],
+                stq: [v.st[0] * q, v.st[1] * q, q],
+                uq: u * q,
+            })
+        })
+        .collect();
+    let out = groups.entry(BatchKey { textures, ..key }).or_default();
+    for tri in &seams.tris {
+        if let [Some(a), Some(b), Some(c)] = tri.map(|i| screen[i as usize]) {
+            out.extend([a, b, c]);
         }
     }
 }
@@ -8248,6 +8391,220 @@ pub(crate) mod tests {
         c[1].act.current = 0x12D;
         assert_eq!(kinds(&c, 0, true), [0]);
         assert_eq!(kinds(&c, 1, true), [0, 4]);
+    }
+
+    /// A battle of `chara` against character 1, run to the fight; and its frame stepper with pad 0's buttons.
+    fn fight_vs_1(chara: i32) -> Option<(Battle, LibcRandom, GameRandom)> {
+        use crate::btl_input::pad::START;
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = chara;
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let mut battle = real_battle(&setup)?;
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let held = if skip && i % 2 == 0 { START } else { 0 };
+            fight_vs_1_frame(&mut battle, held, &mut libc, &mut random);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        Some((battle, libc, random))
+    }
+
+    fn fight_vs_1_frame(
+        battle: &mut Battle,
+        held: u32,
+        libc: &mut LibcRandom,
+        random: &mut GameRandom,
+    ) {
+        use crate::btl_input::pad::START;
+        let start = held & START != 0 && battle.prev_held[0] & START == 0;
+        let pads = [
+            PadState {
+                held,
+                ..PadState::default()
+            },
+            PadState::default(),
+        ];
+        battle.run_frame(start, pads, 0, libc, random, None, false);
+    }
+
+    #[test]
+    fn real_seams_draw_between_the_parts() {
+        // ObjSeam_Draw: character 7's model has a seam section (42 vertices, 14 triangles); its TEX0 values name the
+        // model's textures, and the fighter's draw adds its triangles on screen to the body's batches.
+        let Some((mut battle, ..)) = fight_vs_1(7) else {
+            return;
+        };
+        let m = &battle.assets.fighters[0];
+        let seams = m.model.seams.as_ref().expect("seam section");
+        assert_eq!((seams.vertices.len(), seams.tris.len()), (42, 14));
+        assert!(m.seam_textures.is_some());
+        let cam = battle.roster.chars[0].cam;
+        let view = View::new(cam.pos, cam.rot);
+        let count = |b: &Battle| {
+            let mut groups = BatchGroups::new();
+            let obj = &b.roster.chars[0].obj;
+            draw_model(
+                &b.assets.fighters[0],
+                obj,
+                true,
+                b.light_dir,
+                &view,
+                &mut groups,
+            );
+            groups.values().map(Vec::len).sum::<usize>()
+        };
+        let with = count(&battle);
+        battle.assets.fighters[0].seam_textures = None;
+        assert_eq!(with - count(&battle), 3 * 14);
+    }
+
+    #[test]
+    fn real_sword_swings_leave_a_blade_trail() {
+        // EftBlade: character 0x3E's rush attacks bring its sword out; the trail's ring fills behind the blade and
+        // draws in its blue (53, 147, 242), then fades once the sword is put away.
+        use crate::btl_input::pad::SQUARE;
+        let Some((mut battle, mut libc, mut random)) = fight_vs_1(0x3E) else {
+            return;
+        };
+        let (mut most, mut drawn) = (0, 0);
+        for i in 0..240 {
+            let held = if i < 120 && i % 8 < 4 { SQUARE } else { 0 };
+            let start = false;
+            let pads = [
+                PadState {
+                    held,
+                    ..PadState::default()
+                },
+                PadState::default(),
+            ];
+            let out = battle.run_frame(start, pads, 0, &mut libc, &mut random, None, false);
+            most = most.max(battle.roster.scene.blades.live(0));
+            drawn = drawn.max(
+                out.effects
+                    .iter()
+                    .filter(|t| t.texture.is_none() && t.vertices[0].rgba[..3] == [53, 147, 242])
+                    .count(),
+            );
+        }
+        eprintln!("blade ring {most}, drawn {drawn}");
+        assert!(most > 0);
+        assert!(drawn > 0);
+        assert_eq!(battle.roster.scene.blades.live(0), 0);
+    }
+
+    #[test]
+    fn real_ki_blast_charge_glows_in_the_hand() {
+        // EftBlastCharge: character 0's charged ki blast (request 0x17, a plain ki blast) glows in the hand while it
+        // charges, spawning the kind 2 set's emitters; the glows end once it no longer charges.
+        use crate::btl_input::pad::TRIANGLE;
+        let Some((mut battle, mut libc, mut random)) = fight_vs_1(0) else {
+            return;
+        };
+        let list = crate::eft::SetRef { side: 0, list: 1 };
+        let (mut most, mut objs) = (0, 0);
+        for i in 0..120 {
+            fight_vs_1_frame(
+                &mut battle,
+                if i < 40 { TRIANGLE } else { 0 },
+                &mut libc,
+                &mut random,
+            );
+            most = most.max(battle.roster.scene.blast_charges[0].count());
+            objs = objs.max(
+                battle
+                    .roster
+                    .scene
+                    .fx
+                    .counts(Some(list))
+                    .iter()
+                    .sum::<usize>(),
+            );
+        }
+        assert!(most > 0, "no glow");
+        assert!(objs > 0);
+        assert_eq!(battle.roster.scene.blast_charges[0].count(), 0);
+    }
+
+    #[test]
+    fn real_body_effect_runs_in_flight() {
+        // EftCharaFx: character 0x37 in flight (flag 0xE, R1 ascends) runs its pack's entry 9 set at node 0x38, two
+        // emitters to either side (off before it takes off).
+        use crate::btl_input::pad::R1;
+        let Some((mut battle, mut libc, mut random)) = fight_vs_1(0x37) else {
+            return;
+        };
+        assert!(!battle.roster.scene.chara_fxs[0].is_running());
+        let list = crate::eft::SetRef {
+            side: 0,
+            list: crate::eft_chara_fx::LIST,
+        };
+        let mut objs = 0;
+        for _ in 0..60 {
+            fight_vs_1_frame(&mut battle, R1, &mut libc, &mut random);
+            objs = objs.max(
+                battle
+                    .roster
+                    .scene
+                    .fx
+                    .counts(Some(list))
+                    .iter()
+                    .sum::<usize>(),
+            );
+        }
+        assert!(battle.roster.scene.chara_fxs[0].is_running());
+        assert!(objs > 0);
+    }
+
+    #[test]
+    fn real_restart_flag_places_at_the_alternate_start() {
+        // BtlChar_PlaceRestart: with flag 0xF3 (the result poses) the fighter stands at the stage's first alternate
+        // starting place, on the ground.
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..5 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        let alt = battle.assets.stage.alternate_starting_placements[0].position;
+        let before = battle.roster.chars[0].pose.pos;
+        assert!((before[0] - alt[0]).abs() + (before[2] - alt[2]).abs() > 1.0);
+        battle.roster.chars[0].flags.set_held(0xF3);
+        battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        let p = battle.roster.chars[0].pose.pos;
+        assert!(
+            (p[0] - alt[0]).abs() < 0.01 && (p[2] - alt[2]).abs() < 0.01,
+            "{p:?} {alt:?}"
+        );
+    }
+
+    #[test]
+    fn a_fighter_in_a_clash_is_not_in_view() {
+        // BtlCharApi_IsCamShown: a fighter in clash A or B / C is not the one on screen, before the demo camera.
+        let mut v = SceneView {
+            split: false,
+            two: false,
+            first: true,
+            index: 0,
+            demo: true,
+            eft_cam: false,
+            clash: [false; 2],
+            pri: [false; 2],
+            replay: false,
+            default_view: 0,
+        };
+        assert!(v.in_view(0) && v.in_view(1));
+        v.clash = [true, false];
+        assert!(!v.in_view(0) && v.in_view(1));
     }
 
     #[test]

@@ -352,6 +352,8 @@ pub(crate) struct Scene {
     pub auras: crate::eft_aura::Auras,
     /// The body lightning (`gEftBoltPool`, layer 3).
     pub bolts: crate::eft_bolt::Bolts,
+    /// The blade trails (`gEftBlade`, layer 3).
+    pub blades: crate::eft_blade::Blades,
     /// The body effects of request 0x1A (`gEftBodyFxList`, layer 3).
     pub bodies: crate::eft_body::BodyFxs,
     /// The power-up glow (`gEftGlow`, layer 3).
@@ -368,6 +370,10 @@ pub(crate) struct Scene {
     pub charges: [crate::eft_charge::Charges; 2],
     /// Each fighter's rush-finish bursts (its kind 5 manager, layer 2).
     pub rush_bursts: [crate::eft_rushburst::RushBursts; 2],
+    /// The ki blast charge glows (fighter effect kind 3).
+    pub blast_charges: [crate::eft_blast_charge::BlastCharges; 2],
+    /// The character body effects (fighter effect kind 7).
+    pub chara_fxs: [crate::eft_chara_fx::CharaFxs; 2],
     /// The screen shock waves (`gScrWarp`).
     pub warps: crate::scr_warp::ScrWarps,
     /// The stage effects of layer 0.
@@ -1184,6 +1190,8 @@ impl Scene {
         self.bodies.reset_side(&mut self.fx, side);
         self.shocks[side].reset(&mut self.fx);
         self.rush_bursts[side].reset(&mut self.fx);
+        self.blast_charges[side].reset();
+        self.chara_fxs[side].reset(&mut self.fx);
         self.charges[side].reset(&mut self.fx);
         self.tech.reset_side(chars, &mut self.fx, side);
     }
@@ -1199,9 +1207,29 @@ impl Scene {
         } else {
             current(me, data).kind_type()
         };
-        if kind_type == 4 {
-            self.tech.discs.spawn_held(me, data, &mut self.next_id);
-            self.defer_disc_draws();
+        match kind_type {
+            4 => {
+                self.tech.discs.spawn_held(me, data, &mut self.next_id);
+                self.defer_disc_draws();
+            }
+            2 | 3 | 5 => {}
+            // EftBlastCharge_Start at the firing hand, along the aim.
+            _ => {
+                if let Some(set) = blast_charge_set(data) {
+                    let node = match me.blast_node {
+                        0x15 => 0x1F,
+                        0x23 => 0x2D,
+                        n => n,
+                    } as u32;
+                    self.blast_charges[me.player].start(
+                        set,
+                        node,
+                        me.obj.node_pos(node),
+                        me.aim_dir,
+                        data.height(),
+                    );
+                }
+            }
         }
     }
 
@@ -1345,6 +1373,23 @@ impl Scene {
                     }
                 }
             }
+            // Kind 3, the ki blast's charge glow (the kind 2 list's set).
+            if let Some(set) = blast_charge_set(w.data[side])
+                && let Some(assets) = w.data[side].blast_assets[1]
+            {
+                let ctx = spawn_ctx(w, side, set, assets, 1);
+                let chars = &*w.chars;
+                let node_pos = |n| chars[side].obj.node_pos(n);
+                self.blast_charges[side].update(
+                    &mut self.fx,
+                    &node_pos,
+                    chars[side].flags.test(0x8E),
+                    &ctx,
+                    stopped,
+                    w.libc,
+                    w.vu0,
+                );
+            }
             // Kind 4, the shock.
             if let Some(pack) = shock_pack(w.data[side]) {
                 let me = &w.chars[side];
@@ -1372,7 +1417,26 @@ impl Scene {
                     w.vu0,
                 );
             }
-            // Kind 9, the drain glow (the other kinds are not ported).
+            // Kind 7, the character body effect.
+            if let Some(set) = chara_fx_set(w.data[side])
+                && let Some(assets) = w.data[side].chara_fx_assets
+            {
+                let ctx = spawn_ctx(w, side, set, assets, crate::eft_chara_fx::LIST);
+                let chars = &*w.chars;
+                let node_pos = |n| chars[side].obj.node_pos(n);
+                let node_x = |n| {
+                    chars[side]
+                        .obj
+                        .node(n)
+                        .map_or([0.0; 3], |m| [m.mtx[0][0], m.mtx[0][1], m.mtx[0][2]])
+                };
+                let c = crate::eft_chara_fx::CharaFxChr {
+                    node_pos: &node_pos,
+                    node_x: &node_x,
+                };
+                self.chara_fxs[side].update(&mut self.fx, &c, &ctx, w.paused, w.libc, w.vu0);
+            }
+            // Kind 9, the drain glow (kinds 6, 8 and 10 are empty).
             if let Some((_, ctx)) = absorb_ctx(w, side) {
                 let chars = &*w.chars;
                 let node_pos = |n| chars[side].obj.node_pos(n);
@@ -1533,6 +1597,20 @@ impl Scene {
         let tables = w.env.fx;
         self.shotfx
             .update(w.paused, &shot, &tables.shotfx, &tables.sin_coef, w.libc);
+        // EftBlade_Update (layer 3 entry 6, between the vanish lines and the struggle).
+        {
+            let chars = &*w.chars;
+            let mtx = [0, 1].map(|s| move |n: u32| chars[s].obj.node(n).map(|m| m.mtx));
+            self.blades.update(
+                std::array::from_fn(|s| crate::eft_blade::BladeChr {
+                    chara: w.data[s].chara,
+                    weapon_out: crate::btl_snd::has_weapon_out(&chars[s], w.data[s]),
+                    hidden: chars[s].obj.flags & 2 == 0,
+                    node_mtx: &mtx[s],
+                }),
+                w.paused,
+            );
+        }
         if !w.paused {
             self.step_struggle(w);
         }
@@ -1735,6 +1813,12 @@ impl Scene {
             }
             if let Some(set) = rush_burst_set(w.data[side]) {
                 self.rush_bursts[side].post_update(set, &mut self.fx);
+            }
+            if let Some(set) = blast_charge_set(w.data[side]) {
+                self.blast_charges[side].post_update(set, &mut self.fx);
+            }
+            if let Some(set) = chara_fx_set(w.data[side]) {
+                self.chara_fxs[side].post_update(set, &mut self.fx);
             }
             if let Some(set) = absorb_set(w.data[side]) {
                 self.absorbs[side].post_update(set, &mut self.fx);
@@ -2683,6 +2767,25 @@ pub(crate) fn charge_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
         return None;
     }
     pack.charge_set.as_ref()
+}
+
+/// The ki blast charge glow's set, when the character has the kind 3 manager (`EftChar_Init`: pack bit 2, and no ki
+/// blast of type 3): the kind 2 ki blasts' set (pack entry 4).
+pub(crate) fn blast_charge_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
+    let pack = data.effect?;
+    if pack.kind_bits & (1 << 2) == 0 || data.tables.ki_blasts.iter().any(|r| r.kind_type() == 3) {
+        return None;
+    }
+    pack.blast_sets[1].as_ref()
+}
+
+/// The character body effect's set, when the character's pack makes the kind 7 manager (pack bit 7).
+pub(crate) fn chara_fx_set<'a>(data: &SideData<'a>) -> Option<&'a EmitSet> {
+    let pack = data.effect?;
+    if pack.kind_bits & (1 << 7) == 0 {
+        return None;
+    }
+    pack.chara_fx_set.as_ref()
 }
 
 /// The rush-finish burst's set, when the character's pack makes the kind 5 manager (pack bit 5).

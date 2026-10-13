@@ -1048,11 +1048,13 @@ impl SetRef {
     /// blasts' sets (`EftKiBlast_SpawnParts`), 1 for the techniques' (`EftEmit_SpawnOwn`), 3 for the drain
     /// glow's, the shock's parts, the rush burst's and the charge aura's, 2 for the impacts' and 5 for the
     /// transformation's (all stopped by the pause alone), 4 for the body effect's (the pause or its fighter's rush
-    /// sequence).
+    /// sequence), 6 for the character body effect's (the pause).
     fn stop_kind(self) -> u8 {
         // EftPtcl_Create without EftPtcl_SetType (the orb tail's bursts): kind 0.
         if self.list == BODY_LIST {
             4
+        } else if self.list == crate::eft_chara_fx::LIST {
+            6
         } else if self.list < 2 || self.list == ORB_LIST {
             0
         } else if self.list < crate::eft_absorb::LIST {

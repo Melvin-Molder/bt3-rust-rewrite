@@ -305,7 +305,8 @@ impl Roster {
             me.anim_apply_blend();
             // BtlObj_SaveNodePositions: relative to node 0's translation with flag 0x2B.
             me.obj.save_node_positions(me.flags.test(0x2B));
-            // The placement requests in the original's order (0xF3, the restart's, is not ported).
+            // The placement requests in the original's order.
+            me.place_restart(data[i], env);
             me.place_center(data[i], env);
             me.place_relative(data[i], env);
             place_on_path(me, data[i], env, clash);
@@ -475,6 +476,41 @@ impl Roster {
                 }
                 if me.fx_ended(0x38) {
                     self.scene.absorbs[i].stop();
+                }
+            }
+            // BtlFx_UpdateCharaFx: the body effect of characters 0x37, 0x98 and 0x99 while request 0x3A holds, or
+            // without request 0x3B in flight (flag 0xE) out of the water; not while the model is new.
+            if let Some(set) = crate::btl_blast::chara_fx_set(data[i]) {
+                let fxs = &mut self.scene.chara_fxs[i];
+                let mut keep = false;
+                if !me.flags.test(0x12B) {
+                    if !matches!(data[i].chara, 0x37 | 0x98 | 0x99) {
+                        keep = true;
+                    } else if me.test_fx(0x3A)
+                        || (!me.test_fx(0x3B) && me.flags.test(0xE) && !me.flags.test(0x11))
+                    {
+                        if !fxs.on {
+                            let node_pos = |n| me.obj.node_pos(n);
+                            let node_x = |n| {
+                                me.obj
+                                    .node(n)
+                                    .map_or([0.0; 3], |m| [m.mtx[0][0], m.mtx[0][1], m.mtx[0][2]])
+                            };
+                            let c = crate::eft_chara_fx::CharaFxChr {
+                                node_pos: &node_pos,
+                                node_x: &node_x,
+                            };
+                            fxs.start(set, data[i].chara, &c);
+                        }
+                        fxs.on = true;
+                        keep = true;
+                    }
+                }
+                if !keep {
+                    if fxs.on {
+                        fxs.stop();
+                    }
+                    fxs.on = false;
                 }
             }
             me.obj.build_volumes(&data[i].obj);
@@ -1267,7 +1303,7 @@ fn update_fighter_stage(
 }
 
 /// `BtlOpp_MirrorFlags` (`BtlChar_UpdateStage6`): what the opponent is doing, as this fighter's flags 0xAC..0xB9
-/// and 0xD6 (in a technique: 0xAF; dead: 0xB1). The camera cut its flag 0x27 ends is not ported.
+/// and 0xD6 (in a technique: 0xAF; dead: 0xB1); the opponent's flag 0x27 ends its camera cut.
 fn mirror_flags(me: &mut Chr, opp: &Chr) {
     me.flags.clear_range(0xAC, 0xB9);
     for (o, m) in [(0xB, 0xAC), (0x1A, 0xAD), (0x3F, 0xAE), (0x85, 0xB3)] {
@@ -1289,6 +1325,10 @@ fn mirror_flags(me: &mut Chr, opp: &Chr) {
     }
     if opp.flags.test(0x26) {
         me.flags.set_held(0xB2);
+    }
+    // The opponent's flag 0x27 ends this fighter's camera cut.
+    if opp.flags.test(0x27) {
+        crate::chr_cam::end_cut(me);
     }
     for (o, m) in [
         (0x90, 0xB5),
