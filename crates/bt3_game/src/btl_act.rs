@@ -7975,7 +7975,7 @@ impl Ctx<'_, '_> {
     /// motion 0x12A.., a sequence (0x72) to 0x12D..; a catching technique measures the sequence's motions while it
     /// fires. The self-destruct technique (flag 0x2000) of an undamaged fighter changes it to its damaged model
     /// before the fire. The technique's camera cut ends with the fire motion; the camera shakes at the fire
-    /// (`BtlSuper_ShakeOnEvent`). The sounds are not ported.
+    /// (`BtlSuper_ShakeOnEvent`).
     fn super_beam(&mut self, phase: u32) {
         let cls = self.current_class();
         let long = (0x10C..=0x10E).contains(&self.current());
@@ -9788,7 +9788,7 @@ impl Ctx<'_, '_> {
     /// put back at the saved placement (0xF5), under the character's camera cuts 4, 5 (while waiting) and 6 with
     /// their shakes, voice kinds 0xE (start) and 0x22 (closing) and the sounds (0x54 then 0x4C / 0x53 by parameter
     /// flag 0x40000; the long one's 0x44, 0x22, 0x18 in the lead-in and 0x25, 0x14, 0x45, 0x2C in the closing).
-    /// Each shake comes with the pad's vibration. The battle events are not ported.
+    /// Each shake comes with the pad's vibration. Events 0x20 (entering), 0x5A and 0x4D.
     fn transform_a(&mut self, phase: u32) {
         let long = self.current() == 0xF0;
         if phase == ENTER {

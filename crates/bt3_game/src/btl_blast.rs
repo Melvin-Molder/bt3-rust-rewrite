@@ -16,7 +16,7 @@
 //!
 //! The fighters' answers play their sounds and voices (`BtlColl_*`), the shots their fire and stage-contact sounds.
 //!
-//! Not ported: the particles, impact effects and battle events.
+//! Not ported: the particles and impact effects.
 
 use std::f32::consts::PI;
 

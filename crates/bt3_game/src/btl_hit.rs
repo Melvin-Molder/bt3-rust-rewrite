@@ -438,7 +438,7 @@ fn throw_chara(data: &SideData, slot: i32) -> i32 {
 
 /// `BtlColl_StartThrow`: a rush technique of `slot` catches: the attacker's sequence block is filled (flag 0x72)
 /// and copied to the victim (reaction 0x22), both facing the attacker's heading and out of reach (flags
-/// 0x44..0x46). Refused while the attacker is hit or either is down. The battle events are not ported.
+/// 0x44..0x46), the attacker's event 0x2B..0x2D by slot. Refused while the attacker is hit or either is down.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_throw(
     atk: &mut Chr,

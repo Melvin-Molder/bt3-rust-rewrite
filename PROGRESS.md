@@ -93,7 +93,7 @@ depth, blends in the GS's colour space) are left out.
 - [x] `BtlAct_QueueComboFinish` and the attack records 0x77 / 0x87 / 0x8D..0x8F (`BtlDecide_QueueAttack`)
 - [x] A paid evasion's attack (flag 0x7C), guard kind 4 from a guard action
 - [x] Throws: the motions played from the opponent's table (table flag 0x20000000), a clash win's throw, the throw break (`BtlHit_CheckThrowBreak`)
-- [ ] The battle events fired by hits, clashes and techniques
+- [x] The battle events fired by hits, clashes and techniques (all of `BtlEvent_Raise`'s ids, the KO's 0x51..0x53 by the damage's kind)
 - [x] The technique camera cuts
 - [ ] Technique effects: the rush swarm's models; the disc's model
 - [ ] The ki objects' models, fragments and explosions

@@ -23,7 +23,7 @@
 //! The skills (slots 0, 1) start the same way from effect bit 0x3C / 0x3D: kind 0, their events from the frame
 //! table when they have one, their records answered by `BtlColl_GuardStrike` / `BtlColl_HitByStrike`.
 //!
-//! Not ported: abilities; the battle events.
+//! Not ported: abilities.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -2491,8 +2491,8 @@ pub(crate) fn guard_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
 
 /// `BtlColl_HitByStrike`: a skill's record hits (one not of hit direction kind 4 only from in front of its user):
 /// the reaction by the victim's state (0x800), 0 meaning 3 and 1 nothing; the push, the stun of reactions
-/// 0x17..0x1C, the hit sound, the damage with its camera shake and pad vibration. Flag 0x45 lets it through.
-/// The battle events are not ported.
+/// 0x17..0x1C, the hit sound, the damage with its camera shake and pad vibration, the attacker's event 0x29 /
+/// 0x2A by slot. Flag 0x45 lets it through.
 pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let Some(src) = rec.tech else {
         return false;
@@ -2570,7 +2570,7 @@ pub(crate) fn hit_by_strike(w: &mut World, target: usize, rec: &HitRec) -> bool 
 /// throw technique is shrugged off by a size class 4 fighter, and only guarded from behind, kind 6); the push on
 /// the last hit, the recoil on the attacker. Flag 0x46 lets it through; technique flag 1 (unblockable), and a full
 /// charge of a charge type with flag 2, are only guarded by kind 6. The guard shakes the camera and vibrates
-/// the pad; the battle events are not ported.
+/// the pad; the guard's event 0x2E..0x30 by slot.
 pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let Some(src) = rec.tech else {
         return false;
@@ -2684,7 +2684,7 @@ fn hit_damage_flags(slot: i32) -> u32 {
 /// `BtlColl_HitByRush`: a technique hits; one with hit direction kind 0 / 2 only from in front of its user. The
 /// reaction by the victim's state (0x800) and the last hit, 0 meaning 0xF and 1 nothing; then no flinch, a catch
 /// (0x1D / 0x1E, `BtlColl_StartRushCatch`), the rush sequence (0x22, `BtlColl_StartThrow`), or the hit. A catch or
-/// a sequence that cannot start lets the record pass. The battle events are not ported.
+/// a sequence that cannot start lets the record pass. The attacker's event 0x2B..0x2D by slot.
 pub(crate) fn hit_by_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
     let Some(src) = rec.tech else {
         return false;
