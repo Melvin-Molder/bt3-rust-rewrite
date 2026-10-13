@@ -52,6 +52,7 @@ mod eft;
 mod eft_absorb;
 mod eft_aura;
 mod eft_bill;
+mod eft_body;
 mod eft_bolt;
 mod eft_bound;
 mod eft_bubble;

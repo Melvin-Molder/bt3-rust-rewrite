@@ -352,6 +352,8 @@ pub(crate) struct Scene {
     pub auras: crate::eft_aura::Auras,
     /// The body lightning (`gEftBoltPool`, layer 3).
     pub bolts: crate::eft_bolt::Bolts,
+    /// The body effects of request 0x1A (`gEftBodyFxList`, layer 3).
+    pub bodies: crate::eft_body::BodyFxs,
     /// The power-up glow (`gEftGlow`, layer 3).
     pub glows: crate::eft_glow::Glows,
     /// The impacts (`gEftImpactList`, layer 3).
@@ -1179,6 +1181,7 @@ impl Scene {
             }
         }
         self.absorbs[side].reset(&mut self.fx);
+        self.bodies.reset_side(&mut self.fx, side);
         self.shocks[side].reset(&mut self.fx);
         self.rush_bursts[side].reset(&mut self.fx);
         self.charges[side].reset(&mut self.fx);
@@ -1610,6 +1613,33 @@ impl Scene {
             w.libc,
             w.vu0,
         );
+        // EftBodyFx_Update (after the impacts in layer 3).
+        if let Some(b) = w.env.body {
+            let chars = &*w.chars;
+            let pos = [0, 1].map(|s| move |n: u32| chars[s].obj.node_pos(n));
+            self.bodies.update(
+                &mut self.fx,
+                |s| crate::eft_body::BodyChr {
+                    node_pos: &pos[s],
+                    scale: scale[s],
+                },
+                |s| crate::eft::SpawnCtx {
+                    chr: s,
+                    set: &b.set,
+                    assets: &b.assets,
+                    set_ref: SetRef {
+                        side: s,
+                        list: crate::eft::BODY_LIST,
+                    },
+                    char_scale: [scale[s], scale[s ^ 1]],
+                    opp_chara_flags: flags[s ^ 1],
+                    opp_node3: node3[s ^ 1],
+                },
+                |s| w.paused || crate::btl_tech_fx::in_rush_sequence(&chars[s]),
+                w.libc,
+                w.vu0,
+            );
+        }
         self.tech
             .update_shots(w, &mut self.fx, &mut self.records, HIT_MAX, &self.eft_objs);
         // EftClashSpark_Update.
@@ -1637,6 +1667,7 @@ impl Scene {
                     transform_sets,
                     w.env.orb,
                     w.env.spark,
+                    w.env.body,
                 )
             }),
             any_frozen: stopped,
@@ -1648,6 +1679,7 @@ impl Scene {
             paused: w.paused,
             in_technique: [0, 1].map(|s| crate::btl_act::is_technique_id(w.chars[s].act.current)),
             eft_cam: self.eft_cam_active,
+            rush_seq: [0, 1].map(|s| crate::btl_tech_fx::in_rush_sequence(&w.chars[s])),
         };
         self.fx.update(&fxw, w.libc, w.vu0);
         // Layer 3's blinding overlay and full-screen flash.
@@ -1712,6 +1744,9 @@ impl Scene {
         }
         self.impacts
             .post_update(&mut self.fx, impact_sets, w.paused);
+        if let Some(b) = w.env.body {
+            self.bodies.post_update(&b.set, &mut self.fx);
+        }
         self.tech.post_update_shots(w, &mut self.fx);
         if let Some(s) = w.env.spark {
             self.sparks.post_update(&s.set, &mut self.fx, w.paused);
@@ -2684,9 +2719,11 @@ pub(crate) fn world_sets<'a>(
     transform: &'a [crate::eft_impact::ImpactSet],
     orb: Option<&'a crate::eft_orb_tail::OrbCfg>,
     spark: Option<&'a crate::eft_impact::ImpactSet>,
+    body: Option<&'a crate::eft_impact::ImpactSet>,
 ) -> [Option<&'a SetAssets>; crate::eft::SET_LISTS] {
     own[crate::eft::ORB_LIST] = orb.map(|o| &o.burst_set);
     own[crate::eft::SPARK_LIST] = spark.map(|s| &s.assets);
+    own[crate::eft::BODY_LIST] = body.map(|s| &s.assets);
     for (k, s) in impact.iter().enumerate() {
         own[crate::eft_impact::FIRST_LIST + k] = Some(&s.assets);
     }

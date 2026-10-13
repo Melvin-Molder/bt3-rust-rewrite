@@ -449,6 +449,20 @@ impl Roster {
                 libc,
             );
             rush_burst_fx(me, data[i], &mut self.scene.rush_bursts[i]);
+            // BtlFx_UpdateReq1A: the body effect while request 0x1A holds.
+            if let Some(b) = env.body {
+                if me.fx_new(0x1A) {
+                    let node_pos = |n| me.obj.node_pos(n);
+                    let c = crate::eft_body::BodyChr {
+                        node_pos: &node_pos,
+                        scale: data[i].height() / 19.35,
+                    };
+                    self.scene.bodies.start(i, &b.set, &c);
+                }
+                if me.fx_ended(0x1A) {
+                    self.scene.bodies.stop(i);
+                }
+            }
             // BtlFx_UpdateReq38: the drain glow while the drain technique holds request 0x38.
             if let Some(set) = crate::btl_blast::absorb_set(data[i]) {
                 let node_pos = |n| me.obj.node_pos(n);

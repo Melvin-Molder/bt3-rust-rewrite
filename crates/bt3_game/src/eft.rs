@@ -1021,8 +1021,11 @@ pub(crate) struct SetRef {
 }
 
 /// `FxWorld::sets`' entries per side: the side's own eleven, then the impacts', the transformation's, the orb
-/// tail's and the struggle spark's common sets.
-pub(crate) const SET_LISTS: usize = SPARK_LIST + 1;
+/// tail's, the struggle spark's and the body effect's common sets.
+pub(crate) const SET_LISTS: usize = BODY_LIST + 1;
+
+/// The list of the body effect's set (`EftBodyFx`), after the struggle spark's.
+pub(crate) const BODY_LIST: usize = SPARK_LIST + 1;
 
 /// The list of the struggle spark's set, after the orb tail's.
 pub(crate) const SPARK_LIST: usize = ORB_LIST + 1;
@@ -1044,11 +1047,13 @@ impl SetRef {
     /// The kind of `BtlScene_IsEffectStopped` its objects are given (`EftEmit_Spawn`'s `srcKind`): 0 for the ki
     /// blasts' sets (`EftKiBlast_SpawnParts`), 1 for the techniques' (`EftEmit_SpawnOwn`), 3 for the drain
     /// glow's, the shock's parts, the rush burst's and the charge aura's, 2 for the impacts' and 5 for the
-    /// transformation's (all
-    /// stopped by the pause alone).
+    /// transformation's (all stopped by the pause alone), 4 for the body effect's (the pause or its fighter's rush
+    /// sequence).
     fn stop_kind(self) -> u8 {
         // EftPtcl_Create without EftPtcl_SetType (the orb tail's bursts): kind 0.
-        if self.list < 2 || self.list == ORB_LIST {
+        if self.list == BODY_LIST {
+            4
+        } else if self.list < 2 || self.list == ORB_LIST {
             0
         } else if self.list < crate::eft_absorb::LIST {
             1
@@ -1505,15 +1510,18 @@ pub(crate) struct FxWorld<'a> {
     pub in_technique: [bool; 2],
     /// `EftCam_IsActive`: a technique's camera cut runs.
     pub eft_cam: bool,
+    /// `BtlCharApi_IsInRushSequence` of each fighter.
+    pub rush_seq: [bool; 2],
 }
 
 impl FxWorld<'_> {
     /// `BtlScene_IsEffectStopped(chr, kind)` of an object of the set `set`: kind 0 any fighter stopped, kind 1 its
-    /// own, kind 2 the pause.
+    /// own, kind 4 the pause or its fighter's rush sequence, the others the pause.
     fn effect_stopped(&self, set: SetRef, chr: usize) -> bool {
         match set.stop_kind() {
             0 => self.any_frozen,
             1 => self.stopped[chr],
+            4 => self.paused || self.rush_seq[chr],
             _ => self.paused,
         }
     }

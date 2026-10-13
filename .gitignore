@@ -113,6 +113,7 @@
 !/crates/bt3_game/src/eft_charge.rs
 !/crates/bt3_game/src/eft_glow.rs
 !/crates/bt3_game/src/eft_aura.rs
+!/crates/bt3_game/src/eft_body.rs
 !/crates/bt3_game/src/eft_bolt.rs
 !/crates/bt3_game/src/eft_flash.rs
 !/crates/bt3_game/src/scr_warp.rs

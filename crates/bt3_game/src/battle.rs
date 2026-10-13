@@ -149,6 +149,8 @@ pub struct BattleAssets {
     pub(crate) transform_sets: Vec<crate::eft_impact::ImpactSet>,
     /// `EftClashSparkMgr_Init`: the struggle spark's set.
     pub(crate) spark_set: Option<crate::eft_impact::ImpactSet>,
+    /// The body effect's set (`EftBodyFxMgr_Init`: common effect entry 0x23F) with its assets.
+    pub(crate) body_set: Option<crate::eft_impact::ImpactSet>,
     /// `EftAuraMgr_Init`: the aura's settings and flame textures.
     pub(crate) aura_cfg: Option<crate::eft_aura::AuraCfg>,
     pub(crate) aura_textures: crate::eft_aura::AuraTextures,
@@ -548,6 +550,7 @@ pub fn load(
         impact_sets: Vec::new(),
         transform_sets: Vec::new(),
         spark_set: None,
+        body_set: None,
         aura_cfg: None,
         aura_textures: crate::eft_aura::AuraTextures::default(),
         bolt_cfg: None,
@@ -895,6 +898,14 @@ pub fn load(
         let assets_of =
             crate::eft::SetAssets::load(&set, &mut assets.effect_textures).map_err(error)?;
         assets.spark_set = Some(crate::eft_impact::ImpactSet {
+            set,
+            assets: assets_of,
+        });
+    }
+    if let Ok(set) = bt3_data::eft_pack::EmitSet::parse(&common_fx, crate::eft_body::SET_ENTRY) {
+        let assets_of =
+            crate::eft::SetAssets::load(&set, &mut assets.effect_textures).map_err(error)?;
+        assets.body_set = Some(crate::eft_impact::ImpactSet {
             set,
             assets: assets_of,
         });
@@ -2295,6 +2306,7 @@ impl BattleAssets {
             impact: &self.impact_sets,
             transform: &self.transform_sets,
             spark: self.spark_set.as_ref(),
+            body: self.body_set.as_ref(),
             glow: self.glow_cfg.as_ref(),
             streak: self.streak_cfg.as_ref(),
             orb: self.orb_cfg.as_ref(),
@@ -4220,6 +4232,7 @@ impl Battle {
                         &self.assets.transform_sets,
                         self.assets.orb_cfg.as_ref(),
                         self.assets.spark_set.as_ref(),
+                        self.assets.body_set.as_ref(),
                     )
                 }),
                 any_frozen: self.roster.chars.iter().any(|c| c.is_frozen()),
@@ -4236,6 +4249,7 @@ impl Battle {
                 paused: false,
                 in_technique: [false; 2],
                 eft_cam: false,
+                rush_seq: [false; 2],
             };
             let in_view = |chr: usize| sv.in_view(chr);
             // Layer 0's stage effects, then the others.
@@ -8137,6 +8151,56 @@ pub(crate) mod tests {
             }
         }
         assert!(charas > 100 && sets > 500, "{charas} {sets}");
+    }
+
+    #[test]
+    fn real_stun_runs_the_body_effect() {
+        // Request 0x1A while a fighter is stunned (BtlFx_UpdateReq1A): the common effect file's set 0x23F runs on
+        // P2's body and spawns its emitters' objects; after the stun it lasts the set's end frames and goes.
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        assert!(battle.assets.body_set.is_some());
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..200 {
+            let start = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            battle.run_frame(start, idle, 0, &mut libc, &mut random, None, false);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        let list = crate::eft::SetRef {
+            side: 1,
+            list: crate::eft::BODY_LIST,
+        };
+        battle.roster.chars[1].stun_timer = 60;
+        let (mut on, mut most, mut gone) = (0, 0, None);
+        for i in 0..400 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+            let b = &battle.roster.scene.bodies;
+            assert!(!b.has(0));
+            if b.has(1) {
+                on += 1;
+            } else if on > 0 && gone.is_none() {
+                gone = Some(i);
+            }
+            most = most.max(
+                battle
+                    .roster
+                    .scene
+                    .fx
+                    .counts(Some(list))
+                    .iter()
+                    .sum::<usize>(),
+            );
+        }
+        assert!(on > 30, "{on}");
+        assert!(most > 0);
+        assert!(gone.is_some());
     }
 
     #[test]
