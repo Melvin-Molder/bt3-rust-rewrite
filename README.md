@@ -24,7 +24,7 @@ Next: the menu modes still open in PROGRESS.md.
 
 - The crate-oriented separation of game/data concerns is informed by [gang-beasts-rust](https://github.com/muffinmxn/gang-beasts-rust) (MIT-licensed upstream project). No upstream source code or game data was copied.
 - BT3 format research sources are listed in [bt3-format-research.md](bt3-format-research.md), including the BT3 community research archive, AFS tools, map MDL unpacker, animation tools, and PS2 executable decompilation.
-- The global file-ID mapping and BPE loading-screen behavior are based on `C:\Users\User\.code\BT3-Decompiled\src\sys\file.c`, `src\sys\loading.c`, `src\sys\bpe.c`, and `include\sys\loading.h` (CC0-1.0 for decomp project contributions). The Rust decoder is an independent implementation; no decompiled source was copied.
+- The global file-ID mapping and BPE loading-screen behavior are based on the BT3 decompilation project's `src/sys/file.c`, `src/sys/loading.c`, `src/sys/bpe.c`, and `include/sys/loading.h` (CC0-1.0 for decomp project contributions). The Rust decoder is an independent implementation; no decompiled source was copied.
 - Stage file IDs, relative-offset units, gameplay metadata, and coordinate conversion are based on the decomp stage loader, relocation, and stage-data readers. The Rust reader is an independent, bounds-checked implementation.
 
 The source and format references are credited for research only; their licenses remain with their respective projects. The game and its data remain the property of their rights holders.
