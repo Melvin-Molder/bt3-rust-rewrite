@@ -161,6 +161,8 @@ pub(crate) struct ChrView {
     /// The stage number in the backdrop's data (`BtlStage_GetId`), which picks the ambience.
     stage_number: i32,
     water_level: f32,
+    /// `BtlStage_GetAmbient`: the backdrop's ambient colour.
+    ambient: [u8; 3],
     /// `gStgAmb`, and the stage sounds its handler would play (no bank is loaded for them here).
     amb: crate::stg_amb::StgAmb,
     amb_snd: crate::btl_snd::CharSound,
@@ -211,6 +213,7 @@ impl ChrView {
             stage_id,
             stage_number: loaded.stage.stage_id,
             water_level: loaded.stage.water_level.unwrap_or(0.0),
+            ambient: loaded.stage.ambient,
             amb,
             amb_snd: Default::default(),
             stage_textures: loaded.textures,
@@ -443,7 +446,15 @@ impl ChrView {
         if let Some(s) = &self.cur
             && s.obj.flags & OBJ_VISIBLE != 0
         {
-            crate::battle::draw_model(&s.model, &s.obj, false, self.light_dir, &view, &mut groups);
+            crate::battle::draw_model(
+                &s.model,
+                &s.obj,
+                false,
+                self.light_dir,
+                self.ambient,
+                &view,
+                &mut groups,
+            );
         }
         frame.models = ModelBatch::from_groups(groups);
         frame.obj_alpha = (!frame.models.is_empty()).then(|| crate::battle::ObjAlpha {

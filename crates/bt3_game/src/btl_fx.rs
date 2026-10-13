@@ -462,6 +462,29 @@ pub(crate) fn update_all(me: &Chr, data: &SideData, env: &Env, impacts: &mut Imp
     }
 }
 
+/// `BtlFx_UpdateObjFlagReq3`: request 3 (the change's flash) sets the object's colour flag to the black mode
+/// (0x80000) as it starts and to the stage mode (0x10000) as it ends, past the colour-mode requesters.
+pub(crate) fn update_obj_flag_req3(me: &mut Chr) {
+    if me.fx_new(3) {
+        me.obj.flags = (me.obj.flags & !0xFF_0000) | 0x8_0000;
+    }
+    if me.fx_ended(3) {
+        me.obj.flags = (me.obj.flags & !0xFF_0000) | 0x1_0000;
+    }
+}
+
+/// `BtlFx_HandleEvent1`: an attack with flag 0x80000 raises the landed blow's spark (request 0x1B) on its motion's
+/// first hit event (the frame's event 1, with one of the motion's hit events reached), whether it hits or not.
+pub(crate) fn handle_event1(me: &mut Chr, data: &SideData, env: &Env) {
+    if me.anim_test_attr(1)
+        && crate::btl_hit::attack_id(me, data, env) != -1
+        && crate::btl_hit::attack_flags(me, data, env) & 0x80000 != 0
+        && me.obj.query_event(&data.obj, 1, 0, 5) == 1
+    {
+        me.set_fx(0x1B);
+    }
+}
+
 /// The sparks of `BtlFx_UpdateAfterHits`. `BtlChar_SpawnHitFx`: a landed blow (0x1B) by the attack's hit effect
 /// kind (9 / 0xA for a shown weapon unless attack flag 0x2000), a guarded one (0x1C), 0x21 and 0x24 kind 6, 0x22
 /// kind 4 or 5; launched along the attack's angles from the opponent's side (0x25, 0x26 half a height up, 0x27 a

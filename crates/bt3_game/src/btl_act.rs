@@ -7660,7 +7660,7 @@ impl Ctx<'_, '_> {
         self.me.flags.clear_range(0x9B, 0xA0);
         self.me.flags.clear_range(0xA7, 0xAA);
         self.set(0x29);
-        self.me.charge = 0.0;
+        self.me.tech_charge = 0.0;
         self.me.charge_full_frames = 0;
         if let Some(u) = self.me.gauge.used.get_mut(cls as usize) {
             *u += 1;
@@ -8297,12 +8297,12 @@ impl Ctx<'_, '_> {
                     if self.me.work[2] >= limit {
                         self.me.work[0] |= 1;
                     }
-                    self.me.charge = self.me.work[2] as f32 * 2.0 / limit as f32;
+                    self.me.tech_charge = self.me.work[2] as f32 * 2.0 / limit as f32;
                     if self.me.has_ability(0x4A) {
-                        self.me.charge *= 1.5;
+                        self.me.tech_charge *= 1.5;
                     }
-                    if self.me.charge >= 1.0 {
-                        self.me.charge = 1.0;
+                    if self.me.tech_charge >= 1.0 {
+                        self.me.tech_charge = 1.0;
                         self.me.set_fx(0x1E);
                         if self.me.charge_full_frames == 0 {
                             self.boost_sounds();
@@ -8343,7 +8343,7 @@ impl Ctx<'_, '_> {
                 self.held(0x9E);
                 self.held(0x9D);
                 self.me.work[0] |= 1;
-                if self.me.charge >= 1.0 {
+                if self.me.tech_charge >= 1.0 {
                     self.held(0x9C);
                 }
             }
@@ -8474,7 +8474,7 @@ impl Ctx<'_, '_> {
                     self.me.anim_set_duration(0.1);
                     aim = true;
                     self.me.anim_advance_then(super_anim(cls, 2), 0.0, 0);
-                    self.me.charge = 0.0;
+                    self.me.tech_charge = 0.0;
                 }
                 2 => {
                     self.super_fit_to_event(0.1);

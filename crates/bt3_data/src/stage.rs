@@ -63,6 +63,9 @@ pub struct StageResource {
     /// The same record's bytes 8..12: the objects' light colour (`BtlObj_UpdateAll`'s `BtlObjLight_SetColor`),
     /// which the ground shadows are drawn in.
     pub shadow_color: Option<[u8; 4]>,
+    /// `StgDataA.ambient` (+0x8C, `BtlStage_GetAmbient`): the objects' colour in the stage colour mode. The offset
+    /// is taken whatever the count at +0x88 says (`BtlStage_BindData` relocates it unconditionally).
+    pub ambient: [u8; 3],
     /// `StgDataA.tint` (+0x80 / +0x84, `BtlStage_GetList80`): the two colours of the stage tint's slot 0 (the
     /// darkening of request 0x12), RGBA each.
     pub tint: Option<[u8; 8]>,
@@ -435,6 +438,16 @@ impl StageResource {
                 color_b: [b(0x1B), b(0x1C), b(0x1D), b(0x1E)],
             })
         };
+        let ambient = {
+            let o = resolve_relative(
+                bytes,
+                data_offset,
+                read_u32(bytes, data_offset + 0x8C)?,
+                3,
+                "stage ambient colour",
+            )?;
+            [bytes[o], bytes[o + 1], bytes[o + 2]]
+        };
         let (light_colors, shadow_color) =
             if read_count(bytes, data_offset + 0x78, "stage light colours")? == 0 {
                 (None, None)
@@ -554,6 +567,7 @@ impl StageResource {
             surf,
             light_colors,
             shadow_color,
+            ambient,
             tint,
             wind,
         })

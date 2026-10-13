@@ -3618,6 +3618,12 @@ impl Battle {
         self.with_roster(|roster, data, env| {
             // BtlChars_SampleInput, UpdateInput, UpdateMain and PostScene do nothing while paused or while a stage
             // loads; the effect scene runs with its time stopped.
+            // BtlChars_UpdateInput while a stage loads: BtlChars_ClearObjFlag2, the fighters not drawn.
+            if !paused && loading {
+                for c in &mut roster.chars {
+                    c.obj.flags &= !2;
+                }
+            }
             if !paused && !loading {
                 roster.sample_input(&pads, data, env, &mut replay);
                 roster.update_input(data, env);
@@ -4172,13 +4178,30 @@ impl Battle {
         }
         let mut groups: BatchGroups = HashMap::new();
         // The fighters, then their partner objects while drawn (flag 2), as `BtlObjDraw_Draw` draws them.
-        let fighters = (0..2).map(|s| (&self.assets.fighters[s], &self.roster.chars[s].obj));
+        // BtlObj_UpdateView: a fighter without its visible flag (2) is not drawn.
+        let fighters = (0..2)
+            .map(|s| (&self.assets.fighters[s], &self.roster.chars[s].obj))
+            .filter(|(_, obj)| obj.flags & 2 != 0);
         let partners = (0..2).filter_map(|s| {
             let obj = &self.roster.chars[s].partner.as_ref()?.obj;
             (obj.flags & 2 != 0).then_some((self.assets.fighters[s].partner.as_deref()?, obj))
         });
+        // BtlStage_GetAmbient: 0x80 while a stage change loads.
+        let ambient = if self.loading {
+            [0x80; 3]
+        } else {
+            self.assets.stage.ambient
+        };
         for (i, (model, obj)) in fighters.chain(partners).enumerate() {
-            draw_model(model, obj, i < 2, self.light_dir, &view, &mut groups);
+            draw_model(
+                model,
+                obj,
+                i < 2,
+                self.light_dir,
+                ambient,
+                &view,
+                &mut groups,
+            );
         }
         // The effect objects (`EftObj`), drawn as the fighters are: a prop shot's prop.
         for o in self.roster.scene.eft_objs.iter() {
@@ -4190,7 +4213,7 @@ impl Battle {
             else {
                 continue;
             };
-            draw_effect_model(m, &o.obj, self.light_dir, &view, &mut groups);
+            draw_effect_model(m, &o.obj, self.light_dir, ambient, &view, &mut groups);
         }
         let batches = ModelBatch::from_groups(groups);
         // BtlObjDraw_DrawShadows: per object shown with flags 2 and 0x10 (the fighters, then their partner
@@ -4612,11 +4635,12 @@ pub(crate) fn draw_effect_model(
     m: &crate::eft_obj::EffectModel,
     obj: &crate::btl_obj::Obj,
     light_dir: [f32; 3],
+    ambient: [u8; 3],
     view: &View,
     groups: &mut BatchGroups,
 ) {
     let flags = obj.flags;
-    let (light, look) = model_look(obj, flags, m.model.header.flags, light_dir, view);
+    let (light, look) = model_look(obj, flags, m.model.header.flags, light_dir, ambient, view);
     // An effect model has no parameter block.
     let keys = part_keys(obj, flags, look, 0xF4);
     let head = head_part(&m.model.parts);
@@ -4650,11 +4674,19 @@ pub(crate) fn draw_model(
     obj: &crate::btl_obj::Obj,
     chara: bool,
     light_dir: [f32; 3],
+    ambient: [u8; 3],
     view: &View,
     groups: &mut BatchGroups,
 ) {
     let flags = view_flags(obj, chara, view);
-    let (light, look) = model_look(obj, flags, model.model.header.flags, light_dir, view);
+    let (light, look) = model_look(
+        obj,
+        flags,
+        model.model.header.flags,
+        light_dir,
+        ambient,
+        view,
+    );
     let keys = part_keys(obj, flags, look, dim_alpha(&model.tables));
     let head = head_part(&model.model.parts);
     let parts = model
@@ -4802,9 +4834,12 @@ fn draw_seams(
 /// What the colour mode changes in a fighter's draw (`ObjDraw_AddClutPass` over its palettes, the shading of
 /// `ObjDraw_SetLight`), as bytes: the palettes lerp towards (255, 0x44, 0x66) by `fade` / 128 (mode 2's fade),
 /// then get `tint` (mode 6: the colour preset times its alpha / 128) and the flash added; mode 3 draws the
-/// texture unshaded (its ramp, the light file's second texture, has alpha 0 under ALPHA_2 0x48).
+/// texture unshaded (its ramp, the light file's second texture, has alpha 0 under ALPHA_2 0x48). `color` is the
+/// view's colour the texture is modulated by (`BtlObj_CalcViewColor`: the stage's ambient colour in the stage
+/// mode, black in mode 3, else 0x80).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModelLook {
+    pub color: [u8; 3],
     pub fade: u8,
     pub tint: [u8; 4],
     pub flash: [u8; 4],
@@ -4818,6 +4853,7 @@ pub(crate) fn model_look(
     flags: u32,
     model_flags: u32,
     stage_light: [f32; 3],
+    ambient: [u8; 3],
     view: &View,
 ) -> ([f32; 3], ModelLook) {
     let m = &view.world2view;
@@ -4856,7 +4892,16 @@ pub(crate) fn model_look(
     } else {
         stage_light
     };
+    // BtlObj_CalcViewColor, in its order of the colour flags.
+    let color = if flags & 0x1_0000 != 0 {
+        ambient
+    } else if flags & 0x6_0000 == 0 && flags & 0x8_0000 != 0 {
+        [0; 3]
+    } else {
+        [0x80; 3]
+    };
     let mut look = ModelLook {
+        color,
         unshaded: flags & 0x8_0000 != 0,
         ..ModelLook::default()
     };
@@ -8489,6 +8534,7 @@ pub(crate) mod tests {
                 obj,
                 true,
                 b.light_dir,
+                b.assets.stage.ambient,
                 &view,
                 &mut groups,
             );
@@ -9843,6 +9889,77 @@ pub(crate) mod tests {
             }
         }
         assert!(matches!(cut, Some(0x11 | 0x12)), "{cut:?}");
+    }
+
+    #[test]
+    fn real_fighters_take_the_stage_ambient_colour() {
+        // BtlObj_CalcViewColor: in the stage colour mode a model is modulated by the stage's ambient colour (stage
+        // 14's is 7D 8A A7); the transformation flash's mode 3 is black.
+        let setup = BattleSetup {
+            stage: 14,
+            ..BattleSetup::default()
+        };
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        assert_eq!(battle.assets.stage.ambient, [0x7D, 0x8A, 0xA7]);
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        let mut frame =
+            |b: &mut Battle| b.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        let looks = |f: &BattleFrame| f.models.iter().map(|b| b.look).collect::<Vec<_>>();
+        let l = looks(&frame(&mut battle));
+        assert!(l.iter().any(|l| l.color == [0x7D, 0x8A, 0xA7]), "{l:?}");
+        battle.roster.chars[0].obj.set_color_mode(3, true);
+        let l = looks(&frame(&mut battle));
+        assert!(l.iter().any(|l| l.unshaded && l.color == [0; 3]), "{l:?}");
+    }
+
+    #[test]
+    fn real_change_flash_request_turns_the_body_black() {
+        // BtlFx_UpdateObjFlagReq3: request 3 starting sets the black colour mode, ending the stage mode.
+        let Some((mut battle, _, _)) = fight_vs_1(0) else {
+            return;
+        };
+        let c = &mut battle.roster.chars[0];
+        c.prev_fx_bits = [0; 0x10];
+        c.set_fx(3);
+        crate::btl_fx::update_obj_flag_req3(c);
+        assert_eq!(c.obj.flags & 0xFF_0000, 0x8_0000);
+        c.prev_fx_bits = c.fx_bits;
+        c.fx_bits = [0; 0x10];
+        crate::btl_fx::update_obj_flag_req3(c);
+        assert_eq!(c.obj.flags & 0xFF_0000, 0x1_0000);
+    }
+
+    #[test]
+    fn real_vanished_fighters_are_not_drawn() {
+        // BtlChars_UpdateObjFlag2: flag 0xB (vanished) or 0x30 (hidden) takes the visible flag 2 off; a fighter with
+        // 0x12A leaves only itself shown. A fighter without flag 2 is not drawn.
+        let Some((mut battle, mut libc, _)) = fight_vs_1(0) else {
+            return;
+        };
+        let mut end = |battle: &mut Battle, set: &[(usize, u32)]| {
+            battle.with_roster(|roster, data, env| {
+                for c in &mut roster.chars {
+                    for f in [0xB, 0x30, 0x12A] {
+                        c.flags.clear(f);
+                    }
+                }
+                for &(i, f) in set {
+                    roster.chars[i].flags.set(f);
+                }
+                roster.end_frame(data, env, &mut libc, false);
+                false
+            });
+            [0, 1].map(|i| battle.roster.chars[i].obj.flags & 2 != 0)
+        };
+        assert_eq!(end(&mut battle, &[]), [true, true]);
+        assert_eq!(end(&mut battle, &[(0, 0xB)]), [false, true]);
+        assert_eq!(end(&mut battle, &[(1, 0x30)]), [true, false]);
+        assert_eq!(end(&mut battle, &[(1, 0x12A)]), [false, true]);
+        assert_eq!(end(&mut battle, &[(1, 0x12A), (1, 0xB)]), [false, false]);
     }
 
     #[test]
@@ -11993,11 +12110,12 @@ pub(crate) mod tests {
         // No mode: the stage light, the plain palettes.
         assert_eq!(battle.roster.chars[0].obj.flags & 0xFF_0000, 0x1_0000);
         let looks = |f: &BattleFrame| f.models.iter().map(|b| b.look).collect::<Vec<_>>();
-        assert!(
-            looks(&frame(&mut battle))
-                .iter()
-                .all(|l| *l == ModelLook::default())
-        );
+        // No palette operation, in the view's colour (the stage's ambient here).
+        let plain = |l: &ModelLook| ModelLook {
+            color: l.color,
+            ..ModelLook::default()
+        };
+        assert!(looks(&frame(&mut battle)).iter().all(|l| *l == plain(l)));
         // Mode 6 (the power-up look): the colour preset added at its alpha 40.
         let preset = battle.roster.chars[0].obj.preset;
         battle.roster.chars[0].obj.set_color_mode(6, true);
@@ -12005,7 +12123,7 @@ pub(crate) mod tests {
         let l = looks(&frame(&mut battle));
         let tint = [preset[0] as u8, preset[1] as u8, preset[2] as u8, 40];
         assert!(l.iter().any(|l| l.tint == tint));
-        assert!(l.iter().any(|l| *l == ModelLook::default()));
+        assert!(l.iter().any(|l| *l == plain(l)));
         // Mode 3 over it (the transformation's flash): unshaded, without the tint.
         battle.roster.chars[0].obj.set_color_mode(3, true);
         assert!(
@@ -12036,11 +12154,7 @@ pub(crate) mod tests {
         for _ in 0..12 {
             frame(&mut battle);
         }
-        assert!(
-            looks(&frame(&mut battle))
-                .iter()
-                .all(|l| *l == ModelLook::default())
-        );
+        assert!(looks(&frame(&mut battle)).iter().all(|l| *l == plain(l)));
     }
 
     #[test]

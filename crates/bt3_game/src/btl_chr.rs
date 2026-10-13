@@ -700,6 +700,9 @@ pub(crate) struct Chr {
     pub charge: f32,
     pub charge_timer: f32,
     pub charge_gauge: i32,
+    /// `techCharge` (+0xE44): the charge level of a chargeable technique (0..1), set while it charges and cleared
+    /// as one starts or fires; unlike the attack charge it outlives the action.
+    pub tech_charge: f32,
     pub charge_full_frames: i32,
     /// `blastCharge`: progress of the charged ki blast's hold motion (0..1).
     pub blast_charge: f32,
@@ -935,6 +938,7 @@ impl Chr {
             charge: 0.0,
             charge_timer: 0.0,
             charge_gauge: 0,
+            tech_charge: 0.0,
             charge_full_frames: 0,
             blast_charge: 0.0,
             blast_alt_hand: 0,

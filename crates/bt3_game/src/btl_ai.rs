@@ -1849,6 +1849,22 @@ impl Ai<'_, '_, '_, '_> {
         0.0 < dot(face, normalize(d))
     }
 
+    /// `BtlCharApi_TestOppSkillFlags`: the opponent's technique has flag 1, or flag 2 while this fighter's own
+    /// technique charge is over 0.9, or is of type 1.
+    fn opp_skill_flags(&self) -> bool {
+        let op = self.op();
+        let cur = self.chr(op).act.current;
+        if !crate::btl_act::is_technique_id(cur) {
+            return false;
+        }
+        let cls = crate::btl_act::id_class(cur);
+        let tech = self.c.data[op].tables.tech();
+        let flags = tech.flags(cls);
+        flags & 1 != 0
+            || (flags & 2 != 0 && 0.9 < self.chr(self.me()).tech_charge)
+            || tech.kind(cls) == 1
+    }
+
     /// `BtlCharApi_IsOppSkillFlag4`: bit 2 (value 4) of the flag word of the opponent's technique.
     fn opp_skill_flag4(&self) -> bool {
         let op = self.op();
@@ -1919,7 +1935,8 @@ impl Ai<'_, '_, '_, '_> {
     fn step_fire_skill(&mut self) -> bool {
         let me = self.me();
         let reached = self.step_reach_class();
-        let rate = 0.0f32;
+        // BtlCharApi_GetTechChargeB.
+        let rate = self.chr(me).tech_charge;
         let top = self.w.seq.top().id;
         let slot = self.w.plan.slot;
         if slot == -1 {
@@ -3158,7 +3175,23 @@ impl Ai<'_, '_, '_, '_> {
         if (cls[0] as u8 as u32).wrapping_sub(1) < 6 {
             f |= 0x1000_0000_0000;
         }
-        // Bits 36..39 need a technique of the opponent.
+        // Bits 36..38: the opponent's technique of kind 1 / 2, 3 or 0 (not with reactions 0x800, 0x1000, 0x2000);
+        // kind 3 with reaction 8 also bit 62. Bit 39: its flag 4, with this fighter's parameter flag 2.
+        let react = self.w.st.react;
+        match kind {
+            1 | 2 if react & 0x800 == 0 => f |= 0x10_0000_0000,
+            3 if react & 0x1000 == 0 => {
+                if react & 8 != 0 {
+                    f |= 0x4000_0000_0000_0000;
+                }
+                f |= 0x20_0000_0000;
+            }
+            0 if react & 0x2000 == 0 => f |= 0x40_0000_0000,
+            _ => {}
+        }
+        if self.opp_skill_flag4() && self.c.data[me].tables.params.flags() & 2 != 0 {
+            f |= 0x80_0000_0000;
+        }
         self.w.st.flags |= f;
     }
 
@@ -3704,7 +3737,7 @@ impl Ai<'_, '_, '_, '_> {
             10 => eq(self.w.st.flags >> 6 & 1 != 0),
             // Stage 4 / 27 with the pose bit clear.
             11 => eq(self.c.env.stage_4_or_27 && !self.pose_bit(me)),
-            12 => eq(false),
+            12 => eq(self.opp_skill_flags()),
             13 => eq(self.w.plan.slot == 2),
             14 => self.w.kit & 1 == arg_i,
             15 => self.w.kit >> 1 & 1 == arg_i,

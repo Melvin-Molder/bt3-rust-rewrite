@@ -1,5 +1,5 @@
 // A battle model batch as the GS draws it from VU1 program 0's packet (src/battle/obj_render.c):
-// layer 0 is the model texture (TEX0_1, MODULATE with the vertex colour 0x80, alpha blending off),
+// layer 0 is the model texture (TEX0_1, MODULATE with the vertex colour, the view's; alpha blending off),
 // layer 1 the shading ramp (TEX0_2, DECAL) with ALPHA_2 0x62: Cd - Cs, clamped (COLCLAMP 1).
 // The GS divides S / T by Q per pixel; the vertex carries (s, t) * q in uv and (u * q, 0, q) in its colour.
 // Textures hold the raw GS colours, so the arithmetic is done on them and the result is handed on as linear.
@@ -26,6 +26,7 @@ struct ModelLook {
     tint: vec4<f32>,
     flash: vec4<f32>,
     flags: vec4<f32>,
+    color: vec4<f32>,
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> look: ModelLook;
 
@@ -45,6 +46,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     base = clamp(base + (look.fade.rgb - base) * look.fade.w, vec3<f32>(0.0), vec3<f32>(1.0));
     base = min(base + look.tint.rgb * look.tint.w, vec3<f32>(1.0));
     base = min(base + look.flash.rgb * look.flash.w, vec3<f32>(1.0));
+    // MODULATE: the texel times the vertex colour (the view's) / 128, clamped.
+    base = min(base * look.color.rgb, vec3<f32>(1.0));
     let shade = textureSample(shade_texture, shade_sampler, vec2<f32>(in.color.x / q, 0.5)).rgb;
     var lit = clamp(base - shade, vec3<f32>(0.0), vec3<f32>(1.0));
     if look.flags.x > 0.5 {

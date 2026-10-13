@@ -405,6 +405,7 @@ impl Roster {
                 self.frame,
             );
             crate::btl_snd::fx_event_sounds(me, opp, data[i], env, self.frame, libc);
+            crate::btl_fx::update_obj_flag_req3(me);
             crate::btl_fx::update_all(me, data[i], env, &mut self.scene.impacts);
             let scene = &mut self.scene;
             crate::btl_fx::power_up_look(
@@ -440,6 +441,27 @@ impl Roster {
             }
             transform_fx(me, data[i], env, &mut self.scene.transforms);
             movement_fx(me, opp, data[i], &mut self.scene, libc);
+            // BtlFx_SpawnReq18 (EftRay_StartHit): request 0x18 spins a burst of 36 grey rays at node 0x11 for 0.5 s.
+            if me.test_fx(0x18) {
+                let arg = crate::eft_ray::RayArg {
+                    pos: me.obj.node_pos(0x11),
+                    color: [0xC0, 0xC0, 0xC0, 0x70],
+                    life: 0.5,
+                    length: 60.0,
+                    width: 0.3,
+                    inner: -1.2,
+                    jitter: 0.3,
+                    mode: crate::eft_ray::MODE_SPIN,
+                    count: 36,
+                    chr: i,
+                    blend: 1,
+                    space: 0,
+                    delay: 0,
+                    fade_frames: 0,
+                    auto_kill: true,
+                };
+                self.scene.fx.spawn_ray(&arg, libc);
+            }
             ground_fx(me, data[i], env, &mut self.scene.gdust, libc, vu0);
             water_fx(
                 me,
@@ -562,6 +584,7 @@ impl Roster {
             );
             crate::btl_snd::after_hit_sounds(me, data[i], env, frame);
             crate::btl_fx::trigger_obj_1d(me);
+            crate::btl_fx::handle_event1(me, data[i], env);
             let impacts = &mut self.scene.impacts;
             if let Some(pos) =
                 crate::btl_fx::after_hits(me, opp, data[i], data[i ^ 1], env, impacts)
@@ -785,6 +808,19 @@ impl Roster {
         }
     }
 
+    /// `BtlChars_UpdateObjFlag2`: each fighter's visible flag (2): off with flag 0x30 (hidden by a script) or 0xB
+    /// (vanished); while a fighter has flag 0x12A (a catching technique's close-up) the others are off too.
+    fn update_obj_flag2(&mut self) {
+        let found = self.chars.iter().position(|c| c.flags.test(0x12A));
+        for (i, c) in self.chars.iter_mut().enumerate() {
+            if found.is_some_and(|f| f != i) || c.flags.test(0x30) || c.flags.test(0xB) {
+                c.obj.flags &= !2;
+            } else {
+                c.obj.flags |= 2;
+            }
+        }
+    }
+
     /// `BtlChars_EndFrame`: the late updates (`BtlChar_UpdateLate`: the occlusion flag, the voices and technique
     /// sounds, this frame's stat modifiers), stages 11 and 12, the frame's movement vectors.
     pub(crate) fn end_frame(
@@ -809,6 +845,7 @@ impl Roster {
                 chr.set_stat_frame_mods();
             }
         }
+        self.update_obj_flag2();
         for i in 0..2 {
             let opp_alive = self.chars[i ^ 1].count_alive();
             let chr = &mut self.chars[i];

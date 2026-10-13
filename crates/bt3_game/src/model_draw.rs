@@ -92,6 +92,8 @@ struct ModelLookUniform {
     flash: Vec4,
     /// x: unshaded.
     flags: Vec4,
+    /// The vertex colour the texture is modulated by, as the GS's / 128.
+    color: Vec4,
 }
 
 impl From<ModelLook> for ModelLookUniform {
@@ -109,6 +111,12 @@ impl From<ModelLook> for ModelLookUniform {
             tint: add(l.tint),
             flash: add(l.flash),
             flags: Vec4::new(if l.unshaded { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
+            color: Vec4::new(
+                f32::from(l.color[0]) / 128.0,
+                f32::from(l.color[1]) / 128.0,
+                f32::from(l.color[2]) / 128.0,
+                1.0,
+            ),
         }
     }
 }

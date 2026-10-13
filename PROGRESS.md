@@ -144,6 +144,17 @@ executable (callers and address references) and the ISO, and from the port's own
 - [x] btl_tech_fx.rs ("abilities": every ability number the C tests is tested), btl_tech_shots.rs (its model, camera cut and connected-rush effects), btl_clash.rs (clash A's throw win; clash C's level now takes the story's difficulty), btl_mgr.rs (`BtlFx_UpdateLate`'s occlusion flag, now ported: a fighter whose camera trace hits the stage checks whether the camera is inside it)
 - [x] main.rs: the story mode notes (`--story-result`, `--mode`), `leave_battle`'s "team select" and "replay screen"; README: "the menus that lead to these modes ... are not ported"
 
+### Audit of the functions the port never names (2026-10-13)
+
+Of the 3,375 C functions no Rust source names, 726 are unreachable in the executable and its overlay (a call graph of `jal` / `j`, address loads and pointer words), 1,385 are accessors of three statements or less, 509 are ported under a snake_case name; the 755 left were checked by hand (dispatch tables compared: the 315 actions, the AI's 16 picks, 24 steps and 118 conditions, the 47 script commands). Gaps found and ported:
+
+- [x] The AI's sense bits 36..39 and 62 (`BtlAiSense_CheckBit36..39`) were never set
+- [x] AI condition 12 (`BtlCharApi_TestOppSkillFlags`) was always false; the fire-skill step (`BtlAiStep_FireSkill`) read a charge of 0
+- [x] The technique charge (+0xE44) was one field with the attack charge (+0xD78): split, the action change clearing only the attack's
+- [x] The models' vertex colour (`BtlObj_CalcViewColor`, `BtlStage_GetAmbient`): the stage's ambient colour, black in mode 3
+- [x] `BtlChars_UpdateObjFlag2` / `ClearObjFlag2`: vanished, hidden and close-up fighters, and both while a stage loads, are not drawn
+- [x] `BtlFx_HandleEvent1` (the spark of an attack with flag 0x80000), `BtlFx_SpawnReq18` (the ray burst of request 0x18), `BtlFx_UpdateObjFlagReq3` (request 3's black body)
+
 ### Unreachable in the original (nothing to port)
 
 Checked against the executable and the ISO: `GfxLens_*` (no caller), `EftTrail_*` (no caller), `EftCharNull_Start` (no caller), `EftZap` (no emitter set has kind 12), the water swirls (`EftWater_AddBurst` has no caller), the geyser's steam (no stage has the steam manager), the stage timer of stages 4 / 27 (read only by `BtlCharApi_GetMgrTimerRatio`, never called), the story AI override (fighter word +0x1290 never written), the technique names of pad status 1, story script command 1701 and command 8's stage change (no story script uses them; ported anyway).

@@ -1342,7 +1342,7 @@ impl Beam {
             match self.state {
                 0 => {
                     if !self.prop && self.flags & 0x800 == 0 {
-                        self.ratio = w.chars[side].charge;
+                        self.ratio = w.chars[side].tech_charge;
                         self.draw_scale = self.scale * (self.ratio * 0.5 + 1.0);
                         self.radius = self.scale * (self.ratio * 0.0 + 1.0);
                     }
@@ -2465,7 +2465,7 @@ pub(crate) fn tech_damage(
     if flags & 0x8000 != 0 && atk.flags.test(0x98) {
         d = round_up(d + d * 3 / 10, 10);
     }
-    d = (d as f32 + d as f32 * (atk.charge * (t.charge_scale(slot) - 1.0))) as i32;
+    d = (d as f32 + d as f32 * (atk.tech_charge * (t.charge_scale(slot) - 1.0))) as i32;
     if flags & 0x10 != 0 && opp.has_ability(0x37) {
         d = 1;
     }
@@ -2658,7 +2658,7 @@ pub(crate) fn guard_rush(w: &mut World, target: usize, rec: &HitRec) -> bool {
         return false;
     }
     if t.kind(slot) & 2 != 0
-        && w.chars[side].charge >= 0.9999
+        && w.chars[side].tech_charge >= 0.9999
         && t.flags(slot) & 2 != 0
         && kind != 6
     {

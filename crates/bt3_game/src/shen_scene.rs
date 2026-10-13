@@ -185,6 +185,8 @@ pub(crate) struct ShenScene {
     pub stage_textures: Vec<RgbaTexture>,
     textures: Textures,
     light_dir: [f32; 3],
+    /// `BtlStage_GetAmbient`: the stage's ambient colour.
+    ambient: [u8; 3],
     actors: [Actor; 2],
     /// The objects' rows of the alpha table.
     alpha_rows: crate::btl_obj::AlphaRows,
@@ -261,6 +263,7 @@ impl ShenScene {
             stage_textures: loaded.textures,
             textures,
             light_dir,
+            ambient: loaded.stage.ambient,
             actors,
             alpha_rows: crate::btl_obj::AlphaRows::default(),
             seq,
@@ -506,6 +509,7 @@ impl ShenScene {
                     &a.model,
                     &a.obj,
                     self.light_dir,
+                    self.ambient,
                     view,
                     &mut groups,
                 );
