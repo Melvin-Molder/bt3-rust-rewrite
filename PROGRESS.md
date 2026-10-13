@@ -108,19 +108,59 @@ depth, blends in the GS's colour space) are left out.
 - [x] The body effect of request 0x1A (`EftBodyFx`, common effect set 0x23F on the fighter's body)
 - [x] The particle modules' hidden test when they draw (`BtlScene_IsEffectHidden` of each object's fighter by the kind it was made with; the rings and links draw regardless)
 
+## Left to port
+
+Gathered 2026-10-13 from the decompiled functions the port does not cite, checked one by one against the C, the
+executable (callers and address references) and the ISO, and from the port's own "not ported" notes.
+
+### Battle
+
+- [ ] Blade trails (`EftBlade_*`, src/battle/eft_char_parts.c, layer 3 entry 6): the sword trails of the eight characters in `gEftBladeDef` (0x3E, 0x8A, 0x27, 0x28, ...). Its manager's init also creates both fighters' tasks with one libc `rand()` each at the battle's start, draws the port does not make
+- [ ] The ki blast's charge glow, the fighter effect kind 3 (`EftBlastCharge_*`, src/battle/eft_struggle.c): request 0x17 of a ki blast that is not a disc (`BtlFx_SpawnHitSparkReq17`'s other branch)
+- [ ] The character body effect, the fighter effect kind 7 (`EftCharaFx_*`, src/battle/eft_trail.c, `BtlFx_UpdateCharaFx`): characters 0x37, 0x98 and 0x99, from their pack's entry 9
+- [ ] The lost clash: `BtlAnim_EnableHandle` (the root's axes zeroed) when the motion plays again on the damaged model (src/battle/btl_act_super.c, `BtlAct_ClashLostHandler`)
+- [ ] The result poses' placement: flag 0xF3 puts the fighter at its second start place (`BtlChar_PlaceRestart`); the win and lose poses set it
+- [ ] `BtlOpp_MirrorFlags`: the opponent's flag 0x27 ends this fighter's camera cut (`ChrCam_EndCut`)
+- [ ] `BtlCharApi_IsCamShown`'s clash test: a fighter in clash A, B or C is not the one on screen (`BtlScene_IsCharInView`)
+- [ ] Model seams (`ObjSeam_*`, src/battle/obj_render.c): the CPU-skinned triangles between two nodes of a model with a seam section (header +0x70), drawn with the base texture and the shading ramp
+- [ ] The objects' distance fade (`BtlObjDraw_DrawModelFade`, `BtlObjDraw_DrawFadeLists`, `BtlObj_CalcViewColor`): the fade texture over the parts with flag 1 (check first that it does not depend on how the GS blends)
+- [ ] The streamed sounds' pan on the ADX players (CRI_ADXI.IRX's stereo and balance handling still to read)
+
+### Sound driver
+
+- [ ] SE tones with a noise voice, LFO, exclusive group or transpose, and the SE sequence events the port stops on (`se.rs` warns): first find whether any bank on the disc uses them
+
+### System and front end
+
+- [ ] `PadWatch_*` (src/sys/pad_watch.c): the message and pause when a controller is pulled out (`PadWatch_GetMissing`)
+- [ ] The character viewer's backdrop ambience (`StgAmb_Init` in `ChrView_Init`)
+- [ ] Movies: the PSS streams are decoded by `ffmpeg`, not by a port of the IPU MPEG-2 path (`src/sys/movie.c`)
+
+### Notes to correct (the work is ported)
+
+- [ ] btl_act.rs: the volley dash's and the homing strikes' vibration, the rush start's sound and head look, the guard's head look
+- [ ] btl_chr.rs: `on_stage_loaded`'s head tracking, `damage`'s abilities
+- [ ] btl_blast.rs: the header's particles and impact effects; "the other kinds are not ported" (only kinds 3 and 7 are not)
+- [ ] btl_tech_fx.rs ("abilities": every ability number the C tests is tested), btl_tech_shots.rs (its model, camera cut and connected-rush effects), btl_clash.rs (clash A's throw win), btl_mgr.rs (the late updates' effects: `BtlFx_UpdateLate` is the occlusion flag)
+- [ ] main.rs: the story mode notes (`--story-result`, `--mode`), `leave_battle`'s "team select" and "replay screen"; README: "the menus that lead to these modes ... are not ported"
+
+### Unreachable in the original (nothing to port)
+
+Checked against the executable and the ISO: `GfxLens_*` (no caller), `EftTrail_*` (no caller), `EftCharNull_Start` (no caller), `EftZap` (no emitter set has kind 12), the water swirls (`EftWater_AddBurst` has no caller), the geyser's steam (no stage has the steam manager), the stage timer of stages 4 / 27 (read only by `BtlCharApi_GetMgrTimerRatio`, never called), the story AI override (fighter word +0x1290 never written), the technique names of pad status 1, story script command 1701 and command 8's stage change (no story script uses them; ported anyway).
+
 ## By function
 
 For each decompiled C file of `../BT3-Decompiled/src`, the functions whose names the Rust code cites (the port names the original function in its doc comments). A rough measure: the system layer (heap, DMA, lists, timers) has no counterpart by design, a few files are ported under other names (the script command handlers, `BtlScriptCmd_*`), and the decompilation itself does not cover every module of the executable.
 
-Measured 2026-10-12:
+Measured 2026-10-13 (a function counts when its name appears anywhere in the Rust sources; many uncited ones are accessors or task callbacks folded into their callers):
 
 | Area | Files | Functions | Cited by the port |
 | --- | ---: | ---: | ---: |
-| src/battle | 124 | 5049 | 2619 (52 %) |
-| src/menu | 65 | 757 | 404 (53 %) |
-| src/ui | 11 | 182 | 124 (68 %) |
-| src/sys | 51 | 1133 | 347 (31 %) |
-| src/main.c | 1 | 5 | 0 |
-| Total | 252 | 7126 | 3494 (49 %) |
+| src/battle | 124 | 5051 | 2668 (52 %) |
+| src/menu | 69 | 794 | 601 (75 %) |
+| src/ui | 11 | 182 | 125 (68 %) |
+| src/sys | 51 | 1133 | 359 (31 %) |
+| src/cri, src/main.c | 2 | 7 | 1 |
+| Total | 257 | 7167 | 3754 (52 %) |
 
-Menu files with no function cited yet: disc_fusion.c, mission_result.c, mission_select.c, sim_day.c, sim_event.c, sim_event_1.c, sim_event_card.c, sim_event_rock.c, sim_event_shell.c, sim_result.c, sim_top.c, solo_select.c, survival_result.c, ub_menu.c, ub_rank.c, ub_result.c, ub_score.c, ub_team_select.c, ubz_select.c.
+Every menu file now has functions cited. The system layer (heap, DMA, lists, timers, the VU1 and GS packet builders) has no counterpart by design.
