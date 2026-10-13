@@ -5,8 +5,8 @@
 //! A break plays its sound; the falling pieces raise dust (`EftGndDust_SpawnDebris`) and, of an object of type
 //! 0x80, splash where they fall through y = 0 (`EftWater_AddSplashAt`).
 //!
-//! Not ported: the hidden item of mode 1 and the way-point graph's object flags (nothing reads
-//! them).
+//! A broken object of type bit 0x20000000 may hold story mode's hidden item (`btl_chr::HiddenItem`). Not ported:
+//! the way-point graph's object flags (nothing reads them).
 
 use bt3_data::stage::StageObjectDef;
 use bt3_data::stage_model::{StageModel, StageNode};
