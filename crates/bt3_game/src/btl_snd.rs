@@ -4,8 +4,9 @@
 //! camera. A sample-bank sound's handle is kept per side, one-shot sounds in one ring of four slots (so they can be
 //! cut short), looping sounds in another; a looping sound has to be requested every frame, else it is stopped.
 //!
-//! Not ported: the streamed sounds' volume, pan and player per owner, the voice lines (kinds 5..7) and the story
-//! mode's quieter sounds under a text box.
+//! The streamed sounds and voice lines (kinds 4..7) go to the owner's player with the volume and pan worked out
+//! here; the players apply the volume, not the pan (the CRI ADX IOP module's pan and balance handling is not
+//! traced).
 
 use bt3_data::snd::SeBank;
 
