@@ -1,10 +1,6 @@
 //! The roster's phases of a battle frame (src/battle/btl_char_mgr.c), called from `Battle_Loop` /
 //! `Battle_Update` in this order: `BtlChars_CheckStart`, `BtlChars_SampleInput`, `BtlChars_UpdateInput`,
 //! `BtlChars_UpdateMain`, `BtlChars_PostScene`, `BtlChars_EndFrame`. Every per-fighter step skips a frozen fighter.
-//!
-//! Not ported in these phases: the stage push-out of the body sphere (`StgCol_UpdateFighter` past its sphere update),
-//! the sight test between the fighters (flag 0xBA), holds, partners, member changes, camera cuts, head tracking,
-//! effects, sounds and battle events.
 
 use bt3_data::stage_col::{ColBox, PushSphere};
 
@@ -146,7 +142,9 @@ impl Roster {
     }
 
     /// `BtlChars_UpdateInput`: frame counter, hit-stop, then per fighter the input and the per-frame clears, the
-    /// first snapshot and the sequence flags.
+    /// first snapshot, the sight flag and the sequence flags. (The roster's stage timer of stages 4 / 27 that it
+    /// counts down is read only by `BtlCharApi_GetMgrTimerRatio`, which nothing in the executable calls: it is
+    /// left out, as are its writers, `BtlChar_AddStageTimer`.)
     pub(crate) fn update_input(&mut self, data: [&SideData; 2], env: &Env) {
         if self.started && !env.gate.time_stopped {
             self.frame = (self.frame + 1) & 0x3FFF_FFFF;
@@ -159,9 +157,26 @@ impl Roster {
             begin_frame(chr, data, env);
         }
         self.snapshot(0);
+        self.update_sight_flag(env);
         for i in 0..2 {
             let (me, opp) = split(&mut self.chars, i);
             update_seq_flags(me, opp, data[i], data[i ^ 1], env);
+        }
+    }
+
+    /// `BtlChars_UpdateSightFlag`: held flag 0xBA on both fighters while the stage blocks the line between their
+    /// nodes 0x2F (`StgCol_TraceSegment`).
+    pub(crate) fn update_sight_flag(&mut self, env: &Env) {
+        let (a, b) = (
+            self.chars[0].obj.node_pos(0x2F),
+            self.chars[1].obj.node_pos(0x2F),
+        );
+        let blocked = env.col.trace_segment(a, b, env.broken()).is_some();
+        for c in &mut self.chars {
+            c.flags.clear(0xBA);
+            if blocked {
+                c.flags.set_held(0xBA);
+            }
         }
     }
 

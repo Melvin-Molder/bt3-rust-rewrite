@@ -2709,8 +2709,8 @@ impl Battle {
     /// `BtlLoad_StepStageChange`, one step a frame: the loading flag; the transition pack; the transition
     /// (`EftBurst_Start`: its camera animation, pack entry 1, held); the new stage's file; once the transition's 150
     /// frames are over, the fade out to the slot's colour; covered, the transition ends; the new stage in
-    /// (`BtlLoad_EndStageSwap`: the fighters back at their starting places); the fade in. The stage's sound bank,
-    /// the transition's particles and the stage effects are not ported.
+    /// (`BtlLoad_EndStageSwap`: the fighters back at their starting places, the new stage's effects, `StgFx_Reset`);
+    /// the fade in.
     fn step_stage_job(&mut self, paused: bool, libc: &mut LibcRandom) {
         let Some(job) = &mut self.stage_job else {
             return;
@@ -2813,7 +2813,11 @@ impl Battle {
                             // EftStage_CreateKinds: the new stage's effects.
                             // EftStage_Recreate.
                             self.roster.scene.stage = self.assets.new_stage_fx();
-                            // BtlLoad_EndStageSwap's StgFx_Reset.
+                            // BtlLoad_EndStageSwap's StgFx_Reset: the blurs, the cross-fade and the warps off,
+                            // then the new stage's settings.
+                            self.roster.scene.blurs = Default::default();
+                            self.xfade = ScrXfade::default();
+                            self.roster.scene.warps.reset();
                             self.roster.scene.tints =
                                 crate::stg_tint::Tints::new(self.assets.stage.tint);
                             self.water_wobble
@@ -4843,7 +4847,7 @@ pub(crate) fn lock_on_camera(cam: &LockOn) -> ([f32; 3], [f32; 3], [f32; 3]) {
     turn += spread * (limit / FRAC_PI_2);
     turn *= 0.5;
     turn *= side;
-    let yaw = wrap_angle(cam.yaw - turn);
+    let yaw = crate::btl_input::wrap_angle(cam.yaw - turn);
     target = add(target, pos);
     let (s, c) = cam.yaw.sin_cos();
     let out = [-c * ofs[0] + s * ofs[2], ofs[1], s * ofs[0] + c * ofs[2]];
@@ -5103,18 +5107,6 @@ pub(crate) fn rotate_x(v: [f32; 3], angle: f32) -> [f32; 3] {
 pub(crate) fn rotate_y(v: [f32; 3], angle: f32) -> [f32; 3] {
     let (s, c) = angle.sin_cos();
     [c * v[0] + s * v[2], v[1], -s * v[0] + c * v[2]]
-}
-
-/// `BtlUtil_WrapAngle`: into [-pi, pi).
-fn wrap_angle(a: f32) -> f32 {
-    let mut a = a;
-    while a >= PI {
-        a -= 2.0 * PI;
-    }
-    while a < -PI {
-        a += 2.0 * PI;
-    }
-    a
 }
 
 fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -8083,6 +8075,33 @@ pub(crate) mod tests {
         assert_eq!(hits, [(5450, 0xF)]);
         assert_eq!(end_at, Some(50));
         assert_eq!(act, 0xB);
+    }
+
+    #[test]
+    fn real_sight_flag_follows_the_stage_between_the_heads() {
+        // BtlChars_UpdateSightFlag: at the start the fighters see each other; with P2 sunk under the ground the
+        // floor blocks the line between their nodes 0x2F, and both get held flag 0xBA.
+        let mut setup = BattleSetup::default();
+        setup.sides[1].chara = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..10 {
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        let data = side_data(&battle.assets.fighters[1]);
+        let env = battle.assets.env(0, Default::default());
+        battle.roster.update_sight_flag(&env);
+        assert!(battle.roster.chars.iter().all(|c| !c.flags.test(0xBA)));
+        let o = &mut battle.roster.chars[1].obj;
+        o.pos[1] += 300.0;
+        o.xf_update();
+        o.calc_matrices(&data.obj);
+        battle.roster.update_sight_flag(&env);
+        assert!(battle.roster.chars.iter().all(|c| c.flags.test(0xBA)));
     }
 
     #[test]

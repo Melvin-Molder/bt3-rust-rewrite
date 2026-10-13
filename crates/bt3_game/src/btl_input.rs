@@ -194,14 +194,14 @@ fn byte_to_stick(b: u8) -> f32 {
     f32::from(b) * (1.0 / 254.0) * 2.0 - 1.0
 }
 
-/// `BtlUtil_WrapAngle`.
+/// `BtlUtil_WrapAngle`: one turn added below -pi or taken off above pi (pi itself stays).
 pub(crate) fn wrap_angle(a: f32) -> f32 {
     let mut a = a;
-    while a >= std::f32::consts::PI {
-        a -= std::f32::consts::TAU;
-    }
-    while a < -std::f32::consts::PI {
+    if a < -std::f32::consts::PI {
         a += std::f32::consts::TAU;
+    }
+    if a > std::f32::consts::PI {
+        a -= std::f32::consts::TAU;
     }
     a
 }

@@ -97,7 +97,7 @@ depth, blends in the GS's colour space) are left out.
 - [x] The technique camera cuts
 - [x] Technique effects: the rush swarm's models; the disc's model (`EftDisc_Draw`, `EftDisc_StepTex`), the multi's piece scale, roll and abort flag
 - [x] The ki objects' models, fragments and explosions (`EftKiObj_Draw`, `EftKiObj_Break`, `EftKiBomb_UpdateModel`; a full object pool kills the object)
-- [ ] The stage timer of stages 4 / 27, the body sphere's stage push-out, a stage change's transition effects
+- [x] The stage timer of stages 4 / 27 (read only by `BtlCharApi_GetMgrTimerRatio`, which nothing on the disc calls: left out), the body sphere's stage push-out, a stage change's transition effects (`StgFx_Reset`'s blurs, cross-fade and warps); the sight flag 0xBA (`BtlChars_UpdateSightFlag`)
 - [ ] The camera's stage trace (`BtlCam_TraceStage`)
 - [ ] The jaw and the look-at rotations of nodes 0x2E / 0x2F
 - [ ] The story mode's AI override (`BtlCharApi_GetStoryAiForce`)

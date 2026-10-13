@@ -285,7 +285,7 @@ pub(crate) fn push_back_on_event_400(me: &mut Chr, data: &SideData) {
             me.flags.set_held(0x9F);
         }
         if me.flags.test(0x9F) {
-            let a = me.pose.rot[1] + std::f32::consts::PI;
+            let a = crate::btl_input::wrap_angle(me.pose.rot[1] + std::f32::consts::PI);
             let v = [
                 crate::btl_tech_volley::mathf_sin(a),
                 0.0,

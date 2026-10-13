@@ -2287,8 +2287,8 @@ impl Ctx<'_, '_> {
     /// Action 0x37 (`BtlAct_ChargeHandler`): ki charge, motions 0x34 -> 0x35 (loop) -> 0x36 once the max power
     /// gauge fills. The loop adds ki; at full ki with a blast stock it fills the max power gauge, and a full gauge
     /// spends the stock and holds flag 6. Releasing the charge input (action input 19) ends it outside 0x36. The
-    /// start, loop and max power sounds with voice kinds 0xD and 0x13 (0xD cut short on leaving); the vibration
-    /// and the chains' push are not ported.
+    /// start, loop and max power sounds with voice kinds 0xD and 0x13 (0xD cut short on leaving); the loop's
+    /// vibration and its push on the chains (down and back, unless the character's flags are 0x80).
     fn charge(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x34, 0.15);
@@ -3429,7 +3429,7 @@ impl Ctx<'_, '_> {
     /// movement back (0x20), left (0x21), right (0x22) or along the line to the opponent (0x23), untouchable
     /// (flags 0x42..0x46). Raised by flags 0x74..0x76 (a counter), it starts at once. Sound 0x20; a sideways step
     /// locked on past the opponent's back gives voice kind 0x1D. Raised by the counter: battle event 0x41 and frame
-    /// bit 0x8000 (the stage timer of stages 4 / 27 is not ported).
+    /// bit 0x8000 (`BtlChar_AddStageTimer`'s timer has no reader, `BtlChars::update_input`).
     fn vanish_step(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0xF6, 0.15);
@@ -7213,7 +7213,11 @@ impl Ctx<'_, '_> {
                 self.set(f);
             }
             self.me.vibrate(1.0, 0.1);
-            self.push_angle(self.me.pose.rot[1] + PI, 1.0, 5.0);
+            self.push_angle(
+                crate::btl_input::wrap_angle(self.me.pose.rot[1] + PI),
+                1.0,
+                5.0,
+            );
             if self.me.action_frame >= 0x10 && self.test(0x33) {
                 self.me.clash_count_a += 1;
             }
@@ -7239,7 +7243,6 @@ impl Ctx<'_, '_> {
     /// Action 0x104 (`BtlAct_ClashLostHandler`, forced by flag 0xAB or the lost struggle): motion 0x172 under
     /// level 2 hit-stop, held to its end, then falling (0xD9); a fighter still in its undamaged model changes to the
     /// damaged one, the motion played again on it to its end, put back where it stood, under the common camera cut 0x21 + player.
-    /// Not ported: the chains' push and the stage timer.
     fn clash_lost(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x172, 0.0);
@@ -7289,7 +7292,11 @@ impl Ctx<'_, '_> {
             ] {
                 self.set(f);
             }
-            self.push_angle(self.me.pose.rot[1] + PI, 1.0, 5.0);
+            self.push_angle(
+                crate::btl_input::wrap_angle(self.me.pose.rot[1] + PI),
+                1.0,
+                5.0,
+            );
             self.me.hold_action = true;
         }
         if phase == DECIDE && self.me.work[1] != 0 {
@@ -7869,7 +7876,11 @@ impl Ctx<'_, '_> {
             _ => false,
         };
         if push {
-            self.push_angle(self.me.pose.rot[1] + PI, 1.0, 5.0);
+            self.push_angle(
+                crate::btl_input::wrap_angle(self.me.pose.rot[1] + PI),
+                1.0,
+                5.0,
+            );
         }
     }
 
@@ -9151,8 +9162,7 @@ impl Ctx<'_, '_> {
 
     /// Actions 0x12A..0x12C (`BtlAct_SuperRushFinishHandler`): the closing motion 0x15 of a catching technique,
     /// dealing its own hits (`BtlSuper_SetupRushDamage` from the motion), out of reach. Its end lands a fighter
-    /// within 5 of the ground. The character's camera cut 9 runs between the technique's two frames. The stage
-    /// timer (stages 4 / 27) is not ported.
+    /// within 5 of the ground. The character's camera cut 9 runs between the technique's two frames.
     fn tech_rush_finish(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -9291,7 +9301,7 @@ impl Ctx<'_, '_> {
     /// stays down (0xEB). Models are reloaded through the change queue: the damaged variants of `def_reload` /
     /// `atk_reload`, and technique 0x280's random character (`BtlAct_SetFormRandom`). The partner object of the
     /// technique plays the steps after its own (`level - partner_step` from model animation 0) and goes at the
-    /// end. Not ported: the stage timer.
+    /// end.
     fn rush_sequence(&mut self, phase: u32) {
         let cls = self.current_class();
         if phase == ENTER {
@@ -9814,7 +9824,11 @@ impl Ctx<'_, '_> {
                         self.me.flags.set_held(anim_flag::REQ_SUB);
                     }
                     // BtlActChange_PushBack.
-                    self.push_angle(self.me.pose.rot[1] + PI, 0.4, 3.0);
+                    self.push_angle(
+                        crate::btl_input::wrap_angle(self.me.pose.rot[1] + PI),
+                        0.4,
+                        3.0,
+                    );
                     if long {
                         for (ratio, sound) in [(0.4, 0x44), (0.5, 0x22), (0.8, 0x18)] {
                             if self.me.anim_passed_ratio(ratio) {
@@ -9826,7 +9840,11 @@ impl Ctx<'_, '_> {
                 0x178 => {
                     waiting = true;
                     self.me.anim_advance_loop(0);
-                    self.push_angle(self.me.pose.rot[1] + PI, 0.4, 3.0);
+                    self.push_angle(
+                        crate::btl_input::wrap_angle(self.me.pose.rot[1] + PI),
+                        0.4,
+                        3.0,
+                    );
                     if self.change.is_loaded_for(self.me.player) {
                         self.change_loaded(0x179);
                     }
