@@ -5,7 +5,8 @@
 //! The fighter code steps the player itself (`anim.manual`): it sets the frame, then the object samples the pose
 //! (`BtlObjAnim_SamplePose`), reads the events (`BtlObjAnim_UpdateEvents`) and builds the matrices
 //! (`BtlObjPose_CalcMatrices`). A throw's victim plays the thrower's motion retargeted to its own skeleton
-//! (`BtlObjAnim_PlayFrom`). Not ported: the look-at rotations of nodes 0x2E / 0x2F, the jaw.
+//! (`BtlObjAnim_PlayFrom`). The head and neck (nodes 0x2E / 0x2F) turn towards their look-at rotations
+//! (`btl_head`), and a jaw model's node 0x31 by its jaw track (`btl_face`).
 
 use std::f32::consts::PI;
 
