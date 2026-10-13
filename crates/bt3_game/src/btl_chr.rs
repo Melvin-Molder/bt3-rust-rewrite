@@ -699,7 +699,7 @@ pub(crate) struct Chr {
     /// `frameBits`: this frame's tutorial goals the fighter reached (`BtlChar_SetFrameBits`), cleared by
     /// `BtlChar_BeginFrame`; mode 5 tests bit `gProgress->tutorial` of fighter 0's.
     pub frame_bits: u64,
-    /// `attackId`: the attack last prepared (read by `BtlAct_QueueComboFinish`, which is not ported).
+    /// `attackId`: the attack last prepared (read by `BtlAct_QueueComboFinish`).
     pub attack_id: i32,
     /// The member's idle talk count (+0xA0): the neutral state talks (0x43) only while it is 0.
     pub idle_talk_count: i32,

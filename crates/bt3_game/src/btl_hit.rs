@@ -316,6 +316,28 @@ fn guard_result(rec: &AttackRecord, id: usize, def: &Chr, o: usize) -> i8 {
     }
 }
 
+/// `BtlAtk_GetBestGuardKind`: against guard kind 4 the highest-ranked of the record's raw results (+0x29, +0x27,
+/// +0x28; `BtlAtk_RankGuardKind`: 4, then 0, 1, 2, 3, any other last), the first of equal ones.
+fn best_guard_kind(rec: &AttackRecord) -> i8 {
+    let rank = |v: i8| match v {
+        4 => 5,
+        0 => 4,
+        1 => 3,
+        2 => 2,
+        3 => 1,
+        _ => 0,
+    };
+    let (mut best, mut best_rank) = (-1, -1);
+    for o in [0x29, 0x27, 0x28] {
+        let v = rec.s8_at(o);
+        if best_rank < rank(v) {
+            best_rank = rank(v);
+            best = v;
+        }
+    }
+    best
+}
+
 /// `BtlAtk_GetKiGain`: +50 % (ability 0x6E) or +25 % (0x20), divided by the motion's hits.
 fn ki_gain(me: &Chr, data: &SideData, env: &Env) -> i32 {
     let (r, _) = record(me, data, env);
@@ -1230,12 +1252,15 @@ fn check_dodge(atk: &Chr, def: &mut Chr, data: &SideData, env: &Env, frame: u32)
         let flags = record(atk, data, env).0.flags();
         let (mut done, mut strike, mut counted) = (false, false, false);
         let window = def.dodge_window - i32::from(flags & 0x400_0000 != 0);
-        let mut free = false;
+        let (mut free, mut paid) = (false, false);
         if window > 0 && flags & 1 != 0 && hit_no(atk) == 0 {
             def.flags.set(0x12C);
             done = true;
             free = true;
-            // A paid evasion (attack flag 0x100000) needs 20000 ki: its attack (flag 0x7C) is not ported.
+            // Attack flag 0x100000: the evasion costs 20000 ki, and with it the defender strikes back (flag 0x7C).
+            if flags & 0x10_0000 != 0 {
+                paid = def.has_ki(20000);
+            }
         }
         if !done {
             if def.dodges > 0 {
@@ -1258,7 +1283,10 @@ fn check_dodge(atk: &Chr, def: &mut Chr, data: &SideData, env: &Env, frame: u32)
             }
         }
         if done {
-            if strike {
+            if paid {
+                def.flags.set(0x7C);
+                def.spend_ki(20000, false);
+            } else if strike {
                 def.flags.set(0x77);
             } else {
                 let mut dir = if flags & 0x80_0000 != 0 {
@@ -1356,7 +1384,7 @@ fn check_guard(
         2 => guard_result(&rec, id, def, 0x27),
         3 => guard_result(&rec, id, def, 0x28),
         5 => rec.s8_at(0x2A),
-        // BtlAtk_GetBestGuardKind mixes the kinds: guard kind 4 comes from a guard action, not ported.
+        4 => best_guard_kind(&rec),
         _ => 0,
     };
     if res == 3 {
@@ -1461,6 +1489,20 @@ fn apply_guard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_kind_4_takes_the_best_raw_result() {
+        let rec = |a: i8, b: i8, c: i8| {
+            let mut r = AttackRecord([0; 0x30]);
+            (r.0[0x29], r.0[0x27], r.0[0x28]) = (a as u8, b as u8, c as u8);
+            r
+        };
+        // 4 outranks all; then 0, 1, 2, 3; anything else (here -1) last; the first of equals.
+        assert_eq!(best_guard_kind(&rec(1, 4, 0)), 4);
+        assert_eq!(best_guard_kind(&rec(3, 2, 0)), 0);
+        assert_eq!(best_guard_kind(&rec(-1, 3, 2)), 2);
+        assert_eq!(best_guard_kind(&rec(-1, -2, -3)), -1);
+    }
 
     #[test]
     fn voice_kinds_follow_the_reaction_groups() {

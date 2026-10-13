@@ -735,8 +735,7 @@ impl Ctx<'_, '_> {
         0
     }
 
-    /// `BtlDecide_Attack`: rush attacks, smashes, throws, ki blasts. The ki blasts, the finishers and the other
-    /// attack records need tables that are not ported; their inputs are not recognised.
+    /// `BtlDecide_Attack`: rush attacks, smashes, throws, ki blasts, the finishers.
     fn decide_attack(&mut self, mask: u32) -> u32 {
         if !self.me.is_free() {
             return 0;
@@ -3369,7 +3368,7 @@ impl Ctx<'_, '_> {
     }
 
     /// Actions 0x1E, 0x1F (`BtlAct_StepInHandler`): the short forward dash, motion 0x1B, fast until 70% of it.
-    /// 0x1E reads attack inputs; 0x1F queues the attack records 0x8F, 0x8D, 0x8E (the records are not ported).
+    /// 0x1E reads attack inputs; 0x1F queues the attack records 0x8F, 0x8D, 0x8E.
     fn step_in(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x1B, 0.15);
@@ -4139,8 +4138,8 @@ impl Ctx<'_, '_> {
 
     /// Action 0x58 (`BtlAct_FlyingKickHandler`): the kick out of a dash, motions 0x6B (wind-up) -> 0x6C (hold, the
     /// charge follows its progress) -> 0x6D (strike, on letting go: input 0x41). Within the parameter's angle of the
-    /// opponent it homes on it. Sounds 0x2E and 0x2F (the strike), the record's voice. The follow-up attack records
-    /// 0x87 / 0x77 (`BtlDecide_QueueAttack`) are not ported.
+    /// opponent it homes on it. Sounds 0x2E and 0x2F (the strike), the record's voice, the follow-up attack records
+    /// 0x87 / 0x77 (`BtlDecide_QueueAttack`).
     fn flying_kick(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0x6B, 0.15);
