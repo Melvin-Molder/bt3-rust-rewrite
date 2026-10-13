@@ -1203,10 +1203,16 @@ pub fn add_to(app: &mut App) {
     .add_systems(Startup, (spawn_cameras, spawn_depth_plane, spawn_id_plane));
 }
 
-/// The 2D layer shown on the window: the frame buffers and the quads.
+/// The 2D layer of the finished frame: the frame buffers and the quads.
 pub const DISPLAY_LAYER: usize = 1;
 /// The HUD's layer: drawn into the frame after the scene and the post pass.
 const HUD_LAYER: usize = 3;
+/// The window's layer: the finished frame, scaled.
+const WINDOW_LAYER: usize = 63;
+
+/// The finished 512 x 448 frame, before it is scaled to the window.
+#[derive(Resource)]
+pub struct OutputFrame(pub Handle<Image>);
 
 /// The two frame buffers the 3D passes draw into: one is drawn to, the other keeps the frame `ScrXfade_PostDraw`
 /// captured last.
@@ -1235,9 +1241,13 @@ pub struct LiveFrame;
 #[derive(Component)]
 pub struct KeptFrame;
 
-fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn spawn_cameras(
+    mut commands: Commands,
+    mut assets: ResMut<Assets<Image>>,
+    display: Res<crate::display::DisplaySettings>,
+) {
     let images: [Handle<Image>; 2] = std::array::from_fn(|_| {
-        images.add(Image::new_target_texture(
+        assets.add(Image::new_target_texture(
             SCREEN_WIDTH,
             SCREEN_HEIGHT,
             TextureFormat::Rgba8UnormSrgb,
@@ -1281,14 +1291,47 @@ fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         RenderTarget::from(images[0].clone()),
         RenderLayers::layer(HUD_LAYER),
     ));
+    // The frame as the console outputs it (the buffers and the screens' quads), at 512 x 448.
+    let mut output = Image::new_target_texture(
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        TextureFormat::Rgba8UnormSrgb,
+        None,
+    );
+    output.sampler = display.sampler();
+    let output = assets.add(output);
     commands.spawn((
         Camera2d,
         Camera {
             order: 70,
             ..default()
         },
+        RenderTarget::from(output.clone()),
         RenderLayers::layer(DISPLAY_LAYER),
     ));
+    // Then the window: the finished frame scaled to it (crate::display), bars of the clear colour round it.
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: 80,
+            ..default()
+        },
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: display.scaling(),
+            ..OrthographicProjection::default_2d()
+        }),
+        RenderLayers::layer(WINDOW_LAYER),
+    ));
+    let (width, height) = display.shown_size();
+    commands.spawn((
+        Sprite {
+            image: output.clone(),
+            custom_size: Some(Vec2::new(width, height)),
+            ..default()
+        },
+        RenderLayers::layer(WINDOW_LAYER),
+    ));
+    commands.insert_resource(OutputFrame(output));
     commands.spawn((
         Sprite::from_image(images[0].clone()),
         Transform::from_xyz(0.0, 0.0, -990.0),

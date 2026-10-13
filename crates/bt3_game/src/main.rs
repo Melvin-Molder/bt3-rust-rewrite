@@ -46,6 +46,7 @@ mod dc_save;
 mod dialog;
 mod disc;
 mod disc_fusion;
+mod display;
 mod draw;
 mod duel_menu;
 mod eft;
@@ -183,7 +184,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite_render::AlphaMode2d;
-use bevy::window::WindowResolution;
+use bevy::window::{PrimaryWindow, WindowResolution};
 use bt3_data::Iso9660;
 use bt3_data::adx;
 use bt3_data::afs::{AfsArchive, partition_entry_for_id};
@@ -640,6 +641,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut log_fps = false;
     let mut shot = None;
     let mut shot_at = 600;
+    let mut display = display::DisplaySettings::default();
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--title" {
@@ -661,10 +663,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
             skip_to_title = true;
+        } else if argument == "--fullscreen" {
+            display.fullscreen = true;
+        } else if argument == "--aspect" {
+            display.aspect = arguments
+                .next()
+                .and_then(|v| display::DisplaySettings::parse_aspect(&v.to_string_lossy()))
+                .ok_or("--aspect requires tv, pixel or stretch")?;
+        } else if argument == "--filter" {
+            display.filter = arguments
+                .next()
+                .and_then(|v| display::DisplaySettings::parse_filter(&v.to_string_lossy()))
+                .ok_or("--filter requires linear or nearest")?;
+        } else if argument == "--scale" {
+            display.scale = arguments
+                .next()
+                .and_then(|v| v.to_string_lossy().parse::<u32>().ok())
+                .filter(|v| (1..=8).contains(v))
+                .ok_or("--scale requires a window size of 1 to 8")?;
         } else if argument == "--fps" {
             log_fps = true;
         } else if argument == "--shot" {
-            // A debugging aid: the window saved as a PNG after `--shot-at` updates, then the program ends.
+            // A debugging aid: the frame (512 x 448) saved as a PNG after `--shot-at` updates, then the program
+            // ends.
             shot = Some(PathBuf::from(
                 arguments.next().ok_or("--shot requires a file")?,
             ));
@@ -852,9 +873,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title,
-                        resolution: WindowResolution::new(SCREEN_WIDTH, SCREEN_HEIGHT)
-                            .with_scale_factor_override(1.0),
-                        resizable: false,
+                        resolution: WindowResolution::new(
+                            display.window_size().0,
+                            display.window_size().1,
+                        )
+                        .with_scale_factor_override(1.0),
+                        mode: display.window_mode(),
                         ..default()
                     }),
                     ..default()
@@ -1007,6 +1031,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             font,
         })
         .insert_resource(SeStream(engine))
+        .insert_resource(display)
         .add_audio_source::<se::SeOutput>()
         .init_resource::<Textures>()
         .add_systems(Startup, setup)
@@ -1027,7 +1052,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 apply_volumes,
             )
                 .chain(),
-        );
+        )
+        .add_systems(Update, switch_fullscreen);
     model_draw::add_to(&mut app);
     post_draw::add_to(&mut app);
     if let Some(path) = shot {
@@ -1045,21 +1071,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `--shot`: where the window is saved, and after how many updates (`--shot-at`, 600 by default).
+/// F11: full screen or a window.
+fn switch_fullscreen(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut window: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    if keys.just_pressed(KeyCode::F11)
+        && let Ok(mut window) = window.single_mut()
+    {
+        window.mode = display::toggle_fullscreen(window.mode);
+    }
+}
+
+/// `--shot`: where the frame is saved, and after how many updates (`--shot-at`, 600 by default).
 #[derive(Resource)]
 struct Shot(PathBuf, u32);
 
-/// Saves the window after the shot's updates and ends the program 60 updates later.
+/// Saves the frame after the shot's updates and ends the program 60 updates later.
 fn take_shot(
     mut commands: Commands,
     shot: Res<Shot>,
+    output: Res<model_draw::OutputFrame>,
     mut frames: Local<u32>,
     mut exit: MessageWriter<AppExit>,
 ) {
     *frames += 1;
     if *frames == shot.1 {
         commands
-            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .spawn(bevy::render::view::screenshot::Screenshot::image(
+                output.0.clone(),
+            ))
             .observe(bevy::render::view::screenshot::save_to_disk(shot.0.clone()));
     }
     if *frames == shot.1 + 60 {

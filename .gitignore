@@ -79,6 +79,7 @@
 !/crates/bt3_game/src/dialog.rs
 !/crates/bt3_game/src/disc.rs
 !/crates/bt3_game/src/disc_fusion.rs
+!/crates/bt3_game/src/display.rs
 !/crates/bt3_game/src/mcflow.rs
 !/crates/bt3_game/src/anim.rs
 !/crates/bt3_game/src/windows.rs
