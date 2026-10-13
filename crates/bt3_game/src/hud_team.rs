@@ -51,7 +51,7 @@ pub(crate) struct TeamPart {
     slide: [Ramp; 2],
     flip_a: [Ramp; 2],
     flip_b: [Ramp; 2],
-    /// `hide`: `HudTeam_SlideOut` / `SlideIn` (`Hud_SlideOut` is not ported).
+    /// `hide`: `HudTeam_SlideOut` / `SlideIn` (from `Hud_SlideOut` / `Hud_SlideIn`, `Hud::slide`).
     hide: Ramp,
     /// `BATTLE_FLAG_PAUSE`: the ramps stand still.
     pub(crate) paused: bool,

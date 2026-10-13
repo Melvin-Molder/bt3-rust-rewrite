@@ -5,8 +5,8 @@
 //! 0's are updated and drawn. Between them the cue (node 25, side 0 only): the pad's icon on a pulsing base, which
 //! the story script shows while one of its events waits to start.
 //!
-//! Not ported: the technique names above the command row, which only the prompts of pad status 1 ask for (a PS2
-//! pad reports status 0).
+//! The technique names above the command row (`HudPrompt_DrawNames`) are left out: only the prompts of pad status 1
+//! ask for them, and the PS2's pad module sets a status of 0 or 0xFF only (`Pad_Update`), so they never show.
 
 use crate::battle_seq::Ramp;
 use crate::hud::{HudBlend, HudPrim, HudSheet, Sprite, Xf, fan, sprite_polygon};
