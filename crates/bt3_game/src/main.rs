@@ -126,6 +126,7 @@ mod se;
 mod shen;
 mod shen_scene;
 mod shop;
+mod solo_select;
 mod sound;
 mod stage_anim;
 mod stage_draw;
@@ -147,6 +148,7 @@ mod tour_menu;
 mod training;
 mod ub;
 mod ub_menu;
+mod ub_team_select;
 mod windows;
 
 use std::collections::HashMap;
@@ -223,6 +225,10 @@ enum Scene {
     UbMenu(Box<ub_menu::UbMenuScreen>),
     /// `Ub_Main` mode 14: Mission 100's list.
     MissionSelect(Box<mission_select::MissionSelectScreen>),
+    /// `Ub_Main` modes 15, 18, 21, 25, 29: the one-fighter select (the mode it runs for kept); mode 15 with a team:
+    /// the team select.
+    SoloSelect(Box<solo_select::SoloSelectScreen>, i32),
+    UbTeamSelect(Box<ub_team_select::UbTeamSelectScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -302,6 +308,8 @@ impl Scene {
             | Scene::Bracket(_)
             | Scene::UbMenu(_)
             | Scene::MissionSelect(_)
+            | Scene::SoloSelect(..)
+            | Scene::UbTeamSelect(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -465,6 +473,10 @@ struct Game {
     /// `gMenuArc3`'s Ultimate Battle menu, and the group's block of `gProgress`.
     ub_menu: Option<ub_menu::UbMenuData>,
     mission_select: Option<mission_select::MissionSelectData>,
+    /// Archive 3 section 4: the group's fighter selects.
+    solo_select: Option<solo_select::SoloSelectData>,
+    /// The `Ub_Main` mode a battle of the group returns to (16 the mission result).
+    ub_battle: Option<i32>,
     ub: ub::UbProgress,
     tour: tour_menu::TourSession,
     entry_select: Option<entry_select::EntrySelData>,
@@ -854,6 +866,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tour_menu: None,
             ub_menu: None,
             mission_select: None,
+            solo_select: None,
+            ub_battle: None,
             ub: ub::UbProgress::default(),
             tour: tour_menu::TourSession::default(),
             entry_select: None,
@@ -1567,6 +1581,75 @@ fn run_frames(
                     }
                 }
             }
+            Scene::SoloSelect(screen, mode) => {
+                let mode = *mode;
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &game.save,
+                    &mut loader,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let (result, pick) = (screen.result(), screen.pick());
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after SoloSel_Run.
+                    stop_all(game, &mut commands);
+                    if result != 0 {
+                        game.char_progress.side[0] = pick;
+                    }
+                    match (mode, result) {
+                        (15, 0) => start_mission_select(game, &mut commands),
+                        (15, _) => start_mission_battle(game),
+                        _ => {
+                            info!("Ultimate Battle mode {mode}'s next screen is not ported yet");
+                            start_ub_menu(game, &mut commands);
+                        }
+                    }
+                }
+            }
+            Scene::UbTeamSelect(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &game.save,
+                    &mut loader,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let (result, (team, count)) = (screen.result(), screen.team());
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after UbTeamSel_Run.
+                    stop_all(game, &mut commands);
+                    if result != 0 {
+                        // UbTeamSel_Run: the team and its size to gProgress.
+                        game.char_progress.side[0] = team[0];
+                        game.char_progress.team[0].copy_from_slice(&team[1..]);
+                        game.ub.team_size = count;
+                        start_mission_battle(game);
+                    } else {
+                        start_mission_select(game, &mut commands);
+                    }
+                }
+            }
             Scene::MissionSelect(screen) => {
                 let frame = screen.run_frame(
                     held,
@@ -1591,8 +1674,7 @@ fn run_frames(
                             game.ub.team_size = mission.team_size;
                             game.ub.dp_rule = mission.dp_rule;
                             game.ub.mission = Some(mission);
-                            info!("Ultimate Battle mode 15 (the fighter select) is not ported yet");
-                            start_mission_select(game, &mut commands);
+                            start_ub_fighters(game, &mut commands);
                         }
                         None => start_ub_menu(game, &mut commands),
                     }
@@ -2549,6 +2631,15 @@ fn leave_battle(
             let ball = game.story_ball;
             start_hist_result(game, winner & 1 != 0, ball);
         }
+    } else if let Some(mode) = game.ub_battle.take() {
+        // Progress_Main after a battle of Ultimate Battle: an abort's reason 8 goes to the main menu; else the mode
+        // the battle was set up for.
+        if winner & 8 != 0 && reason & 8 != 0 {
+            start_main_menu(game, commands, audio);
+        } else {
+            info!("Ultimate Battle mode {mode} (the result) is not ported yet");
+            start_mission_select(game, commands);
+        }
     } else if std::mem::take(&mut game.tour_battle) {
         // Progress_Main after a battle of the bracket: an abort's reason 8 ends the tournament (the progress flags
         // 0x10 / 0x20 cleared) and goes to the main menu; else the bracket again (mode 35).
@@ -3379,6 +3470,155 @@ fn start_entry_select(game: &mut Game, commands: &mut Commands) {
             game.scene = Scene::Black;
         }
     }
+}
+
+/// Archive 3 section 4 (the group's fighter selects), read and registered once.
+fn load_solo_select(game: &mut Game) -> Option<solo_select::SoloSelectData> {
+    if game.chr_table.costumes.is_empty() {
+        match Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, 4))
+        {
+            Ok(file) => game.chr_table = bt3_data::chara_data::ChrTable::parse(&file, 0xA1),
+            Err(error) => error!("cannot read the character table: {error}"),
+        }
+    }
+    if game.solo_select.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    solo_select::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| solo_select::SoloSelectAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = solo_select::SoloSelectLayout::new(background, |key| firsts[&key]);
+                game.solo_select = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the fighter select: {error}");
+                return None;
+            }
+        }
+    }
+    game.solo_select.clone()
+}
+
+/// `Ub_Main` mode 15: `Bgm_Play(UB_BGM)`, then `UbTeamSel_Run(4)` when the mission wants two fighters or more,
+/// else `SoloSel_Run(4)`.
+fn start_ub_fighters(game: &mut Game, commands: &mut Commands) {
+    if game.ub.team_size >= 2 {
+        let Some(data) = load_solo_select(game) else {
+            game.scene = Scene::Black;
+            return;
+        };
+        let mut team = [game.char_progress.side[0]; ub_team_select::MEMBER_MAX];
+        team[1..].copy_from_slice(&game.char_progress.team[0]);
+        let mut loader = Pictures {
+            iso_path: &game.iso_path,
+            textures: &mut game.textures,
+            samplers: &mut game.samplers,
+            cache: &mut game.pictures,
+        };
+        let screen = ub_team_select::UbTeamSelectScreen::new(
+            &data,
+            game.ub.team_size,
+            game.ub.dp_rule,
+            &game.chr_table,
+            &game.save,
+            &mut team,
+            &mut loader,
+            &mut game.random,
+        );
+        game.char_progress.side[0] = team[0];
+        game.char_progress.team[0].copy_from_slice(&team[1..]);
+        match screen {
+            Ok(screen) => {
+                play_bgm(game, commands, ub::BGM_FILE_ID);
+                game.scene = Scene::UbTeamSelect(Box::new(screen));
+            }
+            Err(error) => {
+                error!("cannot start the team select: {error}");
+                game.scene = Scene::Black;
+            }
+        }
+    } else {
+        start_solo_select(game, commands, 15);
+    }
+}
+
+/// `SoloSel_Run(4)` for `Ub_Main` mode `mode`.
+fn start_solo_select(game: &mut Game, commands: &mut Commands, mode: i32) {
+    let Some(data) = load_solo_select(game) else {
+        game.scene = Scene::Black;
+        return;
+    };
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    match solo_select::SoloSelectScreen::new(
+        &data,
+        mode,
+        &game.chr_table,
+        &game.save,
+        &mut game.char_progress.side[0],
+        &mut loader,
+        &mut game.random,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::SoloSelect(Box::new(screen), mode);
+        }
+        Err(error) => {
+            error!("cannot start the fighter select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Ub_SetupTeam`: side 0 is the pad with the team chosen (`gProgress->team`, `teamSize` members, CPU level 0,
+/// full health) over the rule and side 1 `MisSel_SetupBattle` wrote; then the battle (mode 16 after it).
+fn start_mission_battle(game: &mut Game) {
+    let Some(mission) = game.ub.mission.clone() else {
+        error!("no mission was set up");
+        game.scene = Scene::Black;
+        return;
+    };
+    let mut setup = mission.setup;
+    let count = game.ub.team_size.clamp(0, 5) as usize;
+    let mut team = [game.char_progress.side[0]; 5];
+    team[1..].copy_from_slice(&game.char_progress.team[0]);
+    let lead = team[0];
+    let side = &mut setup.sides[0];
+    *side = char_select::SideSetup {
+        control: 0,
+        pad: 0,
+        change_allowed: 1,
+        switch_enabled: 1,
+        chara: lead.picked,
+        costume: lead.color_plate,
+        cpu_level: 0,
+        items: lead.items,
+        team_count: count.max(1) as i32 - 1,
+        ..char_select::SideSetup::default()
+    };
+    for (i, m) in team.iter().enumerate().take(count).skip(1) {
+        side.team[i - 1] = (m.picked, m.color_plate);
+        side.team_items[i - 1] = m.items;
+    }
+    setup.finish();
+    game.ub_battle = Some(16);
+    start_battle(game, setup);
 }
 
 /// `Ub_Main` mode 14: `Bgm_Play(UB_BGM)`, then `MisSel_Run(2)` from `gMenuArc3`.

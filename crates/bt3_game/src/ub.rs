@@ -8,20 +8,10 @@ pub const BGM_FILE_ID: u32 = 0x10B1B;
 /// `P_VOICE_BASE`: the voice bank of the group's guides.
 pub const VOICE_BASE: u32 = 0x8765;
 
-/// One fighter the player chose (`UoMember`, gProgress + 0x440, 0x30 bytes each).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct UbMember {
-    pub costume: i32,
-    pub chara: i32,
-    /// 1-based item ids.
-    pub items: [u16; 8],
-}
-
-/// The group's block of `gProgress` (0x440..0x68C).
+/// The group's block of `gProgress` (0x638..0x68C). Its fighters (`team`, 0x440) are the versus select's side 0
+/// pick and team (`CharSelProgress`), written by the fighter and team selects.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UbProgress {
-    /// The player's fighters, written by the fighter and team selects.
-    pub team: [UbMember; 5],
     /// `ubCursor` (0x638): the plate the mode 13 menu was left on.
     pub menu_cursor: i32,
     /// `missionPage` (0x63C).
