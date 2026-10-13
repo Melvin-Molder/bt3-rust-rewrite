@@ -165,6 +165,9 @@ For every C function the port names, its callees and the constants it tests were
 - [x] `BtlFx_SpawnPartFlashes` plays common sound 0x4B; a projectile's impact dust is at its owner's scale
 - [x] `EftStage_SetDrawOn`: from a transformation's flash to its end the stage's scroll, weather, smoke, geysers, bubbles and bound are not drawn
 - [x] `BtlScript_IsSlotBusy` in `Snd_PlaySeEx` / `Adx_Play`: a story line in a side's slots mutes its character bank and refuses its other voices
+- [x] `StgGrid_ApplyUnlocks` in the team select (progress mode 0x28): stages 4 and 0x1B, when unlocked, are empty cells
+
+Checked and nothing to port: the effects' remaining constants (GS packets, pool sizes, owner tags, flags that the C never sets such as `EftBlast`'s 0x100), the progress flag 0x100 (`MPROG_FREEZE`, never set), `Train_Leave`'s `ItemSet_GetStats` (its results unused), `Snd_QueuePlay`'s range checks (`Snd_ScaleVolume` already clamps).
 
 ### Unreachable in the original (nothing to port)
 

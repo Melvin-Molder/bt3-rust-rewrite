@@ -237,7 +237,7 @@ impl TeamSelScreen {
         let layout = data.layout.clone();
         let dp = usize::from(duel.battle_type == 2);
         let mut stage_ids = data.stage_ids.clone();
-        stage_grid_apply_unlocks(&mut stage_ids, save);
+        stage_grid_apply_unlocks(&mut stage_ids, save, true);
         let mut bgm_ids = data.bgm_ids.clone();
         bgm_list_apply_unlocks(&mut bgm_ids, save);
         // The last four entries are not offered; the last one kept becomes "random".
@@ -1985,6 +1985,58 @@ mod tests {
         fn picture(&mut self, _: u32) -> Option<usize> {
             Some(2000)
         }
+    }
+
+    /// `StgGrid_ApplyUnlocks` on the real stage grid with every stage unlocked: the team select (mode 0x28) leaves
+    /// stages 4 and 0x1B empty, the character select offers them.
+    #[test]
+    fn real_team_select_leaves_two_stages_out() {
+        use crate::char_select::{STAGE_EMPTY, STAGE_LOCKED};
+        use crate::duel_menu::ARCHIVE_FILE_ID;
+        use bt3_data::afs::{AfsArchive, partition_entry_for_id};
+        use bt3_data::{Iso9660, bpe, pack_section};
+
+        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = Iso9660::open(&iso) else {
+            eprintln!("skipped: no ISO at {}", iso.display());
+            return;
+        };
+        let location = partition_entry_for_id(ARCHIVE_FILE_ID);
+        let archive =
+            AfsArchive::open(&mut image, format!("DATA/PZS3US{}.AFS", location.partition)).unwrap();
+        let pack = archive.read_entry(&mut image, location.index).unwrap();
+        let res =
+            bpe::decode(pack_section(&pack, crate::char_select::ARCHIVE_SECTION).unwrap()).unwrap();
+        let data = CharSelAssets::parse(&res).unwrap().data;
+        let save = SaveData {
+            stage_bits: !0,
+            ..SaveData::default()
+        };
+        let mut vs = data.stage_ids.clone();
+        stage_grid_apply_unlocks(&mut vs, &save, false);
+        let mut team = data.stage_ids.clone();
+        stage_grid_apply_unlocks(&mut team, &save, true);
+        for (i, &id) in data.stage_ids.iter().enumerate() {
+            if matches!(id, 4 | 0x1B) {
+                assert_eq!((vs[i], team[i]), (id, STAGE_EMPTY));
+            } else {
+                assert_eq!(vs[i], team[i]);
+            }
+        }
+        assert!(data.stage_ids.contains(&4) && data.stage_ids.contains(&0x1B));
+        // Locked, they show as locked in both.
+        let mut locked = data.stage_ids.clone();
+        stage_grid_apply_unlocks(
+            &mut locked,
+            &SaveData {
+                stage_bits: 0,
+                ..save
+            },
+            true,
+        );
+        let at = data.stage_ids.iter().position(|&id| id == 4).unwrap();
+        assert_eq!(locked[at], STAGE_LOCKED);
     }
 
     /// Runs the real team select from the ISO in `rom/`, when it is there: a DP battle (limit 10, every character

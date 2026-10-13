@@ -49,6 +49,8 @@ pub(crate) const CELL_MAX: usize = 165;
 const CUSTOM_MAX: usize = 14;
 pub(crate) const STAGE_RANDOM: i32 = 0x23;
 pub(crate) const STAGE_LOCKED: i32 = 0x24;
+/// `STGGRID_ID_EMPTY`: a filler cell, never chosen.
+pub(crate) const STAGE_EMPTY: i32 = 0x25;
 pub(crate) const BGM_RANDOM: i32 = 0x18;
 pub(crate) const BGM_LOCKED: i32 = 0x19;
 
@@ -753,7 +755,7 @@ impl CharSelScreen {
             .map_err(|_| "the character select has five movies")?;
         let layout = data.layout.clone();
         let mut stage_ids = data.stage_ids.clone();
-        stage_grid_apply_unlocks(&mut stage_ids, save);
+        stage_grid_apply_unlocks(&mut stage_ids, save, false);
         let mut bgm_ids = data.bgm_ids.clone();
         bgm_list_apply_unlocks(&mut bgm_ids, save);
         let mut bgm_count = bgm_ids.len() as i32 - 4;
@@ -2349,11 +2351,17 @@ pub(crate) fn stg_grid_move_up(ids: &[i32], col: &mut i32, row: &mut i32, rows: 
     }
 }
 
-/// `StgGrid_ApplyUnlocks` in mode 39: a locked stage becomes `STGGRID_ID_LOCKED`; the random entry stays.
-pub(crate) fn stage_grid_apply_unlocks(ids: &mut [i32], save: &SaveData) {
+/// `StgGrid_ApplyUnlocks`: a locked stage becomes `STGGRID_ID_LOCKED`; the random entry stays. In the team select
+/// (progress mode 0x28, `team`) stages 4 and 0x1B, when unlocked, become `STGGRID_ID_EMPTY`.
+pub(crate) fn stage_grid_apply_unlocks(ids: &mut [i32], save: &SaveData, team: bool) {
     for id in ids.iter_mut() {
-        if *id != STAGE_RANDOM && !save.stage_unlocked(*id) {
+        if *id == STAGE_RANDOM {
+            continue;
+        }
+        if !save.stage_unlocked(*id) {
             *id = STAGE_LOCKED;
+        } else if team && matches!(*id, 4 | 0x1B) {
+            *id = STAGE_EMPTY;
         }
     }
 }
