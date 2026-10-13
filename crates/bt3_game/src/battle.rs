@@ -2165,6 +2165,8 @@ pub struct Battle {
     /// `gStgGlare`: the sky glare.
     pub(crate) glare: crate::stg_glare::Glare,
     pub(crate) hud: Hud,
+    /// `PadWatch_GetMissing`: the controller port the controller watch finds missing, if it warns.
+    pub(crate) pad_missing: Option<usize>,
     /// `Fade_Start(0, 1, 1.0)` of `Battle_Restart`.
     pub(crate) fade: Fade,
     /// Node 0's world matrix of each fighter from the last pose (`DemoCam_SetBase` reads it before the new pose).
@@ -2627,6 +2629,7 @@ impl Battle {
             pan_blur: crate::stg_pan_blur::PanBlur::default(),
             glare,
             hud,
+            pad_missing: None,
             fade: Fade::start_in(1.0),
             roots,
             shadows: Default::default(),
@@ -8430,6 +8433,38 @@ pub(crate) mod tests {
             PadState::default(),
         ];
         battle.run_frame(start, pads, 0, libc, random, None, false);
+    }
+
+    #[test]
+    fn real_missing_controller_pauses_a_split_battle_for_it() {
+        // BtlPause_CheckOpen: PadWatch_GetMissing's port owns the pause menu, which opens though no START went down.
+        use crate::btl_input::pad::START;
+        let mut setup = BattleSetup {
+            screen_mode: 1,
+            ..BattleSetup::default()
+        };
+        setup.sides[1].chara = 1;
+        setup.sides[1].pad = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        for i in 0..200 {
+            let skip = battle.seq.state != SeqState::Ready && battle.seq.state != SeqState::Fight;
+            let held = if skip && i % 2 == 0 { START } else { 0 };
+            fight_vs_1_frame(&mut battle, held, &mut libc, &mut random);
+            if battle.seq.state == SeqState::Fight {
+                break;
+            }
+        }
+        assert_eq!(battle.seq.state, SeqState::Fight);
+        fight_vs_1_frame(&mut battle, 0, &mut libc, &mut random);
+        assert!(!battle.seq.pause_menu);
+        battle.pad_missing = Some(1);
+        fight_vs_1_frame(&mut battle, 0, &mut libc, &mut random);
+        assert!(battle.seq.paused && battle.seq.pause_menu);
+        assert_eq!(battle.seq.result_pad, 1);
     }
 
     #[test]

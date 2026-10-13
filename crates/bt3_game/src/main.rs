@@ -121,6 +121,7 @@ mod model_draw;
 mod movie;
 mod obj_shadow;
 mod options;
+mod pad_watch;
 mod pass_win;
 mod password;
 mod post;
@@ -401,6 +402,12 @@ struct Game {
     /// `PAD_*` bits pressed since the last battle frame, per port.
     battle_latch: [u32; 2],
     quads: Vec<ScreenQuad>,
+    /// `PadWatch_Draw`'s quads, over the frame's.
+    overlay_quads: Vec<ScreenQuad>,
+    /// `gPadWatch`.
+    pad_watch: pad_watch::PadWatch,
+    /// The boot file's words 9..11: the controller watch's three warnings.
+    pad_watch_texts: [Vec<u16>; 3],
     iso_path: PathBuf,
     random: GameRandom,
     /// newlib `rand()`, behind `Rand_IntRange`.
@@ -779,7 +786,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         textures.len() - 1
     });
-    let font = load_fonts(&mut image, &mut textures)?;
+    let (font, pad_watch_texts) = load_fonts(&mut image, &mut textures)?;
     // BootCard_Init: the dialog of section 2 of menu archive 0 (its section 1), its textures filtered.
     let mut linear = Vec::new();
     let boot_dialog = if boot {
@@ -861,6 +868,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pressed_latch2: 0,
             battle_latch: [0; 2],
             quads: Vec::new(),
+            overlay_quads: Vec::new(),
+            pad_watch: pad_watch::PadWatch::default(),
+            pad_watch_texts,
             iso_path: image_path.clone(),
             random,
             libc_random,
@@ -1096,11 +1106,12 @@ fn read_file(image: &mut Iso9660, file_id: u32) -> Result<Vec<u8>, Box<dyn std::
 }
 
 /// `Font_InitEx`: fonts 0 and 1 of the boot file (header words 1 and 2 are their byte offsets), one texture per
-/// CLUT the glyphs use. GS sprites without TEX1 filtering sample point-wise.
+/// CLUT the glyphs use. GS sprites without TEX1 filtering sample point-wise. Also the controller watch's warnings
+/// (`PadWatch_DrawMessage`: the texts at the byte offsets of words 9..11, rounded down to a word).
 fn load_fonts(
     image: &mut Iso9660,
     textures: &mut Vec<RgbaTexture>,
-) -> Result<font::Font, Box<dyn std::error::Error>> {
+) -> Result<(font::Font, [Vec<u16>; 3]), Box<dyn std::error::Error>> {
     let boot = read_file(image, BOOT_FILE_ID)?;
     let word = |i: usize| -> Result<usize, Box<dyn std::error::Error>> {
         let bytes = boot
@@ -1145,7 +1156,8 @@ fn load_fonts(
         icons.textures.push((texture, width));
     }
     font.icons = Some(icons);
-    Ok(font)
+    let texts = pad_watch::texts(&boot).ok_or("a controller warning is outside the boot file")?;
+    Ok((font, texts))
 }
 
 /// `Title_Init`: section 1 of gMenuArc1, BPE-packed.
@@ -2911,6 +2923,10 @@ fn run_frames(
                         status: 0,
                     });
                 battle.stream_stat = battle_streams;
+                // BtlPause_CheckOpen's PadWatch_GetMissing, as the last frame's end left it.
+                battle.pad_missing = game
+                    .pad_watch
+                    .missing(!battle.hud.is_replay() && battle.assets.screen_mode == 1);
                 let winner = battle.seq.winner;
                 game.story_ball = battle
                     .assets
@@ -2989,6 +3005,31 @@ fn run_frames(
         }
         // FontIcon_Tick.
         game.font.tick_icons(vsyncs);
+        // PadWatch_Update and PadWatch_Draw, over the screen's fade. Off on the screens that turn it off.
+        game.pad_watch.disabled = matches!(
+            game.scene,
+            Scene::BootCard(_)
+                | Scene::Logos(_)
+                | Scene::Movie(..)
+                | Scene::Loading(_)
+                | Scene::BattleLoad(_)
+        );
+        let both = match &game.scene {
+            Scene::Battle(b) => !b.hud.is_replay() && b.assets.screen_mode == 1,
+            // Progress modes 0x27 / 0x28 (the Vs mode's selects) with players 1.
+            Scene::CharSelect(s) => !s.is_training() && game.duel.players == 1,
+            Scene::TeamSelect(_) => game.duel.players == 1,
+            _ => false,
+        };
+        game.pad_watch.update([true, sorted.len() >= 2], both);
+        let mode_7 = matches!(&game.scene, Scene::Battle(b) if b.assets.mode == 7);
+        game.overlay_quads.clear();
+        game.pad_watch.draw(
+            mode_7,
+            &game.pad_watch_texts,
+            &mut game.font,
+            &mut game.overlay_quads,
+        );
     }
 }
 
@@ -6015,10 +6056,11 @@ fn sync_quads(
             .and_then(|index| game.textures.get(index))
             .map(|texture| (texture.width, texture.height))
     };
+    let all: Vec<&ScreenQuad> = game.quads.iter().chain(&game.overlay_quads).collect();
     let mut existing = 0;
     for (slot, mesh, material, mut visibility) in &mut slots {
         existing = existing.max(slot.0 + 1);
-        let Some(quad) = game.quads.get(slot.0) else {
+        let Some(&quad) = all.get(slot.0) else {
             *visibility = Visibility::Hidden;
             continue;
         };
@@ -6035,7 +6077,7 @@ fn sync_quads(
         }
         *visibility = Visibility::Visible;
     }
-    for (index, quad) in game.quads.iter().enumerate().skip(existing) {
+    for (index, &quad) in all.iter().enumerate().skip(existing) {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),

@@ -183,6 +183,7 @@
 !/crates/bt3_game/src/btl_event.rs
 !/crates/bt3_game/src/btl_script.rs
 !/crates/bt3_game/src/options.rs
+!/crates/bt3_game/src/pad_watch.rs
 !/crates/bt3_game/src/char_ref.rs
 !/crates/bt3_game/src/chr_view.rs
 !/crates/bt3_game/src/get_win.rs

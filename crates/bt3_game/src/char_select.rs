@@ -1145,6 +1145,11 @@ impl CharSelScreen {
         self
     }
 
+    /// The screen of free training (progress mode 0x2D) rather than the Vs mode's (0x27).
+    pub fn is_training(&self) -> bool {
+        self.training
+    }
+
     /// The end of `CharSel_Run`: a random stage or music is drawn, then the battle setup; in mode 0x2D free
     /// training (mode 6: announcer 1, no time limit, no stage change, CPU level -1, changes allowed).
     fn battle_setup(&mut self, save: &SaveData, random: &mut GameRandom) -> BattleSetup {

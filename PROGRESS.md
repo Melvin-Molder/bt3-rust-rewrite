@@ -132,7 +132,7 @@ executable (callers and address references) and the ISO, and from the port's own
 
 ### System and front end
 
-- [ ] `PadWatch_*` (src/sys/pad_watch.c): the message and pause when a controller is pulled out (`PadWatch_GetMissing`)
+- [x] `PadWatch_*` (src/sys/pad_watch.c): the debounced readings, the warning (darkened screen, boot file text) and the battle pause for the missing controller (`pad_watch.rs`)
 - [ ] The character viewer's backdrop ambience (`StgAmb_Init` in `ChrView_Init`)
 - [ ] Movies: the PSS streams are decoded by `ffmpeg`, not by a port of the IPU MPEG-2 path (`src/sys/movie.c`)
 

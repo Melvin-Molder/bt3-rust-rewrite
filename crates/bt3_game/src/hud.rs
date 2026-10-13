@@ -1344,7 +1344,6 @@ impl Hud {
         self.replay = on;
     }
 
-    #[cfg(test)]
     pub(crate) fn is_replay(&self) -> bool {
         self.replay
     }

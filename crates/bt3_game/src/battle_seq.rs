@@ -786,7 +786,7 @@ impl Battle {
     /// finish scene).
     fn fight_update(&mut self, input: &mut SeqInput) -> SeqState {
         if self.assets.mode != 8 {
-            if !self.seq.pause_menu && self.check_open(input) {
+            if !self.seq.pause_menu && self.check_open(&mut *input) {
                 if self.assets.mode == 7 {
                     // BattleResult_Set(BTL_RESULT_ABORT, 0).
                     self.seq.winner = ABORT;
@@ -843,9 +843,10 @@ impl Battle {
     }
 
     /// `BtlPause_CheckOpen`: START on one of the pads that may pause (both in split screen, else pad 0) opens the
-    /// menu for that pad. (Mode 7's second test of pad 0 adds nothing here; the pulled-out pad of
-    /// `PadWatch_GetMissing` is not emulated.)
-    fn check_open(&mut self, input: &SeqInput) -> bool {
+    /// menu for that pad. Else, outside mode 7, a controller the controller watch finds missing
+    /// (`PadWatch_GetMissing`) owns the menu, which is opened here (the fight paused, the streams too) though
+    /// false is returned. (Mode 7's second test of pad 0 adds nothing here.)
+    fn check_open(&mut self, input: &mut SeqInput) -> bool {
         let count = if self.assets.screen_mode == 1 { 2 } else { 1 };
         for i in 0..count {
             if input.menu[i].start {
@@ -856,6 +857,14 @@ impl Battle {
                 self.seq.result_pad = i;
                 return true;
             }
+        }
+        if self.assets.mode != 7
+            && let Some(port) = self.pad_missing
+        {
+            self.seq.result_pad = port;
+            self.seq.pause_menu = true;
+            self.seq.paused = true;
+            input.sounds.push(TitleSound::PauseSeVoice(true));
         }
         false
     }
