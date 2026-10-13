@@ -17,6 +17,16 @@ const LOCKED_STAGES: [u32; 8] = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1F, 0x20]
 /// `Save_ResetRules`: time, COM level, referee, two transformation switches and destructible stages.
 pub const DEFAULT_RULES: [i32; 6] = [3, 2, 2, 0, 0, 0];
 
+/// One mission's record (`UoMissionRec`): cleared, its rank letter, the best time as three two-digit groups and
+/// the score (shown * 100).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MissionRec {
+    pub cleared: u8,
+    pub rank: u8,
+    pub time: [u8; 3],
+    pub score: i32,
+}
+
 /// `SAVE_SIZE`.
 pub const SIZE: usize = 0x4000;
 /// `ITEM_INFO_INITIAL`: an item owned in a new save.
@@ -32,6 +42,7 @@ const OFS_LEVEL: usize = 0xC;
 const OFS_SLOT: usize = 0x10;
 const OFS_UB_FLAGS: usize = 0x208;
 const OFS_MISSION_PAGES: usize = 0x20C;
+const OFS_MISSION: usize = 0x28C;
 const OFS_RANK: usize = 0x77C;
 const OFS_CHARA_BITS: usize = 0xC10;
 const OFS_STAGE_BITS: usize = 0xC28;
@@ -171,6 +182,23 @@ impl SaveData {
     /// missions cleared; 0x10: the reward for clearing all five courses was given).
     pub fn ub_flags(&self) -> i32 {
         self.word(OFS_UB_FLAGS)
+    }
+
+    /// `missionPages`: the pages of five missions the mission list shows.
+    pub fn mission_pages(&self) -> i32 {
+        self.word(OFS_MISSION_PAGES)
+    }
+
+    /// `mission[n]` (12 bytes each): its record.
+    pub fn mission(&self, n: usize) -> MissionRec {
+        let at = OFS_MISSION + n * 0xC;
+        let b = |k: usize| self.image.get(at + k).copied().unwrap_or(0);
+        MissionRec {
+            cleared: b(0),
+            rank: b(1),
+            time: [b(2), b(3), b(4)],
+            score: self.word(at + 8),
+        }
     }
 
     /// `level`: the history menu's difficulty, 0..2.

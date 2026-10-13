@@ -18,7 +18,7 @@ pub struct UbMember {
 }
 
 /// The group's block of `gProgress` (0x440..0x68C).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct UbProgress {
     /// The player's fighters, written by the fighter and team selects.
     pub team: [UbMember; 5],
@@ -38,4 +38,6 @@ pub struct UbProgress {
     pub flags: i32,
     /// `ubChoice` (0x688).
     pub choice: i32,
+    /// The battle setup `MisSel_SetupBattle` wrote (the rule and side 1), for the fighter select's hand-off.
+    pub mission: Option<crate::mission_select::MissionSetup>,
 }

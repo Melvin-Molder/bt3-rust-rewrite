@@ -108,6 +108,7 @@ mod main_menu;
 mod mcflow;
 mod memcard;
 mod menu_res;
+mod mission_select;
 mod mode_menu;
 mod model_draw;
 mod movie;
@@ -220,6 +221,8 @@ enum Scene {
     Bracket(Box<bracket::BracketScreen>),
     /// `Ub_Main` mode 13: Ultimate Battle's menu.
     UbMenu(Box<ub_menu::UbMenuScreen>),
+    /// `Ub_Main` mode 14: Mission 100's list.
+    MissionSelect(Box<mission_select::MissionSelectScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -298,6 +301,7 @@ impl Scene {
             | Scene::EntrySel(_)
             | Scene::Bracket(_)
             | Scene::UbMenu(_)
+            | Scene::MissionSelect(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -460,6 +464,7 @@ struct Game {
     tour_menu: Option<tour_menu::TourMenuData>,
     /// `gMenuArc3`'s Ultimate Battle menu, and the group's block of `gProgress`.
     ub_menu: Option<ub_menu::UbMenuData>,
+    mission_select: Option<mission_select::MissionSelectData>,
     ub: ub::UbProgress,
     tour: tour_menu::TourSession,
     entry_select: Option<entry_select::EntrySelData>,
@@ -848,6 +853,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             evo_z: None,
             tour_menu: None,
             ub_menu: None,
+            mission_select: None,
             ub: ub::UbProgress::default(),
             tour: tour_menu::TourSession::default(),
             entry_select: None,
@@ -1561,6 +1567,37 @@ fn run_frames(
                     }
                 }
             }
+            Scene::MissionSelect(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &game.save,
+                    &mut game.random,
+                    &mut game.libc_random,
+                    &mut game.font,
+                );
+                let result = screen.result().cloned();
+                let (page, cursor) = screen.position();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after MisSel_Run.
+                    stop_all(game, &mut commands);
+                    match result {
+                        Some(mission) => {
+                            game.ub.mission_page = page;
+                            game.ub.cursor = cursor;
+                            game.ub.team_size = mission.team_size;
+                            game.ub.dp_rule = mission.dp_rule;
+                            game.ub.mission = Some(mission);
+                            info!("Ultimate Battle mode 15 (the fighter select) is not ported yet");
+                            start_mission_select(game, &mut commands);
+                        }
+                        None => start_ub_menu(game, &mut commands),
+                    }
+                }
+            }
             Scene::UbMenu(screen) => {
                 let frame = screen.run_frame(held, pressed, stat, &mut game.random, &mut game.font);
                 let (result, cursor) = (screen.result(), screen.cursor());
@@ -1573,14 +1610,18 @@ fn run_frames(
                         start_main_menu(game, &mut commands, &mut audio);
                     } else {
                         game.ub.menu_cursor = cursor;
-                        let mode = match result {
-                            1 => 20,
-                            2 => 14,
-                            3 => 17,
-                            _ => 24,
-                        };
-                        info!("Ultimate Battle mode {mode} is not ported yet");
-                        start_ub_menu(game, &mut commands);
+                        match result {
+                            2 => start_mission_select(game, &mut commands),
+                            _ => {
+                                let mode = match result {
+                                    1 => 20,
+                                    3 => 17,
+                                    _ => 24,
+                                };
+                                info!("Ultimate Battle mode {mode} is not ported yet");
+                                start_ub_menu(game, &mut commands);
+                            }
+                        }
                     }
                 }
             }
@@ -3335,6 +3376,57 @@ fn start_entry_select(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the entrant select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Ub_Main` mode 14: `Bgm_Play(UB_BGM)`, then `MisSel_Run(2)` from `gMenuArc3`.
+fn start_mission_select(game: &mut Game, commands: &mut Commands) {
+    if game.mission_select.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    mission_select::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| mission_select::MissionSelectAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout =
+                    mission_select::MissionSelectLayout::new(background, |key| firsts[&key]);
+                game.mission_select = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the mission list: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .mission_select
+        .clone()
+        .expect("the mission list is loaded");
+    match mission_select::MissionSelectScreen::new(
+        &data,
+        game.ub.mission_page,
+        game.ub.cursor,
+        &game.save,
+        &mut game.libc_random,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::MissionSelect(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the mission list: {error}");
             game.scene = Scene::Black;
         }
     }

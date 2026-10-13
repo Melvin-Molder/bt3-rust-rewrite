@@ -79,6 +79,12 @@ impl TextBox {
         self
     }
 
+    /// `TextBox_SetMaxWidth`.
+    pub fn with_max_width(mut self, w: i32) -> Self {
+        self.max_w = Some(w);
+        self
+    }
+
     /// `TextBox_SetSpacing`.
     pub fn with_spacing(mut self, x: i32, y: i32) -> Self {
         self.spacing = (x, y);
