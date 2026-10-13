@@ -184,6 +184,10 @@ impl SaveData {
         self.word(OFS_UB_FLAGS)
     }
 
+    pub fn set_ub_flags(&mut self, v: i32) {
+        self.set_word(OFS_UB_FLAGS, v);
+    }
+
     /// `missionPages`: the pages of five missions the mission list shows.
     pub fn mission_pages(&self) -> i32 {
         self.word(OFS_MISSION_PAGES)
@@ -199,6 +203,19 @@ impl SaveData {
             time: [b(2), b(3), b(4)],
             score: self.word(at + 8),
         }
+    }
+
+    pub fn set_mission(&mut self, n: usize, rec: MissionRec) {
+        let at = OFS_MISSION + n * 0xC;
+        for (k, v) in [rec.cleared, rec.rank, rec.time[0], rec.time[1], rec.time[2]]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(b) = self.image.get_mut(at + k) {
+                *b = v;
+            }
+        }
+        self.set_word(at + 8, rec.score);
     }
 
     /// `level`: the history menu's difficulty, 0..2.

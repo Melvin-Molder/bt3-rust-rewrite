@@ -40,6 +40,11 @@ pub(crate) struct Roster {
     pub pad_vib: [crate::btl_vib::PadVib; 2],
     /// `BattleResult.health`: each side's team health in percent, taken every frame of the fight.
     pub result_health: [f32; 2],
+    /// `BattleResult.maxComboDamage` / `maxComboHits`: each side's biggest combo dealt.
+    pub result_combo_damage: [i32; 2],
+    pub result_combo_hits: [i32; 2],
+    /// `BattleResult.frames`: the frames side 0's event 0x48 was newly raised on (`BattleResult_CountFrame`).
+    pub result_frames: i32,
 }
 
 impl Roster {
@@ -59,6 +64,9 @@ impl Roster {
             cpu,
             pad_vib: Default::default(),
             result_health: [0.0; 2],
+            result_combo_damage: [0; 2],
+            result_combo_hits: [0; 2],
+            result_frames: 0,
         };
         roster.sync_abilities();
         roster
@@ -743,8 +751,12 @@ impl Roster {
                 chr.pose.moved = [0.0; 3];
             }
             chr.raise_events(data[i], env, opp_alive);
-            // BtlChar_RaiseEvents: while the fight runs (flag 3) the result keeps the team's health.
+            // BtlChar_RaiseEvents: while the fight runs (flag 3) the result keeps the opponent's biggest combo on
+            // this fighter and the team's health.
             if chr.flags.test(3) {
+                let opp = (chr.player ^ 1).min(1);
+                self.result_combo_damage[opp] = self.result_combo_damage[opp].max(chr.combo.damage);
+                self.result_combo_hits[opp] = self.result_combo_hits[opp].max(chr.combo.hits);
                 self.result_health[chr.player.min(1)] = chr.team_health_ratio() * 100.0;
             }
             // BtlChar_UpdateVibration to the fighter's pad.

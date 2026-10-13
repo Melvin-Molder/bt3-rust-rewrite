@@ -108,6 +108,7 @@ mod main_menu;
 mod mcflow;
 mod memcard;
 mod menu_res;
+mod mission_result;
 mod mission_select;
 mod mode_menu;
 mod model_draw;
@@ -148,6 +149,7 @@ mod tour_menu;
 mod training;
 mod ub;
 mod ub_menu;
+mod ub_score;
 mod ub_team_select;
 mod windows;
 
@@ -229,6 +231,8 @@ enum Scene {
     /// the team select.
     SoloSelect(Box<solo_select::SoloSelectScreen>, i32),
     UbTeamSelect(Box<ub_team_select::UbTeamSelectScreen>),
+    /// `Ub_Main` mode 16: the mission's result.
+    MissionResult(Box<mission_result::MissionResultScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -310,6 +314,7 @@ impl Scene {
             | Scene::MissionSelect(_)
             | Scene::SoloSelect(..)
             | Scene::UbTeamSelect(_)
+            | Scene::MissionResult(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -477,6 +482,9 @@ struct Game {
     solo_select: Option<solo_select::SoloSelectData>,
     /// The `Ub_Main` mode a battle of the group returns to (16 the mission result).
     ub_battle: Option<i32>,
+    mission_result: Option<mission_result::MissionResultData>,
+    /// `BattleResult` of the last battle.
+    battle_result: battle::BattleResult,
     ub: ub::UbProgress,
     tour: tour_menu::TourSession,
     entry_select: Option<entry_select::EntrySelData>,
@@ -868,6 +876,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mission_select: None,
             solo_select: None,
             ub_battle: None,
+            mission_result: None,
+            battle_result: battle::BattleResult::default(),
             ub: ub::UbProgress::default(),
             tour: tour_menu::TourSession::default(),
             entry_select: None,
@@ -1648,6 +1658,24 @@ fn run_frames(
                     } else {
                         start_mission_select(game, &mut commands);
                     }
+                }
+            }
+            Scene::MissionResult(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let done = screen.is_done();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    // Ub_Main: Adx_StopAll after MisResult_Run, back to the mission list.
+                    stop_all(game, &mut commands);
+                    start_mission_select(game, &mut commands);
                 }
             }
             Scene::MissionSelect(screen) => {
@@ -2599,6 +2627,18 @@ fn leave_battle(
             winner,
             health: battle.roster.result_health,
         };
+        // BattleResult_Finish: whether side 0's members carry any item (the u16 sum of their ids).
+        let no_items = game.last_battle.as_ref().is_some_and(|(setup, _)| {
+            let side = &setup.sides[0];
+            let count = (side.team_count.max(0) as usize).min(4);
+            let sum = side
+                .items
+                .iter()
+                .chain(side.team_items[..count].iter().flatten())
+                .fold(0u16, |s, &id| s.wrapping_add(id));
+            sum == 0
+        });
+        game.battle_result = battle.result(no_items);
         // gBattleReplay: what the replay list saves.
         if let Some((_, replay)) = &mut game.last_battle {
             *replay = battle.replay().clone();
@@ -2637,8 +2677,13 @@ fn leave_battle(
         if winner & 8 != 0 && reason & 8 != 0 {
             start_main_menu(game, commands, audio);
         } else {
-            info!("Ultimate Battle mode {mode} (the result) is not ported yet");
-            start_mission_select(game, commands);
+            match mode {
+                16 => start_mission_result(game, commands),
+                _ => {
+                    info!("Ultimate Battle mode {mode} (the result) is not ported yet");
+                    start_ub_menu(game, commands);
+                }
+            }
         }
     } else if std::mem::take(&mut game.tour_battle) {
         // Progress_Main after a battle of the bracket: an abort's reason 8 ends the tournament (the progress flags
@@ -3619,6 +3664,59 @@ fn start_mission_battle(game: &mut Game) {
     setup.finish();
     game.ub_battle = Some(16);
     start_battle(game, setup);
+}
+
+/// `Ub_Main` mode 16: `Bgm_Play(UB_BGM)`, then `MisResult_Run(3)` from `gMenuArc3`.
+fn start_mission_result(game: &mut Game, commands: &mut Commands) {
+    if game.mission_result.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    mission_result::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| mission_result::MissionResultAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout =
+                    mission_result::MissionResultLayout::new(background, |key| firsts[&key]);
+                game.mission_result = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the mission result: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .mission_result
+        .clone()
+        .expect("the mission result is loaded");
+    let mission = (game.ub.mission_page * 5 + game.ub.cursor).clamp(0, 99) as usize;
+    match mission_result::MissionResultScreen::new(
+        &data,
+        mission,
+        game.ub.menu_cursor,
+        &game.battle_result,
+        &mut game.save,
+        &mut game.libc_random,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::MissionResult(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the mission result: {error}");
+            game.scene = Scene::Black;
+        }
+    }
 }
 
 /// `Ub_Main` mode 14: `Bgm_Play(UB_BGM)`, then `MisSel_Run(2)` from `gMenuArc3`.

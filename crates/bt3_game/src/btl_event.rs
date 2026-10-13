@@ -44,7 +44,6 @@ impl BattleEvents {
     }
 
     /// `BtlEvent_WasRaised`: raised at any time since the last reset.
-    #[cfg(test)]
     pub(crate) fn was_raised(&self, side: usize, ev: u32) -> bool {
         let set = &self.sets[side & 1];
         (set.held[((ev & 0x7F) / 64) as usize] >> (ev % 64)) & 1 != 0

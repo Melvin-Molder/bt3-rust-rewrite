@@ -1808,6 +1808,24 @@ impl SceneView {
     }
 }
 
+/// `BattleResult` as `BattleResult_Finish` leaves it at the end of the battle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BattleResult {
+    /// `BTL_RESULT_*`: 1 side 0 won, 2 side 1 won, 8 aborted.
+    pub winner: u32,
+    pub reason: u32,
+    pub aborted: bool,
+    /// Bit n: result bonus n was earned (`BattleResult_CollectEvents`).
+    pub event_summary: u64,
+    pub frames: i32,
+    pub max_combo_damage: [i32; 2],
+    pub max_combo_hits: [i32; 2],
+    /// Each side's team health in percent.
+    pub health: [f32; 2],
+    /// The battle clock: hours, minutes, seconds, milliseconds.
+    pub clock: [i32; 4],
+}
+
 /// The battle as far as it is ported.
 pub struct Battle {
     pub assets: BattleAssets,
@@ -2855,6 +2873,85 @@ impl Battle {
         ops
     }
 
+    /// `BattleResult_Finish`: the result block at the end of the battle (the event summary from side 0's events,
+    /// the clock, the abort flag and the winners reasons 0x20 / 0x40 force). `no_items`: side 0's members carry no
+    /// item (the sum of their item ids, as a u16, is 0).
+    pub(crate) fn result(&self, no_items: bool) -> BattleResult {
+        let ev = |n: u32| self.events.was_raised(0, n);
+        let mut s = 0u64;
+        for (n, bit) in [
+            (0x51, 1u64),
+            (0x52, 2),
+            (0x53, 4),
+            (0x54, 0x10),
+            (0x55, 0x200),
+            (0x57, 0x400),
+            (0x34, 0x2000),
+            (0x3E, 0x8000),
+            (0x32, 0x10000),
+            (0x3F, 0x20000),
+            (0x40, 0x40000),
+            (0x56, 0x80000),
+            (0x36, 0x100_0000),
+            (0x24, 0x200_0000),
+            (0x25, 0x200_0000),
+            (0x26, 0x400_0000),
+            (0x27, 0x400_0000),
+            (0x28, 0x800_0000),
+            (0x1F, 0x1000_0000),
+            (0x33, 1 << 31),
+            (0x41, 1 << 32),
+            (0x45, 1 << 33),
+            (0x42, 1 << 34),
+            (0x43, 1 << 35),
+            (0x44, 1 << 36),
+            (0x58, 1 << 39),
+            (0x21, 1 << 41),
+            (0x3C, 1 << 42),
+            (0x1E, 1 << 44),
+            (0x46, 1 << 46),
+            (0x47, 1 << 47),
+        ] {
+            if ev(n) {
+                s |= bit;
+            }
+        }
+        if !ev(0x59) {
+            s |= 8;
+        }
+        if (0x37..=0x3B).all(ev) {
+            s |= 0x100;
+        }
+        if !ev(0x22) {
+            s |= 1 << 37;
+        }
+        if !ev(0x4E) && self.roster.chars[0].members.len() >= 2 {
+            s |= 1 << 40;
+        }
+        if no_items {
+            s |= 1 << 45;
+        }
+        let mut winner = self.seq.winner;
+        let reason = self.seq.reason;
+        if reason & 0x20 != 0 {
+            winner |= 2;
+        }
+        if reason & 0x40 != 0 {
+            winner |= 1;
+        }
+        BattleResult {
+            winner,
+            reason,
+            aborted: self.seq.winner & 8 != 0,
+            event_summary: s,
+            frames: self.roster.result_frames,
+            max_combo_damage: self.roster.result_combo_damage,
+            max_combo_hits: self.roster.result_combo_hits,
+            health: self.roster.result_health,
+            clock: self.seq.clock(),
+        }
+    }
+
     /// `Battle_Restart` for a rematch: `Battle_ResetWork` (sounds stopped, the battle music again, the result
     /// cleared), `StgFx_Reset` (the cross-fade), `BtlGame_Reset` (the menus, the HUD, the sequence),
     /// `BtlChar_ResetAll` and the 1 s fade-in. The AI is not reset, as in the original.
@@ -3141,7 +3238,10 @@ impl Battle {
         // BATTLE_FLAG_PAUSE as the sequence left it last frame.
         let paused = self.seq.paused;
         if !paused {
-            // Battle_UpdateWork: BtlEvent_Update.
+            // Battle_UpdateWork: BattleResult_CountFrame, then BtlEvent_Update.
+            if self.events.is_new(0, 0x48) {
+                self.roster.result_frames += 1;
+            }
             self.update_events();
             // BtlAiMgr_Update, after Battle_UpdateWork and before the fighters sample their input.
             let data = [

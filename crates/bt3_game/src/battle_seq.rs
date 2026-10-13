@@ -592,6 +592,12 @@ impl Seq {
         }
     }
 
+    /// `BtlSeq_GetClock`: hours, minutes, seconds and milliseconds of fight.
+    pub(crate) fn clock(&self) -> [i32; 4] {
+        let c = &self.clock;
+        [c.hours, c.minutes, c.seconds, c.ms]
+    }
+
     /// `BtlSeq_ResetSubClock`.
     pub(crate) fn reset_sub_clock(&mut self) {
         self.sub_clock = Clock::default();
