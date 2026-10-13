@@ -55,8 +55,11 @@
 !/crates/bt3_game/src/training.rs
 !/crates/bt3_game/src/ub.rs
 !/crates/bt3_game/src/ub_menu.rs
+!/crates/bt3_game/src/ub_rank.rs
+!/crates/bt3_game/src/ub_result.rs
 !/crates/bt3_game/src/ub_score.rs
 !/crates/bt3_game/src/ub_team_select.rs
+!/crates/bt3_game/src/ubz_select.rs
 !/crates/bt3_game/src/dc_save.rs
 !/crates/bt3_game/src/evo_top.rs
 !/crates/bt3_game/src/evo_z.rs

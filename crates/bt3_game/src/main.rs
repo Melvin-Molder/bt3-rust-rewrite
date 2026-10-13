@@ -153,8 +153,11 @@ mod tour_menu;
 mod training;
 mod ub;
 mod ub_menu;
+mod ub_rank;
+mod ub_result;
 mod ub_score;
 mod ub_team_select;
+mod ubz_select;
 mod windows;
 
 use std::collections::HashMap;
@@ -242,6 +245,10 @@ enum Scene {
     SurvivalResult(Box<survival_result::SurvivalResultScreen>),
     /// `Ub_Main` mode 24: Disc Fusion.
     DiscFusion(Box<disc_fusion::DiscFusionScreen>),
+    /// `Ub_Main` mode 26: the ranking ladder; mode 28: the course select; modes 27 and 30: their result.
+    UbRank(Box<ub_rank::UbRankScreen>),
+    UbzSelect(Box<ubz_select::UbzSelectScreen>),
+    UbResult(Box<ub_result::UbResultScreen>, i32),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -327,6 +334,9 @@ impl Scene {
             | Scene::SurvivalSelect(_)
             | Scene::SurvivalResult(_)
             | Scene::DiscFusion(_)
+            | Scene::UbRank(_)
+            | Scene::UbzSelect(_)
+            | Scene::UbResult(..)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -500,6 +510,9 @@ struct Game {
     survival_select: Option<survival_select::SurvivalSelectData>,
     survival_result: Option<survival_result::SurvivalResultData>,
     disc_fusion: Option<disc_fusion::DiscFusionData>,
+    ub_rank: Option<ub_rank::UbRankData>,
+    ubz_select: Option<ubz_select::UbzSelectData>,
+    ub_result: Option<ub_result::UbResultData>,
     /// `BattleResult` of the last battle.
     battle_result: battle::BattleResult,
     ub: ub::UbProgress,
@@ -905,6 +918,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             survival_select: None,
             survival_result: None,
             disc_fusion: None,
+            ub_rank: None,
+            ubz_select: None,
+            ub_result: None,
             battle_result: battle::BattleResult::default(),
             ub: ub::UbProgress::default(),
             tour: tour_menu::TourSession::default(),
@@ -1676,6 +1692,10 @@ fn run_frames(
                         (15, _) => start_mission_battle(game),
                         (18, 0) => start_survival_select(game, &mut commands),
                         (18, _) => start_survival_battle(game),
+                        (25, 0) => start_disc_fusion(game, &mut commands),
+                        (25, _) => start_ub_rank(game, &mut commands),
+                        (29, 0) => start_ubz_select(game, &mut commands),
+                        (29, _) => start_ubz_battle(game),
                         _ => {
                             info!("Ultimate Battle mode {mode}'s next screen is not ported yet");
                             start_ub_menu(game, &mut commands);
@@ -1716,6 +1736,92 @@ fn run_frames(
                     }
                 }
             }
+            Scene::UbRank(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut loader,
+                    &mut game.random,
+                    &mut game.libc_random,
+                    &mut game.font,
+                );
+                let result = screen.result().cloned();
+                (game.ub.flags, game.ub.choice) = screen.progress();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after UbRank_Run; a battle goes on to mode 27, a cancel to mode 24.
+                    stop_all(game, &mut commands);
+                    match result {
+                        Some(setup) => {
+                            game.ub_battle = Some(27);
+                            start_battle(game, setup);
+                        }
+                        None => start_disc_fusion(game, &mut commands),
+                    }
+                }
+            }
+            Scene::UbzSelect(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &game.save,
+                    &mut game.random,
+                    &mut game.libc_random,
+                    &mut game.font,
+                );
+                let result = screen.result().cloned();
+                let choice = screen.choice();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after UbzSel_Run.
+                    stop_all(game, &mut commands);
+                    match result {
+                        Some(setup) => {
+                            // UbzSel_Input / UbzSel_SetupBattle: the course, one fighter, no DP limit.
+                            game.ub.choice = choice;
+                            game.ub.team_size = 1;
+                            game.ub.dp_rule = 0;
+                            game.ub.survival = Some(setup);
+                            start_solo_select(game, &mut commands, 29);
+                        }
+                        None => start_disc_fusion(game, &mut commands),
+                    }
+                }
+            }
+            Scene::UbResult(screen, mode) => {
+                let mode = *mode;
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let done = screen.is_done();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    // Ub_Main: Adx_StopAll after UbResult_Run; mode 27 back to the ladder, 30 to the courses.
+                    stop_all(game, &mut commands);
+                    if mode == 27 {
+                        start_ub_rank(game, &mut commands);
+                    } else {
+                        start_ubz_select(game, &mut commands);
+                    }
+                }
+            }
             Scene::DiscFusion(screen) => {
                 let frame = screen.run_frame(
                     held,
@@ -1737,15 +1843,13 @@ fn run_frames(
                         // DiscFusion_Run: the disc chosen to gProgress->cursor; Ub_Main: disc 0 is one fighter with
                         // no DP limit (mode 25), disc 1 its course select (mode 28).
                         game.ub.cursor = cursor;
-                        let mode = if cursor == 0 {
+                        if cursor == 0 {
                             game.ub.team_size = 1;
                             game.ub.dp_rule = 0;
-                            25
+                            start_solo_select(game, &mut commands, 25);
                         } else {
-                            28
-                        };
-                        info!("Ultimate Battle mode {mode} is not ported yet");
-                        start_ub_menu(game, &mut commands);
+                            start_ubz_select(game, &mut commands);
+                        }
                     } else {
                         start_ub_menu(game, &mut commands);
                     }
@@ -2816,6 +2920,7 @@ fn leave_battle(
             match mode {
                 16 => start_mission_result(game, commands),
                 19 => start_survival_result(game, commands),
+                27 | 30 => start_ub_result(game, commands, mode),
                 _ => {
                     info!("Ultimate Battle mode {mode} (the result) is not ported yet");
                     start_ub_menu(game, commands);
@@ -3801,6 +3906,164 @@ fn start_mission_battle(game: &mut Game) {
     setup.finish();
     game.ub_battle = Some(16);
     start_battle(game, setup);
+}
+
+/// A whole file of the group, read, unpacked and parsed.
+fn load_ub_file<T>(
+    game: &Game,
+    file: u32,
+    parse: impl FnOnce(&[u8]) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let mut image = Iso9660::open(&game.iso_path)?;
+    let res = bpe::decode(&read_file(&mut image, file)?)?;
+    parse(&res)
+}
+
+/// `Ub_Main` mode 26: `Bgm_Play(UB_BGM)`, then `UbRank_Run` (file `baseFile + 0x1B`).
+fn start_ub_rank(game: &mut Game, commands: &mut Commands) {
+    if game.ub_rank.is_none() {
+        match load_ub_file(game, ub_rank::FILE_ID, ub_rank::UbRankAssets::parse) {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = ub_rank::UbRankLayout::new(background, |key| firsts[&key]);
+                game.ub_rank = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the ranking ladder: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.ub_rank.clone().expect("the ranking ladder is loaded");
+    match ub_rank::UbRankScreen::new(
+        &data,
+        game.char_progress.side[0],
+        game.ub.flags,
+        game.ub.choice,
+        game.battle_result.winner,
+        &game.save,
+        &mut game.libc_random,
+    ) {
+        Ok(screen) => {
+            game.ub.flags = screen.progress().0;
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::UbRank(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the ranking ladder: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Ub_Main` mode 28: `Bgm_Play(UB_BGM)`, then `UbzSel_Run` (file `baseFile + 0x1C`).
+fn start_ubz_select(game: &mut Game, commands: &mut Commands) {
+    if game.ubz_select.is_none() {
+        match load_ub_file(
+            game,
+            ubz_select::FILE_ID,
+            ubz_select::UbzSelectAssets::parse,
+        ) {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = ubz_select::UbzSelectLayout::new(background, |key| firsts[&key]);
+                game.ubz_select = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the course select: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .ubz_select
+        .clone()
+        .expect("the course select is loaded");
+    match ubz_select::UbzSelectScreen::new(&data, &mut game.libc_random) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::UbzSelect(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the course select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Ub_SetupSolo2`: member 0 of side 0 is the fighter chosen over the course's setup; then the battle (mode 30
+/// after it).
+fn start_ubz_battle(game: &mut Game) {
+    let Some(mut setup) = game.ub.survival.clone() else {
+        error!("no course was set up");
+        game.scene = Scene::Black;
+        return;
+    };
+    let pick = game.char_progress.side[0];
+    let side = &mut setup.sides[0];
+    side.chara = pick.picked;
+    side.costume = pick.color_plate;
+    side.cpu_level = 0;
+    side.items = pick.items;
+    setup.finish();
+    game.ub_battle = Some(30);
+    start_battle(game, setup);
+}
+
+/// `Ub_Main` modes 27 and 30: `Bgm_Play(UB_BGM)`, then `UbResult_Run(3)` from `gMenuArc3`.
+fn start_ub_result(game: &mut Game, commands: &mut Commands, mode: i32) {
+    if game.ub_result.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    ub_result::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| ub_result::UbResultAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = ub_result::UbResultLayout::new(background, |key| firsts[&key]);
+                game.ub_result = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the result: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.ub_result.clone().expect("the result is loaded");
+    match ub_result::UbResultScreen::new(
+        &data,
+        game.ub.cursor,
+        game.ub.choice,
+        game.ub.flags,
+        game.ub.menu_cursor,
+        &game.battle_result,
+        &mut game.save,
+        &mut game.libc_random,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::UbResult(Box::new(screen), mode);
+        }
+        Err(error) => {
+            error!("cannot start the result: {error}");
+            game.scene = Scene::Black;
+        }
+    }
 }
 
 /// `Ub_Main` mode 24: `Bgm_Play(UB_BGM)`, then `DiscFusion_Run(6)` from `gMenuArc3`.

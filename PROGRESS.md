@@ -41,7 +41,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 - [x] Survival: course select, fighter select, battle, result (modes 17..19)
 - [ ] Sim Dragon: top, day, events, result (modes 20..23; src/menu/sim_*.c)
 - [x] Disc Fusion (mode 24), with the drive's tray and discs on the host (F1 / F2, `--disc`)
-- [ ] Ultimate Battle Z ranking and course select (modes 25..30; src/menu/ub_*.c, ubz_select.c)
+- [x] Ultimate Battle Z ranking and course select (modes 25..30; src/menu/ub_*.c, ubz_select.c)
 
 ### World Tournament (`Tour_Main`, modes 33..35)
 

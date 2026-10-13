@@ -50,8 +50,8 @@ const ST_LEAVE: i32 = 6;
 /// The fireworks are drawn inside the result window only (`MisResult_ClipScissorOn`).
 const FIREWORKS_SCISSOR: [i32; 4] = [0x84, 0x5A, 0x1DC, 0x1A0];
 
-/// `MR->tex[n]` of `MisResult_Init`.
-const TEX: [ImageTexture; 47] = [
+/// `MR->tex[n]` of `MisResult_Init` (and `UbResult_Init`, the same movie).
+pub(crate) const TEX: [ImageTexture; 47] = [
     tex(4, 0),
     tex(4, 3),
     tex(4, 28),
