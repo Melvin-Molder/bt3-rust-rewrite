@@ -236,6 +236,8 @@ pub enum TitleSound {
     SeStop(u32),
     /// `Snd_StopBank(mask)`.
     SeStopBanks(u32),
+    /// `Snd_SetPause(mask, on)`.
+    SePause(u32, bool),
     /// `StreamSe_PlayDefault(0, id)`.
     StreamSe(u32),
     /// `StreamSe_FadeOutStep(player)`.

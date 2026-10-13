@@ -1249,6 +1249,10 @@ fn update_seq_flags(me: &mut Chr, opp: &Chr, data: &SideData, opp_data: &SideDat
     } else {
         me.flags.clear(0x135);
     }
+    // BtlChar_ResetObjWork: the chains start over as time runs again.
+    if me.flags.dropped(0x135) {
+        me.obj.init_chains(data.tables.chain.as_ref(), &data.obj);
+    }
     if !me.flags.test(0xAF) {
         me.flags.clear(0x80);
     }
@@ -1521,6 +1525,23 @@ fn coll_update_ground(me: &mut Chr, data: &SideData, env: &Env) {
     }
     if me.flags.raised(0x11) {
         me.pose.fall_speed *= 0.5;
+    }
+    // Stages 4 / 27: flag 0x17 (kept at y = -10, `BtlMove_ClampToStage`) drops over ground below -10; held
+    // flag 7 comes from a push out of a polygon without contact flags 0xC0, a broken object, or a landing on ground
+    // without them.
+    if env.stage_4_or_27 {
+        if me.pose.ground_pos[1] < -10.0 {
+            me.flags.clear(0x17);
+        }
+        if hit & 0x20 != 0 && me.obj.work.contact_flags & 0xC0 == 0 {
+            me.flags.set_held(7);
+        }
+        if hit & 0x40 != 0 {
+            me.flags.set_held(7);
+        }
+        if landed && me.obj.work.ground.map_or(0, |g| g.flags) & 0xC0 == 0 {
+            me.flags.set_held(7);
+        }
     }
     if hit & 0x20 != 0 {
         me.flags.set_held(0x1F);

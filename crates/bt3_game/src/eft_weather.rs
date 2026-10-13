@@ -94,6 +94,7 @@ impl Weather {
         paused: bool,
         libc: &mut LibcRandom,
         second: Option<bool>,
+        shown: bool,
     ) {
         let range = match second {
             Some(second) => {
@@ -104,6 +105,9 @@ impl Weather {
         };
         if !paused {
             self.step(ctx, tint, libc, range.clone());
+        }
+        if !shown {
+            return;
         }
         let s = self.size * 16.0;
         for p in &self.parts[range] {
@@ -289,7 +293,7 @@ mod tests {
         for _ in 0..30 {
             w.update(&mut libc);
             let mut ot = OrderTable::new();
-            w.draw(&mut ot, &ctx, None, false, &mut libc, None);
+            w.draw(&mut ot, &ctx, None, false, &mut libc, None, true);
             drawn += ot.into_list().len();
         }
         // Inside the box 55 in front of the camera after the first frames' wraps.
@@ -304,7 +308,15 @@ mod tests {
         assert!(drawn > 0);
         // Paused: they do not move.
         let before = w.parts[0].pos;
-        w.draw(&mut OrderTable::new(), &ctx, None, true, &mut libc, None);
+        w.draw(
+            &mut OrderTable::new(),
+            &ctx,
+            None,
+            true,
+            &mut libc,
+            None,
+            true,
+        );
         assert_eq!(w.parts[0].pos, before);
         // Under the stage tint (slot 0 at alpha 50 of a stage darkest 100): darker by 50, half as opaque.
         let mut again = w.clone();
@@ -316,6 +328,7 @@ mod tests {
             false,
             &mut LibcRandom::new(99),
             None,
+            true,
         );
         again.draw(
             &mut OrderTable::new(),
@@ -324,6 +337,7 @@ mod tests {
             false,
             &mut libc2,
             None,
+            true,
         );
         for (p, q) in w.parts[..w.count].iter().zip(&again.parts[..again.count]) {
             assert_eq!(q.color[..3], [78.0, 78.0, 78.0]);
@@ -338,6 +352,7 @@ mod tests {
             false,
             &mut libc,
             Some(true),
+            true,
         );
         assert_eq!(w.parts[..PARTS / 2], before[..PARTS / 2]);
         assert_ne!(
@@ -352,6 +367,7 @@ mod tests {
             false,
             &mut libc,
             Some(false),
+            true,
         );
         assert_ne!(w.parts[..10], before[..10]);
         assert_eq!(w.parts[10..], before[10..]);

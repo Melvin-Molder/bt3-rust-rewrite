@@ -1412,6 +1412,7 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
             } => game.se.play_se_ex(mask, id, volume, pan, pitch, handle),
             TitleSound::SeStop(handle) => game.se.stop_handle(handle),
             TitleSound::SeStopBanks(mask) => game.se.stop_banks(mask),
+            TitleSound::SePause(mask, on) => game.se.set_pause(mask, on),
             TitleSound::MapBgm(id) => {
                 stop_player(&mut game.map_bgm, commands);
                 game.map_volume = 0x40;
@@ -3059,6 +3060,8 @@ fn leave_battle(
     winner: u32,
 ) {
     stop_all(game, commands);
+    // BtlLoad_FreeAll: Snd_Reset.
+    game.se.reset();
     if let Scene::Battle(battle) = &game.scene {
         game.vu0_random = battle.vu0;
         game.tour_outcome = bracket::BattleOutcome {

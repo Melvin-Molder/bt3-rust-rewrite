@@ -23,7 +23,9 @@ const VOICES: usize = 48;
 const BANKS: usize = 8;
 /// `gSndBankVolume`.
 const BANK_VOLUME: [i32; BANKS] = [0xD8, 0xE0, 0x80, 0x80, 0x80, 0x80, 0x80, 0];
-/// sceHSyn port volume: `Snd_SetMasterVolume(0x7F)` at boot sends it to every port (S:220c → hsyn #10).
+/// sceHSyn port volume: `Snd_SetMasterVolume(0x7F)` at boot sends it to every port (S:220c → hsyn #10, which only
+/// stores it, H:1c78); SOUNDS.IRX keeps it per port (S:22b4), and a bank's load or unload sets its port's back to
+/// 0x7F (S:1088, S:1514).
 const PORT_VOLUME: i32 = 0x7F;
 
 /// A loaded bank: the sample body as sound RAM and the parsed tables.
@@ -90,7 +92,9 @@ impl SoundEffects {
             return;
         }
         self.loaded[slot] = true;
-        self.engine.lock().unwrap().banks[slot] = Some(Arc::new(bank));
+        let mut engine = self.engine.lock().unwrap();
+        engine.banks[slot] = Some(Arc::new(bank));
+        engine.kept_volume[slot] = PORT_VOLUME;
     }
 
     /// `Snd_ReloadBank`: the slot's bank replaced, its sounds stopped.
@@ -100,6 +104,7 @@ impl SoundEffects {
         let mut engine = self.engine.lock().unwrap();
         engine.stop_banks(1 << slot);
         engine.banks[slot] = Some(Arc::new(bank));
+        engine.kept_volume[slot] = PORT_VOLUME;
     }
 
     /// `Snd_UnloadBank`: the slot emptied, its sounds stopped.
@@ -109,6 +114,18 @@ impl SoundEffects {
         let mut engine = self.engine.lock().unwrap();
         engine.stop_banks(1 << slot);
         engine.banks[slot] = None;
+        engine.kept_volume[slot] = PORT_VOLUME;
+    }
+
+    /// `Snd_SetPause` (a blocking RPC: at once).
+    pub fn set_pause(&mut self, mask: u32, on: bool) {
+        self.engine.lock().unwrap().set_pause(mask, on);
+    }
+
+    /// `Snd_Reset`'s RPC 2 (S:ee4): every port given back the volume kept for it.
+    pub fn reset(&mut self) {
+        let mut engine = self.engine.lock().unwrap();
+        engine.port_volume = engine.kept_volume;
     }
 
     /// `Snd_StopHandle`: queues a stop of the sound `Snd_PlaySeEx` gave this handle.
@@ -233,6 +250,10 @@ pub struct Engine {
     voices: Vec<Voice>,
     serial: u16,
     tick_acc: u64,
+    /// The synthesizer's port volumes, read as a note starts (H:4ca4 through the voice's port pointer): a pause
+    /// (`Snd_SetPause`, S:1fd4) sets 0, its end the volume SOUNDS.IRX keeps (`kept_volume`).
+    port_volume: [i32; BANKS],
+    kept_volume: [i32; BANKS],
 }
 
 impl Default for Engine {
@@ -245,6 +266,8 @@ impl Default for Engine {
             voices: (0..VOICES).map(|_| Voice::default()).collect(),
             serial: 0,
             tick_acc: 0,
+            port_volume: [PORT_VOLUME; BANKS],
+            kept_volume: [PORT_VOLUME; BANKS],
         }
     }
 }
@@ -340,6 +363,16 @@ impl Engine {
     }
 
     /// The sounds of the banks in `mask` (a bit per slot) end: their sequences and voices.
+    /// SOUNDS.IRX RPC 6 (`Snd_SetPause`): the ports in `mask` muted (their new notes silent; the notes sounding go
+    /// on), or given back the volume kept for them.
+    fn set_pause(&mut self, mask: u32, on: bool) {
+        for port in 0..BANKS {
+            if mask >> port & 1 != 0 {
+                self.port_volume[port] = if on { 0 } else { self.kept_volume[port] };
+            }
+        }
+    }
+
     fn stop_banks(&mut self, mask: u32) {
         let in_mask = |id: u32| mask >> ((id >> 16) & 0xFF) & 1 != 0;
         self.tracks.retain(|t| mask >> t.port & 1 == 0);
@@ -439,7 +472,12 @@ impl Engine {
         let curve = velocity_curve(tone.velocity_curve, message.velocity);
         // H:4ca4: port volume × Play volume / 127, times timbre volume × curve, >> 8; then × pan / 128.
         let base = i32::from(tone.volume) * curve;
-        let level = (PORT_VOLUME * i32::from(message.volume) / 127) * base >> 8;
+        let port_volume = self
+            .port_volume
+            .get(message.port)
+            .copied()
+            .unwrap_or(PORT_VOLUME);
+        let level = (port_volume * i32::from(message.volume) / 127) * base >> 8;
         let (pan_l, pan_r, phase) = pan_levels(
             tone.pan,
             tone.pan_mode & 1 != 0,
@@ -1030,6 +1068,44 @@ mod tests {
             }
         }
         println!("{} banks: {:X?}", found.len(), found);
+    }
+
+    /// `Snd_SetPause`: a paused bank's new sounds are silent; resumed, they sound again.
+    #[test]
+    fn real_paused_bank_plays_silently() {
+        use super::{Engine, LoadedBank, SAMPLE_RATE, SoundEffects};
+        use bt3_data::Iso9660;
+        use bt3_data::afs::{AfsArchive, partition_entry_for_id};
+        use std::sync::{Arc, Mutex};
+
+        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = Iso9660::open(&iso) else {
+            return;
+        };
+        let location = partition_entry_for_id(0x14B);
+        let archive =
+            AfsArchive::open(&mut image, format!("DATA/PZS3US{}.AFS", location.partition)).unwrap();
+        let common = archive.read_entry(&mut image, location.index).unwrap();
+        let peak = |pause: Option<bool>| {
+            let engine = Arc::new(Mutex::new(Engine::default()));
+            let mut effects = SoundEffects::new(engine.clone());
+            effects.load_bank(1, LoadedBank::parse(&common).unwrap());
+            if let Some(on) = pause {
+                effects.set_pause(1, true);
+                if !on {
+                    effects.set_pause(1, false);
+                }
+            }
+            effects.play_se(1, 0);
+            effects.update();
+            let mut out = vec![0f32; SAMPLE_RATE as usize];
+            engine.lock().unwrap().render(&mut out);
+            out.iter().fold(0f32, |m, s| m.max(s.abs()))
+        };
+        assert!(peak(None) > 0.0);
+        assert_eq!(peak(Some(true)), 0.0);
+        assert_eq!(peak(Some(false)), peak(None));
     }
 
     /// Renders the title's sound effects from the ISO in `rom/`, when it is there.

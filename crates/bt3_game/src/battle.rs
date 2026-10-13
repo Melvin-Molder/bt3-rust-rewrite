@@ -3301,7 +3301,9 @@ impl Battle {
     /// `BtlChar_ResetAll` and the 1 s fade-in. The AI is not reset, as in the original.
     fn restart(&mut self, sounds: &mut Vec<TitleSound>) {
         // Snd_StopBankAndResume(0x3C): the battle banks' sounds.
+        // Snd_StopBankAndResume(0x3C).
         sounds.push(TitleSound::SeStopBanks(0x3C));
+        sounds.push(TitleSound::SePause(0x3C, false));
         sounds.push(TitleSound::VoiceStop);
         sounds.push(TitleSound::Bgm(BGM_FIRST + self.assets.bgm.max(0) as u32));
         self.xfade = ScrXfade::default();
@@ -4156,6 +4158,7 @@ impl Battle {
         };
         // EftStageScroll_Draw, from the stage draw after group 0.
         if !self.loading
+            && !self.roster.scene.stage.draw_off
             && let Some(s) = &self.roster.scene.stage.scroll
         {
             stage.extend(s.draw(&view));
@@ -11031,6 +11034,7 @@ pub(crate) mod tests {
         let mut libc = LibcRandom::new(1);
         let mut random = GameRandom::from_key(&[1]);
         let (mut live, mut dark, mut objects, mut waves) = (0, 0, 0, 0);
+        let mut stage_off = 0;
         let lists: Vec<_> = (0..crate::eft_transform::SET_ENTRIES.len())
             .map(|k| crate::eft::SetRef {
                 side: 0,
@@ -11059,9 +11063,12 @@ pub(crate) mod tests {
                     .sum::<usize>(),
             );
             waves = waves.max(scene.warps.count());
+            stage_off += usize::from(scene.stage.draw_off);
         }
         // Change kind 2 (effect kind 0): one effect, eleven frames of silhouette, its set's objects, two waves;
-        // it ends with the transformation.
+        // it ends with the transformation. The stage effects are not drawn from the flash to its end.
+        assert!(stage_off > 0);
+        assert!(!battle.roster.scene.stage.draw_off);
         assert_eq!(battle.roster.chars[0].form.kind, 2);
         assert_eq!((live, dark, waves), (1, 11, 2));
         assert!(objects > 0);

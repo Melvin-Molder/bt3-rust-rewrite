@@ -1673,6 +1673,9 @@ impl Scene {
             w.chars[r.chr].obj.set_color_mode(3, r.silhouette);
             self.tints.start(1, usize::from(!r.silhouette), 0.0);
         }
+        if let Some(on) = self.transforms.stage_draw {
+            self.stage.draw_off = !on;
+        }
         // EftImpact_Update.
         self.impacts.update(
             &mut self.fx,
@@ -1912,7 +1915,9 @@ impl Scene {
                     }
                     let dust = |s: &mut Self, w: &mut World| {
                         let coef = w.env.fx.sin_coef;
-                        s.gdust.spawn_impact(owner, at, 1.0, w.libc, w.vu0, &coef);
+                        // EftGndDustImpact_Init: the puffs at the owner's scale (BtlScene_GetCharScale).
+                        let scale = w.data[owner].height() / 19.35;
+                        s.gdust.spawn_impact(owner, at, scale, w.libc, w.vu0, &coef);
                     };
                     if f & T_HIT_CHAR != 0 {
                         if rec.flags & H_GROUND != 0 {

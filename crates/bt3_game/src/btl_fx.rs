@@ -409,7 +409,7 @@ fn spark(impacts: &mut Impacts, env: &Env, data: &SideData, me: &Chr, id: i32, p
 /// impact event at its model part while the model is drawn (not with event 0x8000000): kinds 0 / 3 in actions
 /// without a class, 0xF / 0x10 in the others, 9 / 0xA for a shown weapon outside a rush sequence.
 /// `BtlFx_SpawnFlashReq2B`: request 0x2B, kind 0xD at node 0x10. `BtlFx_SpawnPartFlashes`: event 0x1000000, kind
-/// 0xC at every model part its value names.
+/// 0xC at every model part its value names, and common sound 0x4B.
 pub(crate) fn update_all(me: &Chr, data: &SideData, env: &Env, impacts: &mut Impacts) {
     let classless = crate::btl_act::id_class(me.act.current) < 0;
     let mut event = None;
@@ -458,6 +458,7 @@ pub(crate) fn update_all(me: &Chr, data: &SideData, env: &Env, impacts: &mut Imp
                     spark(impacts, env, data, me, 0xC, pos, dir);
                 }
             }
+            me.play_common(&mut env.snd(), 0x4B);
         }
     }
 }

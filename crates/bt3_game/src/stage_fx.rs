@@ -28,6 +28,9 @@ pub(crate) struct StageFx {
     pub bubbles: Option<crate::eft_bubble::Bubbles>,
     /// Kind 8.
     pub bound: Option<crate::eft_bound::Bound>,
+    /// `EftStage_SetDrawOn(0)` (a transformation's flash to its end): the scroll, the weather (still moving), the
+    /// smoke, the geysers, the bubbles and the bound are not drawn. `EftStage_Init` turns drawing on.
+    pub draw_off: bool,
     /// The inits still to run, the resets after them, and the tasks these replaced with their own (run first).
     init_pending: bool,
     resets_pending: u32,
@@ -38,6 +41,7 @@ impl StageFx {
     /// `EftStage_CreateKinds`: the tasks made, their inits to run.
     pub(crate) fn created(mut self) -> Self {
         self.init_pending = true;
+        self.draw_off = false;
         self
     }
 
@@ -171,10 +175,25 @@ impl StageFx {
         }
         if let Some(w) = &mut self.weather {
             let second = sv.split.then_some(!sv.first);
-            w.draw(ot, ctx, tints.weather(), paused, libc, second);
+            w.draw(
+                ot,
+                ctx,
+                tints.weather(),
+                paused,
+                libc,
+                second,
+                !self.draw_off,
+            );
         }
         if let Some(s) = &mut self.storm {
             s.draw(ot, ctx, tints.scale(), libc, sv.index, sv.split);
+        }
+        if self.draw_off {
+            // The water is not gated (EftWater_Draw).
+            if let Some(w) = &self.water {
+                w.draw(ot, ctx);
+            }
+            return;
         }
         if let Some(s) = &self.smoke {
             s.draw(ot, ctx, light, tints.scale());

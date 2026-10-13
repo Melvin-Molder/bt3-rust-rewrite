@@ -99,6 +99,8 @@ pub(crate) struct Transforms {
     busy: bool,
     /// The fighters' colour mode changes of this update, in order.
     pub model_requests: Vec<ModelRequest>,
+    /// `EftStage_SetDrawOn` of this update: off at the flash, on as an effect ends.
+    pub stage_draw: Option<bool>,
 }
 
 impl Transforms {
@@ -183,6 +185,7 @@ impl Transforms {
         vu0: &mut Vu0Random,
     ) {
         self.model_requests.clear();
+        self.stage_draw = None;
         let mut i = 0;
         while i < self.list.len() {
             let t = &mut self.list[i];
@@ -203,6 +206,7 @@ impl Transforms {
                                 _ => {}
                             }
                             t.flags |= TINT;
+                            self.stage_draw = Some(false);
                             self.model_requests.push(ModelRequest {
                                 chr: t.chr,
                                 silhouette: true,
@@ -259,6 +263,7 @@ impl Transforms {
             let c = &chars[t.chr];
             reveal(&mut t, c, warps, vu0, &mut self.model_requests);
         }
+        self.stage_draw = Some(true);
         if t.flags & DETACHED == 0 {
             self.task = None;
             self.busy = false;

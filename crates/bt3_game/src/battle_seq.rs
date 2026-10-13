@@ -798,6 +798,7 @@ impl Battle {
                         self.seq.pause_menu = true;
                         self.seq.paused = true;
                         input.sounds.push(TitleSound::PauseSeVoice(true));
+                        input.sounds.push(TitleSound::SePause(4, true));
                     }
                 }
             }
@@ -823,6 +824,7 @@ impl Battle {
                 if !open {
                     // PauseMenu_Update's close (Adx_ResumeSeVoice), then the flags.
                     input.sounds.push(TitleSound::PauseSeVoice(false));
+                    input.sounds.push(TitleSound::SePause(4, false));
                     self.seq.pause_menu = false;
                     self.seq.paused = false;
                 }
@@ -865,6 +867,7 @@ impl Battle {
             self.seq.pause_menu = true;
             self.seq.paused = true;
             input.sounds.push(TitleSound::PauseSeVoice(true));
+            input.sounds.push(TitleSound::SePause(4, true));
         }
         false
     }
