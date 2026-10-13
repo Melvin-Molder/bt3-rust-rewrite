@@ -139,6 +139,7 @@ mod stg_scroll;
 mod stg_tint;
 mod team_select;
 mod title;
+mod tour_menu;
 mod training;
 mod windows;
 
@@ -208,6 +209,8 @@ enum Scene {
     Training(Box<training::TrainScreen>),
     /// `EvoMode_Main` mode 48: Evolution Z's top menu.
     EvoTop(Box<evo_top::EvoTopScreen>),
+    /// `Tour_Main` mode 33: Dragon World Tour's menu.
+    TourMenu(Box<tour_menu::TourMenuScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -282,6 +285,7 @@ impl Scene {
             | Scene::EvoTop(_)
             | Scene::Shop(_)
             | Scene::EvoZ(_)
+            | Scene::TourMenu(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -440,6 +444,9 @@ struct Game {
     evo_bgm: bool,
     shop: Option<shop::ShopData>,
     evo_z: Option<evo_z::EvoZData>,
+    /// `gMenuArc4`'s tournament menu, and the tournament's block of `gProgress`.
+    tour_menu: Option<tour_menu::TourMenuData>,
+    tour: tour_menu::TourSession,
     shen_textures: bool,
     /// The character reference's model viewer (`ChrView`) while the screen runs, and the model texture revision
     /// of it the renderer has.
@@ -816,6 +823,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             evo_bgm: false,
             shop: None,
             evo_z: None,
+            tour_menu: None,
+            tour: tour_menu::TourSession::default(),
             shen_textures: false,
             chr_view: None,
             chr_view_rev: None,
@@ -1522,6 +1531,31 @@ fn run_frames(
                     }
                 }
             }
+            Scene::TourMenu(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                let session = screen.session();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Tour_Main: Adx_StopAll after TourMenu_Run.
+                    stop_all(game, &mut commands);
+                    if result != 0 {
+                        game.tour = session;
+                        info!("the tournament's entrant select (mode 34) is not ported yet");
+                        start_tour_menu(game, &mut commands);
+                    } else {
+                        start_main_menu(game, &mut commands, &mut audio);
+                    }
+                }
+            }
             Scene::EvoZ(screen) => {
                 let mut loader = Pictures {
                     iso_path: &game.iso_path,
@@ -1973,6 +2007,7 @@ fn run_frames(
                         MainMenuResult::Mode(60) => start_char_ref(game, &mut commands),
                         MainMenuResult::Mode(44) => start_training(game, &mut commands),
                         MainMenuResult::Mode(70) => start_shen(game, &mut commands),
+                        MainMenuResult::Mode(33) => start_tour_menu(game, &mut commands),
                         MainMenuResult::Mode(48) => {
                             // EvoMode_Main: the cursor starts over.
                             game.evo_cursor = -1;
@@ -2966,6 +3001,64 @@ fn start_char_ref(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the character reference: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Tour_Main` mode 33: `Bgm_Play(0x10B19)`, then `TourMenu_Run(1)` from `gMenuArc4`.
+fn start_tour_menu(game: &mut Game, commands: &mut Commands) {
+    if game.tour_menu.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, tour_menu::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    tour_menu::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| tour_menu::TourMenuAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = tour_menu::TourMenuLayout::new(background, |key| firsts[&key]);
+                game.tour_menu = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the tournament menu: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .tour_menu
+        .clone()
+        .expect("the tournament menu is loaded");
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    let mut sounds = Vec::new();
+    match tour_menu::TourMenuScreen::new(
+        &data,
+        &mut game.save,
+        &mut loader,
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, tour_menu::BGM_FILE_ID);
+            game.scene = Scene::TourMenu(Box::new(screen));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start the tournament menu: {error}");
             game.scene = Scene::Black;
         }
     }

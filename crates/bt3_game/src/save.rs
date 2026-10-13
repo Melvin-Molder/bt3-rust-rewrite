@@ -52,6 +52,10 @@ const OFS_ITEM: usize = 0x2EC8;
 const OFS_MONEY: usize = 0x3028;
 /// `trainClear[3]` (src/menu/training.h `MSaveTrain`): one word of "lesson cleared" bits per class.
 const OFS_TRAIN_CLEAR: usize = 0xE0C;
+/// `tourFlags`, `tourHour`, `tourLevel`: Dragon World Tour's invitations, clock and the open tournament's level.
+const OFS_TOUR_FLAGS: usize = 0xA08;
+const OFS_TOUR_HOUR: usize = 0xA0C;
+const OFS_TOUR_LEVEL: usize = 0xA10;
 const OFS_SHOP_FLAGS: usize = 0x1008;
 const OFS_STOCK_LEVEL: usize = 0x100C;
 /// `SAVE_MONEY_MAX`.
@@ -216,6 +220,33 @@ impl SaveData {
 
     pub fn set_stock_level(&mut self, v: i32) {
         self.set_word(OFS_STOCK_LEVEL, v);
+    }
+
+    /// `tourFlags`: bit n the open tournament, 0x20 the mode was visited, 0x40 the explanation was heard.
+    pub fn tour_flags(&self) -> i32 {
+        self.word(OFS_TOUR_FLAGS)
+    }
+
+    pub fn set_tour_flags(&mut self, v: i32) {
+        self.set_word(OFS_TOUR_FLAGS, v);
+    }
+
+    /// `tourHour`: the mode's clock, 0..23.
+    pub fn tour_hour(&self) -> i32 {
+        self.word(OFS_TOUR_HOUR)
+    }
+
+    pub fn set_tour_hour(&mut self, v: i32) {
+        self.set_word(OFS_TOUR_HOUR, v);
+    }
+
+    /// `tourLevel`: the open tournament's level, 0..2.
+    pub fn tour_level(&self) -> i32 {
+        self.word(OFS_TOUR_LEVEL)
+    }
+
+    pub fn set_tour_level(&mut self, v: i32) {
+        self.set_word(OFS_TOUR_LEVEL, v);
     }
 
     /// `custom[cell].exp`: the experience paid into a customised character.
