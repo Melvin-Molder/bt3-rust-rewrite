@@ -133,16 +133,16 @@ executable (callers and address references) and the ISO, and from the port's own
 ### System and front end
 
 - [x] `PadWatch_*` (src/sys/pad_watch.c): the debounced readings, the warning (darkened screen, boot file text) and the battle pause for the missing controller (`pad_watch.rs`)
-- [ ] The character viewer's backdrop ambience (`StgAmb_Init` in `ChrView_Init`)
-- [ ] Movies: the PSS streams are decoded by `ffmpeg`, not by a port of the IPU MPEG-2 path (`src/sys/movie.c`)
+- [x] The character viewer's backdrop ambience (`StgAmb_Init` once a model is shown, `StgAmb_Term` at init and on hide): the backdrop's data says stage 5, its loop at volume 0x50
+- [x] Movies: the PSS streams stay decoded by `ffmpeg`, not by a port of the IPU MPEG-2 path (`src/sys/movie.c`): MPEG-2 decoding is set by the standard, and how the IPU's colour conversion and dither differ from it is the PS2's own rendering, left out by the rule for visuals; the playback around it (timing, skip, fade, the soundtrack) is ported
 
 ### Notes to correct (the work is ported)
 
-- [ ] btl_act.rs: the volley dash's and the homing strikes' vibration, the rush start's sound and head look, the guard's head look
-- [ ] btl_chr.rs: `on_stage_loaded`'s head tracking, `damage`'s abilities
-- [ ] btl_blast.rs: the header's particles and impact effects; "the other kinds are not ported" (only kinds 3 and 7 are not)
-- [ ] btl_tech_fx.rs ("abilities": every ability number the C tests is tested), btl_tech_shots.rs (its model, camera cut and connected-rush effects), btl_clash.rs (clash A's throw win), btl_mgr.rs (the late updates' effects: `BtlFx_UpdateLate` is the occlusion flag)
-- [ ] main.rs: the story mode notes (`--story-result`, `--mode`), `leave_battle`'s "team select" and "replay screen"; README: "the menus that lead to these modes ... are not ported"
+- [x] btl_act.rs: the volley dash's and the homing strikes' vibration, the rush start's sound and head look, the guard's head look
+- [x] btl_chr.rs: `on_stage_loaded`'s head tracking (and its vibration stop, now ported), `damage`'s abilities
+- [x] btl_blast.rs: the header's particles and impact effects; "the other kinds are not ported"
+- [x] btl_tech_fx.rs ("abilities": every ability number the C tests is tested), btl_tech_shots.rs (its model, camera cut and connected-rush effects), btl_clash.rs (clash A's throw win; clash C's level now takes the story's difficulty), btl_mgr.rs (`BtlFx_UpdateLate`'s occlusion flag, now ported: a fighter whose camera trace hits the stage checks whether the camera is inside it)
+- [x] main.rs: the story mode notes (`--story-result`, `--mode`), `leave_battle`'s "team select" and "replay screen"; README: "the menus that lead to these modes ... are not ported"
 
 ### Unreachable in the original (nothing to port)
 

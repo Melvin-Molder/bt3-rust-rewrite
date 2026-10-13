@@ -16,7 +16,9 @@
 //!
 //! The fighters' answers play their sounds and voices (`BtlColl_*`), the shots their fire and stage-contact sounds.
 //!
-//! Not ported: the particles and impact effects.
+//! The effect scene's fighter lists run here too: the character pack's effect kinds (the charge aura, the ki
+//! blasts' emitter sets with their particles, the charge glow, the shock, the rush-finish burst, the body effect,
+//! the drain glow) and the impacts (`eft_impact`).
 
 use std::f32::consts::PI;
 

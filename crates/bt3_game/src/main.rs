@@ -648,7 +648,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_to_title = true;
             skip_to_menu = true;
         } else if argument == "--story-result" {
-            // A debugging aid while story battles are not ported: their result screen, saga 0's first episode.
+            // A debugging aid: a story battle's result screen without the battle, saga 0's first episode.
             story_result = Some(
                 match arguments
                     .next()
@@ -693,7 +693,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             skip_to_title = true;
             skip_to_battle = true;
         } else if argument == "--mode" {
-            // Story mode (1) needs its script, which is not ported; nothing sets up 8 or 9.
+            // Story mode (1) needs the script and setup Dragon History's menus give it (`--menu`); nothing sets up
+            // 8 or 9.
             battle_mode.0 = arguments
                 .next()
                 .and_then(|value| value.to_string_lossy().parse::<i32>().ok())
@@ -2449,6 +2450,9 @@ fn run_frames(
                             char_ref::ViewerRequest::Hide => viewer.hide(),
                         }
                     }
+                    // The backdrop's ambience.
+                    let sounds = viewer.take_sounds();
+                    play_sounds(game, &mut commands, sounds);
                 }
                 if done {
                     // CharRefMode_Main: Adx_StopAll, back to the main menu (CharRef_Term ends the viewer).
@@ -3043,9 +3047,10 @@ fn into_screen_at(quads: Vec<loading::Quad>, texture_base: usize) -> Vec<ScreenQ
         .collect()
 }
 
-/// `Battle_Term`, then `Progress_Main` picks the next screen from the result's reason: 8 the main menu, 0x10 the
-/// character select (the team select of team battles is not ported), 0x80 the Vs menu; the replay screen (0x1000)
-/// is not ported.
+/// `Battle_Term`, then `Progress_Main` picks the next screen from the mode the battle came from and the result's
+/// reason: the story's result, Ultimate Battle's results, the bracket, the training, the replay list (0x1000, or
+/// back to it), the title after the attract battle; else 8 the main menu, 0x10 the character select (the team
+/// select after a team or DP battle), 0x80 the Vs menu.
 fn leave_battle(
     game: &mut Game,
     commands: &mut Commands,
@@ -3317,7 +3322,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
     }
     if let Some(script) = game.pending_script.take() {
         battle.script = Some(Box::new(script));
-        battle.story_difficulty = game.hist.level;
+        battle.assets.story_difficulty = game.hist.level;
         // BattleSetup_FinishEx in mode 1: rule.dragonBall, 1 + the first dragon ball the save lacks (0: all seven).
         let flags = game.save.unlock_flags();
         let rule = (0..7).find(|i| flags & 1 << i == 0).map_or(0, |i| i + 1);

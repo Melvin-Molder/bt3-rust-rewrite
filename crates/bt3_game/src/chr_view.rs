@@ -5,8 +5,10 @@
 //! A new model is loaded by a job over a few frames into a buffer of its own; three frames after its object was
 //! made the old one goes and the new one is shown (the original keeps two buffers for this). The viewer's scene
 //! runs only its layer 3 (`BtlScene_Init(8)`), so the backdrop's stage effects of layer 0 (its water surface) are
-//! not drawn, as in the original. Left out: the stage's tint ramps (`StgFx_DrawPreNoCheck`, off here), its ambience
-//! (`StgAmb_Init`) and the fade slot `ChrView_Init` starts (the menu's own fade covers it).
+//! not drawn, as in the original. Once a model is shown the backdrop's ambience runs (`StgAmb_Init`: the stage
+//! number in its data is 5, a looping sound at a constant volume), until the model is taken off. Left out: the
+//! stage's tint ramps (`StgFx_DrawPreNoCheck`, off here) and the fade slot `ChrView_Init` starts (the menu's own
+//! fade covers it).
 
 use std::collections::HashMap;
 
@@ -156,6 +158,12 @@ pub(crate) struct ChrView {
     ramp: Vec<u8>,
     stage: StageModel,
     stage_id: i32,
+    /// The stage number in the backdrop's data (`BtlStage_GetId`), which picks the ambience.
+    stage_number: i32,
+    water_level: f32,
+    /// `gStgAmb`, and the stage sounds its handler would play (no bank is loaded for them here).
+    amb: crate::stg_amb::StgAmb,
+    amb_snd: crate::btl_snd::CharSound,
     /// The stage's textures, then the model's (from `textures`), as the renderer takes them.
     pub stage_textures: Vec<RgbaTexture>,
     textures: Textures,
@@ -188,6 +196,9 @@ impl ChrView {
         let ramp = crate::battle::light_ramp(&common)?;
         let stage_id = (FILE_STAGE - crate::battle::STAGE_FILE) as i32;
         let loaded = crate::battle::load_stage(read, stage_id, false)?;
+        // ChrView_Init's StgAmb_Term.
+        let mut amb = crate::stg_amb::StgAmb::default();
+        amb.stop();
         let light_dir = crate::battle::normalize(
             loaded
                 .stage
@@ -198,6 +209,10 @@ impl ChrView {
             ramp,
             stage: loaded.model,
             stage_id,
+            stage_number: loaded.stage.stage_id,
+            water_level: loaded.stage.water_level.unwrap_or(0.0),
+            amb,
+            amb_snd: Default::default(),
             stage_textures: loaded.textures,
             textures: Textures {
                 face,
@@ -228,6 +243,11 @@ impl ChrView {
         )
     }
 
+    /// What the ambience asked of the sound players since the last call.
+    pub(crate) fn take_sounds(&mut self) -> Vec<crate::title::TitleSound> {
+        std::mem::take(&mut self.amb.out)
+    }
+
     /// `ChrView_IsVisible`.
     pub(crate) fn is_visible(&self) -> bool {
         self.visible
@@ -248,9 +268,10 @@ impl ChrView {
         });
     }
 
-    /// `ChrView_Hide`: the model off the screen.
+    /// `ChrView_Hide`: the model off the screen, and the ambience (`StgAmb_Term`).
     pub(crate) fn hide(&mut self) {
         self.stage_on = false;
+        self.amb.stop();
         self.visible = false;
         if self.loading {
             self.cancel_load();
@@ -351,6 +372,7 @@ impl ChrView {
                         }
                         self.stage_on = true;
                         self.visible = true;
+                        self.amb.start(self.stage_number);
                         self.loading = false;
                         return;
                     }
@@ -396,6 +418,9 @@ impl ChrView {
         if !self.visible {
             return frame;
         }
+        // BtlStage_Update: StgAmb_Update.
+        self.amb
+            .update(Some(view.eye()), self.water_level, libc, &mut self.amb_snd);
         if self.stage_on {
             frame.stage = crate::stage_draw::draw_stage(&mut self.stage, self.stage_id, &view);
         }

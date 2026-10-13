@@ -5,7 +5,7 @@
 //! Clash A (states 1..5): both in a beam struggle (0x130..0x132); for 106 frames the one counting more inputs
 //! gains the lead, then the leader's lead grows to 71: the winner gets held flags 0xC1 / 0xC3, the loser 0xC2 and
 //! the damage of both techniques (the winner's whole plus half the loser's); the struggle effect ends, the loser's
-//! effects reset (a throw technique's win would throw: not ported). Clash B (states 6..8): both in 0xFA, trading blows for 76 frames; the one who counted more inputs wins
+//! effects reset; a throw technique's winner throws the loser instead (flag 0xA0). Clash B (states 6..8): both in 0xFA, trading blows for 76 frames; the one who counted more inputs wins
 //! (flags 0xBF / 0xC0). Clash C (states 9..11): both in 0xFB, then 0xFC exchanges placed on the stage paths; each
 //! exchange (both raising 0xC4) scores one for the fighter whose answer is right, and after seven with a leader
 //! the winner gets 0xC7, the loser 0xC8. The clash cameras are one-frame cuts (`ChrCam_SetCut`) and the clash B cut; the voices and streamed
@@ -22,7 +22,7 @@ use crate::chr_cam::{CutSpec, set_cut};
 /// `BtlClashC` (roster + 0x7C): read by the exchange action and the placement.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ClashC {
-    /// 1, or the story mode's difficulty (not ported).
+    /// 1, or in a story battle the story's difficulty.
     pub level: i32,
     pub count: i32,
     /// The stage path the pair is placed on (1 .. paths - 1) and its point.
@@ -479,7 +479,7 @@ impl Clash {
                 };
                 c.prev_pick = -1;
                 c.pick = (r() & 3) as i32;
-                c.level = 1;
+                c.level = if env.mode == 1 { env.difficulty } else { 1 };
                 state += 1;
             }
             10 => {

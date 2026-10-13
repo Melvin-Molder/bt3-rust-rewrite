@@ -1261,9 +1261,25 @@ mod tests {
         assert!(viewer.is_visible());
         let drawn = drawn.get();
         assert!(drawn.0 > 0 && drawn.1 > 0, "{drawn:?}");
+        // The backdrop's ambience: stage 5's loop at volume 0x50 (8 on the player).
+        let sounds = viewer.take_sounds();
+        assert!(
+            sounds
+                .iter()
+                .any(|s| matches!(s, TitleSound::MapBgm(0x10BA9))),
+            "{sounds:?}"
+        );
+        assert!(
+            matches!(sounds.last(), Some(TitleSound::MapBgmVolume(8))),
+            "{sounds:?}"
+        );
         press(&mut screen, &mut viewer, PAD_TRIANGLE);
         assert_eq!(screen.state, ST_COSTUME);
         assert!(!viewer.is_visible());
+        assert!(matches!(
+            viewer.take_sounds().last(),
+            Some(TitleSound::MapBgmStop)
+        ));
         press(&mut screen, &mut viewer, PAD_TRIANGLE);
         press(&mut screen, &mut viewer, PAD_TRIANGLE);
         assert_eq!(screen.state, ST_LIST);

@@ -1635,7 +1635,7 @@ impl ScriptHost<'_> {
 
     /// The CPU level's raise by the difficulty (+6 / +9).
     fn level_bonus(&self) -> i32 {
-        match self.b.story_difficulty {
+        match self.b.assets.story_difficulty {
             1 => 6,
             2 => 9,
             _ => 0,

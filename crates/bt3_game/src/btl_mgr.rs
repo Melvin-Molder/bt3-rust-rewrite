@@ -785,8 +785,8 @@ impl Roster {
         }
     }
 
-    /// `BtlChars_EndFrame`: the late updates (`BtlChar_UpdateLate`: the voices and technique sounds, this
-    /// frame's stat modifiers; the effects are not ported), stages 11 and 12, the frame's movement vectors.
+    /// `BtlChars_EndFrame`: the late updates (`BtlChar_UpdateLate`: the occlusion flag, the voices and technique
+    /// sounds, this frame's stat modifiers), stages 11 and 12, the frame's movement vectors.
     pub(crate) fn end_frame(
         &mut self,
         data: [&SideData; 2],
@@ -797,6 +797,14 @@ impl Roster {
         for i in 0..2 {
             let chr = &mut self.chars[i];
             if !chr.is_frozen() {
+                // BtlFx_UpdateLate (BtlFx_UpdateOccludedFlag): while the fighter's camera trace hits the stage
+                // (and not with flag 0x12D) its object asks whether the camera is inside it
+                // (BTL_OBJ_FLAG_CHECK_NEAR), which puts it in the draw list's third pass.
+                if chr.cam.hit && !chr.flags.test(0x12D) {
+                    chr.obj.flags |= OBJ_CHECK_NEAR;
+                } else {
+                    chr.obj.flags &= !OBJ_CHECK_NEAR;
+                }
                 chr.late_voice(data[i], data[i ^ 1], env, self.frame, libc);
                 chr.set_stat_frame_mods();
             }
@@ -1488,6 +1496,10 @@ fn coll_update_ground(me: &mut Chr, data: &SideData, env: &Env) {
 /// behind it) to the eye through the target's zone, then the eye's when they differ; the camera stands where it
 /// first touches a triangle the camera may not pass (not `POLY_NO_SOLID` / `POLY_NO_CAMERA`), with the fraction of
 /// the way, else at the eye.
+/// `BTL_OBJ_FLAG_CHECK_NEAR`: a fighter's object tests whether the camera is inside its body box
+/// (`battle::view_flags`).
+const OBJ_CHECK_NEAR: u32 = 0x200_0000;
+
 pub(crate) fn trace_camera(env: &Env, eye: [f32; 3], target: [f32; 3]) -> ([f32; 3], Option<f32>) {
     use bt3_data::stage_col::{POLY_NO_CAMERA, POLY_NO_SOLID};
     const RADIUS: f32 = 2.0;
@@ -1662,6 +1674,7 @@ fn cam_update(
     }
     let (pos, frac) = trace_camera(env, me.cam.eye, me.cam.target);
     me.cam.pos = pos;
+    me.cam.hit = frac.is_some();
     if let Some(frac) = frac
         && turn
     {

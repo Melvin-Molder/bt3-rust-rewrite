@@ -10,8 +10,9 @@
 //! Once connected it sets view 0's stage blur every frame, rising between the opponent's events 0x10 and 0x20 with
 //! definition flag 0x200.
 //!
-//! Not ported: its model, the camera cut, and what the connected rush starts on the opponent's events (screen
-//! flash, node sounds, streaks, the aura orb and glow, the ground dust).
+//! Its model (definition flag 0x20000) is posed at node 0x36 between the owner's events 0x10 and 0x20; the
+//! connected rush starts the technique's camera cut, and on the opponent's events the screen flash, the node
+//! sounds, the streaks, the aura orb and its glow, and the ground dust.
 
 use bt3_data::eft_pack::SetHead;
 

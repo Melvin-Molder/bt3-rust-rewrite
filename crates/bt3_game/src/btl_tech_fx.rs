@@ -23,7 +23,7 @@
 //! The skills (slots 0, 1) start the same way from effect bit 0x3C / 0x3D: kind 0, their events from the frame
 //! table when they have one, their records answered by `BtlColl_GuardStrike` / `BtlColl_HitByStrike`.
 //!
-//! Not ported: abilities.
+//! The abilities the original's functions here test are tested (0x22, 0x37, 0x3A, 0x3B, 0x48, 0x49, 0x6F, 0x77).
 
 use std::f32::consts::{FRAC_PI_2, PI};
 

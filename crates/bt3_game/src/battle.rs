@@ -128,6 +128,8 @@ pub(crate) const IDENTITY: Mtx = [
 
 /// What `Battle_Load` leaves for the draw: the fighters' models and their textures as GS colours.
 pub struct BattleAssets {
+    /// `gProgress->difficulty`: the story's level (the script's CPU levels and clash C's level go by it).
+    pub story_difficulty: i32,
     /// Material textures (bilinear, wrapping: TEX1 0x60, CLAMP_1 0).
     pub base_textures: Vec<RgbaTexture>,
     /// By base texture, the alpha it leaves in the frame (`id_texture`).
@@ -539,6 +541,7 @@ pub fn load(
         .and_then(|i| limits.get(i * 2..i * 2 + 2))
         .map_or(0, |b| i32::from(i16::from_le_bytes([b[0], b[1]])));
     let mut assets = BattleAssets {
+        story_difficulty: 0,
         base_textures: Vec::new(),
         shade_textures: Vec::new(),
         id_textures: Vec::new(),
@@ -2217,8 +2220,6 @@ pub struct Battle {
     pub(crate) events: crate::btl_event::BattleEvents,
     /// The story battle's script (mode 1).
     pub script: Option<Box<crate::btl_script::BtlScript>>,
-    /// `gProgress->difficulty`: the story's level (the script's CPU levels go up by it).
-    pub story_difficulty: i32,
     /// Fade slot 1, the story script's white fades.
     pub(crate) fade1: Fade,
     /// The voice and music streams as the sound system reported them before the frame.
@@ -2332,6 +2333,7 @@ impl BattleAssets {
             item: &self.hidden_item,
             snd: &self.snd,
             mode: self.mode,
+            difficulty: self.story_difficulty,
             stage_4_or_27: matches!(self.stage_id, 4 | 27),
             seq_state,
             gate,
@@ -2655,7 +2657,6 @@ impl Battle {
             amb_cam: None,
             events: Default::default(),
             script: None,
-            story_difficulty: 0,
             fade1: Fade::default(),
             stream_stat: Default::default(),
             voice_req: [false; 2],
@@ -9842,6 +9843,32 @@ pub(crate) mod tests {
             }
         }
         assert!(matches!(cut, Some(0x11 | 0x12)), "{cut:?}");
+    }
+
+    #[test]
+    fn real_hidden_camera_makes_the_fighter_check_it() {
+        // BtlFx_UpdateOccludedFlag: the frame's end gives a fighter whose camera trace hit the stage (without flag
+        // 0x12D) object flag 0x2000000, the near check of the draw; otherwise it is cleared.
+        let Some((mut battle, mut libc, _)) = fight_vs_1(0) else {
+            return;
+        };
+        let mut end = |battle: &mut Battle, hit: bool, flag: bool| {
+            battle.with_roster(|roster, data, env| {
+                let c = &mut roster.chars[0];
+                c.cam.hit = hit;
+                if flag {
+                    c.flags.set(0x12D);
+                } else {
+                    c.flags.clear(0x12D);
+                }
+                roster.end_frame(data, env, &mut libc, false);
+                roster.chars[0].obj.flags & 0x200_0000 != 0
+            })
+        };
+        assert!(!end(&mut battle, false, false));
+        assert!(end(&mut battle, true, false));
+        assert!(!end(&mut battle, true, true));
+        assert!(!end(&mut battle, false, false));
     }
 
     #[test]

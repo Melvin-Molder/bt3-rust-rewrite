@@ -426,6 +426,8 @@ pub(crate) struct ChrCam {
     pub rot: [f32; 3],
     pub target: [f32; 3],
     pub rate: f32,
+    /// `hit`: the stage trace found the stage between the target and the eye (`BtlCam_TraceStage`).
+    pub hit: bool,
     /// `distMode`: the follow distance preset (0..2; `BattleSide_GetOptionA`, the save's 0 by default).
     pub dist_mode: i32,
     pub shake: crate::chr_cam::CamShake,
@@ -554,6 +556,8 @@ pub(crate) struct Env<'a> {
     pub item: &'a std::sync::Mutex<HiddenItem>,
     /// `Battle_GetMode`.
     pub mode: i32,
+    /// `gProgress->difficulty`, the story's level.
+    pub difficulty: i32,
     /// `BtlChar_IsStage4Or27`.
     pub stage_4_or_27: bool,
     /// `BtlSeq_GetState`.
@@ -1907,14 +1911,15 @@ impl Chr {
 
     /// `BtlChar_OnStageLoaded` after a stage change: the pose cleared and the fighter put at its starting place on
     /// the ground (flag 0xF held, 0xE cleared), held flag 0x13A when it was in the air (motion flag 0x10) or in a
-    /// reaction, else 0x139; its reaction ended (1), standing in motion 0. The head tracking and the vibration are
-    /// not ported.
+    /// reaction, else 0x139; its reaction ended (1), standing in motion 0. The vibration stops and the head look
+    /// is reset.
     pub(crate) fn on_stage_loaded(&mut self, data: &SideData, env: &Env) {
         self.pose = Pose::default();
-        crate::btl_head::reset_look(self, data);
         self.place_at_start(data, env);
         self.flags.clear(0xE);
         self.flags.set_held(0xF);
+        self.vib.clear();
+        crate::btl_head::reset_look(self, data);
         self.pose_to_obj(true);
         if env.anim_flags(self.anim.cur) & 0x10 != 0 || self.react.reaction >= 3 {
             self.flags.set_held(0x13A);
@@ -2657,7 +2662,7 @@ impl Chr {
     }
 
     /// `BtlMember_Damage`: the one place health goes. `flags` are the original's `BTL_DMG_*` bits; the abilities
-    /// they test are not ported. Returns the health lost.
+    /// that change it (0x5D, 0x4C, 0x3E, 0x3F, 0x76) are tested. Returns the health lost.
     pub(crate) fn damage(&mut self, env: &Env, data: &SideData, amount: i32, flags: u32) -> i32 {
         // BTL_DMG_* (include/battle/btl_char_member.h).
         const NO_DEFENSE: u32 = 0x1;

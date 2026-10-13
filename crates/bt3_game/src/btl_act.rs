@@ -4925,8 +4925,8 @@ impl Ctx<'_, '_> {
     /// Action 0x99 (`BtlAct_AttackVolleyDashHandler`): motion 0x2D into the dash loop 0x19 at the record's speed
     /// (held flag 0x4F from the loop's start, raised again two frames after it is found down, three times), then
     /// the strike 0x1A in 0.3 s after the fourth time, 24 frames or a guard, under the record's camera cut (ended on
-    /// contact with attack flag 0x40). The record's voice, the dash sound each time the loop starts; the vibration
-    /// is not ported.
+    /// contact with attack flag 0x40). The record's voice and a vibration (1.0 for 0.3 s), the dash sound each time
+    /// the loop starts.
     fn attack_volley_dash(&mut self, phase: u32) {
         if phase == ENTER {
             self.begin_attack();
@@ -5630,8 +5630,8 @@ impl Ctx<'_, '_> {
     }
 
     /// Actions 0x6B..0x6F (`BtlAct_Action6Bto6F`): one strike each (motions 0x67, 0x6A, 0x61, 0x64, 0x5E) homing at
-    /// 1500 km/h; on a hit the follow-ups of the opponent's state. After a dash, camera cut 0x20. The vibration is
-    /// not ported.
+    /// 1500 km/h; on a hit the follow-ups of the opponent's state. After a dash, camera cut 0x20. A vibration of 1.0
+    /// for 0.3 s.
     fn homing_strike(&mut self, phase: u32) {
         if phase == ENTER {
             let anim = match self.current() {
@@ -8718,8 +8718,8 @@ impl Ctx<'_, '_> {
     }
 
     /// The start of a rush technique (dash, strike): the start motion, facing the opponent, the begin, the start
-    /// flags, the technique's camera cut and half the ki (the sequence pays the other half). The sound and the head
-    /// look are not ported.
+    /// flags, the technique's camera cut and half the ki (the sequence pays the other half), the technique's start
+    /// sound, and the head look reset.
     fn rush_start(&mut self, cls: i32) {
         self.play(super_anim(cls, 0), 0.15);
         self.me.turn_yaw(self.opp, 2, PI);
@@ -11745,7 +11745,7 @@ impl Ctx<'_, '_> {
     /// each with its recoil at +1, and 0xF5 after flag 0x67. Forced by flags 0x68 / 0x69 / 0x6A when a hit is
     /// guarded (it opens on the recoil 0xF2 / 0xF4 / 0xF0). A pose change needs three frames of the new input
     /// (work[2]); releasing the guard (input 34) ends the action. Voice kind 0x1B as 0xF5 starts; the head look is
-    /// not ported.
+    /// on while guarding.
     fn guard(&mut self, phase: u32) {
         if phase == ENTER {
             let (anim, blend) = if self.flag(0x68) {

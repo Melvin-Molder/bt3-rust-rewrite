@@ -32,6 +32,16 @@ impl Default for Vib {
     }
 }
 
+impl Vib {
+    /// The rest of `BtlCharVib` cleared (power, times, phase, toggle), as a stage change does.
+    pub(crate) fn clear(&mut self) {
+        *self = Self {
+            enabled: self.enabled,
+            ..Self::default()
+        };
+    }
+}
+
 /// `Pad.vibPower` / `vibSmall` as a frame's requests add up (`Pad_AddVibration`: the power summed, at most 1).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PadVib {
