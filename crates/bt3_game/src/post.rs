@@ -46,6 +46,9 @@ pub struct PostOp {
     /// spare byte left it in the frame (`GfxPost_DrawDepthClut` under the frame mask): the alpha of each byte value
     /// (0x80 = 1.0), read at each target pixel.
     pub mask: Option<Box<[u8; 256]>>,
+    /// The mask's bytes are the objects' ids (`GfxPost_CopyAlphaToDepth` put them in the depth buffer's spare byte
+    /// as `BtlObj_BeginDraw` began), not the stage's depth.
+    pub ids: bool,
     /// Added to the target (ALPHA 0x68 with FIX 0x80: `Cs + Cd`) instead of copied or blended.
     pub add: bool,
     /// The texels the source is read in (`CLAMP_1` REGION_CLAMP: x0, y0, x1, y1), else the whole buffer.
@@ -74,6 +77,7 @@ impl PostOp {
             target,
             blend,
             mask: None,
+            ids: false,
             add: false,
             region: None,
             tris: vec![[c[0], c[1], c[2]], [c[1], c[2], c[3]]],

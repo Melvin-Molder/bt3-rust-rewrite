@@ -68,6 +68,7 @@ impl<'a> FontFile<'a> {
             clut_blt: u32_at(header, 28)?,
             tbp_offset: u32_at(header, 32)? as i32,
             cbp_offset: u32_at(header, 36)? as i32,
+            extra: [0; 8],
             texture_register: u64::from(u32_at(header, 0x30)?)
                 | u64::from(u32_at(header, 0x34)?) << 32,
         };

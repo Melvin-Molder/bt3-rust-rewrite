@@ -40,6 +40,8 @@ pub(crate) struct ObjData<'a> {
     pub height: f32,
     /// What the model gives its face, when it has one.
     pub face: Option<&'a std::sync::Arc<crate::btl_face::FaceModel>>,
+    /// The loaded model file (`ObjMdlFile`), told apart from every other load: whether it was bound already.
+    pub model_uid: u64,
 }
 
 /// `BobjPart`: one node's local pose of this frame and its world matrix.
@@ -276,6 +278,88 @@ pub(crate) struct Obj {
     pub borrowed: Option<Motion>,
     /// `obj->face`: `None` for a model without eyes or a mouth.
     pub face: Option<crate::btl_face::Face>,
+    /// This object, told apart from every other one (in the order they were made).
+    pub uid: u64,
+    /// `ObjData::model_uid` of its model.
+    pub model_uid: u64,
+    /// `mdl.model->alphaRow`: its row of the alpha table (`AlphaRows`).
+    pub alpha_row: u8,
+    /// `alphaAdd` (`BtlObj_SetAlphaAdd`): added to the model's slot alphas.
+    pub alpha_add: i32,
+}
+
+/// The source of `Obj::uid`.
+static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A new `ObjData::model_uid` for a model file just loaded.
+pub(crate) fn new_model_uid() -> u64 {
+    NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `BtlObjVis`' rows of the alpha table (`allocBits`: `BtlObjVis_AllocFreeBit` / `AllocBit` / `FreeBit`) and the
+/// rows the model files took when they were first bound (`ObjMdlFile.bound`, `alphaRow`). The original claims a
+/// row as an object binds its model (`BtlObjMdl_BindFiles`) and frees it as the object goes
+/// (`BtlObjMdl_Destroy`); here the objects of a frame are matched with the last frame's, the rows of the objects
+/// gone freed first and then those of the new ones bound in the order they were made (a rebind frees, then binds).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AlphaRows {
+    bits: u16,
+    files: std::collections::HashMap<u64, u8>,
+    /// Object uid and row of the objects bound.
+    live: Vec<(u64, u8)>,
+}
+
+impl AlphaRows {
+    /// `BtlObjVis_AllocBit`.
+    fn alloc_bit(&mut self, bit: u8) -> bool {
+        let mask = 1 << bit;
+        if self.bits & mask == 0 {
+            self.bits |= mask;
+            return true;
+        }
+        false
+    }
+
+    /// `BtlObjVis_AllocFreeBit`: the first of 15, 0 when all are taken.
+    fn alloc_free(&mut self) -> u8 {
+        (0..15).find(|&i| self.alloc_bit(i)).unwrap_or(0)
+    }
+
+    /// The objects of this frame: rows freed for the objects gone, bound for the new ones, and each object's row
+    /// set.
+    pub(crate) fn update<'a>(&mut self, objs: impl IntoIterator<Item = &'a mut Obj>) {
+        let mut objs: Vec<&mut Obj> = objs.into_iter().collect();
+        let bits = &mut self.bits;
+        self.live.retain(|&(uid, row)| {
+            let kept = objs.iter().any(|o| o.uid == uid);
+            if !kept {
+                *bits &= !(1 << row);
+            }
+            kept
+        });
+        objs.sort_by_key(|o| o.uid);
+        for o in &mut objs {
+            let row = match self.live.iter().find(|&&(uid, _)| uid == o.uid) {
+                Some(&(_, row)) => row,
+                None => {
+                    let row = match self.files.get(&o.model_uid) {
+                        Some(&row) => {
+                            self.alloc_bit(row);
+                            row
+                        }
+                        None => {
+                            let row = self.alloc_free();
+                            self.files.insert(o.model_uid, row);
+                            row
+                        }
+                    };
+                    self.live.push((o.uid, row));
+                    row
+                }
+            };
+            o.alpha_row = row;
+        }
+    }
 }
 
 impl Obj {
@@ -351,6 +435,31 @@ impl Obj {
             face: data
                 .face
                 .and_then(|m| crate::btl_face::Face::new(std::sync::Arc::clone(m))),
+            uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            model_uid: data.model_uid,
+            alpha_row: 0,
+            alpha_add: 0,
+        }
+    }
+
+    /// `BtlObj_FillAlphaRow`: the object's 15 bytes of the glow's alpha table, by its colour flag: 0xFF for the
+    /// black flag, the fade * 128 for 0x40000, the preset's alpha for 0x400000, else the model's slot alphas
+    /// plus `alpha_add` (`BtlObj_UpdateAlpha`, at most 0x7F).
+    pub(crate) fn fill_alpha_row(&self, table: &mut [u8; 256], model_alpha: &[u8; 16]) {
+        let row = usize::from(self.alpha_row) * 15;
+        let Some(out) = table.get_mut(row..row + 15) else {
+            return;
+        };
+        if self.flags & 0x8_0000 != 0 {
+            out.fill(0xFF);
+        } else if self.flags & 0x4_0000 != 0 {
+            out.fill((self.flash.fade_value() * 128.0) as u32 as u8);
+        } else if self.flags & 0x40_0000 != 0 {
+            out.fill(self.preset[4] as u32 as u8);
+        } else {
+            for (o, &a) in out.iter_mut().zip(model_alpha) {
+                *o = (self.alpha_add + i32::from(a)).min(0x7F) as u8;
+            }
         }
     }
 
@@ -1392,6 +1501,95 @@ pub(crate) fn rot_z(a: f32) -> Mtx {
 mod tests {
     use super::*;
 
+    fn bare_model() -> CharaModel {
+        CharaModel {
+            header: bt3_data::model::ModelHeader {
+                flags: 0,
+                size: [0.0; 4],
+                face_tex: 0,
+                fade_tex: 0,
+                tex_first: 0,
+                tex_count: 0,
+                clut_first: 0,
+                clut_count: 0,
+                fade_first: 0,
+                fade_count: 0,
+                tex_no_alpha: 0,
+                seam_offset: 0,
+            },
+            parts: Vec::new(),
+            min_tbp: 0,
+            min_cbp: 0,
+        }
+    }
+
+    fn obj_of(model: &CharaModel, model_uid: u64) -> Obj {
+        Obj::new(
+            &ObjData {
+                model,
+                motions: &[],
+                raw: &[],
+                body: None,
+                chara: 0,
+                height: 0.0,
+                face: None,
+                model_uid,
+            },
+            0.0,
+        )
+    }
+
+    #[test]
+    fn alpha_rows_follow_the_binds_and_the_destroys() {
+        let m = bare_model();
+        let (fa, fb, fc) = (new_model_uid(), new_model_uid(), new_model_uid());
+        let mut rows = AlphaRows::default();
+        let (mut p1, mut p2) = (obj_of(&m, fa), obj_of(&m, fb));
+        rows.update([&mut p1, &mut p2]);
+        assert_eq!((p1.alpha_row, p2.alpha_row), (0, 1));
+        // An effect object takes the first free row.
+        let mut e = obj_of(&m, fc);
+        rows.update([&mut p1, &mut p2, &mut e]);
+        assert_eq!(e.alpha_row, 2);
+        // A character change to a new file: the old object's row freed first, so the new one binds row 0.
+        let mut p1b = obj_of(&m, new_model_uid());
+        rows.update([&mut p1b, &mut p2, &mut e]);
+        assert_eq!(p1b.alpha_row, 0);
+        // The effect object goes and comes back on its file, bound before: it claims its row again.
+        rows.update([&mut p1b, &mut p2]);
+        let mut e2 = obj_of(&m, fc);
+        rows.update([&mut p1b, &mut p2, &mut e2]);
+        assert_eq!(e2.alpha_row, 2);
+        // Back to the first file while the new one keeps row 0: both on row 0 (the original's claim fails).
+        let mut p1c = obj_of(&m, fa);
+        rows.update([&mut p1b, &mut p1c, &mut p2]);
+        assert_eq!((p1b.alpha_row, p1c.alpha_row), (0, 0));
+    }
+
+    #[test]
+    fn an_objects_alpha_row_follows_its_colour_flag() {
+        let m = bare_model();
+        let mut o = obj_of(&m, new_model_uid());
+        o.alpha_row = 2;
+        let mut alpha = [0u8; 16];
+        alpha[1] = 0x50;
+        alpha[2] = 0x7F;
+        let row = |o: &Obj| {
+            let mut t = [0u8; 256];
+            o.fill_alpha_row(&mut t, &alpha);
+            t
+        };
+        o.alpha_add = 0x40;
+        let t = row(&o);
+        assert_eq!(&t[30..33], &[0x40, 0x7F, 0x7F]);
+        assert!(t[..30].iter().chain(&t[45..]).all(|&a| a == 0));
+        o.flags |= 0x8_0000;
+        assert!(row(&o)[30..45].iter().all(|&a| a == 0xFF));
+        o.flags = 0x40_0000;
+        o.preset[4] = 65.0;
+        assert!(row(&o)[30..45].iter().all(|&a| a == 65));
+    }
+
     fn unit_obb(center: [f32; 3]) -> Obb {
         let mut m = IDENTITY;
         m[3] = [center[0], center[1], center[2], 1.0];
@@ -1491,6 +1689,11 @@ impl ObjFlash {
     /// `BtlObjFlash_GetColor`: the colour and its strength (time / 0.2 * alpha / 128) while it runs.
     pub(crate) fn color(&self) -> Option<([f32; 4], f32)> {
         (self.time > 0.0).then(|| (self.color, self.time / 0.2 * self.color[3] * (1.0 / 128.0)))
+    }
+
+    /// The fade as `BtlObjFade_Get` stores it, 0 or not.
+    pub(crate) fn fade_value(&self) -> f32 {
+        self.fade
     }
 
     /// `BtlObjFade_Get`: the fade when not 0.

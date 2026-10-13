@@ -192,6 +192,8 @@
 !/crates/bt3_game/src/gs_stage.wgsl
 !/crates/bt3_game/src/gs_depth.wgsl
 !/crates/bt3_game/src/gs_depth_clut.wgsl
+!/crates/bt3_game/src/gs_id.wgsl
+!/crates/bt3_game/src/gs_outline.wgsl
 !/crates/bt3_game/src/stg_depth.rs
 !/crates/bt3_game/src/stg_glare.rs
 !/crates/bt3_game/src/stg_haze.rs

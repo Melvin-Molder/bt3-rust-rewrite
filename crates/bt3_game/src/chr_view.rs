@@ -104,6 +104,7 @@ impl OrbitCam {
 struct Textures {
     base: Vec<RgbaTexture>,
     shade: Vec<RgbaTexture>,
+    ids: Vec<RgbaTexture>,
     face: crate::btl_face::FaceTables,
 }
 
@@ -114,6 +115,10 @@ impl ModelSink for Textures {
 
     fn shade_textures(&mut self) -> &mut Vec<RgbaTexture> {
         &mut self.shade
+    }
+
+    fn id_textures(&mut self) -> &mut Vec<RgbaTexture> {
+        &mut self.ids
     }
 
     fn face_tables(&self) -> crate::btl_face::FaceTables {
@@ -142,6 +147,8 @@ struct Job {
 pub(crate) struct ViewerFrame {
     pub stage: Vec<StageBatch>,
     pub models: Vec<ModelBatch>,
+    /// `BtlObj_BeginDraw`'s passes, while the model is drawn.
+    pub obj_alpha: Option<crate::battle::ObjAlpha>,
 }
 
 /// `ChrView`.
@@ -152,6 +159,8 @@ pub(crate) struct ChrView {
     /// The stage's textures, then the model's (from `textures`), as the renderer takes them.
     pub stage_textures: Vec<RgbaTexture>,
     textures: Textures,
+    /// The objects' rows of the alpha table.
+    alpha_rows: crate::btl_obj::AlphaRows,
     /// Bumped when `textures` starts over for a new model.
     pub model_rev: u32,
     light_dir: [f32; 3],
@@ -194,6 +203,7 @@ impl ChrView {
                 face,
                 ..Textures::default()
             },
+            alpha_rows: crate::btl_obj::AlphaRows::default(),
             model_rev: 0,
             light_dir,
             cur: None,
@@ -210,8 +220,12 @@ impl ChrView {
     }
 
     /// The model's textures, as the renderer takes them.
-    pub(crate) fn model_textures(&self) -> (Vec<RgbaTexture>, Vec<RgbaTexture>) {
-        (self.textures.base.clone(), self.textures.shade.clone())
+    pub(crate) fn model_textures(&self) -> crate::battle::ModelTextures {
+        (
+            self.textures.base.clone(),
+            self.textures.shade.clone(),
+            self.textures.ids.clone(),
+        )
     }
 
     /// `ChrView_IsVisible`.
@@ -385,22 +399,31 @@ impl ChrView {
         if self.stage_on {
             frame.stage = crate::stage_draw::draw_stage(&mut self.stage, self.stage_id, &view);
         }
+        // The objects' rows, then BtlObj_FinishVisibility's BtlObj_UploadAlphaTable.
+        let objs = self
+            .cur
+            .iter_mut()
+            .chain(self.job.as_mut().and_then(|j| j.slot.as_mut()))
+            .map(|s| &mut s.obj);
+        self.alpha_rows.update(objs);
+        let mut table = [0u8; 256];
+        for s in self
+            .cur
+            .iter()
+            .chain(self.job.as_ref().and_then(|j| j.slot.as_ref()))
+        {
+            s.obj.fill_alpha_row(&mut table, &s.model.alpha);
+        }
         let mut groups = HashMap::new();
         if let Some(s) = &self.cur
             && s.obj.flags & OBJ_VISIBLE != 0
         {
-            crate::battle::draw_model(&s.model, &s.obj, self.light_dir, &view, &mut groups);
+            crate::battle::draw_model(&s.model, &s.obj, false, self.light_dir, &view, &mut groups);
         }
-        let mut models: Vec<ModelBatch> = groups
-            .into_iter()
-            .map(|((textures, look), vertices)| ModelBatch {
-                textures,
-                look,
-                vertices,
-            })
-            .collect();
-        models.sort_by_key(|batch| (batch.textures, batch.look));
-        frame.models = models;
+        frame.models = ModelBatch::from_groups(groups);
+        frame.obj_alpha = (!frame.models.is_empty()).then(|| crate::battle::ObjAlpha {
+            table: Box::new(table),
+        });
         frame
     }
 }

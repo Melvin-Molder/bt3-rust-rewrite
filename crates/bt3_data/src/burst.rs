@@ -108,6 +108,7 @@ impl<'a> BurstModel<'a> {
                 clut_blt: u32_at(bytes, e + 0x1C)?,
                 tbp_offset: 0,
                 cbp_offset: 0,
+                extra: [0; 8],
                 texture_register: u64::from(u32_at(bytes, e + 0x30)?)
                     | (u64::from(u32_at(bytes, e + 0x34)?) << 32),
             });

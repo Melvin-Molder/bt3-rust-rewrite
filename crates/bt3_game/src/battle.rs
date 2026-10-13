@@ -132,6 +132,8 @@ pub(crate) const IDENTITY: Mtx = [
 pub struct BattleAssets {
     /// Material textures (bilinear, wrapping: TEX1 0x60, CLAMP_1 0).
     pub base_textures: Vec<RgbaTexture>,
+    /// By base texture, the alpha it leaves in the frame (`id_texture`).
+    pub id_textures: Vec<RgbaTexture>,
     /// One 256 x 1 row per shading CLUT: the light ramp looked up through it (bilinear, clamped: CLAMP_2 5).
     pub shade_textures: Vec<RgbaTexture>,
     /// The stage texture file, decoded (`StgModel_SetTexture` uploads one at a time to block 0x2A00).
@@ -285,6 +287,10 @@ pub struct BattleAssets {
 }
 
 pub(crate) struct FighterModel {
+    /// This load of the file (`ObjData::model_uid`).
+    pub(crate) uid: u64,
+    /// `mdl.model->alpha`: the material slots' alphas (`BtlObjMdl_InitAlphaSlots`).
+    pub(crate) alpha: [u8; 16],
     pub(crate) chara: i32,
     pub(crate) costume: i32,
     /// The characters its two animation files are of (`BtlRes_Reload`'s files 8 and 9).
@@ -520,6 +526,7 @@ pub fn load(
     let mut assets = BattleAssets {
         base_textures: Vec::new(),
         shade_textures: Vec::new(),
+        id_textures: Vec::new(),
         stage_textures,
         effect_textures: Vec::new(),
         ray_texture: None,
@@ -1291,15 +1298,8 @@ pub(crate) struct SurfAssets {
 /// A texture record with its TCC bit clear (the draw sets it; the texels decode the same).
 fn without_tcc<'a>(e: &bt3_data::tex::TextureEntry<'a>) -> bt3_data::tex::TextureEntry<'a> {
     bt3_data::tex::TextureEntry {
-        pixel_data: e.pixel_data,
-        clut_data: e.clut_data,
-        pixel_size: e.pixel_size,
-        clut_size: e.clut_size,
-        pixel_blt: e.pixel_blt,
-        clut_blt: e.clut_blt,
-        tbp_offset: e.tbp_offset,
-        cbp_offset: e.cbp_offset,
         texture_register: e.texture_register & !(1 << 34),
+        ..*e
     }
 }
 
@@ -1458,12 +1458,57 @@ type Materials = HashMap<(u32, u32), usize>;
 
 /// `BtlObjMdl_BindFiles` / `ObjDraw_UploadTextures` of a model file's textures: per part, per batch, the
 /// material texture and the shading row (the CLUTs through the ramp); and the materials.
+/// The alpha a model texture leaves in the frame (TEX0_1 takes the texel's alpha, ALPHA_1 0x64 with FBA 0 writes
+/// it): per texel the alpha of its CLUT entry in `r`; `g` 0xFF for the entries whose alpha
+/// `BtlObjMdl_InitAlphaSlots` replaced with the material slot's id (the 16 colours at bytes 0x60..0x9F of the CLUT
+/// packet: past its six header quadwords, the first 16 uploaded), `r` then the slot (the object's row * 15 is
+/// added as it draws). `slot` is `None` for a texture whose CLUT keeps its alphas.
+pub(crate) fn id_texture(
+    e: &bt3_data::tex::TextureEntry,
+    slot: Option<u8>,
+) -> std::io::Result<RgbaTexture> {
+    let t = bt3_data::gs::decode_indexed_texture(e)?;
+    let offsets = bt3_data::gs::clut_entry_offsets(e)?;
+    let patched = |i: u8| {
+        offsets
+            .get(usize::from(i))
+            .is_some_and(|&o| (0x60..0xA0).contains(&o))
+    };
+    let pixels = t
+        .indices
+        .iter()
+        .flat_map(|&i| match slot {
+            Some(slot) if patched(i) => [slot, 0xFF, 0, 0xFF],
+            _ => [
+                t.palette.get(usize::from(i)).map_or(0, |c| c[3]),
+                0,
+                0,
+                0xFF,
+            ],
+        })
+        .collect();
+    Ok(RgbaTexture {
+        width: t.width,
+        height: t.height,
+        pixels,
+    })
+}
+
+#[allow(clippy::type_complexity)]
 fn bind_model_textures(
     model: &CharaModel,
     textures: &TextureResource,
     ramp: &[u8],
     assets: &mut dyn ModelSink,
-) -> Result<(Vec<Vec<[usize; 2]>>, Materials, HashMap<u32, usize>), String> {
+) -> Result<
+    (
+        Vec<Vec<[usize; 2]>>,
+        Materials,
+        HashMap<u32, usize>,
+        [u8; 16],
+    ),
+    String,
+> {
     let error = |e: std::io::Error| e.to_string();
     let header = &model.header;
     let entry = |i: u8| {
@@ -1473,6 +1518,9 @@ fn bind_model_textures(
             .ok_or_else(|| format!("texture {i} is missing"))
     };
     let mut materials = HashMap::new();
+    // BtlObjMdl_InitAlphaSlots: each material texture's slot (entry byte 0x2C) and alpha (0x2D, above 0x80 0x7F);
+    // the texture `texNoAlpha` (0 none) keeps its CLUT and gives its slot alpha 0.
+    let mut alpha = [0u8; 16];
     for i in header.tex_first..header.tex_first.saturating_add(header.tex_count) {
         let e = entry(i)?;
         let mut texture = decode_sprite_texture(e).map_err(error)?;
@@ -1480,11 +1528,25 @@ fn bind_model_textures(
         for pixel in texture.pixels.chunks_exact_mut(4) {
             pixel[3] = 0xFF;
         }
+        let slot = e.extra[4];
+        let skip = header.tex_no_alpha != 0 && header.tex_no_alpha == i;
+        let a = if skip {
+            0
+        } else if e.extra[5] > 0x80 {
+            0x7F
+        } else {
+            e.extra[5]
+        };
+        if let Some(v) = alpha.get_mut(usize::from(slot)) {
+            *v = a;
+        }
         materials.insert(
             (e.tbp_offset as u32, e.cbp_offset as u32),
             assets.base_textures().len(),
         );
         assets.base_textures().push(texture);
+        let ids = id_texture(e, (!skip).then_some(slot)).map_err(error)?;
+        assets.id_textures().push(ids);
     }
     let mut shades = HashMap::new();
     for i in header.clut_first..header.clut_first.saturating_add(header.clut_count) {
@@ -1514,7 +1576,7 @@ fn bind_model_textures(
                 .collect()
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok((batch_textures, materials, shades))
+    Ok((batch_textures, materials, shades, alpha))
 }
 
 /// A batch's material texture (its TEX0_1's blocks less the model's lowest) and shading row (its TEX0_2's CLUT).
@@ -1548,7 +1610,7 @@ pub(crate) fn load_effect_model(
     let model = CharaModel::from_file(pack).map_err(error)?;
     let textures = TextureResource::parse(pack_section(pack, TEXTURE_SECTION).map_err(error)?)
         .map_err(error)?;
-    let (batch_textures, _, _) = bind_model_textures(&model, &textures, ramp, assets)?;
+    let (batch_textures, _, _, alpha) = bind_model_textures(&model, &textures, ramp, assets)?;
     let anims = (0..crate::eft_obj::MODEL_ANIMS)
         .map(|i| {
             bt3_data::pack_entry(pack, 0x1D + i)
@@ -1556,6 +1618,8 @@ pub(crate) fn load_effect_model(
         })
         .collect();
     Ok(crate::eft_obj::EffectModel {
+        uid: crate::btl_obj::new_model_uid(),
+        alpha,
         model,
         batch_textures,
         anims,
@@ -1602,7 +1666,8 @@ fn load_fighter(
             .get(usize::from(i))
             .ok_or_else(|| format!("texture {i} is missing"))
     };
-    let (batch_textures, materials, shades) = bind_model_textures(&model, &textures, ramp, assets)?;
+    let (batch_textures, materials, shades, alpha) =
+        bind_model_textures(&model, &textures, ramp, assets)?;
     // BtlObj_BindTables / BtlObj_CreateFace: the face's meshes, textures and lip tracks (of the voice set of the
     // options).
     let face_data = bt3_data::face::FaceData::from_file(file, crate::sound::options().alt_voice)
@@ -1621,6 +1686,9 @@ fn load_fighter(
             pixel[3] = 0xFF;
         }
         assets.base_textures().push(texture);
+        // ObjDraw_UploadTextures puts a face frame's own CLUT where the face texture's was.
+        let ids = id_texture(e, None).map_err(error)?;
+        assets.id_textures().push(ids);
         Ok(assets.base_textures().len() - 1)
     };
     let eye_table = bt3_data::pack_entry(file, bt3_data::face::EYE_TABLE)
@@ -1664,6 +1732,8 @@ fn load_fighter(
         tables: assets.face_tables(),
     });
     Ok(FighterModel {
+        uid: crate::btl_obj::new_model_uid(),
+        alpha,
         chara: 0,
         costume: 0,
         anim_chara: 0,
@@ -1702,14 +1772,131 @@ pub struct ScreenVertex {
     pub uq: f32,
 }
 
+/// What `BtlObj_BeginDraw`'s passes (`GfxAlphaKey`, `ObjOutline`, `ObjGlow`) read beyond the objects' ids: the
+/// glow's alpha table (`ObjGlow_SetAlphaTable`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjAlpha {
+    pub table: Box<[u8; 256]>,
+}
+
+/// What a batch leaves in the frame's alpha (`ObjDraw_SetLight`'s FRAME_1 masks, the CLUT pass's dimming), which
+/// `BtlObj_BeginDraw`'s passes read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AlphaWrite {
+    /// Alpha masked.
+    #[default]
+    None,
+    /// The texels' ids (`id_texture`), the material slots' those of the object's alpha row.
+    Ids(u8),
+    /// One alpha for every texel (`ObjDraw_AddClutPass`'s dimming: 0xF4 + parameter byte 3).
+    Dim(u8),
+}
+
+/// How a batch draws: its textures and colour mode, whether it writes colour, its alpha, whether it writes depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BatchKey {
+    pub textures: [usize; 2],
+    pub look: ModelLook,
+    pub rgb: bool,
+    pub alpha: AlphaWrite,
+    pub depth: bool,
+}
+
+/// The triangles of one frame's model draws, by how they draw.
+pub(crate) type BatchGroups = HashMap<BatchKey, Vec<ScreenVertex>>;
+
 /// Triangles drawn with one material texture and one shading row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelBatch {
     pub textures: [usize; 2],
     /// The fighter's colour mode as the batch is drawn.
     pub look: ModelLook,
+    /// The colour is written (not by a draw that only leaves its alpha).
+    pub rgb: bool,
+    pub alpha: AlphaWrite,
+    /// Depth is written.
+    pub depth: bool,
     /// Three vertices per triangle.
     pub vertices: Vec<ScreenVertex>,
+}
+
+impl ModelBatch {
+    /// The batches of a frame's groups, in a fixed order.
+    pub(crate) fn from_groups(groups: BatchGroups) -> Vec<Self> {
+        let mut batches: Vec<(BatchKey, Vec<ScreenVertex>)> = groups.into_iter().collect();
+        batches.sort_by_key(|(k, _)| *k);
+        batches
+            .into_iter()
+            .map(|(k, vertices)| Self {
+                textures: k.textures,
+                look: k.look,
+                rgb: k.rgb,
+                alpha: k.alpha,
+                depth: k.depth,
+                vertices,
+            })
+            .collect()
+    }
+}
+
+/// The colour flags of `ObjDraw_SetLight`'s lit draws (the others write no colour).
+pub(crate) const COLOR_FLAGS: u32 = 0x1_0000 | 0x2_0000 | 0x4_0000 | 0x8_0000 | 0x40_0000;
+
+/// `BtlObj_UpdateView`'s flags of a fighter in a view: one asking with flag 0x2000000 that the camera is inside of
+/// (its body box grown 2.2 times) goes to the draw list's third pass (0x200000), its colour flags cleared. The
+/// battle flag that turns the test off (0x2000000000000000) is never set.
+pub(crate) fn view_flags(obj: &crate::btl_obj::Obj, chara: bool, view: &View) -> u32 {
+    let flags = obj.flags;
+    if chara && flags & 2 != 0 && flags & 0x200_0000 != 0 && !obj.body.boxes.is_empty() {
+        let b = &obj.body.bounds;
+        let eye = view.eye();
+        let inside = (0..3).all(|k| {
+            let c = (b.max[k] + b.min[k]) * 0.5;
+            let h = (b.max[k] - b.min[k]) * 0.5 * 2.2;
+            !(c + h < eye[k]) && !(eye[k] < c - h)
+        });
+        if inside {
+            return (flags & 0xFF00_FFFF) | 0x20_0000;
+        }
+    }
+    flags
+}
+
+/// `ObjDraw_SetLight`'s FRAME_1 / ZBUF state and the CLUT pass's dimming for an object's draw: (colour, alpha,
+/// depth) of its body and of its head (node 0x33, drawn between `ObjGs_AddFrameMaskOpaque` and `Blend`: alpha
+/// masked, unless the draw dims). The alpha is written with the object's flags 2 and 4 by the lit draws, always
+/// by a draw without a colour flag (which writes neither colour nor depth).
+fn obj_writes(obj_flags: u32, view_flags: u32, row: u8, dim: u8) -> [(bool, AlphaWrite, bool); 2] {
+    let alpha_on = obj_flags & 6 == 6;
+    let dims = view_flags & 0x20_0000 != 0;
+    let ids = if dims {
+        AlphaWrite::Dim(dim)
+    } else {
+        AlphaWrite::Ids(row)
+    };
+    let masked = |on: bool| if on { ids } else { AlphaWrite::None };
+    let (body, head_rgb) = if view_flags & COLOR_FLAGS != 0 {
+        ((true, masked(alpha_on), true), true)
+    } else if view_flags & 0x10_0000 != 0 {
+        ((false, masked(alpha_on), true), false)
+    } else {
+        ((false, ids, false), true)
+    };
+    let head = if dims {
+        body
+    } else {
+        (head_rgb, AlphaWrite::None, body.2)
+    };
+    [body, head]
+}
+
+/// `ObjDraw_GetDimAlpha`: 0xF4 plus the parameter block's byte 3 (0xF4 without one).
+fn dim_alpha(tables: &CharaTables) -> u8 {
+    if tables.params.is_empty() {
+        0xF4
+    } else {
+        tables.params.u8_at(3).wrapping_add(0xF4)
+    }
 }
 
 /// What one battle frame draws, in `Battle_Draw`'s order: the stage, then the fighters, then the overlay pass
@@ -1743,6 +1930,8 @@ pub struct BattleFrame {
     pub texture_updates: Vec<(usize, RgbaTexture)>,
     /// `BtlObjDraw_DrawShadows`: the fighters' ground shadows, after the fighters.
     pub shadows: Vec<EffectTri>,
+    /// `BtlObj_BeginDraw`'s passes over the objects drawn (none without one).
+    pub obj_alpha: Option<ObjAlpha>,
     /// `Pad_SendActuator`: each pad's `vibData` (big motor power << 1, small motor bit 0).
     pub rumble: [u8; 2],
 }
@@ -1837,6 +2026,9 @@ pub struct Battle {
     /// `gBtlChars`.
     pub(crate) roster: Roster,
     light_dir: [f32; 3],
+    /// The objects' rows of the alpha table, and the table `BtlObj_UploadAlphaTable` sent last (kept while paused).
+    alpha_rows: crate::btl_obj::AlphaRows,
+    alpha_table: Box<[u8; 256]>,
     pub(crate) seq: Seq,
     pub(crate) demo: DemoCam,
     /// `gEftCam`: a rush technique's camera animation.
@@ -1931,6 +2123,8 @@ pub(crate) fn light_ramp(common: &[u8]) -> Result<Vec<u8>, String> {
 pub(crate) trait ModelSink {
     fn base_textures(&mut self) -> &mut Vec<RgbaTexture>;
     fn shade_textures(&mut self) -> &mut Vec<RgbaTexture>;
+    /// By base texture, its id texture (`id_texture`).
+    fn id_textures(&mut self) -> &mut Vec<RgbaTexture>;
     fn face_tables(&self) -> crate::btl_face::FaceTables;
 }
 
@@ -1943,10 +2137,17 @@ impl ModelSink for BattleAssets {
         &mut self.shade_textures
     }
 
+    fn id_textures(&mut self) -> &mut Vec<RgbaTexture> {
+        &mut self.id_textures
+    }
+
     fn face_tables(&self) -> crate::btl_face::FaceTables {
         self.fx_tables.face.clone()
     }
 }
+
+/// A model user's textures: base, shading rows and ids (`ModelSink`).
+pub type ModelTextures = (Vec<RgbaTexture>, Vec<RgbaTexture>, Vec<RgbaTexture>);
 
 /// What reads the files of a character change.
 pub type Loader = Box<dyn FnMut(u32) -> Result<Vec<u8>, String> + Send + Sync>;
@@ -1978,6 +2179,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
             chara: f.chara,
             height: f.tables.params.height(),
             face: f.face.as_ref(),
+            model_uid: f.uid,
         },
         tables: &f.tables,
         entry: f.entry,
@@ -2292,6 +2494,8 @@ impl Battle {
             seq,
             demo: DemoCam::default(),
             eft_cam: crate::battle_seq::EftCam::default(),
+            alpha_rows: crate::btl_obj::AlphaRows::default(),
+            alpha_table: Box::new([0; 256]),
             xfade: ScrXfade::default(),
             water_wobble,
             depth_tints,
@@ -3622,6 +3826,12 @@ impl Battle {
                 .collect();
             self.roster.scene.warps.update(&ctxs);
         }
+        // The objects' rows (`BtlObjMdl_BindFiles` / `BtlObjMdl_Destroy`), and BtlObj_FinishVisibility's
+        // BtlObj_UploadAlphaTable (not while paused).
+        self.update_alpha_rows();
+        if !self.seq.paused {
+            self.alpha_table = Box::new(self.alpha_table());
+        }
         // BtlScene_SetSingleView / Battle_DrawSplit: one view, or split screen's two with their scissors.
         let mut stage = Vec::new();
         let mut batches = Vec::new();
@@ -3712,6 +3922,7 @@ impl Battle {
             tints.release();
             front
         };
+        let batches_empty = batches.is_empty();
         BattleFrame {
             stage,
             models: batches,
@@ -3741,9 +3952,49 @@ impl Battle {
             post,
             texture_updates,
             shadows,
+            // BtlObjDraw_Draw's BtlObj_BeginDraw, when an object is drawn.
+            obj_alpha: (!batches_empty).then(|| ObjAlpha {
+                table: self.alpha_table.clone(),
+            }),
             rumble: self.roster.pad_vib.each_mut().map(|p| p.send()),
         }
     }
+    /// The battle objects as the pool holds them: the fighters, their partner objects, the effect objects.
+    fn update_alpha_rows(&mut self) {
+        let r = &mut self.roster;
+        let mut objs: Vec<&mut crate::btl_obj::Obj> = Vec::new();
+        for c in r.chars.iter_mut() {
+            objs.push(&mut c.obj);
+            if let Some(p) = &mut c.partner {
+                objs.push(&mut p.obj);
+            }
+        }
+        objs.extend(r.scene.eft_objs.objs_mut());
+        self.alpha_rows.update(objs);
+    }
+
+    /// `BtlObj_UploadAlphaTable`: every object's row (`BtlObj_FillAlphaRow`), 0 elsewhere.
+    fn alpha_table(&self) -> [u8; 256] {
+        let mut table = [0u8; 256];
+        for s in 0..2 {
+            let c = &self.roster.chars[s];
+            let f = &self.assets.fighters[s];
+            c.obj.fill_alpha_row(&mut table, &f.alpha);
+            if let (Some(p), Some(m)) = (&c.partner, f.partner.as_deref()) {
+                p.obj.fill_alpha_row(&mut table, &m.alpha);
+            }
+        }
+        for o in self.roster.scene.eft_objs.iter() {
+            if let Some(m) = self.assets.fighters[o.model.side].tech_packs[o.model.slot]
+                .as_ref()
+                .and_then(|p| p.model.as_ref())
+            {
+                o.obj.fill_alpha_row(&mut table, &m.alpha);
+            }
+        }
+        table
+    }
+
     /// One view's draw of `Battle_Draw` / `Battle_DrawSplit`: `StgModel_Draw`, `BtlObjDraw_Draw`'s fighters and
     /// shadows for the view, then `BtlScene_Draw` and `Ot_Draw` (`sv` says which view of split screen it is).
     fn draw_view(
@@ -3781,15 +4032,15 @@ impl Battle {
                 view.eye(),
             ));
         }
-        let mut groups: HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>> = HashMap::new();
+        let mut groups: BatchGroups = HashMap::new();
         // The fighters, then their partner objects while drawn (flag 2), as `BtlObjDraw_Draw` draws them.
         let fighters = (0..2).map(|s| (&self.assets.fighters[s], &self.roster.chars[s].obj));
         let partners = (0..2).filter_map(|s| {
             let obj = &self.roster.chars[s].partner.as_ref()?.obj;
             (obj.flags & 2 != 0).then_some((self.assets.fighters[s].partner.as_deref()?, obj))
         });
-        for (model, obj) in fighters.chain(partners) {
-            draw_model(model, obj, self.light_dir, &view, &mut groups);
+        for (i, (model, obj)) in fighters.chain(partners).enumerate() {
+            draw_model(model, obj, i < 2, self.light_dir, &view, &mut groups);
         }
         // The effect objects (`EftObj`), drawn as the fighters are: a prop shot's prop.
         for o in self.roster.scene.eft_objs.iter() {
@@ -3805,15 +4056,7 @@ impl Battle {
             };
             draw_effect_model(m, &o.obj, self.light_dir, &view, &mut groups);
         }
-        let mut batches: Vec<ModelBatch> = groups
-            .into_iter()
-            .map(|((textures, look), vertices)| ModelBatch {
-                textures,
-                look,
-                vertices,
-            })
-            .collect();
-        batches.sort_by_key(|batch| (batch.textures, batch.look));
+        let batches = ModelBatch::from_groups(groups);
         // BtlObjDraw_DrawShadows: per object shown with flags 2 and 0x10 (the fighters, then their partner
         // objects): a flat shadow (flag 0x20000000), or with the shadow flag the page of its silhouette and the
         // ground triangles textured with it.
@@ -3834,9 +4077,8 @@ impl Battle {
             }
         });
         for (slot, obj, model) in objects {
-            if obj.flags & 0x12 != 0x12
-                || model_look(obj, model.header.flags, self.light_dir, &view).is_none()
-            {
+            // A draw that writes no colour has no shadow.
+            if obj.flags & 0x12 != 0x12 || obj.flags & COLOR_FLAGS == 0 {
                 continue;
             }
             if crate::obj_shadow::flat(obj.flags, self.loading) {
@@ -4093,18 +4335,39 @@ impl Battle {
 /// texture of the frame for the model's, grouped by textures and look.
 /// `BtlObjDraw_Draw` of an object that is not a fighter (an effect model's, the dragon scene's): its parts shown by
 /// the model's and the object's flags, posed by its nodes.
+/// The keys of an object's body and head batches (the textures set by the batch).
+fn part_keys(obj: &crate::btl_obj::Obj, flags: u32, look: ModelLook, dim: u8) -> [BatchKey; 2] {
+    obj_writes(obj.flags, flags, obj.alpha_row, dim).map(|(rgb, alpha, depth)| BatchKey {
+        textures: [0; 2],
+        look,
+        rgb,
+        alpha,
+        depth,
+    })
+}
+
+/// `ObjDraw_DrawParts`' lit draw: the head is the last part on node 0x33 (an earlier one is not drawn).
+fn head_part(parts: &[ModelPart]) -> Option<usize> {
+    parts.iter().rposition(|p| p.enabled && p.node == 0x33)
+}
+
 pub(crate) fn draw_effect_model(
     m: &crate::eft_obj::EffectModel,
     obj: &crate::btl_obj::Obj,
     light_dir: [f32; 3],
     view: &View,
-    groups: &mut HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>>,
+    groups: &mut BatchGroups,
 ) {
-    let Some((light, look)) = model_look(obj, m.model.header.flags, light_dir, view) else {
-        return;
-    };
+    let flags = obj.flags;
+    let (light, look) = model_look(obj, flags, m.model.header.flags, light_dir, view);
+    // An effect model has no parameter block.
+    let keys = part_keys(obj, flags, look, 0xF4);
+    let head = head_part(&m.model.parts);
     let parts = m.model.parts.iter().zip(&m.batch_textures).zip(&obj.nodes);
-    for ((part, textures), node) in parts {
+    for (i, ((part, textures), node)) in parts.enumerate() {
+        if part.node == 0x33 && Some(i) != head {
+            continue;
+        }
         if part.enabled && node_shown(m.model.header.flags, obj.flags, part.node) {
             draw_part(
                 part,
@@ -4113,7 +4376,7 @@ pub(crate) fn draw_effect_model(
                 &node.mtx,
                 &node.parent,
                 light,
-                look,
+                keys[usize::from(part.node == 0x33)],
                 view,
                 groups,
             );
@@ -4121,16 +4384,19 @@ pub(crate) fn draw_effect_model(
     }
 }
 
+/// An object of a fighter's model in a view (`chara`: a fighter, which the camera may be inside of).
 pub(crate) fn draw_model(
     model: &FighterModel,
     obj: &crate::btl_obj::Obj,
+    chara: bool,
     light_dir: [f32; 3],
     view: &View,
-    groups: &mut HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>>,
+    groups: &mut BatchGroups,
 ) {
-    let Some((light, look)) = model_look(obj, model.model.header.flags, light_dir, view) else {
-        return;
-    };
+    let flags = view_flags(obj, chara, view);
+    let (light, look) = model_look(obj, flags, model.model.header.flags, light_dir, view);
+    let keys = part_keys(obj, flags, look, dim_alpha(&model.tables));
+    let head = head_part(&model.model.parts);
     let parts = model
         .model
         .parts
@@ -4147,7 +4413,10 @@ pub(crate) fn draw_model(
         .and_then(crate::btl_face::Face::texture)
         .and_then(|t| model.face_draw.texture(t))
         .zip(model.face_draw.material);
-    for ((part, textures), node) in parts {
+    for (i, ((part, textures), node)) in parts.enumerate() {
+        if part.node == 0x33 && Some(i) != head {
+            continue;
+        }
         if part.enabled && node_shown(model.model.header.flags, obj_flags, part.node) {
             let (batches, textures) = match mouth {
                 Some((b, t)) if part.node == 0x30 => (b.as_slice(), t.as_slice()),
@@ -4171,7 +4440,7 @@ pub(crate) fn draw_model(
                 &node.mtx,
                 &node.parent,
                 light,
-                look,
+                keys[usize::from(part.node == 0x33)],
                 view,
                 groups,
             );
@@ -4191,15 +4460,15 @@ pub struct ModelLook {
     pub unshaded: bool,
 }
 
-/// `ObjDraw_SetLight`'s light direction and the CLUT pass, by the object's colour flag; `None` for the colour
-/// flags whose draw writes no colour (0x100000, 0x200000).
+/// `ObjDraw_SetLight`'s light direction and the CLUT pass, by the colour flag of the view's flags `flags` (the
+/// stage light for the draws without one, which write no colour but a head).
 pub(crate) fn model_look(
     obj: &crate::btl_obj::Obj,
+    flags: u32,
     model_flags: u32,
     stage_light: [f32; 3],
     view: &View,
-) -> Option<([f32; 3], ModelLook)> {
-    let flags = obj.flags;
+) -> ([f32; 3], ModelLook) {
     let m = &view.world2view;
     let cam_z = [m[0][2], m[1][2], m[2][2]];
     // The camera's direction to node 3, leaning along the view's x axis (its y replaced by the axis's).
@@ -4234,7 +4503,7 @@ pub(crate) fn model_look(
     } else if flags & 0x4_0000 != 0 {
         towards(obj.flash.fade().unwrap_or(0.0))
     } else {
-        return None;
+        stage_light
     };
     let mut look = ModelLook {
         unshaded: flags & 0x8_0000 != 0,
@@ -4258,7 +4527,7 @@ pub(crate) fn model_look(
             a as u8,
         ];
     }
-    Some((light, look))
+    (light, look)
 }
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -4569,6 +4838,7 @@ fn projection(layout: Layout) -> (Mtx, Mtx, Mtx) {
 /// `ObjDraw_DrawParts` mode 0 for one part and VU1 program 0 on its batches: bone A is the part's node, bone B
 /// its parent; `offset_a` / `offset_b` are their rest positions in model space.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn draw_part(
     part: &ModelPart,
     batches: &[Batch],
@@ -4576,16 +4846,21 @@ fn draw_part(
     mtx_a: &Mtx,
     mtx_b: &Mtx,
     light_dir: [f32; 3],
-    look: ModelLook,
+    key: BatchKey,
     view: &View,
-    groups: &mut HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>>,
+    groups: &mut BatchGroups,
 ) {
     // Mtx_MakeNormalLight(light, lightDir, 0, 0): x of light * n is -L . n; Vec3_Normalize clears w.
     let neg_light = scale3(normalize(light_dir), -1.0);
     for (batch, &tex) in batches.iter().zip(textures) {
         let mut flags = [false; 2];
         let mut previous: [Option<ScreenVertex>; 2] = [None, None];
-        let out = groups.entry((tex, look)).or_default();
+        let out = groups
+            .entry(BatchKey {
+                textures: tex,
+                ..key
+            })
+            .or_default();
         for vertex in &batch.vertices {
             let [x, y, z, w] = vertex.position;
             let pa = apply(
@@ -4772,6 +5047,76 @@ pub(crate) mod tests {
         assert_eq!(target, [0.0, -14.0, 0.0]);
         assert_eq!(rot[1], 0.0);
         assert!(rot[0] < 0.0);
+    }
+
+    #[test]
+    fn real_fighters_leave_their_ids_in_the_frames_alpha() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
+            return;
+        };
+        let cnf = image.read_file("SYSTEM.CNF").unwrap();
+        let exe = bt3_data::elf::boot_path(&cnf).unwrap();
+        let elf = Elf::parse(image.read_file(&exe).unwrap()).unwrap();
+        let mut read = |id: u32| -> Result<Vec<u8>, String> {
+            let location = bt3_data::afs::partition_entry_for_id(id);
+            let archive = bt3_data::afs::AfsArchive::open(
+                &mut image,
+                format!("DATA/PZS3US{}.AFS", location.partition),
+            )
+            .map_err(|e| e.to_string())?;
+            archive
+                .read_entry(&mut image, location.index)
+                .map_err(|e| e.to_string())
+        };
+        let mut setup = BattleSetup::default();
+        setup.sides[0].chara = 0;
+        setup.sides[1].chara = 1;
+        setup.mode = 5;
+        let assets = load(&mut read, &elf, &setup).unwrap();
+        // Every base texture has its id texture; the material textures' slot entries are marked.
+        assert_eq!(assets.id_textures.len(), assets.base_textures.len());
+        let marked = assets
+            .id_textures
+            .iter()
+            .filter(|t| t.pixels.chunks_exact(4).any(|p| p[1] == 0xFF))
+            .count();
+        assert!(marked > 0);
+        // Goku's material slot 11 glows (alpha 100), his others do not.
+        assert_eq!(assets.fighters[0].alpha[11], 100);
+        let mut battle = Battle::new(assets);
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let frame = battle.run_frame(
+            false,
+            [PadState::default(); 2],
+            0,
+            &mut libc,
+            &mut random,
+            None,
+            true,
+        );
+        // The two fighters took rows 0 and 1 and write their ids (their flags 2 and 4).
+        let rows: std::collections::BTreeSet<_> = frame
+            .models
+            .iter()
+            .filter_map(|b| match b.alpha {
+                AlphaWrite::Ids(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.into_iter().collect::<Vec<_>>(), [0, 1]);
+        let table = &frame.obj_alpha.as_ref().unwrap().table;
+        assert_eq!(
+            table[..15],
+            battle.assets.fighters[0].alpha.map(|a| a.min(0x7F))[..15]
+        );
+        assert_eq!(
+            table[15..30],
+            battle.assets.fighters[1].alpha.map(|a| a.min(0x7F))[..15]
+        );
+        assert!(table[30..].iter().all(|&a| a == 0));
     }
 
     #[test]

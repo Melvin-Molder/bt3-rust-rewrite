@@ -23,12 +23,13 @@ use crate::model_draw::FrameBuffers;
 use crate::post::{PostBuf, PostOp};
 
 const GS_POST_SHADER: Handle<Shader> = uuid_handle!("5e2a9c41-7b3d-4f8a-9e16-c2d84a0f7b35");
-/// The render layers of each chain's cameras (one each) and how many there are: a blur of three passes takes five.
-const POST_LAYER_BASE: [usize; 2] = [17, 5];
-const POST_CAMERAS: [usize; 2] = [28, 12];
-/// The camera orders of the chains: the pre chain after the stage camera (0), the post chain after the fighters'
-/// camera (`model_draw::FIGHTER_ORDER`).
-const POST_ORDER_BASE: [isize; 2] = [1, 31];
+/// The render layers of each chain's cameras (one each) and how many there are: a blur of three passes takes five,
+/// a glow sixteen.
+const POST_LAYER_BASE: [usize; 3] = [17, 5, 47];
+const POST_CAMERAS: [usize; 3] = [28, 12, 16];
+/// The camera orders of the chains: the pre chain after the stage camera (0); `BtlObj_BeginDraw`'s glow after the
+/// fighters' camera (`model_draw::FIGHTER_ORDER`, 30), before the effects' (47); the post chain after that.
+const POST_ORDER_BASE: [isize; 3] = [1, 48, 31];
 
 /// One op's triangles: the source buffer, copied or blended (ALPHA 0x44), in the order of its group.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -141,6 +142,7 @@ type PostKey = (
     Option<AssetId<Image>>,
     PostBuf,
     Option<[u16; 4]>,
+    bool,
 );
 
 /// A post camera: its chain, its place in the chain and the image it draws into.
@@ -173,7 +175,7 @@ fn spawn_post_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>)
         TextureFormat::Rgba8UnormSrgb,
         None,
     ));
-    for chain in 0..2 {
+    for chain in 0..3 {
         for i in 0..POST_CAMERAS[chain] {
             commands.spawn((
                 Camera2d,
@@ -227,6 +229,7 @@ pub fn sync_post(
     )>,
     slots: Query<(Entity, &Mesh2d), With<PostSlot>>,
     plane: Res<crate::model_draw::DepthPlane>,
+    ids: Res<crate::model_draw::IdPlane>,
     mut images: ResMut<Assets<Image>>,
 ) {
     if !game.is_changed() {
@@ -241,7 +244,11 @@ pub fn sync_post(
         PostBuf::Work(i) => work.0[i & 1].clone(),
         PostBuf::Wide => work.1.clone(),
     };
-    let chains = [groups(&game.pre_ops), groups(&game.post_ops)];
+    let chains = [
+        groups(&game.pre_ops),
+        groups(&game.post_ops),
+        groups(&game.obj_ops),
+    ];
     for (mut cam, mut camera, mut target, mut projection) in &mut cameras {
         match chains[cam.0].get(cam.1) {
             Some(g) => {
@@ -278,7 +285,11 @@ pub fn sync_post(
                     mask.as_ref().map(Handle::id),
                     op.target,
                     op.region,
+                    op.ids,
                 );
+                // The depth buffer's spare byte: the stage's depth, or the objects' ids once BtlObj_BeginDraw
+                // copied them there.
+                let byte = if op.ids { ids.image() } else { plane.image() };
                 let [tw, th] = op.target.size();
                 let material = cache
                     .0
@@ -286,8 +297,8 @@ pub fn sync_post(
                     .or_insert_with(|| {
                         materials.add(GsPostMaterial {
                             texture,
-                            plane: plane.image(),
-                            mask: mask.clone().unwrap_or_else(|| plane.image()),
+                            plane: byte.clone(),
+                            mask: mask.clone().unwrap_or_else(|| byte.clone()),
                             params: Vec4::new(
                                 if mask.is_some() { 1.0 } else { 0.0 },
                                 512.0 / tw,
@@ -381,6 +392,7 @@ mod tests {
             target: t,
             blend: false,
             mask: None,
+            ids: false,
             add: false,
             region: None,
             tris: Vec::new(),

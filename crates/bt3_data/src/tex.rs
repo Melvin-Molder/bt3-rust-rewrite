@@ -17,6 +17,9 @@ pub struct TextureEntry<'a> {
     /// `tbpOfs` / `cbpOfs`: block offsets of the pixels / CLUT from the file's first texture.
     pub tbp_offset: i32,
     pub cbp_offset: i32,
+    /// +0x28..+0x30 (`unk28`): for a model's material texture, [4] its material slot and [5] the slot's base
+    /// alpha (`BtlObjMdl_InitAlphaSlots`).
+    pub extra: [u8; 8],
     pub texture_register: u64,
 }
 
@@ -66,6 +69,7 @@ impl<'a> TextureResource<'a> {
                 clut_blt: read_u32(entry, 28)?,
                 tbp_offset: read_i32(entry, 32)?,
                 cbp_offset: read_i32(entry, 36)?,
+                extra: entry[40..48].try_into().unwrap(),
                 texture_register: read_u64(entry, 48)?,
             });
         }

@@ -80,7 +80,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 - [x] Effects, stages and their effects, cameras, the demo camera
 - [x] HUD, pause and result menus, replays
 - [x] Sound: the fighters' sounds and voices, music, announcer
-- [ ] The objects' frame-alpha passes of `BtlObj_BeginDraw` (`GfxAlphaKey`, `ObjOutline`, `ObjGlow`: each material's alpha id in the frame, the glow of `BtlObj_SetAlphaAdd`; src/sys/gfx_post.c, gfx_screen.c)
+- [x] The objects' frame-alpha passes of `BtlObj_BeginDraw` (`GfxAlphaKey`, `ObjOutline`, `ObjGlow`: each material's alpha id in the frame, the glow of `BtlObj_SetAlphaAdd`; src/sys/gfx_post.c, gfx_screen.c)
 
 ## By function
 

@@ -123,6 +123,15 @@ impl Glare {
             Box::new(std::array::from_fn(
                 |i| if i == 0xFF { 0x80 } else { alpha },
             ));
+        glow_ops(mask, false, self.level.clamp(0, 255) as u8)
+    }
+}
+
+/// `GfxPost_DrawGlow(10, 0x80808080, glow)`: the frame weighed by the frame's alpha, which `mask` gives by the
+/// depth buffer's spare byte (the stage's depth, or with `ids` the objects' ids), halved into a work buffer over
+/// black, shrunk, blurred back and forth, grown back tinted by `level` (`glow`'s grey) and added over the frame.
+pub(crate) fn glow_ops(mask: Box<[u8; 256]>, ids: bool, level: u8) -> Vec<PostOp> {
+    {
         let sprite = |s, t, xy, uv, rgba| PostOp::sprite(s, t, false, xy, uv, rgba);
         // The corner buffers read only their own texels (CLAMP_1 REGION_CLAMP).
         let within = |mut op: PostOp, w: u16, h: u16| {
@@ -148,6 +157,7 @@ impl Glare {
             [0x80; 4],
         );
         weighed.mask = Some(mask);
+        weighed.ids = ids;
         ops.push(weighed);
         // To a quarter, then an eighth one texel on.
         ops.push(sprite(
@@ -189,7 +199,7 @@ impl Glare {
             ));
         }
         // Back up, tinted by the level, and added over the frame.
-        let l = self.level.clamp(0, 255) as u8;
+        let l = level;
         ops.push(within(
             sprite(
                 w0,

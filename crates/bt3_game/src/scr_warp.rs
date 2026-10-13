@@ -188,6 +188,7 @@ impl ScrWarps {
             target: PostBuf::Frame,
             blend: true,
             mask: None,
+            ids: false,
             add: false,
             region: None,
             tris: Vec::new(),

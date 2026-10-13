@@ -406,7 +406,7 @@ struct Game {
     /// The loading screen type shown last (`Load_InitScreen` avoids repeating it).
     last_loading_type: Option<u16>,
     /// The battle's model textures (material, shading rows) and this frame's model triangles.
-    model_textures: (Vec<RgbaTexture>, Vec<RgbaTexture>),
+    model_textures: battle::ModelTextures,
     /// Bumped whenever `model_textures` starts over (a battle, a model of the viewer).
     model_rev: u32,
     model_batches: Vec<battle::ModelBatch>,
@@ -428,6 +428,9 @@ struct Game {
     effect_point: Vec<usize>,
     /// `StgFx_DrawPost`'s redraws of the frame (the radial blur).
     post_ops: Vec<post::PostOp>,
+    /// `BtlObj_BeginDraw`'s passes over the objects drawn (`set_obj_alpha`), and its glow's ops.
+    obj_alpha: Option<battle::ObjAlpha>,
+    obj_ops: Vec<post::PostOp>,
     /// `StgFx_DrawPre`'s ops, between the stage and the fighters.
     pre_ops: Vec<post::PostOp>,
     /// The battle frame's depth tint (`StgDepthTint_Draw`).
@@ -859,7 +862,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             libc_random,
             vu0_random: rng::Vu0Random::default(),
             last_loading_type: None,
-            model_textures: (Vec::new(), Vec::new()),
+            model_textures: (Vec::new(), Vec::new(), Vec::new()),
             model_rev: 0,
             model_batches: Vec::new(),
             stage_textures: Vec::new(),
@@ -873,6 +876,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rumble_sent: [0; 2],
             effect_point: Vec::new(),
             post_ops: Vec::new(),
+            obj_alpha: None,
+            obj_ops: Vec::new(),
             pre_ops: Vec::new(),
             depth_tint: None,
             effect_updates: Vec::new(),
@@ -999,6 +1004,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 model_draw::sync_models,
                 model_draw::sync_stage,
                 model_draw::sync_depth_tint,
+                model_draw::sync_obj_passes,
                 model_draw::sync_effects,
                 model_draw::sync_hud,
                 model_draw::sync_frame_buffers,
@@ -1416,6 +1422,16 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
             } => play_stream_se(game, commands, player as usize & 1, id, volume),
         }
     }
+}
+
+/// `BtlObj_BeginDraw`'s passes of this frame: none without objects drawn, else the key, the outline and the glow
+/// (`ObjGlow_Draw`: `GfxPost_DrawGlow(10, 0x80808080, 0x80808080)` weighed by the table's alpha of each id).
+fn set_obj_alpha(game: &mut Game, alpha: Option<battle::ObjAlpha>) {
+    game.obj_ops = alpha
+        .as_ref()
+        .map(|a| stg_glare::glow_ops(a.table.clone(), true, 0x80))
+        .unwrap_or_default();
+    game.obj_alpha = alpha;
 }
 
 /// `Voice_Play(player, id, volume, pan)`: the player restarts with the file once it is decoded. The pan is not
@@ -2254,6 +2270,7 @@ fn run_frames(
                 let done = screen.is_done();
                 game.stage_batches = frame.scene.stage;
                 game.model_batches = frame.scene.models;
+                set_obj_alpha(game, frame.scene.obj_alpha);
                 game.post_ops = frame.scene.post;
                 if frame.scene.capture {
                     game.xfade_captures += 1;
@@ -2266,6 +2283,7 @@ fn run_frames(
                     game.shen_textures = false;
                     game.stage_batches.clear();
                     game.model_batches.clear();
+                    set_obj_alpha(game, None);
                     game.post_ops.clear();
                     game.xfade_alpha = 0;
                     stop_all(game, &mut commands);
@@ -2367,6 +2385,7 @@ fn run_frames(
                 // ChrView_Update while the viewer has the screen: the backdrop and the model, nothing else.
                 game.stage_batches.clear();
                 game.model_batches.clear();
+                set_obj_alpha(game, None);
                 if viewer_shown && let Some(viewer) = &mut game.chr_view {
                     let [left, right] = game.menu_sticks;
                     let out = viewer.update(left, right[1], &mut game.libc_random);
@@ -2379,6 +2398,12 @@ fn run_frames(
                     }
                     game.stage_batches = out.stage;
                     game.model_batches = out.models;
+                    game.obj_ops = out
+                        .obj_alpha
+                        .as_ref()
+                        .map(|a| stg_glare::glow_ops(a.table.clone(), true, 0x80))
+                        .unwrap_or_default();
+                    game.obj_alpha = out.obj_alpha;
                 }
                 if let Some(viewer) = &mut game.chr_view {
                     for request in requests {
@@ -2884,6 +2909,7 @@ fn run_frames(
                 for (have, all) in [
                     (&mut game.model_textures.0, &a.base_textures),
                     (&mut game.model_textures.1, &a.shade_textures),
+                    (&mut game.model_textures.2, &a.id_textures),
                     (&mut game.effect_textures, &a.effect_textures),
                 ] {
                     if have.len() < all.len() {
@@ -2905,6 +2931,7 @@ fn run_frames(
                     game.stage_rev = a.stage_rev;
                 }
                 game.model_batches = frame.models;
+                set_obj_alpha(game, frame.obj_alpha);
                 game.stage_batches = frame.stage;
                 game.effects = frame.effects;
                 game.under_effects = frame.under;
@@ -2991,6 +3018,7 @@ fn leave_battle(
         game.se.unload_bank(mask);
     }
     game.model_batches.clear();
+    set_obj_alpha(game, None);
     game.stage_batches.clear();
     game.effects.clear();
     game.under_effects.clear();
@@ -3168,6 +3196,7 @@ fn start_battle(game: &mut Game, setup: BattleSetup) {
         battle::load(&mut read, &elf, &setup)
     });
     game.model_batches.clear();
+    set_obj_alpha(game, None);
     game.stage_batches.clear();
     game.effects.clear();
     game.under_effects.clear();
@@ -3206,7 +3235,11 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
             return;
         }
     };
-    game.model_textures = (assets.base_textures.clone(), assets.shade_textures.clone());
+    game.model_textures = (
+        assets.base_textures.clone(),
+        assets.shade_textures.clone(),
+        assets.id_textures.clone(),
+    );
     game.model_rev += 1;
     game.stage_textures = assets.stage_textures.clone();
     game.stage_rev = assets.stage_rev;

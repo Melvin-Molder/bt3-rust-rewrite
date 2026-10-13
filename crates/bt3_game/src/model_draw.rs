@@ -21,7 +21,7 @@ use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin};
 use bt3_data::gs::RgbaTexture;
 
-use crate::battle::{ModelBatch, ModelLook};
+use crate::battle::{AlphaWrite, ModelBatch, ModelLook};
 use crate::eft::{EffectBlend, EffectTri};
 use crate::hud::{HudBlend, HudPrim};
 use crate::stage_draw::StageBatch;
@@ -33,12 +33,25 @@ const GS_HUD_SHADER: Handle<Shader> = uuid_handle!("9c3e5a71-0d2b-4e8f-b6a4-7f15
 const GS_EFFECT_SHADER: Handle<Shader> = uuid_handle!("d41c7e2a-5b93-4f06-8e1d-3a7c9b2f6e58");
 const GS_DEPTH_SHADER: Handle<Shader> = uuid_handle!("8a1f3c52-6d07-4b9e-a2c4-5e9d0b7f1c36");
 const GS_DEPTH_CLUT_SHADER: Handle<Shader> = uuid_handle!("3b6e9d14-2f8a-4c71-b5e0-9a4d7c2e8f15");
+const GS_ID_SHADER: Handle<Shader> = uuid_handle!("a7c41e93-5d28-4f60-8b1e-2c9f7d3a6e54");
+const GS_OUTLINE_SHADER: Handle<Shader> = uuid_handle!("e25b7d08-91c4-4a3f-b6d2-7f0e8a1c4d39");
 /// The layer of the camera that draws the depth buffer's spare byte.
 const DEPTH_LAYER: usize = 2;
 /// The fighters' camera (`BtlObjDraw_Draw` and after): its layer and order, between `StgFx_DrawPre`'s post chain
 /// and `StgFx_DrawPost`'s. It draws the stage's depth again first (depth only), as the GS depth buffer keeps it.
 const FIGHTER_LAYER: usize = 4;
 pub const FIGHTER_ORDER: isize = 30;
+/// `BtlObj_BeginDraw`'s ids (`GfxPost_CopyAlphaToDepth`): the camera drawing what the objects leave in the frame's
+/// alpha, before the fighters' camera.
+const ID_LAYER: usize = 45;
+const ID_ORDER: isize = 29;
+/// What `BtlObjDraw_Draw` draws after `BtlObj_BeginDraw`'s passes (the shadows), then the sorted pass's effects:
+/// their camera, after the glow's chain. It draws the stage's and the fighters' depth first.
+const EFFECT_LAYER: usize = 46;
+const EFFECT_ORDER: isize = 47;
+/// `GfxAlphaKey_Draw`, then `ObjOutline_Draw`, after the models.
+const KEY_SORT: f32 = FIGHTER_SORT + 10.0;
+const OUTLINE_SORT: f32 = FIGHTER_SORT + 11.0;
 /// The stage's depth before everything else of the fighters' camera.
 const STAGE_Z_SORT: f32 = -1000.0;
 /// `StgFx_DrawPre`'s depth tint: after the stage, before the back tints.
@@ -249,6 +262,8 @@ pub struct GsDepthClutMaterial {
     #[texture(1)]
     clut: Handle<Image>,
     additive: bool,
+    /// `GfxAlphaKey_Draw` over the objects' ids, after the models (else the depth tint, after the stage).
+    after_models: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -274,7 +289,11 @@ impl Material2d for GsDepthClutMaterial {
     }
 
     fn depth_bias(&self) -> f32 {
-        DEPTH_TINT_SORT
+        if self.after_models {
+            KEY_SORT
+        } else {
+            DEPTH_TINT_SORT
+        }
     }
 
     /// ALPHA 0x44 (`(Cs - Cd) * As + Cd`) or 0x48 (`Cs * As + Cd`); TEST 0x30000 (always), no depth write.
@@ -300,6 +319,244 @@ impl Material2d for GsDepthClutMaterial {
             depth.depth_compare = Some(bevy::render::render_resource::CompareFunction::Always);
         }
         Ok(())
+    }
+}
+
+/// What a model batch leaves in the frame's alpha (`gs_id.wgsl`), drawn with the batch's depth test into the ids'
+/// image; with `write` off it draws depth alone (the ids' camera, the effects' camera).
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[bind_group_data(GsIdKey)]
+pub struct GsIdMaterial {
+    #[texture(0)]
+    ids: Handle<Image>,
+    /// x: the object's row * 15; y: the dimmed alpha; z: 1 for a dimmed draw.
+    #[uniform(1)]
+    params: Vec4,
+    write: bool,
+    depth: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GsIdKey {
+    write: bool,
+    depth: bool,
+}
+
+impl From<&GsIdMaterial> for GsIdKey {
+    fn from(material: &GsIdMaterial) -> Self {
+        Self {
+            write: material.write,
+            depth: material.depth,
+        }
+    }
+}
+
+impl Material2d for GsIdMaterial {
+    fn fragment_shader() -> ShaderRef {
+        GS_ID_SHADER.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    /// The draws that write no depth (the objects drawn for their alpha alone) after the others, as the draw list's
+    /// third pass puts them.
+    fn depth_bias(&self) -> f32 {
+        if self.depth {
+            FIGHTER_SORT
+        } else {
+            FIGHTER_SORT + 1.0
+        }
+    }
+
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        set_pipeline_state(descriptor, None, key.bind_group_data.depth);
+        if !key.bind_group_data.write
+            && let Some(fragment) = &mut descriptor.fragment
+        {
+            for target in fragment.targets.iter_mut().flatten() {
+                target.write_mask = bevy::render::render_resource::ColorWrites::empty();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `ObjOutline_Draw` over the objects' ids (`gs_outline.wgsl`): its grey taken from the frame by the edges' alpha
+/// (`Cd - Cs * As`), no depth.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct GsOutlineMaterial {
+    #[texture(0)]
+    plane: Handle<Image>,
+}
+
+impl Material2d for GsOutlineMaterial {
+    fn fragment_shader() -> ShaderRef {
+        GS_OUTLINE_SHADER.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    fn depth_bias(&self) -> f32 {
+        OUTLINE_SORT
+    }
+
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let blend = BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::SrcAlpha,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::ReverseSubtract,
+            },
+            alpha: BlendComponent {
+                src_factor: BlendFactor::Zero,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+        };
+        set_pipeline_state(descriptor, Some(blend), false);
+        if let Some(depth) = &mut descriptor.depth_stencil {
+            depth.depth_compare = Some(bevy::render::render_resource::CompareFunction::Always);
+        }
+        Ok(())
+    }
+}
+
+/// The objects' ids (`GfxPost_CopyAlphaToDepth`'s byte): the image their camera draws (cleared to 0xFF, no
+/// object), and the full-screen draws of `GfxAlphaKey_Draw` and `ObjOutline_Draw` over it.
+#[derive(Resource)]
+pub struct IdPlane {
+    image: Handle<Image>,
+}
+
+impl IdPlane {
+    /// The ids' image.
+    pub fn image(&self) -> Handle<Image> {
+        self.image.clone()
+    }
+}
+
+/// The full-screen draws over the ids, shown while objects are drawn.
+#[derive(Component)]
+pub struct ObjPassSlot;
+
+/// `GfxAlphaKey_BuildClut`: eleven colours at alpha 0x30 for ids 0xF4..0xFE, nothing else.
+fn alpha_key_clut() -> Vec<u8> {
+    const RGB: [[u8; 3]; 11] = [
+        [0x3F, 0x3F, 0xFF],
+        [0x80, 0x00, 0xFF],
+        [0xFF, 0xFF, 0x20],
+        [0xFF, 0x00, 0x00],
+        [0x00, 0xFF, 0x00],
+        [0x54, 0xFD, 0xFF],
+        [0xFF, 0x00, 0xFF],
+        [0x40, 0x00, 0xFF],
+        [0xFF, 0xFF, 0x20],
+        [0xFF, 0xFF, 0x2A],
+        [0xFF, 0xFF, 0x34],
+    ];
+    (0..256usize)
+        .flat_map(|i| {
+            if (0xF4..0xFF).contains(&i) {
+                let c = RGB[i - 0xF4];
+                [c[0], c[1], c[2], 0x30]
+            } else {
+                [0; 4]
+            }
+        })
+        .collect()
+}
+
+fn spawn_id_plane(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut cluts: ResMut<Assets<GsDepthClutMaterial>>,
+    mut outlines: ResMut<Assets<GsOutlineMaterial>>,
+) {
+    let image = images.add(Image::new_target_texture(
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        None,
+    ));
+    // Gfx_ClearScreen(0xFFFFFF, 0xFF000000) before the objects: 0xFF where none draws.
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: ID_ORDER,
+            clear_color: ClearColorConfig::Custom(Color::WHITE),
+            ..default()
+        },
+        RenderTarget::from(image.clone()),
+        RenderLayers::layer(ID_LAYER),
+    ));
+    let mut clut = Image::new_fill(
+        Extent3d {
+            width: 256,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+    clut.data = Some(alpha_key_clut());
+    let key = cluts.add(GsDepthClutMaterial {
+        plane: image.clone(),
+        clut: images.add(clut),
+        additive: false,
+        after_models: true,
+    });
+    let outline = outlines.add(GsOutlineMaterial {
+        plane: image.clone(),
+    });
+    let quad = meshes.add(Rectangle::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32));
+    commands.spawn((
+        ObjPassSlot,
+        Mesh2d(quad.clone()),
+        MeshMaterial2d(key),
+        Transform::default(),
+        RenderLayers::layer(FIGHTER_LAYER),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        ObjPassSlot,
+        Mesh2d(quad),
+        MeshMaterial2d(outline),
+        Transform::default(),
+        RenderLayers::layer(FIGHTER_LAYER),
+        Visibility::Hidden,
+    ));
+    commands.insert_resource(IdPlane { image });
+}
+
+/// Runs after the frame logic: `BtlObj_BeginDraw`'s key and outline while objects are drawn.
+pub fn sync_obj_passes(game: Res<Game>, mut slots: Query<&mut Visibility, With<ObjPassSlot>>) {
+    if !game.is_changed() {
+        return;
+    }
+    let shown = if game.obj_alpha.is_some() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    for mut v in &mut slots {
+        if *v != shown {
+            *v = shown;
+        }
     }
 }
 
@@ -367,6 +624,7 @@ fn spawn_depth_plane(
             plane: image.clone(),
             clut: clut.clone(),
             additive,
+            after_models: false,
         })
     });
     commands.spawn((
@@ -618,11 +876,21 @@ pub fn sync_effects(
         &Mesh2d,
         &mut MeshMaterial2d<GsEffectMaterial>,
         &mut Visibility,
+        &mut RenderLayers,
     )>,
 ) {
     if !game.is_changed() {
         return;
     }
+    // The rectangles under the fighters in the fighters' camera; the shadows and the sorted pass after
+    // BtlObj_BeginDraw's glow, in the effects' camera.
+    let layer = |under: u8| {
+        RenderLayers::layer(if under == 0 {
+            FIGHTER_LAYER
+        } else {
+            EFFECT_LAYER
+        })
+    };
     if game.effect_textures.len() < textures.images.len() {
         *textures = EffectTextures::default();
     }
@@ -755,13 +1023,17 @@ pub fn sync_effects(
         handle
     };
     let mut existing = 0;
-    for (slot, mesh, mut handle, mut visibility) in &mut slots {
+    for (slot, mesh, mut handle, mut visibility, mut layers) in &mut slots {
         existing = existing.max(slot.0 + 1);
         let Some((texture, clamp, blend, zwrite, alpha_ref, tris, under)) = batches.get(slot.0)
         else {
             *visibility = Visibility::Hidden;
             continue;
         };
+        let want = layer(*under);
+        if *layers != want {
+            *layers = want;
+        }
         if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
             write_effect_mesh(&mut mesh, tris);
         }
@@ -790,7 +1062,7 @@ pub fn sync_effects(
         write_effect_mesh(&mut mesh, tris);
         commands.spawn((
             EffectSlot(index),
-            RenderLayers::layer(FIGHTER_LAYER),
+            layer(*under),
             Mesh2d(meshes.add(mesh)),
             MeshMaterial2d(material(
                 index,
@@ -863,11 +1135,22 @@ pub struct ModelTextures {
     rev: u32,
     base: Vec<Handle<Image>>,
     shade: Vec<Handle<Image>>,
+    ids: Vec<Handle<Image>>,
     materials: HashMap<([usize; 2], ModelLook), Handle<GsModelMaterial>>,
+    /// By id texture, alpha, depth and whether the id is written.
+    id_materials: HashMap<(usize, AlphaWrite, bool, bool), Handle<GsIdMaterial>>,
 }
 
 #[derive(Component)]
 pub struct ModelSlot(usize);
+
+/// A model slot's twin in the ids' camera.
+#[derive(Component)]
+pub struct IdSlot(usize);
+
+/// A model slot's depth in the effects' camera (and in the fighters' for a batch that writes depth but no colour).
+#[derive(Component)]
+pub struct ZSlot(usize);
 
 /// The stage textures of the battle and the materials made of them by (group, order, texture).
 #[derive(Resource, Default)]
@@ -893,6 +1176,8 @@ pub fn add_to(app: &mut App) {
         "gs_depth_clut.wgsl",
         Shader::from_wgsl
     );
+    load_internal_asset!(app, GS_ID_SHADER, "gs_id.wgsl", Shader::from_wgsl);
+    load_internal_asset!(app, GS_OUTLINE_SHADER, "gs_outline.wgsl", Shader::from_wgsl);
     app.add_plugins((
         Material2dPlugin::<GsModelMaterial>::default(),
         Material2dPlugin::<GsStageMaterial>::default(),
@@ -900,12 +1185,14 @@ pub fn add_to(app: &mut App) {
         Material2dPlugin::<GsEffectMaterial>::default(),
         Material2dPlugin::<GsDepthMaterial>::default(),
         Material2dPlugin::<GsDepthClutMaterial>::default(),
+        Material2dPlugin::<GsIdMaterial>::default(),
+        Material2dPlugin::<GsOutlineMaterial>::default(),
     ))
     .init_resource::<ModelTextures>()
     .init_resource::<StageTextures>()
     .init_resource::<HudTextures>()
     .init_resource::<EffectTextures>()
-    .add_systems(Startup, (spawn_cameras, spawn_depth_plane));
+    .add_systems(Startup, (spawn_cameras, spawn_depth_plane, spawn_id_plane));
 }
 
 /// The 2D layer shown on the window: the frame buffers and the quads.
@@ -962,11 +1249,23 @@ fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         RenderTarget::from(images[0].clone()),
         RenderLayers::layer(FIGHTER_LAYER),
     ));
-    // The HUD after the post chains (orders 1..28 and 31..42), the window last.
+    // The shadows and the sorted pass after BtlObj_BeginDraw's glow chain (orders 31..46).
     commands.spawn((
         Camera2d,
         Camera {
-            order: 50,
+            order: EFFECT_ORDER,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        SceneCamera,
+        RenderTarget::from(images[0].clone()),
+        RenderLayers::layer(EFFECT_LAYER),
+    ));
+    // The HUD after the post chains (orders 1..28 and 48..59), the window last.
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: 60,
             clear_color: ClearColorConfig::None,
             ..default()
         },
@@ -977,7 +1276,7 @@ fn spawn_cameras(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         Camera2d,
         Camera {
-            order: 60,
+            order: 70,
             ..default()
         },
         RenderLayers::layer(DISPLAY_LAYER),
@@ -1168,7 +1467,11 @@ pub fn sync_stage(
                 Mesh2d(mesh.clone()),
                 MeshMaterial2d(depth_material(batch, &textures, z_only)),
                 Transform::default(),
-                RenderLayers::layer(if z_only { FIGHTER_LAYER } else { DEPTH_LAYER }),
+                if z_only {
+                    RenderLayers::from_layers(&[FIGHTER_LAYER, ID_LAYER, EFFECT_LAYER])
+                } else {
+                    RenderLayers::layer(DEPTH_LAYER)
+                },
                 if matches!(batch.group, 1 | 2 | 6) {
                     Visibility::Visible
                 } else {
@@ -1444,7 +1747,9 @@ fn screen_position(p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// Runs after the frame logic, like `sync_quads`.
+/// Runs after the frame logic, like `sync_quads`: each batch in the fighters' camera (when it writes colour), its
+/// twin in the ids' camera (what it leaves in the frame's alpha, its depth) and its depth in the effects' camera.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn sync_models(
     mut commands: Commands,
     game: Res<Game>,
@@ -1452,12 +1757,29 @@ pub fn sync_models(
     mut textures: ResMut<ModelTextures>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GsModelMaterial>>,
-    mut slots: Query<(
-        &ModelSlot,
-        &Mesh2d,
-        &mut MeshMaterial2d<GsModelMaterial>,
-        &mut Visibility,
-    )>,
+    mut id_materials: ResMut<Assets<GsIdMaterial>>,
+    mut slots: Query<
+        (
+            &ModelSlot,
+            &Mesh2d,
+            &mut MeshMaterial2d<GsModelMaterial>,
+            &mut Visibility,
+        ),
+        (Without<IdSlot>, Without<ZSlot>),
+    >,
+    mut ids: Query<
+        (&IdSlot, &mut MeshMaterial2d<GsIdMaterial>, &mut Visibility),
+        (Without<ModelSlot>, Without<ZSlot>),
+    >,
+    mut zs: Query<
+        (
+            &ZSlot,
+            &mut MeshMaterial2d<GsIdMaterial>,
+            &mut Visibility,
+            &mut RenderLayers,
+        ),
+        (Without<ModelSlot>, Without<IdSlot>),
+    >,
 ) {
     if !game.is_changed() {
         return;
@@ -1481,6 +1803,12 @@ pub fn sync_models(
             .shade
             .push(images.add(model_image(texture, ImageAddressMode::ClampToEdge)));
     }
+    while textures.ids.len() < game.model_textures.2.len() {
+        let texture = &game.model_textures.2[textures.ids.len()];
+        textures
+            .ids
+            .push(images.add(model_image(texture, ImageAddressMode::Repeat)));
+    }
     let mut material = |key: ([usize; 2], ModelLook), textures: &mut ModelTextures| {
         if let Some(handle) = textures.materials.get(&key) {
             return handle.clone();
@@ -1492,6 +1820,39 @@ pub fn sync_models(
         });
         textures.materials.insert(key, handle.clone());
         handle
+    };
+    let mut id_material = |batch: &ModelBatch, write: bool, textures: &mut ModelTextures| {
+        let alpha = if write { batch.alpha } else { AlphaWrite::None };
+        let key = (batch.textures[0], alpha, batch.depth, write);
+        if let Some(handle) = textures.id_materials.get(&key) {
+            return handle.clone();
+        }
+        let params = match alpha {
+            AlphaWrite::Ids(row) => Vec4::new(f32::from(row) * 15.0, 0.0, 0.0, 0.0),
+            AlphaWrite::Dim(a) => Vec4::new(0.0, f32::from(a), 1.0, 0.0),
+            AlphaWrite::None => Vec4::ZERO,
+        };
+        let ids = textures
+            .ids
+            .get(batch.textures[0])
+            .or(textures.ids.first())
+            .cloned()
+            .unwrap_or_default();
+        let handle = id_materials.add(GsIdMaterial {
+            ids,
+            params,
+            write,
+            depth: batch.depth,
+        });
+        textures.id_materials.insert(key, handle.clone());
+        handle
+    };
+    let shown = |on: bool| {
+        if on {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        }
     };
     let mut existing = 0;
     for (slot, mesh, mut handle, mut visibility) in &mut slots {
@@ -1507,7 +1868,34 @@ pub fn sync_models(
         if handle.0 != wanted {
             handle.0 = wanted;
         }
-        *visibility = Visibility::Visible;
+        *visibility = shown(batch.rgb);
+    }
+    for (slot, mut handle, mut visibility) in &mut ids {
+        let Some(batch) = game.model_batches.get(slot.0) else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        let write = batch.alpha != AlphaWrite::None;
+        let wanted = id_material(batch, write, &mut textures);
+        if handle.0 != wanted {
+            handle.0 = wanted;
+        }
+        *visibility = shown(write || batch.depth);
+    }
+    for (slot, mut handle, mut visibility, mut layers) in &mut zs {
+        let Some(batch) = game.model_batches.get(slot.0) else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        let wanted = id_material(batch, false, &mut textures);
+        if handle.0 != wanted {
+            handle.0 = wanted;
+        }
+        let want = z_layers(batch);
+        if *layers != want {
+            *layers = want;
+        }
+        *visibility = shown(batch.depth);
     }
     for (index, batch) in game.model_batches.iter().enumerate().skip(existing) {
         let mut mesh = Mesh::new(
@@ -1515,13 +1903,41 @@ pub fn sync_models(
             RenderAssetUsages::default(),
         );
         write_batch_mesh(&mut mesh, batch);
+        let mesh = meshes.add(mesh);
+        let write = batch.alpha != AlphaWrite::None;
         commands.spawn((
             ModelSlot(index),
             RenderLayers::layer(FIGHTER_LAYER),
-            Mesh2d(meshes.add(mesh)),
+            Mesh2d(mesh.clone()),
             MeshMaterial2d(material((batch.textures, batch.look), &mut textures)),
             Transform::default(),
+            shown(batch.rgb),
         ));
+        commands.spawn((
+            IdSlot(index),
+            RenderLayers::layer(ID_LAYER),
+            Mesh2d(mesh.clone()),
+            MeshMaterial2d(id_material(batch, write, &mut textures)),
+            Transform::default(),
+            shown(write || batch.depth),
+        ));
+        commands.spawn((
+            ZSlot(index),
+            z_layers(batch),
+            Mesh2d(mesh),
+            MeshMaterial2d(id_material(batch, false, &mut textures)),
+            Transform::default(),
+            shown(batch.depth),
+        ));
+    }
+}
+
+/// A batch's depth: the effects' camera's, and the fighters' too for a batch that writes no colour there.
+fn z_layers(batch: &ModelBatch) -> RenderLayers {
+    if batch.rgb {
+        RenderLayers::layer(EFFECT_LAYER)
+    } else {
+        RenderLayers::from_layers(&[FIGHTER_LAYER, EFFECT_LAYER])
     }
 }
 

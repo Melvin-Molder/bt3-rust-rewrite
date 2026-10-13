@@ -22,6 +22,7 @@ pub(crate) fn obj_data(m: &PartnerModel) -> ObjData<'_> {
         chara: m.chara,
         height: m.tables.params.height(),
         face: m.face.as_ref(),
+        model_uid: m.uid,
     }
 }
 

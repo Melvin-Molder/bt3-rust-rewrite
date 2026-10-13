@@ -102,6 +102,7 @@ impl<'a> SurfFile<'a> {
                 clut_blt: read_u32(file, r + 28)?,
                 tbp_offset: read_i32(file, r + 32)?,
                 cbp_offset: read_i32(file, r + 36)?,
+                extra: [0; 8],
                 // TCC is set in the file; the draw sets it again (`EftVram_AddTex(.., 1, 0)`), and the texels
                 // decode the same either way.
                 texture_register: (u64::from(read_u32(file, r + 0x30)?)

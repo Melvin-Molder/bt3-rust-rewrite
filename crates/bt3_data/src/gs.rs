@@ -57,6 +57,28 @@ pub fn decode_indexed_texture(entry: &TextureEntry<'_>) -> io::Result<IndexedTex
     })
 }
 
+/// Where each palette entry's colour (index order) lies in the entry's CLUT packet, as a byte offset: what code that
+/// patches the packet in memory (`BtlObjMdl_InitAlphaSlots`) reaches.
+pub fn clut_entry_offsets(entry: &TextureEntry<'_>) -> io::Result<Vec<usize>> {
+    let packet = entry
+        .clut_data
+        .ok_or_else(|| invalid_data("sprite texture has no CLUT packet"))?;
+    let texture_psm = ((entry.texture_register >> 20) & 0x3f) as u8;
+    let transfer = find_image_transfer(packet)?;
+    let start = transfer.image.as_ptr() as usize - packet.as_ptr() as usize;
+    let colors = if texture_psm == PSM_T4 { 16 } else { 256 };
+    Ok((0..colors)
+        .map(|i| {
+            let position = if texture_psm == PSM_T4 {
+                i
+            } else {
+                csm1_t32_i8_transfer_index(i as u8)
+            };
+            start + position * 4
+        })
+        .collect())
+}
+
 /// `decode_sprite_texture` with the palette that `clut_entry` uploads.
 pub fn decode_sprite_texture_with_clut(
     entry: &TextureEntry<'_>,
@@ -704,6 +726,7 @@ mod tests {
             clut_blt: 0,
             tbp_offset: 0,
             cbp_offset: 0,
+            extra: [0; 8],
             texture_register: (2 << 14) | (0x14 << 20) | (7 << 26) | (7 << 30),
         };
 

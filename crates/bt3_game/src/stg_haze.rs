@@ -124,6 +124,7 @@ impl View {
             target: PostBuf::Frame,
             blend: true,
             mask: Some(mask),
+            ids: false,
             add: false,
             region: None,
             tris: Vec::new(),

@@ -68,6 +68,7 @@ const CAM_ROT: [[f32; 3]; 3] = [
 struct Textures {
     base: Vec<RgbaTexture>,
     shade: Vec<RgbaTexture>,
+    ids: Vec<RgbaTexture>,
 }
 
 impl ModelSink for Textures {
@@ -77,6 +78,10 @@ impl ModelSink for Textures {
 
     fn shade_textures(&mut self) -> &mut Vec<RgbaTexture> {
         &mut self.shade
+    }
+
+    fn id_textures(&mut self) -> &mut Vec<RgbaTexture> {
+        &mut self.ids
     }
 
     fn face_tables(&self) -> crate::btl_face::FaceTables {
@@ -164,6 +169,8 @@ pub(crate) struct SceneFrame {
     pub models: Vec<ModelBatch>,
     /// `StgFx_DrawPost`: the radial blur and the shock waves.
     pub post: Vec<PostOp>,
+    /// `BtlObj_BeginDraw`'s passes, while an object is drawn.
+    pub obj_alpha: Option<crate::battle::ObjAlpha>,
     /// `StgFx_DrawOverlay`'s cross-fade: keep this frame, and the alpha of the kept one over it.
     pub capture: bool,
     pub xfade_alpha: i32,
@@ -179,6 +186,8 @@ pub(crate) struct ShenScene {
     textures: Textures,
     light_dir: [f32; 3],
     actors: [Actor; 2],
+    /// The objects' rows of the alpha table.
+    alpha_rows: crate::btl_obj::AlphaRows,
     seq: Seq,
     demo: DemoCam,
     view: View,
@@ -253,6 +262,7 @@ impl ShenScene {
             textures,
             light_dir,
             actors,
+            alpha_rows: crate::btl_obj::AlphaRows::default(),
             seq,
             demo: DemoCam::default(),
             view: View::new([0.0; 3], [0.0; 3]),
@@ -266,8 +276,12 @@ impl ShenScene {
     }
 
     /// The models' textures, as the renderer takes them.
-    pub(crate) fn model_textures(&self) -> (Vec<RgbaTexture>, Vec<RgbaTexture>) {
-        (self.textures.base.clone(), self.textures.shade.clone())
+    pub(crate) fn model_textures(&self) -> crate::battle::ModelTextures {
+        (
+            self.textures.base.clone(),
+            self.textures.shade.clone(),
+            self.textures.ids.clone(),
+        )
     }
 
     /// `ShenScene_GetState`.
@@ -474,6 +488,17 @@ impl ShenScene {
         self.frame += 1;
         let view = &self.view;
         frame.stage = crate::stage_draw::draw_stage(&mut self.stage, self.stage_id, view);
+        // The objects' rows and glow (`BtlObj_SetAlphaAdd`), then BtlObj_FinishVisibility's
+        // BtlObj_UploadAlphaTable.
+        for a in &mut self.actors {
+            a.obj.alpha_add = a.alpha_add;
+        }
+        self.alpha_rows
+            .update(self.actors.iter_mut().map(|a| &mut a.obj));
+        let mut table = [0u8; 256];
+        for a in &self.actors {
+            a.obj.fill_alpha_row(&mut table, &a.model.alpha);
+        }
         let mut groups = HashMap::new();
         for a in &self.actors {
             if a.obj.flags & OBJ_VISIBLE != 0 {
@@ -486,16 +511,10 @@ impl ShenScene {
                 );
             }
         }
-        let mut models: Vec<ModelBatch> = groups
-            .into_iter()
-            .map(|((textures, look), vertices)| ModelBatch {
-                textures,
-                look,
-                vertices,
-            })
-            .collect();
-        models.sort_by_key(|batch| (batch.textures, batch.look));
-        frame.models = models;
+        frame.models = ModelBatch::from_groups(groups);
+        frame.obj_alpha = (!frame.models.is_empty()).then(|| crate::battle::ObjAlpha {
+            table: Box::new(table),
+        });
         // StgFx_DrawPost: the blur (no battle camera: the view drawn), then the shock waves stepped and drawn.
         frame.post = self.blurs.draw(0, &view.world2view, false);
         if self.warps.any() {

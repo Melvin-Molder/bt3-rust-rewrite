@@ -24,6 +24,10 @@ const PLAY_LOOP: u8 = 2;
 /// An effect model: the model, its textures by part and batch, and its animations.
 #[derive(Clone, Debug)]
 pub(crate) struct EffectModel {
+    /// This load of the pack (`ObjData::model_uid`).
+    pub uid: u64,
+    /// `mdl.model->alpha`: the material slots' alphas.
+    pub alpha: [u8; 16],
     pub model: CharaModel,
     pub batch_textures: Vec<Vec<[usize; 2]>>,
     pub anims: Vec<Option<Motion>>,
@@ -40,6 +44,7 @@ impl EffectModel {
             chara: -1,
             height: 0.0,
             face: None,
+            model_uid: self.uid,
         }
     }
 }
@@ -89,6 +94,11 @@ impl EftObjs {
             mode: PLAY_NONE,
         });
         true
+    }
+
+    /// The objects' battle objects.
+    pub(crate) fn objs_mut(&mut self) -> impl Iterator<Item = &mut Obj> {
+        self.objs.iter_mut().map(|o| &mut o.obj)
     }
 
     /// `EftObj_Destroy`.
