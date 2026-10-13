@@ -129,6 +129,7 @@ mod se;
 mod shen;
 mod shen_scene;
 mod shop;
+mod sim_top;
 mod solo_select;
 mod sound;
 mod stage_anim;
@@ -245,6 +246,8 @@ enum Scene {
     SurvivalResult(Box<survival_result::SurvivalResultScreen>),
     /// `Ub_Main` mode 24: Disc Fusion.
     DiscFusion(Box<disc_fusion::DiscFusionScreen>),
+    /// `Ub_Main` mode 20: Sim Dragon's entry screen.
+    SimTop(Box<sim_top::SimTopScreen>),
     /// `Ub_Main` mode 26: the ranking ladder; mode 28: the course select; modes 27 and 30: their result.
     UbRank(Box<ub_rank::UbRankScreen>),
     UbzSelect(Box<ubz_select::UbzSelectScreen>),
@@ -335,6 +338,7 @@ impl Scene {
             | Scene::SurvivalResult(_)
             | Scene::DiscFusion(_)
             | Scene::UbRank(_)
+            | Scene::SimTop(_)
             | Scene::UbzSelect(_)
             | Scene::UbResult(..)
             | Scene::ShenSave(_)
@@ -511,6 +515,7 @@ struct Game {
     survival_result: Option<survival_result::SurvivalResultData>,
     disc_fusion: Option<disc_fusion::DiscFusionData>,
     ub_rank: Option<ub_rank::UbRankData>,
+    sim_top: Option<sim_top::SimTopData>,
     ubz_select: Option<ubz_select::UbzSelectData>,
     ub_result: Option<ub_result::UbResultData>,
     /// `BattleResult` of the last battle.
@@ -919,6 +924,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             survival_result: None,
             disc_fusion: None,
             ub_rank: None,
+            sim_top: None,
             ubz_select: None,
             ub_result: None,
             battle_result: battle::BattleResult::default(),
@@ -1694,6 +1700,7 @@ fn run_frames(
                         (18, _) => start_survival_battle(game),
                         (25, 0) => start_disc_fusion(game, &mut commands),
                         (25, _) => start_ub_rank(game, &mut commands),
+                        (21, 0) => start_sim_top(game, &mut commands),
                         (29, 0) => start_ubz_select(game, &mut commands),
                         (29, _) => start_ubz_battle(game),
                         _ => {
@@ -1733,6 +1740,28 @@ fn run_frames(
                         start_mission_battle(game);
                     } else {
                         start_mission_select(game, &mut commands);
+                    }
+                }
+            }
+            Scene::SimTop(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after SimTop_Run.
+                    stop_all(game, &mut commands);
+                    if result != 0 {
+                        start_solo_select(game, &mut commands, 21);
+                    } else {
+                        start_ub_menu(game, &mut commands);
                     }
                 }
             }
@@ -1967,10 +1996,7 @@ fn run_frames(
                             2 => start_mission_select(game, &mut commands),
                             3 => start_survival_select(game, &mut commands),
                             4 => start_disc_fusion(game, &mut commands),
-                            _ => {
-                                info!("Ultimate Battle mode 20 is not ported yet");
-                                start_ub_menu(game, &mut commands);
-                            }
+                            _ => start_sim_top(game, &mut commands),
                         }
                     }
                 }
@@ -3917,6 +3943,51 @@ fn load_ub_file<T>(
     let mut image = Iso9660::open(&game.iso_path)?;
     let res = bpe::decode(&read_file(&mut image, file)?)?;
     parse(&res)
+}
+
+/// `Ub_Main` mode 20: `Bgm_Play(UB_BGM)`, then `SimTop_Run(5)` from `gMenuArc3`.
+fn start_sim_top(game: &mut Game, commands: &mut Commands) {
+    if game.sim_top.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    sim_top::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| sim_top::SimTopAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = sim_top::SimTopLayout::new(background, |key| firsts[&key]);
+                game.sim_top = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load Sim Dragon: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.sim_top.clone().expect("Sim Dragon is loaded");
+    match sim_top::SimTopScreen::new(&data) {
+        Ok(screen) => {
+            // SimTop_Init: a new run, one fighter, no DP limit.
+            game.ub.sim = sim_top::SimRun::default();
+            game.ub.team_size = 1;
+            game.ub.dp_rule = 0;
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::SimTop(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start Sim Dragon: {error}");
+            game.scene = Scene::Black;
+        }
+    }
 }
 
 /// `Ub_Main` mode 26: `Bgm_Play(UB_BGM)`, then `UbRank_Run` (file `baseFile + 0x1B`).

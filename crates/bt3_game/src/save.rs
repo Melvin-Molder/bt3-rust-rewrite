@@ -37,6 +37,15 @@ pub struct SurvivalRec {
     pub time: [u8; 3],
 }
 
+/// An entry of Sim Dragon's ranking (`SimRankRec`): the character, the score (shown * 100), and whether the ladder
+/// was finished.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimRank {
+    pub chara: i32,
+    pub score: i32,
+    pub cleared: u8,
+}
+
 /// `SAVE_SIZE`.
 pub const SIZE: usize = 0x4000;
 /// `ITEM_INFO_INITIAL`: an item owned in a new save.
@@ -52,6 +61,7 @@ const OFS_LEVEL: usize = 0xC;
 const OFS_SLOT: usize = 0x10;
 const OFS_UB_FLAGS: usize = 0x208;
 const OFS_MISSION_PAGES: usize = 0x20C;
+const OFS_SIM_RANK: usize = 0x210;
 const OFS_MISSION: usize = 0x28C;
 const OFS_SURVIVAL: usize = 0x73C;
 const OFS_RANK: usize = 0x77C;
@@ -228,6 +238,16 @@ impl SaveData {
             }
         }
         self.set_word(at + 8, rec.score);
+    }
+
+    /// `rank[n]` of Sim Dragon's ranking (ten entries, best first).
+    pub fn sim_rank(&self, n: usize) -> SimRank {
+        let at = OFS_SIM_RANK + n.min(9) * 0xC;
+        SimRank {
+            chara: self.word(at),
+            score: self.word(at + 4),
+            cleared: self.image.get(at + 8).copied().unwrap_or(0),
+        }
     }
 
     /// `rank`: the player's place on Ultimate Battle Z's ladder (99 the hundredth by default, 0 the first).

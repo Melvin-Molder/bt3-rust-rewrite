@@ -30,6 +30,8 @@ pub struct UbProgress {
     pub choice: i32,
     /// The battle setup `MisSel_SetupBattle` wrote (the rule and side 1), for the fighter select's hand-off.
     pub mission: Option<crate::mission_select::MissionSetup>,
+    /// `sim` (0x64C): Sim Dragon's run.
+    pub sim: crate::sim_top::SimRun,
     /// The battle setup `SurvSel_SetupBattle` wrote (the rule, side 1 and the opponents), for `Ub_SetupSolo`.
     pub survival: Option<crate::char_select::BattleSetup>,
 }
