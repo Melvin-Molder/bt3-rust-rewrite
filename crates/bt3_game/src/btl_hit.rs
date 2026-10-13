@@ -6,7 +6,7 @@
 //! attack table, the strike volumes of the motion's open hit window touching the defender's body boxes, and the
 //! reaction block `BtlHit_ApplyHit` fills on the defender. A rushing technique (flag 0x49) that touches its
 //! opponent starts its sequence (`BtlHit_CheckRush`, `BtlColl_StartThrow`). Hits, guards and trades shake the
-//! cameras and vibrate the pads by the record, with their sounds and voices. Not ported: the throw break
+//! cameras and vibrate the pads by the record, with their sounds and voices; a throw can be refused or broken
 //! (`BtlHit_CheckThrowBreak`).
 
 use std::f32::consts::PI;
@@ -314,6 +314,50 @@ fn guard_result(rec: &AttackRecord, id: usize, def: &Chr, o: usize) -> i8 {
     } else {
         i8::from(!(0x13..0x22).contains(&id))
     }
+}
+
+/// `BtlHit_CheckThrowBreak`: attack 0x55 (a throw) fails (true) against a defender of size class 4, or with
+/// parameter bit 0x4000 against attack flag 0x4000 (the attacker gets flag 0x7A); a free defender in an animation of
+/// flags 0x31 (not 0x800) facing the throw within its break window breaks it (also flag 0x79 and its voice).
+#[allow(clippy::too_many_arguments)]
+fn check_throw_break(
+    atk: &mut Chr,
+    def: &mut Chr,
+    data: &SideData,
+    def_data: &SideData,
+    env: &Env,
+    frame: u32,
+    libc: &mut crate::rng::LibcRandom,
+) -> bool {
+    if attack_id(atk, data, env) != 0x55 {
+        return false;
+    }
+    let refused = def_data.tables.params.size_class() == 4
+        || (def_data.tables.params.flags() & 0x4000 != 0
+            && record(atk, data, env).0.flags() & 0x4000 != 0);
+    if refused {
+        atk.flags.set(0x7A);
+        def.play_common(&mut env.snd(), 0x44);
+        atk.voice(env, frame, 0, libc);
+        return true;
+    }
+    if !def.is_free() {
+        return false;
+    }
+    let anim = env.anim_flags(def.anim.cur);
+    if anim & 0x31 != 0
+        && anim & 0x800 == 0
+        && !is_from_behind(atk, def)
+        && def.throw_break_window > 0
+    {
+        atk.flags.set(0x7A);
+        def.flags.set(0x79);
+        def.play_common(&mut env.snd(), 0x44);
+        atk.voice(env, frame, 0, libc);
+        def.voice(env, frame, 0x11, libc);
+        return true;
+    }
+    false
 }
 
 /// `BtlAtk_GetBestGuardKind`: against guard kind 4 the highest-ranked of the record's raw results (+0x29, +0x27,
@@ -816,8 +860,7 @@ impl Pair<'_, '_> {
                         let guard = guard_damage(me, data, env);
                         opp.damage(env, opp_data, guard, 0xC);
                     }
-                } else {
-                    // BtlHit_CheckThrowBreak concerns attack 0x55 (a throw) only.
+                } else if !check_throw_break(me, opp, data, opp_data, env, frame, &mut *self.libc) {
                     me.status.target = (a ^ 1) as i32;
                 }
             }

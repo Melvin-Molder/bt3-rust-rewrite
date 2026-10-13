@@ -92,7 +92,7 @@ depth, blends in the GS's colour space) are left out.
 - [x] Streamed sounds: volume, pan and player per owner; voice lines of kinds 5..7 (`btl_snd.rs`). The pan is worked out but not applied to the ADX players: CRI_ADXI.IRX's cosine pan law is read (31 steps, 180 / 255 a side at the centre), its stereo / balance handling is not, so it is left out
 - [x] `BtlAct_QueueComboFinish` and the attack records 0x77 / 0x87 / 0x8D..0x8F (`BtlDecide_QueueAttack`)
 - [x] A paid evasion's attack (flag 0x7C), guard kind 4 from a guard action
-- [ ] Throws: the motions played from the opponent's table (table flag 0x20000000), a clash win's throw, the throw break (`BtlHit_CheckThrowBreak`)
+- [x] Throws: the motions played from the opponent's table (table flag 0x20000000), a clash win's throw, the throw break (`BtlHit_CheckThrowBreak`)
 - [ ] The battle events fired by hits, clashes and techniques
 - [x] The technique camera cuts
 - [ ] Technique effects: the rush swarm's models; the disc's model

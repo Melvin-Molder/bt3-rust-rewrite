@@ -1493,7 +1493,7 @@ impl Chr {
 
     /// `BtlAnim_Play`: starts a motion on the main layer now, raising flag 0x2B; a blend over `blend` seconds.
     pub(crate) fn anim_play(&mut self, data: &SideData, motion: i32, blend: f32) {
-        // Motions with table flag 0x20000000 play from the opponent's table (throws): not ported.
+        // Motions with table flag 0x20000000 play from the opponent's table: `anim_play_any`.
         self.obj.play(&data.obj, 0, motion.max(0) as usize, true);
         self.obj.flags &= !0x60;
         self.face_on_new_motion();
