@@ -103,8 +103,31 @@ const ICON_TEXTURES: [ImageTexture; 5] = [
 ];
 const MSG_TEXTURES: [ImageTexture; 3] = [Some(((20, 1), 0)), Some(((20, 1), 1)), None];
 
-/// The tournament's block of `gProgress` (`TourSession`, 0x7C..0x440): what the menu chose, and the bracket's
-/// state (its entrants and the round and match being played).
+/// `TourEntrant` (gProgress + 0x98, 0x28 bytes each): one entrant of the tournament.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TourEntrant {
+    /// `TOUR_ENT_*`.
+    pub flags: u16,
+    pub chara: i32,
+    pub costume: i32,
+    /// Index of the entrant among the players' choices.
+    pub player: i32,
+    /// Where its chip sits in the tree.
+    pub pos: i32,
+    /// Health left after its last battle.
+    pub health: f32,
+    /// 1-based item ids.
+    pub items: [u16; 8],
+}
+
+/// `TOUR_ENT_PLAYER`, `TOUR_ENT_REC`, `TOUR_ENT_ITEMS`.
+pub const ENT_PLAYER: u16 = 1;
+pub const ENT_REC: u16 = 0x10;
+pub const ENT_ITEMS: u16 = 0x20;
+/// `TOUR_ENTRANT_MAX`.
+pub const ENTRANT_MAX: usize = 17;
+
+/// The tournament's block of `gProgress` (`TourSession`, 0x7C..0x440): what the menu chose, and the entrants.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TourSession {
     /// 0 the open tournament (prizes), 1 free play.
@@ -113,6 +136,7 @@ pub struct TourSession {
     pub level: i32,
     /// Entrants the players choose, 1..8.
     pub entry_num: i32,
+    pub entrants: [TourEntrant; ENTRANT_MAX],
 }
 
 /// What `TourMenu_Init` reads from its unpacked section.
@@ -227,6 +251,7 @@ impl TourMenuScreen {
     /// first `ColorFade_StartIn`.
     pub fn new(
         data: &TourMenuData,
+        session: &TourSession,
         save: &mut SaveData,
         loader: &mut dyn PictureLoader,
         random: &mut GameRandom,
@@ -298,7 +323,7 @@ impl TourMenuScreen {
             blink: 0,
             talk: 0,
             result: 1,
-            session: TourSession::default(),
+            session: session.clone(),
             done: None,
         })
     }
@@ -398,12 +423,10 @@ impl TourMenuScreen {
             self.leave_timer -= 1;
             if self.leave_timer == -1 {
                 self.fade = ColorFade::start_out(true, FADE_FRAMES);
-                self.session = TourSession {
-                    entry: self.cursor[LV_TOP],
-                    tour: self.cursor[LV_TOUR],
-                    level: self.cursor[LV_LEVEL],
-                    entry_num: self.cursor[LV_NUM] + 1,
-                };
+                self.session.entry = self.cursor[LV_TOP];
+                self.session.tour = self.cursor[LV_TOUR];
+                self.session.level = self.cursor[LV_LEVEL];
+                self.session.entry_num = self.cursor[LV_NUM] + 1;
             }
         } else if self.seq == 0 {
             self.input(pressed, repeat, save, &mut frame.sounds);
@@ -909,6 +932,7 @@ mod tests {
         let mut font = Font::new(Vec::new(), 20);
         let mut screen = TourMenuScreen::new(
             &data,
+            &TourSession::default(),
             &mut save,
             &mut Pictures,
             &mut random,
@@ -965,14 +989,7 @@ mod tests {
             press(&mut screen, &mut save, 0);
         }
         assert_eq!(screen.result(), Some(1));
-        assert_eq!(
-            screen.session(),
-            TourSession {
-                entry: 1,
-                tour: 2,
-                level: 2,
-                entry_num: 3,
-            }
-        );
+        let s = screen.session();
+        assert_eq!((s.entry, s.tour, s.level, s.entry_num), (1, 2, 2, 3));
     }
 }

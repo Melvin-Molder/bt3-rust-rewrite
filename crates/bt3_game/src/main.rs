@@ -81,6 +81,7 @@ mod eft_surf;
 mod eft_transform;
 mod eft_water;
 mod eft_weather;
+mod entry_select;
 mod evo_top;
 mod evo_z;
 mod fade;
@@ -139,6 +140,7 @@ mod stg_scroll;
 mod stg_tint;
 mod team_select;
 mod title;
+mod tour_bg;
 mod tour_menu;
 mod training;
 mod windows;
@@ -209,8 +211,9 @@ enum Scene {
     Training(Box<training::TrainScreen>),
     /// `EvoMode_Main` mode 48: Evolution Z's top menu.
     EvoTop(Box<evo_top::EvoTopScreen>),
-    /// `Tour_Main` mode 33: Dragon World Tour's menu.
+    /// `Tour_Main` mode 33: Dragon World Tour's menu; mode 34: its entrant select.
     TourMenu(Box<tour_menu::TourMenuScreen>),
+    EntrySel(Box<entry_select::EntrySelScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -286,6 +289,7 @@ impl Scene {
             | Scene::Shop(_)
             | Scene::EvoZ(_)
             | Scene::TourMenu(_)
+            | Scene::EntrySel(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -447,6 +451,9 @@ struct Game {
     /// `gMenuArc4`'s tournament menu, and the tournament's block of `gProgress`.
     tour_menu: Option<tour_menu::TourMenuData>,
     tour: tour_menu::TourSession,
+    entry_select: Option<entry_select::EntrySelData>,
+    /// The tournaments' backdrops (file 0x3C9 + tournament), as registered.
+    tour_bgs: HashMap<i32, tour_bg::TourBgData>,
     shen_textures: bool,
     /// The character reference's model viewer (`ChrView`) while the screen runs, and the model texture revision
     /// of it the renderer has.
@@ -825,6 +832,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             evo_z: None,
             tour_menu: None,
             tour: tour_menu::TourSession::default(),
+            entry_select: None,
+            tour_bgs: HashMap::new(),
             shen_textures: false,
             chr_view: None,
             chr_view_rev: None,
@@ -1549,10 +1558,41 @@ fn run_frames(
                     stop_all(game, &mut commands);
                     if result != 0 {
                         game.tour = session;
-                        info!("the tournament's entrant select (mode 34) is not ported yet");
-                        start_tour_menu(game, &mut commands);
+                        start_entry_select(game, &mut commands);
                     } else {
                         start_main_menu(game, &mut commands, &mut audio);
+                    }
+                }
+            }
+            Scene::EntrySel(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &game.save,
+                    &mut loader,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                let session = screen.session();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Tour_Main: Adx_StopAll after EntrySel_Run.
+                    stop_all(game, &mut commands);
+                    if result != 0 {
+                        game.tour = session;
+                        info!("the tournament's bracket (mode 35) is not ported yet");
+                        start_tour_menu(game, &mut commands);
+                    } else {
+                        start_tour_menu(game, &mut commands);
                     }
                 }
             }
@@ -3006,6 +3046,115 @@ fn start_char_ref(game: &mut Game, commands: &mut Commands) {
     }
 }
 
+/// `TourBg_Init`'s file: the backdrop of tournament `tour` (file 0x3C9 + tournament), read and registered once.
+fn tour_bg(game: &mut Game, tour: i32) -> Option<tour_bg::TourBgData> {
+    if let Some(data) = game.tour_bgs.get(&tour) {
+        return Some(data.clone());
+    }
+    let loaded = Iso9660::open(&game.iso_path)
+        .map_err(Into::into)
+        .and_then(|mut image| read_file(&mut image, tour_bg::FILE_FIRST + tour.max(0) as u32))
+        .and_then(|file| Ok(bpe::decode(&file)?))
+        .and_then(|res| tour_bg::TourBgAssets::parse(&res));
+    match loaded {
+        Ok(assets) => {
+            let background = register_picture(game, assets.background);
+            let first = game.textures.len();
+            register_pairs(game, assets.textures.into_iter().map(Some).collect());
+            let data = tour_bg::TourBgData {
+                fod: assets.fod,
+                background,
+                first,
+            };
+            game.tour_bgs.insert(tour, data.clone());
+            Some(data)
+        }
+        Err(error) => {
+            error!("cannot load the tournament's backdrop: {error}");
+            None
+        }
+    }
+}
+
+/// `Tour_Main` mode 34: `Bgm_Play(0x10B1B)`, then `EntrySel_Run(2)` from `gMenuArc4`.
+fn start_entry_select(game: &mut Game, commands: &mut Commands) {
+    if game.chr_table.costumes.is_empty() {
+        match Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, 4))
+        {
+            Ok(file) => game.chr_table = bt3_data::chara_data::ChrTable::parse(&file, 0xA1),
+            Err(error) => error!("cannot read the character table: {error}"),
+        }
+    }
+    if game.entry_select.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, tour_menu::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    entry_select::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| entry_select::EntrySelAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let firsts = register_files(game, assets.files);
+                data.layout = entry_select::EntrySelLayout::new(|key| firsts[&key]);
+                game.entry_select = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the entrant select: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let Some(bg) = tour_bg(game, game.tour.tour) else {
+        game.scene = Scene::Black;
+        return;
+    };
+    let data = game
+        .entry_select
+        .clone()
+        .expect("the entrant select is loaded");
+    let bg = match tour_bg::TourBg::new(&bg, game.tour.tour, None) {
+        Ok(bg) => bg,
+        Err(error) => {
+            error!("cannot start the tournament's backdrop: {error}");
+            game.scene = Scene::Black;
+            return;
+        }
+    };
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    match entry_select::EntrySelScreen::new(
+        &data,
+        bg,
+        &game.tour,
+        &game.chr_table,
+        &game.save,
+        &mut game.char_progress.side[0],
+        &mut loader,
+        &mut game.random,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, entry_select::BGM_FILE_ID);
+            game.scene = Scene::EntrySel(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the entrant select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
 /// `Tour_Main` mode 33: `Bgm_Play(0x10B19)`, then `TourMenu_Run(1)` from `gMenuArc4`.
 fn start_tour_menu(game: &mut Game, commands: &mut Commands) {
     if game.tour_menu.is_none() {
@@ -3047,6 +3196,7 @@ fn start_tour_menu(game: &mut Game, commands: &mut Commands) {
     let mut sounds = Vec::new();
     match tour_menu::TourMenuScreen::new(
         &data,
+        &game.tour,
         &mut game.save,
         &mut loader,
         &mut game.random,

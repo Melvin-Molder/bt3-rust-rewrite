@@ -28,12 +28,15 @@ pub const PANEL_SECTION: usize = 53;
 /// The details page's section.
 pub const HELP_SECTION: usize = 51;
 
-fn t(n: usize, e: usize) -> ImageTexture {
-    Some(((PANEL_SECTION, n), e))
-}
-
 /// `ItemPanel_Init`'s textures (`p->tex[n]`) for one side.
 pub fn panel_textures(side: usize) -> [ImageTexture; 21] {
+    panel_textures_in(PANEL_SECTION, side)
+}
+
+/// `ItemPanel_Init(MPACK_AT(res, section), side)`'s textures, for the screens that keep the panel in another
+/// section.
+pub fn panel_textures_in(section: usize, side: usize) -> [ImageTexture; 21] {
+    let t = |n: usize, e: usize| Some(((section, n), e));
     let s = side != 0;
     let mut tex = [None; 21];
     tex[12] = t(16, 0);
@@ -91,19 +94,20 @@ pub struct ItemAssets {
 
 impl ItemAssets {
     pub fn parse(res: &[u8]) -> Result<Self, Box<dyn Error>> {
+        Self::parse_in(res, PANEL_SECTION, HELP_SECTION)
+    }
+
+    /// The panel's pack in section `panel` and the details page's in section `help`.
+    pub fn parse_in(res: &[u8], panel: usize, help: usize) -> Result<Self, Box<dyn Error>> {
         let sub = |s: usize, n: usize| -> Result<Vec<u8>, Box<dyn Error>> {
             Ok(bt3_data::pack_section(bt3_data::pack_section(res, s)?, n)?.to_vec())
         };
         Ok(Self {
-            panel_fods: [sub(PANEL_SECTION, 4)?, sub(PANEL_SECTION, 5)?],
-            help_fod: sub(HELP_SECTION, 2)?,
-            panel_text: [
-                sub(PANEL_SECTION, 13)?,
-                sub(PANEL_SECTION, 14)?,
-                sub(PANEL_SECTION, 15)?,
-            ],
-            help_name: sub(HELP_SECTION, 6)?,
-            help_desc: sub(HELP_SECTION, 5)?,
+            panel_fods: [sub(panel, 4)?, sub(panel, 5)?],
+            help_fod: sub(help, 2)?,
+            panel_text: [sub(panel, 13)?, sub(panel, 14)?, sub(panel, 15)?],
+            help_name: sub(help, 6)?,
+            help_desc: sub(help, 5)?,
         })
     }
 }

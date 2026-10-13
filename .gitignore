@@ -55,6 +55,8 @@
 !/crates/bt3_game/src/evo_top.rs
 !/crates/bt3_game/src/evo_z.rs
 !/crates/bt3_game/src/tour_menu.rs
+!/crates/bt3_game/src/tour_bg.rs
+!/crates/bt3_game/src/entry_select.rs
 !/crates/bt3_game/src/shen.rs
 !/crates/bt3_game/src/shen_scene.rs
 !/crates/bt3_game/src/shop.rs
