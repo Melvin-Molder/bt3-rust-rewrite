@@ -62,6 +62,7 @@ const OFS_SLOT: usize = 0x10;
 const OFS_UB_FLAGS: usize = 0x208;
 const OFS_MISSION_PAGES: usize = 0x20C;
 const OFS_SIM_RANK: usize = 0x210;
+const OFS_SIM_CLEARED: usize = 0x288;
 const OFS_MISSION: usize = 0x28C;
 const OFS_SURVIVAL: usize = 0x73C;
 const OFS_RANK: usize = 0x77C;
@@ -247,6 +248,34 @@ impl SaveData {
             chara: self.word(at),
             score: self.word(at + 4),
             cleared: self.image.get(at + 8).copied().unwrap_or(0),
+        }
+    }
+
+    /// `UbScore_AddRanking`: a finished run goes into Sim Dragon's ranking above the first entry it beats (the
+    /// last one drops out).
+    pub fn add_sim_ranking(&mut self, score: i32, chara: i32, cleared: bool) {
+        let Some(i) = (0..10).find(|&i| self.sim_rank(i).score < score) else {
+            return;
+        };
+        let at = OFS_SIM_RANK + i * 0xC;
+        if let Some(rows) = self.image.get_mut(at..OFS_SIM_RANK + 10 * 0xC) {
+            rows.copy_within(..rows.len() - 0xC, 0xC);
+        }
+        self.set_word(at, chara);
+        self.set_word(at + 4, score);
+        if let Some(b) = self.image.get_mut(at + 8) {
+            *b = u8::from(cleared);
+        }
+    }
+
+    /// `simCleared`: the reward item of a finished Sim Dragon run was given.
+    pub fn sim_cleared(&self) -> bool {
+        self.image.get(OFS_SIM_CLEARED).is_some_and(|&b| b != 0)
+    }
+
+    pub fn set_sim_cleared(&mut self) {
+        if let Some(b) = self.image.get_mut(OFS_SIM_CLEARED) {
+            *b = 1;
         }
     }
 
