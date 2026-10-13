@@ -146,7 +146,7 @@ executable (callers and address references) and the ISO, and from the port's own
 
 ### Audit of the functions the port never names (2026-10-13)
 
-Of the 3,375 C functions no Rust source names, 726 are unreachable in the executable and its overlay (a call graph of `jal` / `j`, address loads and pointer words), 1,385 are accessors of three statements or less, 509 are ported under a snake_case name; the 755 left were checked by hand (dispatch tables compared: the 315 actions, the AI's 16 picks, 24 steps and 118 conditions, the 47 script commands). Gaps found and ported:
+Of the 3,375 C functions no Rust source names, 726 are unreachable in the executable and its overlay (a call graph of `jal` / `j`, address loads and pointer words), 1,385 are accessors of three statements or less, 509 are ported under a snake_case name; the 755 left were checked by hand (dispatch tables compared: the 315 actions, the AI's 16 picks, 24 steps and 118 conditions, the 47 script commands; the 289 reachable accessors that set or start something were checked by their callers). What this cannot see is a call or branch left out inside a function the port names. Gaps found and ported:
 
 - [x] The AI's sense bits 36..39 and 62 (`BtlAiSense_CheckBit36..39`) were never set
 - [x] AI condition 12 (`BtlCharApi_TestOppSkillFlags`) was always false; the fire-skill step (`BtlAiStep_FireSkill`) read a charge of 0
