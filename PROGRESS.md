@@ -15,7 +15,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 - [x] Main menu (`MainMenu_Run`, mode 4)
 - [x] Saves: load, save, sound options taking effect
 - [x] Options screen (`OptMode_Main`, mode 62; src/menu/option.c)
-- [x] Character reference (`CharRefMode_Main`, mode 60; src/menu/char_reference.c, src/ui/char_viewer.c)
+- [x] Character reference (`CharRefMode_Main`, mode 60; src/menu/src/ui/char_viewer.c)
 
 ### Story: Dragon History (`Hist_Main`, modes 3, 6..10)
 
@@ -49,7 +49,8 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 
 ### Training (`TrainMode_Main`, modes 44..45)
 
-- [~] Free training and the tutorial battles run (`--mode 6`, `--mode 5`); the training menu does not (src/menu/training.c)
+- [x] Training menu (`Train_Run`, mode 44; src/menu/training.c): classes, lessons, pages, the lesson battles and their "cleared" bits
+- [x] Free training's character select (`CharSel_Run(2)`, mode 45) and battle
 - [x] The tutorials' goals (the fighters' frame bits, `BtlCtrl_TestTutorialFrameBit` → `HudNotice_Show(8)`)
 
 ### Evolution Z (`EvoMode_Main`, modes 48..50)
@@ -91,4 +92,4 @@ Measured 2026-10-12:
 | src/main.c | 1 | 5 | 0 |
 | Total | 252 | 7126 | 3216 (45 %) |
 
-Menu files with no function cited yet: bracket.c, bracket_clips.c, bracket_guide.c, bracket_logic.c, char_reference.c, disc_fusion.c, entry_select.c, evo_mode.c, evo_top.c, evo_z_1.c, evo_z_2.c, evo_z_3.c, mission_result.c, mission_select.c, option.c, option_mode.c, reference_training_mode.c, shop.c, sim_day.c, sim_event.c, sim_event_1.c, sim_event_card.c, sim_event_rock.c, sim_event_shell.c, sim_result.c, sim_top.c, solo_select.c, survival_result.c, tour_background.c, tour_menu.c, training.c, ub_menu.c, ub_rank.c, ub_result.c, ub_score.c, ub_team_select.c, ubz_select.c; and in src/ui: char_viewer.c, shen_confirm.c, shen_save.c, shen_scene.c, shen_wish.c.
+Menu files with no function cited yet: bracket.c, bracket_clips.c, bracket_guide.c, bracket_logic.c, char_reference.c, disc_fusion.c, entry_select.c, evo_mode.c, evo_top.c, evo_z_1.c, evo_z_2.c, evo_z_3.c, mission_result.c, mission_select.c, shop.c, sim_day.c, sim_event.c, sim_event_1.c, sim_event_card.c, sim_event_rock.c, sim_event_shell.c, sim_result.c, sim_top.c, solo_select.c, survival_result.c, tour_background.c, tour_menu.c, ub_menu.c, ub_rank.c, ub_result.c, ub_score.c, ub_team_select.c, ubz_select.c; and in src/ui: shen_confirm.c, shen_save.c, shen_scene.c, shen_wish.c.

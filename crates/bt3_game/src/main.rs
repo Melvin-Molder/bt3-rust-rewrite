@@ -132,6 +132,7 @@ mod stg_scroll;
 mod stg_tint;
 mod team_select;
 mod title;
+mod training;
 mod windows;
 
 use std::collections::HashMap;
@@ -196,6 +197,8 @@ enum Scene {
     CharRef(Box<char_ref::CharRefScreen>),
     /// `OptMode_Main`, progress mode 62: the options screen.
     Options(Box<options::OptionScreen>),
+    /// `TrainMode_Main`, progress mode 44: the training menu.
+    Training(Box<training::TrainScreen>),
     /// `Dc_Main` mode 54: the password screen.
     DcPass(Box<dc_password::DcPassScreen>),
     /// `Dc_Main` mode 55: the custom character list.
@@ -259,6 +262,7 @@ impl Scene {
             | Scene::HistSave(_)
             | Scene::HistOutro(_)
             | Scene::Options(_)
+            | Scene::Training(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
@@ -398,6 +402,12 @@ struct Game {
     dc_menu: Option<dc_menu::DcMenuData>,
     options: Option<options::OptionData>,
     char_ref: Option<char_ref::CharRefData>,
+    /// `gMenuArc6`'s training menu (section 1) and its character select (section 2).
+    train: Option<training::TrainData>,
+    train_char_select: Option<CharSelData>,
+    /// The progress mode (44 the menu, 45 its character select) of the training screen that set up the battle,
+    /// or that the character select runs in.
+    train_mode: Option<i32>,
     /// The character reference's model viewer (`ChrView`) while the screen runs, and the model texture revision
     /// of it the renderer has.
     chr_view: Option<chr_view::ChrView>,
@@ -764,6 +774,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dc_menu: None,
             options: None,
             char_ref: None,
+            train: None,
+            train_char_select: None,
+            train_mode: None,
             chr_view: None,
             chr_view_rev: None,
             menu_sticks: [[0.0; 2]; 2],
@@ -1430,6 +1443,46 @@ fn run_frames(
                     game.scene = Scene::Logos(LogoSequence::new());
                 }
             }
+            Scene::Training(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut loader,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                game.progress.train = screen.progress();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // TrainMode_Main: Adx_StopAll after Train_Run.
+                    stop_all(game, &mut commands);
+                    match result {
+                        training::TrainResult::Back => {
+                            start_main_menu(game, &mut commands, &mut audio)
+                        }
+                        training::TrainResult::Select => start_train_select(game, &mut commands),
+                        training::TrainResult::Lesson(Some(setup)) => {
+                            game.train_mode = Some(44);
+                            start_battle(game, setup);
+                        }
+                        training::TrainResult::Lesson(None) => {
+                            // Only the lessons with no listed page set no battle.
+                            info!("the lesson sets up no battle");
+                            start_training(game, &mut commands);
+                        }
+                    }
+                }
+            }
             Scene::CharRef(screen) => {
                 // CharRef_Draw's Job_Run (the viewer's load job) runs unless the viewer has the screen.
                 let viewer_shown = screen.viewer_shown();
@@ -1732,6 +1785,7 @@ fn run_frames(
                         }
                         MainMenuResult::Mode(62) => start_options(game, &mut commands),
                         MainMenuResult::Mode(60) => start_char_ref(game, &mut commands),
+                        MainMenuResult::Mode(44) => start_training(game, &mut commands),
                         MainMenuResult::Mode(mode) => {
                             info!("progress mode {mode} is not ported yet");
                             game.scene = Scene::Black;
@@ -1775,11 +1829,20 @@ fn run_frames(
                 game.quads = frame.quads;
                 play_sounds(game, &mut commands, frame.sounds);
                 if let Some(result) = result {
-                    // Duel_Main: Adx_StopAll after CharSel_Run.
+                    // Duel_Main / TrainMode_Main: Adx_StopAll after CharSel_Run.
                     stop_all(game, &mut commands);
-                    match result {
-                        CharSelResult::Back => start_duel_menu(game, &mut commands),
-                        CharSelResult::Battle(setup) => start_battle(game, setup),
+                    match (result, game.train_mode) {
+                        // TrainMode_Main mode 45: back to the training menu.
+                        (CharSelResult::Back, Some(_)) => {
+                            game.train_mode = None;
+                            start_training(game, &mut commands);
+                        }
+                        (CharSelResult::Back, None) => start_duel_menu(game, &mut commands),
+                        (CharSelResult::Battle(mut setup), Some(_)) => {
+                            setup.tutorial = game.progress.train.tutorial;
+                            start_battle(game, setup);
+                        }
+                        (CharSelResult::Battle(setup), None) => start_battle(game, setup),
                     }
                 }
             }
@@ -2079,6 +2142,17 @@ fn leave_battle(
         } else {
             let ball = game.story_ball;
             start_hist_result(game, winner & 1 != 0, ball);
+        }
+    } else if let Some(mode) = game.train_mode.take() {
+        // Progress_Main after a battle of the training: an abort's reason 8 goes to the main menu, 0x10 to the
+        // character select (mode 45); else the mode the battle was set up in, the menu (44) reopening where the
+        // progress flags left it.
+        if reason & 8 != 0 {
+            start_main_menu(game, commands, audio);
+        } else if reason & 0x10 != 0 || mode == 45 {
+            start_train_select(game, commands);
+        } else {
+            start_training(game, commands);
         }
     } else if reason & 0x1000 != 0 {
         // Progress_Main: "Save Replay Data" goes to the replay list in its save mode.
@@ -2700,6 +2774,118 @@ fn start_char_ref(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the character reference: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `TrainMode_Main` mode 44: `Bgm_Play(BGM_TRAIN)`, then `Train_Run(1)` from `gMenuArc6`.
+fn start_training(game: &mut Game, commands: &mut Commands) {
+    if game.train.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, training::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    training::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| training::TrainAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = training::TrainLayout::new(background, |key| firsts[&key]);
+                game.train = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the training menu: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.train.clone().expect("training assets are loaded");
+    match training::TrainScreen::new(&data, game.progress.train, &mut game.random) {
+        Ok(screen) => {
+            play_bgm(game, commands, training::BGM_FILE_ID);
+            game.scene = Scene::Training(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the training menu: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `TrainMode_Main` mode 45: `CharSel_Run(2)` from `gMenuArc6`, the character select of free training (it starts
+/// its own music).
+fn start_train_select(game: &mut Game, commands: &mut Commands) {
+    if game.chr_table.costumes.is_empty() {
+        match Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, 4))
+        {
+            Ok(file) => game.chr_table = bt3_data::chara_data::ChrTable::parse(&file, 0xA1),
+            Err(error) => error!("cannot read the character table: {error}"),
+        }
+    }
+    if game.train_char_select.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, training::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    training::CHAR_SELECT_SECTION,
+                )?)?)
+            })
+            .and_then(|res| CharSelAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let firsts = register_files(game, assets.files);
+                data.layout = CharSelLayout::new(|key| firsts[&key]);
+                game.train_char_select = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the training's character select: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .train_char_select
+        .as_ref()
+        .expect("the training's character select is loaded");
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    let mut sounds = Vec::new();
+    // CharSel_Init: CSPROG->players = 0 in mode 0x2D.
+    match CharSelScreen::new(
+        data,
+        0,
+        game.char_progress,
+        &game.save,
+        game.chr_table.clone(),
+        &mut loader,
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            game.train_mode = Some(45);
+            game.scene = Scene::CharSelect(Box::new(screen.for_training()));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start the training's character select: {error}");
             game.scene = Scene::Black;
         }
     }

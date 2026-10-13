@@ -50,6 +50,8 @@ const OFS_CUSTOM: usize = 0x1808;
 const OFS_REC: usize = 0x2D40;
 const OFS_ITEM: usize = 0x2EC8;
 const OFS_MONEY: usize = 0x3028;
+/// `trainClear[3]` (src/menu/training.h `MSaveTrain`): one word of "lesson cleared" bits per class.
+const OFS_TRAIN_CLEAR: usize = 0xE0C;
 const OFS_SHOP_FLAGS: usize = 0x1008;
 const OFS_STOCK_LEVEL: usize = 0x100C;
 /// `SAVE_MONEY_MAX`.
@@ -201,6 +203,15 @@ impl SaveData {
     pub fn raise_stock_level(&mut self) {
         self.set_word(OFS_STOCK_LEVEL, self.word(OFS_STOCK_LEVEL) + 1);
         self.set_word(OFS_SHOP_FLAGS, self.word(OFS_SHOP_FLAGS) | 1);
+    }
+
+    /// `trainClear[class]`: the cleared lessons of a training class.
+    pub fn train_clear(&self, class: usize) -> i32 {
+        self.word(OFS_TRAIN_CLEAR + class * 4)
+    }
+
+    pub fn set_train_clear(&mut self, class: usize, v: i32) {
+        self.set_word(OFS_TRAIN_CLEAR + class * 4, v);
     }
 
     /// `flags`: `SAVE_FLAG_VOICE` (1), each pad's vibration (2, 4) and own key assignment (8, 0x10).

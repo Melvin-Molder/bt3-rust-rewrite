@@ -720,6 +720,9 @@ pub struct CharSelScreen {
     item_info: usize,
     progress: CharSelProgress,
     running: bool,
+    /// `gProgress->mode == 0x2D`: the character select of free training (from the training menu's archive), one
+    /// player, which sets up free training's battle.
+    training: bool,
     done: Option<CharSelResult>,
 }
 
@@ -804,6 +807,7 @@ impl CharSelScreen {
             chr,
             progress,
             running: true,
+            training: false,
             done: None,
         };
         let s = &mut screen;
@@ -1131,7 +1135,15 @@ impl CharSelScreen {
         frame
     }
 
-    /// The end of `CharSel_Run`: a random stage or music is drawn, then the battle setup.
+    /// `CharSel_Run` in progress mode 0x2D (`TrainMode_Main`): the screen is built from the training archive's
+    /// section (`players` 0) and sets up free training.
+    pub fn for_training(mut self) -> Self {
+        self.training = true;
+        self
+    }
+
+    /// The end of `CharSel_Run`: a random stage or music is drawn, then the battle setup; in mode 0x2D free
+    /// training (mode 6: announcer 1, no time limit, no stage change, CPU level -1, changes allowed).
     fn battle_setup(&mut self, save: &SaveData, random: &mut GameRandom) -> BattleSetup {
         if self.stage.stage == STAGE_RANDOM {
             loop {
@@ -1145,6 +1157,32 @@ impl CharSelScreen {
         let mut bgm = self.bgm_ids[self.stage.bgm_playing as usize];
         if bgm == BGM_RANDOM {
             bgm = random.range(9) as i32 + 8;
+        }
+        if self.training {
+            let side = |control, pad, i: usize| SideSetup {
+                control,
+                pad,
+                change_allowed: 1,
+                chara: self.side[i].pick.picked,
+                costume: self.side[i].pick.color_plate,
+                cpu_level: -1,
+                items: self.side[i].pick.items,
+                switch_enabled: 1,
+                ..SideSetup::default()
+            };
+            // CSPROG->players is 0 in this mode: the pad against the computer.
+            return BattleSetup {
+                screen_mode: 0,
+                mode: 6,
+                bgm,
+                time_limit: 0,
+                announcer: 1,
+                stage: self.stage.stage,
+                stage_change: 0,
+                sides: [side(0, 0, 0), side(2, 1, 1)],
+                pool: Vec::new(),
+                tutorial: 0,
+            };
         }
         let time_limit = match save.rules[0] {
             0 => 1,
@@ -2566,6 +2604,88 @@ mod tests {
         assert_eq!(screen.progress().side[0].picked, setup.sides[0].chara);
         assert!(looked);
         assert_eq!(setup.sides[0].items, [3, 7, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// The training's character select from the ISO in `rom/` (`CharSel_Run(2)` in mode 0x2D, menu archive 6),
+    /// when it is there: confirm through both sides and the stage, and free training is set up.
+    #[test]
+    fn real_training_char_select_sets_up_free_training() {
+        use crate::training::{ARCHIVE_FILE_ID, CHAR_SELECT_SECTION};
+        use bt3_data::afs::{AfsArchive, partition_entry_for_id};
+        use bt3_data::{Iso9660, bpe};
+
+        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = Iso9660::open(&iso) else {
+            return;
+        };
+        let location = partition_entry_for_id(ARCHIVE_FILE_ID);
+        let archive =
+            AfsArchive::open(&mut image, format!("DATA/PZS3US{}.AFS", location.partition)).unwrap();
+        let pack = archive.read_entry(&mut image, location.index).unwrap();
+        let res = bpe::decode(pack_section(&pack, CHAR_SELECT_SECTION).unwrap()).unwrap();
+        let assets = CharSelAssets::parse(&res).unwrap();
+        let mut next = 10;
+        let mut firsts = std::collections::BTreeMap::new();
+        for (key, textures) in &assets.files {
+            firsts.insert(*key, next);
+            next += 2 * textures.len();
+        }
+        let mut data = assets.data;
+        data.layout = CharSelLayout::new(|key| firsts[&key]);
+        let save = SaveData::default();
+        let mut font = Font::new(Vec::new(), 20);
+        let mut random = GameRandom::from_key(&[2, 7, 1]);
+        let mut screen = CharSelScreen::new(
+            &data,
+            0,
+            CharSelProgress::default(),
+            &save,
+            ChrTable {
+                costumes: vec![2; 0xA1],
+                ..ChrTable::default()
+            },
+            &mut NoPictures,
+            &mut random,
+            &mut Vec::new(),
+        )
+        .unwrap()
+        .for_training();
+        for _ in 0..30 {
+            if screen.result().is_some() {
+                break;
+            }
+            screen.run_frame(
+                [(PAD_CROSS, PAD_CROSS), (0, 0)],
+                &mut NoPictures,
+                &save,
+                &mut random,
+                &mut font,
+            );
+            for _ in 0..60 {
+                screen.run_frame([(0, 0); 2], &mut NoPictures, &save, &mut random, &mut font);
+            }
+        }
+        let Some(CharSelResult::Battle(setup)) = screen.result() else {
+            panic!("no battle: {:?}", screen.result());
+        };
+        assert_eq!(
+            (
+                setup.mode,
+                setup.announcer,
+                setup.time_limit,
+                setup.stage_change
+            ),
+            (6, 1, 0, 0)
+        );
+        assert_eq!(
+            (
+                setup.sides[0].control,
+                setup.sides[1].control,
+                setup.sides[1].cpu_level
+            ),
+            (0, 2, -1)
+        );
     }
 
     /// `BattleSetup_FixForMode`: each mode's sides and rule.

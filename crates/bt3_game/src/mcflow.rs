@@ -93,11 +93,14 @@ pub struct Progress {
     /// Bit 0: the replay menu saves the battle's replay (`ZAPROG_REPLAY_SAVE`).
     pub replay_flags: u32,
     pub slots: [ReplaySlot; REPLAY_SLOTS],
+    /// The training menu's block (0x7D4..0x7FC).
+    pub train: crate::training::TrainProgress,
 }
 
 impl Progress {
-    /// `Progress_ClearSession`'s part here: the replay flags and slot list.
+    /// `Progress_ClearSession`'s part here: the replay flags and slot list, and the training block.
     pub fn clear_session(&mut self) {
+        self.train = crate::training::TrainProgress::default();
         self.replay_flags = 0;
         self.slots = [ReplaySlot::default(); REPLAY_SLOTS];
     }

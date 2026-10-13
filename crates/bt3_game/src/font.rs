@@ -322,6 +322,14 @@ impl Font {
         None
     }
 
+    /// `Font_GetHeight`: the lines at the style's scale and line spacing.
+    pub fn height(&self, text: &[u16]) -> i32 {
+        let st = &self.style;
+        Self::count_lines(text)
+            * ((self.line_height as f32 * st.scale_y * st.scale) as i32 + st.spacing_y)
+            - st.spacing_y
+    }
+
     /// `Font_CountLines`.
     pub fn count_lines(text: &[u16]) -> i32 {
         1 + text.iter().filter(|&&c| is_newline(c)).count() as i32

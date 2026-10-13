@@ -50,6 +50,7 @@
 !/crates/bt3_game/src/flash.rs
 !/crates/bt3_game/src/sound.rs
 !/crates/bt3_game/src/title.rs
+!/crates/bt3_game/src/training.rs
 !/crates/bt3_game/src/font.rs
 !/crates/bt3_game/src/dialog.rs
 !/crates/bt3_game/src/mcflow.rs

@@ -19,6 +19,10 @@ pub struct TextBox {
     color: Option<[u8; 4]>,
     /// `TEXTBOX_FLAG_MAX_W`: a wider line is shrunk horizontally.
     max_w: Option<i32>,
+    /// `TEXTBOX_FLAG_MAX_H`: a taller text is shrunk vertically.
+    max_h: Option<i32>,
+    /// `TEXTBOX_FLAG_SPACING`: character and line spacing.
+    spacing: (i32, i32),
     /// `TEXTBOX_FLAG_LINE_Y`: extra y for texts of one to five rows.
     line_y: Option<[i32; 5]>,
     /// `TextBox_SetClip`: `[x0, y0, x1, y1]`, inclusive.
@@ -66,6 +70,18 @@ impl TextBox {
     /// `TextBox_SetClip(box, x0, x1, y0, y1)`: the text is cut to the rectangle.
     pub fn with_clip(mut self, x0: i32, x1: i32, y0: i32, y1: i32) -> Self {
         self.clip = Some([x0, y0, x1, y1]);
+        self
+    }
+
+    /// `TextBox_SetMaxSize`.
+    pub fn with_max_size(mut self, w: i32, h: i32) -> Self {
+        (self.max_w, self.max_h) = (Some(w), Some(h));
+        self
+    }
+
+    /// `TextBox_SetSpacing`.
+    pub fn with_spacing(mut self, x: i32, y: i32) -> Self {
+        self.spacing = (x, y);
         self
     }
 
@@ -138,6 +154,17 @@ impl TextBox {
             }
             None => 1.0,
         };
+        let scale_y = match self.max_h {
+            Some(max) => {
+                let height = font.height(&text);
+                if max < height {
+                    max as f32 / height as f32
+                } else {
+                    1.0
+                }
+            }
+            None => 1.0,
+        };
         let row_y = match (self.line_y, Font::count_lines(&text)) {
             (Some(rows), n @ 1..=5) => rows[n as usize - 1],
             _ => 0,
@@ -153,6 +180,8 @@ impl TextBox {
             y: self.y + row_y + dy,
             align: self.align,
             scale_x,
+            scale_y,
+            spacing: self.spacing,
             color: color.map(i32::from),
             shadow: [0x20, 0x20, 0x20, i32::from((alpha * 64.0) as u32 as u8)],
             clip: self.clip.unwrap_or([0, 0, 0x1FF, 0x1BF]),
@@ -169,6 +198,8 @@ pub struct TextDraw {
     y: i32,
     align: i32,
     scale_x: f32,
+    scale_y: f32,
+    spacing: (i32, i32),
     color: [i32; 4],
     shadow: [i32; 4],
     clip: [i32; 4],
@@ -199,15 +230,14 @@ fn draw_clip(draw: &TextDraw, over: &DrawOver, font: &mut Font) {
     font.push_style();
     font.style.align = draw.align;
     font.style.scale_x = draw.scale_x;
-    font.style.scale_y = 1.0;
+    font.style.scale_y = draw.scale_y;
     font.style.color = rgba(color[0], color[1], color[2], color[3]);
     font.style.shadow_mode = 2;
     font.style.shadow_dx = 1;
     font.style.shadow_dy = 2;
     font.style.shadow_color = rgba(shadow[0], shadow[1], shadow[2], shadow[3]);
     font.style.clip = draw.clip;
-    font.style.spacing_x = 0;
-    font.style.spacing_y = 0;
+    (font.style.spacing_x, font.style.spacing_y) = draw.spacing;
     font.print_at(x, y, &draw.text);
     font.pop_style();
 }
@@ -219,6 +249,8 @@ pub struct MsgWin {
     text: Vec<u8>,
     draw: Option<TextDraw>,
     right: bool,
+    /// `MsgWin_SetSpacing`.
+    spacing: (i32, i32),
 }
 
 impl MsgWin {
@@ -236,6 +268,7 @@ impl MsgWin {
             text,
             draw: None,
             right,
+            spacing: (0, 0),
         })
     }
 
@@ -254,6 +287,11 @@ impl MsgWin {
         self.text = text;
     }
 
+    /// `MsgWin_SetSpacing`.
+    pub fn set_spacing(&mut self, x: i32, y: i32) {
+        self.spacing = (x, y);
+    }
+
     pub fn close(&mut self) {
         let label = if self.right { "fl_r_out" } else { "fl_l_out" };
         self.flash.goto_label(label, true);
@@ -263,8 +301,9 @@ impl MsgWin {
     pub fn draw(&mut self, line: i32, font: &mut Font, quads: &mut Vec<ScreenQuad>) {
         self.flash.advance();
         let clip = self.flash.find(None, "mc_message_text");
-        self.draw =
-            TextBox::preset(5).attach_line(&mut self.flash, clip, 0, &self.text, line, font);
+        self.draw = TextBox::preset(5)
+            .with_spacing(self.spacing.0, self.spacing.1)
+            .attach_line(&mut self.flash, clip, 0, &self.text, line, font);
         let textures = &self.textures;
         let has_texture = |image: usize| textures.get(image).is_some_and(Option::is_some);
         let (flash_quads, overs) = self.flash.draw_with_overs(&has_texture);
