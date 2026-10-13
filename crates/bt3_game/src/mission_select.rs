@@ -410,6 +410,7 @@ impl MissionSelectScreen {
         }
         side1.members = Some(members);
         let setup = BattleSetup {
+            wide: false,
             screen_mode: 0,
             mode: 2,
             bgm,

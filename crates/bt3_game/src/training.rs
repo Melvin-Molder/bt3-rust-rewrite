@@ -1079,6 +1079,7 @@ impl TrainScreen {
                 ..SideSetup::default()
             };
             let mut s = BattleSetup {
+                wide: false,
                 screen_mode: 0,
                 mode: 5,
                 bgm: i32::from(rec.bgm),

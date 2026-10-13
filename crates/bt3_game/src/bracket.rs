@@ -1115,6 +1115,7 @@ impl BracketScreen {
             }
         };
         let mut setup = BattleSetup {
+            wide: false,
             screen_mode,
             mode: 4,
             bgm,

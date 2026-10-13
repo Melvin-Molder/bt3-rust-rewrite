@@ -240,6 +240,8 @@ pub enum TitleSound {
     StreamSe(u32),
     /// `StreamSe_FadeOutStep(player)`.
     StreamSeFadeOutStep(u32),
+    /// `StreamSe_Stop(player)`.
+    StreamSeStop(u32),
     /// `StreamSe_Play(player, id, volume, pan)` (players 0 and 1).
     StreamSeEx {
         player: u32,

@@ -129,6 +129,8 @@ mod se;
 mod shen;
 mod shen_scene;
 mod shop;
+mod sim_day;
+mod sim_event;
 mod sim_result;
 mod sim_top;
 mod solo_select;
@@ -249,6 +251,8 @@ enum Scene {
     DiscFusion(Box<disc_fusion::DiscFusionScreen>),
     /// `Ub_Main` mode 20: Sim Dragon's entry screen.
     SimTop(Box<sim_top::SimTopScreen>),
+    /// `Ub_Main` mode 22: Sim Dragon's board.
+    SimDay(Box<sim_day::SimDayScreen>),
     /// `Ub_Main` mode 23: the result of a Sim Dragon round's fight.
     SimResult(Box<sim_result::SimResultScreen>),
     /// `Ub_Main` mode 26: the ranking ladder; mode 28: the course select; modes 27 and 30: their result.
@@ -343,6 +347,7 @@ impl Scene {
             | Scene::UbRank(_)
             | Scene::SimTop(_)
             | Scene::SimResult(_)
+            | Scene::SimDay(_)
             | Scene::UbzSelect(_)
             | Scene::UbResult(..)
             | Scene::ShenSave(_)
@@ -521,6 +526,7 @@ struct Game {
     ub_rank: Option<ub_rank::UbRankData>,
     sim_top: Option<sim_top::SimTopData>,
     sim_result: Option<sim_result::SimResultData>,
+    sim_day: Option<sim_day::SimDayData>,
     ubz_select: Option<ubz_select::UbzSelectData>,
     ub_result: Option<ub_result::UbResultData>,
     /// `BattleResult` of the last battle.
@@ -931,6 +937,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ub_rank: None,
             sim_top: None,
             sim_result: None,
+            sim_day: None,
             ubz_select: None,
             ub_result: None,
             battle_result: battle::BattleResult::default(),
@@ -1396,6 +1403,9 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 game.pending_map = None;
             }
             TitleSound::StreamSe(id) => play_stream_se(game, commands, 0, id, 0x40),
+            TitleSound::StreamSeStop(player) => {
+                stop_player(&mut game.stream_se[player as usize & 1], commands);
+            }
             TitleSound::StreamSeFadeOutStep(player) => {
                 if let Some(p) = &mut game.stream_se[player as usize & 1] {
                     p.level = sound::fade_out_step(p.level);
@@ -1707,6 +1717,7 @@ fn run_frames(
                         (25, 0) => start_disc_fusion(game, &mut commands),
                         (25, _) => start_ub_rank(game, &mut commands),
                         (21, 0) => start_sim_top(game, &mut commands),
+                        (21, _) => start_sim_day(game, &mut commands),
                         (29, 0) => start_ubz_select(game, &mut commands),
                         (29, _) => start_ubz_battle(game),
                         _ => {
@@ -1771,6 +1782,40 @@ fn run_frames(
                     }
                 }
             }
+            Scene::SimDay(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut loader,
+                    &mut game.random,
+                    &mut game.libc_random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                game.ub.sim = screen.run();
+                game.ub.sim_games = screen.games();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after SimDay_Run; the fight is followed by mode 23, a quit by mode 13.
+                    stop_all(game, &mut commands);
+                    match result {
+                        sim_day::SimDayResult::Battle(setup) => {
+                            game.ub_battle = Some(23);
+                            start_battle(game, *setup);
+                        }
+                        sim_day::SimDayResult::Quit => start_ub_menu(game, &mut commands),
+                    }
+                }
+            }
             Scene::SimResult(screen) => {
                 let frame = screen.run_frame(
                     held,
@@ -1792,8 +1837,7 @@ fn run_frames(
                         start_sim_top(game, &mut commands);
                     } else {
                         game.ub.sim.turn += 1;
-                        info!("Sim Dragon's board (mode 22) is not ported yet");
-                        start_ub_menu(game, &mut commands);
+                        start_sim_day(game, &mut commands);
                     }
                 }
             }
@@ -3976,6 +4020,48 @@ fn load_ub_file<T>(
     let mut image = Iso9660::open(&game.iso_path)?;
     let res = bpe::decode(&read_file(&mut image, file)?)?;
     parse(&res)
+}
+
+/// `Ub_Main` mode 22: `SimDay_Run(0)` (file `baseFile + 0x1A`; its music is the round's).
+fn start_sim_day(game: &mut Game, _commands: &mut Commands) {
+    if game.sim_day.is_none() {
+        match load_ub_file(game, sim_day::FILE_ID, sim_day::SimDayAssets::parse) {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout =
+                    sim_day::SimDayLayout::new(background, dialog, data.picked, |key| firsts[&key]);
+                game.sim_day = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load Sim Dragon's board: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.sim_day.clone().expect("Sim Dragon's board is loaded");
+    let pick = game.char_progress.side[0];
+    match sim_day::SimDayScreen::new(
+        &data,
+        game.ub.sim,
+        pick.picked,
+        pick.color_plate,
+        game.battle_result.health[0],
+        game.ub.sim_games,
+        &game.save,
+    ) {
+        Ok(screen) => {
+            game.ub.sim = screen.run();
+            game.scene = Scene::SimDay(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start Sim Dragon's board: {error}");
+            game.scene = Scene::Black;
+        }
+    }
 }
 
 /// `Ub_Main` mode 23: `SimResult_Run(3)` from `gMenuArc3` (its music is the round's).

@@ -69,6 +69,8 @@
 !/crates/bt3_game/src/shen.rs
 !/crates/bt3_game/src/shen_scene.rs
 !/crates/bt3_game/src/shop.rs
+!/crates/bt3_game/src/sim_day.rs
+!/crates/bt3_game/src/sim_event.rs
 !/crates/bt3_game/src/sim_result.rs
 !/crates/bt3_game/src/sim_top.rs
 !/crates/bt3_game/src/solo_select.rs

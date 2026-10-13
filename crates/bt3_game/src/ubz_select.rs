@@ -365,6 +365,7 @@ impl UbzSelectScreen {
         sides[1].chara = first.chara;
         sides[1].cpu_level = first.cpu_level;
         BattleSetup {
+            wide: false,
             screen_mode: 0,
             mode: 3,
             bgm,

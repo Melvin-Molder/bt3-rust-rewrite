@@ -431,6 +431,8 @@ pub struct BattleSetup {
     pub pool: Vec<PoolMember>,
     /// `gProgress->tutorial`: the tutorial whose controls mode 5's pause menu shows.
     pub tutorial: i32,
+    /// `BattleSetup_FinishEx(1)`: the bonuses of a side at a pad clamped to -20..60 (Sim Dragon's fights).
+    pub wide: bool,
 }
 
 impl BattleSetup {
@@ -542,6 +544,7 @@ impl BattleSetup {
             ..SideSetup::default()
         };
         let mut setup = Self {
+            wide: false,
             screen_mode: 0,
             mode: 3,
             bgm,
@@ -1172,6 +1175,7 @@ impl CharSelScreen {
             };
             // CSPROG->players is 0 in this mode: the pad against the computer.
             return BattleSetup {
+                wide: false,
                 screen_mode: 0,
                 mode: 6,
                 bgm,
@@ -1207,6 +1211,7 @@ impl CharSelScreen {
             _ => ([2, 2], [0, 1], flag),
         };
         BattleSetup {
+            wide: false,
             screen_mode: i32::from(self.players == 1),
             mode: 0,
             bgm,

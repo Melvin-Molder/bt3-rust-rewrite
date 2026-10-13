@@ -499,6 +499,7 @@ impl UbRankScreen {
         let bgm = if bgm == 24 { libc.rand() % 24 } else { bgm };
         let foe = self.cur_foe;
         let mut setup = BattleSetup {
+            wide: false,
             screen_mode: 0,
             mode: 2,
             bgm,

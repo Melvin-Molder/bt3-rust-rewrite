@@ -418,6 +418,27 @@ impl Flash {
         self.tl_mut(TlId::Root).state |= TL_PLAY;
     }
 
+    /// `Flash_Reset(flash, 0)`: as `reset`, and every sprite instance and shape is let go.
+    pub fn reset_clips(&mut self) {
+        self.reset();
+        for index in 0..self.clips.len() {
+            self.clip_reset(index);
+        }
+        for shape in &mut self.shapes {
+            *shape = Shape {
+                used: false,
+                id: 0,
+                mtx: IDENTITY,
+                cx: CXFORM_IDENTITY,
+            };
+        }
+    }
+
+    /// `Flash_Stop`: `Flash_Advance` no longer runs the timelines.
+    pub fn stop(&mut self) {
+        self.flags &= !FLASH_PLAY;
+    }
+
     /// `Flash_SetOffset`: the screen offset added to everything drawn.
     pub fn set_offset(&mut self, x: i32, y: i32) {
         self.ofs = [x, y];

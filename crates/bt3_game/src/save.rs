@@ -216,6 +216,10 @@ impl SaveData {
         self.word(OFS_MISSION_PAGES)
     }
 
+    pub fn set_mission_pages(&mut self, v: i32) {
+        self.set_word(OFS_MISSION_PAGES, v);
+    }
+
     /// `mission[n]` (12 bytes each): its record.
     pub fn mission(&self, n: usize) -> MissionRec {
         let at = OFS_MISSION + n * 0xC;

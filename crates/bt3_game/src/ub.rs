@@ -32,6 +32,8 @@ pub struct UbProgress {
     pub mission: Option<crate::mission_select::MissionSetup>,
     /// `sim` (0x64C): Sim Dragon's run.
     pub sim: crate::sim_top::SimRun,
+    /// The Sim Dragon scripts' globals (the trainings' last outcomes, the mini games).
+    pub sim_games: crate::sim_event::SimGames,
     /// The battle setup `SurvSel_SetupBattle` wrote (the rule, side 1 and the opponents), for `Ub_SetupSolo`.
     pub survival: Option<crate::char_select::BattleSetup>,
 }

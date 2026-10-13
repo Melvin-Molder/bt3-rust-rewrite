@@ -501,8 +501,13 @@ pub fn load(
     let member_ai_type = items.map(|side| side.map(|s| s.ai_type.max(0) as usize));
     let ai_type = member_ai_type.map(|side| side[0]);
     let member_items = std::array::from_fn(|side| {
-        // BattleSetup_FinishEx: the bonuses clamped to -20..20, or -20..60 for the computer in modes 1..4.
-        let wide = matches!(setup.mode, 1..=4) && setup.sides[side].control == 2;
+        // BattleSetup_FinishEx: the bonuses clamped to -20..20, or -20..60 for the computer in modes 1..4 and for
+        // a side at a pad when the setup asks for it.
+        let wide = if setup.sides[side].control == 2 {
+            matches!(setup.mode, 1..=4)
+        } else {
+            setup.wide
+        };
         items[side].map(|s| member_items(&s, wide))
     });
     let curve = elf.f32s(STAT_CURVE, 39).map_err(error)?;

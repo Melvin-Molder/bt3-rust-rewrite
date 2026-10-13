@@ -763,6 +763,7 @@ impl TeamSelScreen {
             _ => ([2, 2], flag),
         };
         BattleSetup {
+            wide: false,
             screen_mode: i32::from(self.players == PLAYERS_TWO),
             mode: 0,
             bgm,

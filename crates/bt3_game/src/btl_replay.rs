@@ -7,7 +7,7 @@
 //! caption only, 1 everything with the replay mark, 2 nothing); the pads do not vibrate and the blind overlay is
 //! not drawn. Saving a replay (reason 0x1000) leaves for a screen that is not ported.
 
-use crate::char_select::{BattleSetup, SideSetup};
+use crate::char_select::{BattleSetup, MemberStart, SideSetup};
 
 /// `BTL_REPLAY_FRAMES`: five minutes at 30 frames a second.
 pub(crate) const FRAMES: usize = 9000;
@@ -201,7 +201,8 @@ fn members(side: &SideSetup) -> Vec<(i32, i32, i32, [u16; 8])> {
 
 /// `BattleSetup` as the original lays it out (0x5A8 bytes): "btls", version 7, the rule, the two sides and their
 /// members with what `BtlMember_ApplyItems` and `BattleSetup_FinishEx` work out from the items of the item table
-/// (common file 4, `table`): the bonus levels (clamped to -20..20, or -20..60 for the computer in modes 1..4),
+/// (common file 4, `table`): the bonus levels (clamped to -20..20, or -20..60 for the computer in modes 1..4 and for a side at a pad
+/// of a wide setup),
 /// the AI type and the ability bits. The option block is left as `isSet` 0 (the battle takes the save's
 /// options).
 fn setup_bytes(setup: &BattleSetup, table: &[u8]) -> Vec<u8> {
@@ -226,13 +227,18 @@ fn setup_bytes(setup: &BattleSetup, table: &[u8]) -> Vec<u8> {
         let at = 0xC0 + s * 0x270;
         let m = members(side);
         put(&mut b, at, m.len() as i32);
-        let wide = matches!(setup.mode, 1..=4) && side.control == 2;
+        let wide = if side.control == 2 {
+            matches!(setup.mode, 1..=4)
+        } else {
+            setup.wide
+        };
         for (k, (chara, costume, cpu, items)) in m.iter().enumerate() {
             let mt = at + 4 + k * 0x64;
             put(&mut b, mt, *chara);
             put(&mut b, mt + 4, *costume);
             put(&mut b, mt + 0xC, *cpu);
-            b[mt + 0x10..mt + 0x14].copy_from_slice(&100.0f32.to_le_bytes());
+            let health = side.members.map_or(100.0, |start| start[k.min(4)].health);
+            b[mt + 0x10..mt + 0x14].copy_from_slice(&health.to_le_bytes());
             for (n, id) in items.iter().enumerate() {
                 b[mt + 0x14 + n * 2..mt + 0x16 + n * 2].copy_from_slice(&id.to_le_bytes());
             }
@@ -277,6 +283,7 @@ fn setup_from(b: &[u8]) -> Option<BattleSetup> {
         screen_mode: get(b, 0x24),
         ..BattleSetup::default()
     };
+    let mut wide = false;
     for (s, side) in setup.sides.iter_mut().enumerate() {
         let at = 0xC0 + s * 0x270;
         let count = get(b, at).clamp(1, 5) as usize;
@@ -302,7 +309,25 @@ fn setup_from(b: &[u8]) -> Option<BattleSetup> {
         side.switch_enabled = get(b, at + 0x200);
         side.pad = get(b, at + 0x204);
         side.control = get(b, at + 0x208);
+        let health = |k: usize| {
+            let mt = at + 4 + k * 0x64 + 0x10;
+            f32::from_le_bytes([b[mt], b[mt + 1], b[mt + 2], b[mt + 3]])
+        };
+        if (0..count).any(|k| health(k) != 100.0) {
+            side.members = Some(std::array::from_fn(|k| MemberStart {
+                cpu_level: if k < count { member(k).2 } else { cpu },
+                health: if k < count { health(k) } else { 100.0 },
+                variant: 0,
+            }));
+        }
+        // A bonus above 20 at a pad was clamped wide (BattleSetup_FinishEx(1)).
+        if side.control != 2
+            && (0..count).any(|k| (0..8).any(|n| get(b, at + 4 + k * 0x64 + 0x28 + n * 4) > 20))
+        {
+            wide = true;
+        }
     }
+    setup.wide = wide;
     Some(setup)
 }
 
