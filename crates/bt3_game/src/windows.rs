@@ -244,6 +244,11 @@ impl MsgWin {
         self.flash.goto_label(label, true);
     }
 
+    /// `MsgWin_SetSide`: the window's side for the next open / close (right: `fl_r_in` / `fl_r_out`).
+    pub fn set_side(&mut self, right: bool) {
+        self.right = right;
+    }
+
     /// `MsgWin_SetText`.
     pub fn set_text(&mut self, text: Vec<u8>) {
         self.text = text;

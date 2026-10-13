@@ -1168,10 +1168,16 @@ impl ItemInfo {
 }
 
 /// The character and item tables of common file 4 as the menus read them (`ChrTbl_*`, `ItemTbl_*`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChrTable {
-    /// Per character id: `costumes` (+0xA) and `baseSlots` (+0xE).
+    /// Per character id: `flags` (+8; bit 0 clear: the character reference's second base plate), `costumes` (+0xA)
+    /// and `baseSlots` (+0xE).
+    pub flags: Vec<i32>,
     pub costumes: Vec<i32>,
+    /// Per character id: the model viewer's camera, the height it looks at (+0x30) and its distance (+0x34)
+    /// (`ChrView_GetCharaInfo`).
+    pub view_target_y: Vec<f32>,
+    pub view_dist: Vec<f32>,
     pub base_slots: Vec<i32>,
     /// Per character id: `cost` (+0xC), the DP a team battle with a limit counts, and `link` (+0x2C), the ids of
     /// its other forms (0xFF none).
@@ -1191,8 +1197,17 @@ impl ChrTable {
         let charas = section(1);
         let items = section(2);
         Self {
+            flags: (0..count)
+                .map(|id| u16_at(charas + id * 0x3C + 8).unwrap_or(0))
+                .collect(),
             costumes: (0..count)
                 .map(|id| u16_at(charas + id * 0x3C + 0xA).unwrap_or(1))
+                .collect(),
+            view_target_y: (0..count)
+                .map(|id| f32::from_bits(u32_at(file, charas + id * 0x3C + 0x30)))
+                .collect(),
+            view_dist: (0..count)
+                .map(|id| f32::from_bits(u32_at(file, charas + id * 0x3C + 0x34)))
                 .collect(),
             base_slots: (0..count)
                 .map(|id| u16_at(charas + id * 0x3C + 0xE).unwrap_or(0))

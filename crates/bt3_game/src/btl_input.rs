@@ -114,17 +114,20 @@ pub(crate) struct PadState {
     pub status: i32,
 }
 
+/// `Pad_StickToFloat(raw, 50)`: one axis of a stick, 0 within 50 of the centre.
+pub(crate) fn stick_axis(raw: u8) -> f32 {
+    let mut v = f32::from(raw) - 127.5;
+    if 0.0 < v {
+        v = (v - 50.0).max(0.0);
+    } else {
+        v = (v + 50.0).min(0.0);
+    }
+    v / (127.5 - 50.0)
+}
+
 /// `Pad_StickToFloat` with `PAD_STICK_DEADZONE` (50 of 127.5), then `Pad_Update`'s clamp to the unit circle.
 pub(crate) fn stick_from_raw(x: u8, y: u8) -> [f32; 2] {
-    let axis = |raw: u8| {
-        let mut v = f32::from(raw) - 127.5;
-        if 0.0 < v {
-            v = (v - 50.0).max(0.0);
-        } else {
-            v = (v + 50.0).min(0.0);
-        }
-        v / (127.5 - 50.0)
-    };
+    let axis = stick_axis;
     let mut s = [axis(x), axis(y)];
     let len = s[0] * s[0] + s[1] * s[1];
     if 1.0 < len {

@@ -102,7 +102,7 @@ const FADE_COLORS_SLOT1: u32 = 0x2C_6E60 + 0x20;
 /// `Battle_ResetWork`: `Bgm_Play(Battle_GetBgm() + 0x10B16)`.
 pub const BGM_FIRST: u32 = 0x10B16;
 /// `BtlObjLight_Init`: section 1 of common file 2 is the light's texture file.
-const COMMON_LIGHT_FILE: u32 = 2;
+pub(crate) const COMMON_LIGHT_FILE: u32 = 2;
 /// `gCommonRes->data[1]`: common file 3, the common effect file (`BtlScene_GetCommonEntry`).
 const COMMON_EFFECT_FILE: u32 = 3;
 /// Common file 4: the character table (`ChrTblEntry`, 0x3C bytes, header word 1) and the item table
@@ -112,7 +112,7 @@ const CHARA_TABLE_FILE: u32 = 4;
 #[cfg(test)]
 const HEAD_NODE: u16 = 0x30;
 /// `BtlObjLight_Init`'s direction, used until the stage gives one.
-const DEFAULT_LIGHT: [f32; 3] = [0.34, -0.006, 0.941];
+pub(crate) const DEFAULT_LIGHT: [f32; 3] = [0.34, -0.006, 0.941];
 
 /// The GS frame the battle draws into (`View_InitLayout`, full screen): XYOFFSET is (2048 - 256, 2048 - 224).
 const OFFSET_X: f32 = 2048.0 - 256.0;
@@ -382,15 +382,8 @@ pub fn load(
     let mut setup = setup.clone();
     setup.finish();
     let setup = &setup;
-    // BtlObjLight_FindRes0 uploads texture 0 of the light file to block 0x3D40; the models' TEX0_2 reads that
-    // block as a 256-wide PSMT8 texture (TBW 4) on its first row.
     let common = read(COMMON_LIGHT_FILE)?;
-    let light = TextureResource::parse(pack_section(&common, 1).map_err(error)?).map_err(error)?;
-    let ramp_entry = light
-        .entries
-        .first()
-        .ok_or("the light file has no textures")?;
-    let ramp = psmt8_row_from_upload(ramp_entry, 4, 0, 256).map_err(error)?;
+    let ramp = light_ramp(&common)?;
     let LoadedStage {
         stage,
         model: stage_model,
@@ -1243,30 +1236,30 @@ fn motion_flags(common: &[u8], motion: usize) -> u32 {
 
 /// What a stage file gives the battle (`BtlStage_Init`, `StgNav_Bind`, the stage's camera cuts).
 pub(crate) struct LoadedStage {
-    stage: StageResource,
-    model: StageModel,
-    textures: Vec<RgbaTexture>,
-    cuts: Vec<Option<CamAnim>>,
-    collision: StageCollision,
-    nav: StageNav,
+    pub(crate) stage: StageResource,
+    pub(crate) model: StageModel,
+    pub(crate) textures: Vec<RgbaTexture>,
+    pub(crate) cuts: Vec<Option<CamAnim>>,
+    pub(crate) collision: StageCollision,
+    pub(crate) nav: StageNav,
     /// Stage pack entry 0x12's textures (`EftTexSet_Load32` of the water, `EftTexSet_Load8` of the smoke), when
     /// the entry is not empty.
-    pack12: Option<Vec<RgbaTexture>>,
+    pub(crate) pack12: Option<Vec<RgbaTexture>>,
     /// Stage pack entry 0xE's textures (`EftStorm_Init`), when the entry is not empty.
-    pack14: Option<Vec<RgbaTexture>>,
+    pub(crate) pack14: Option<Vec<RgbaTexture>>,
     /// Stage pack entry 0xB's textures (`EftWeather_Init`), when the entry is not empty.
-    pack11: Option<Vec<RgbaTexture>>,
+    pub(crate) pack11: Option<Vec<RgbaTexture>>,
     /// `EftStage_LoadSprite`: stage pack entry 0x14's textures, when the entry is not empty.
-    sun: Option<Vec<RgbaTexture>>,
+    pub(crate) sun: Option<Vec<RgbaTexture>>,
     /// `EftBoundMgr_Init`: the parameters (entry 23), colour (22) and textures (21), when all three are there.
-    bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
+    pub(crate) bound: Option<(bt3_data::stage::StageBound, Vec<RgbaTexture>)>,
     /// `EftStageScroll_Load`: the sheet (entry 7), its textures (entry 6) appended to the stage textures.
-    scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
+    pub(crate) scroll: Option<(bt3_data::eft_mesh::StageScroll, usize)>,
     /// `StgModel_BindAnims`: the animated objects, their textures among `textures`.
-    anims: crate::stage_anim::StageAnims,
+    pub(crate) anims: crate::stage_anim::StageAnims,
     /// `EftSurf_Init`: the surface file's meshes, textures and parameters (entry 0xD), and the normal maps of a
     /// reflecting one (`EftTexSet_Load34` of entry 0xA, all but its last four textures).
-    surf: Option<LoadedSurf>,
+    pub(crate) surf: Option<LoadedSurf>,
 }
 
 /// A stage's surfaces as read from its file.
@@ -1306,7 +1299,7 @@ fn without_tcc<'a>(e: &bt3_data::tex::TextureEntry<'a>) -> bt3_data::tex::Textur
 }
 
 /// Reads stage `stage_id`'s file (`BTL_FILE_STAGE + stage`).
-fn load_stage(
+pub(crate) fn load_stage(
     read: &mut dyn FnMut(u32) -> Result<Vec<u8>, String>,
     stage_id: i32,
     split: bool,
@@ -1328,16 +1321,16 @@ fn load_stage(
     let anims =
         crate::stage_anim::StageAnims::load(&stage_file, &mut textures, stage.objects.len())
             .map_err(error)?;
+    // The cuts are read only when one is played (`DemoCam_PlayStageAnim`): a section that is not one (the model
+    // viewer's backdrop has none) is no cut.
     let cuts = (0..3)
         .map(|i| {
             pack_section(&stage_file, STAGE_CUT_SECTION + i)
                 .ok()
                 .filter(|s| !s.is_empty())
-                .map(CamAnim::parse)
-                .transpose()
+                .and_then(|s| CamAnim::parse(s).ok())
         })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(error)?;
+        .collect::<Vec<_>>();
     let entry_size = |n: usize| {
         let word = |k: usize| {
             stage_file
@@ -1464,7 +1457,7 @@ fn bind_model_textures(
     model: &CharaModel,
     textures: &TextureResource,
     ramp: &[u8],
-    assets: &mut BattleAssets,
+    assets: &mut dyn ModelSink,
 ) -> Result<(Vec<Vec<[usize; 2]>>, Materials, HashMap<u32, usize>), String> {
     let error = |e: std::io::Error| e.to_string();
     let header = &model.header;
@@ -1484,9 +1477,9 @@ fn bind_model_textures(
         }
         materials.insert(
             (e.tbp_offset as u32, e.cbp_offset as u32),
-            assets.base_textures.len(),
+            assets.base_textures().len(),
         );
-        assets.base_textures.push(texture);
+        assets.base_textures().push(texture);
     }
     let mut shades = HashMap::new();
     for i in header.clut_first..header.clut_first.saturating_add(header.clut_count) {
@@ -1499,8 +1492,8 @@ fn bind_model_textures(
                 [r, g, b, 0xFF]
             })
             .collect();
-        shades.insert(e.tbp_offset as u32, assets.shade_textures.len());
-        assets.shade_textures.push(RgbaTexture {
+        shades.insert(e.tbp_offset as u32, assets.shade_textures().len());
+        assets.shade_textures().push(RgbaTexture {
             width: ramp.len() as u32,
             height: 1,
             pixels,
@@ -1567,11 +1560,11 @@ pub(crate) fn load_effect_model(
 /// `BtlLoad_StepObject`'s file as a battle object binds it: the model, textures and face as a fighter's, its tables
 /// when it has them (an object file has none), its model animations (sections 0x1D..0x24) as its motions, its
 /// character `(file - 0x590) / 10` (`BtlObj_Setup`).
-fn load_partner(
+pub(crate) fn load_partner(
     file: &[u8],
     id: u32,
     ramp: &[u8],
-    assets: &mut BattleAssets,
+    assets: &mut dyn ModelSink,
 ) -> Result<FighterModel, String> {
     let mut m = load_fighter(file, ramp, assets)?;
     m.tables = CharaTables::parse(file).unwrap_or_default();
@@ -1591,7 +1584,7 @@ fn load_partner(
 fn load_fighter(
     file: &[u8],
     ramp: &[u8],
-    assets: &mut BattleAssets,
+    assets: &mut dyn ModelSink,
 ) -> Result<FighterModel, String> {
     let error = |e: std::io::Error| e.to_string();
     let model = CharaModel::from_file(file).map_err(error)?;
@@ -1622,8 +1615,8 @@ fn load_fighter(
         for pixel in texture.pixels.chunks_exact_mut(4) {
             pixel[3] = 0xFF;
         }
-        assets.base_textures.push(texture);
-        Ok(assets.base_textures.len() - 1)
+        assets.base_textures().push(texture);
+        Ok(assets.base_textures().len() - 1)
     };
     let eye_table = bt3_data::pack_entry(file, bt3_data::face::EYE_TABLE)
         .map(TextureResource::parse)
@@ -1663,7 +1656,7 @@ fn load_fighter(
         mouth_tex,
         model_flags: header.flags,
         lips: face_data.lips,
-        tables: assets.fx_tables.face.clone(),
+        tables: assets.face_tables(),
     });
     Ok(FighterModel {
         chara: 0,
@@ -1895,6 +1888,41 @@ pub struct Battle {
     pub stream_stat: crate::btl_script::StreamStat,
     /// A voice asked for this frame (the reported status does not know it yet).
     pub(crate) voice_req: [bool; 2],
+}
+
+/// `BtlObjLight_FindRes0` uploads texture 0 of the light file to block 0x3D40; the models' TEX0_2 reads that block
+/// as a 256-wide PSMT8 texture (TBW 4) on its first row: the light ramp.
+/// `common` is common file 2 (`COMMON_LIGHT_FILE`).
+pub(crate) fn light_ramp(common: &[u8]) -> Result<Vec<u8>, String> {
+    let error = |e: std::io::Error| e.to_string();
+    let light = TextureResource::parse(pack_section(common, 1).map_err(error)?).map_err(error)?;
+    let ramp_entry = light
+        .entries
+        .first()
+        .ok_or("the light file has no textures")?;
+    psmt8_row_from_upload(ramp_entry, 4, 0, 256).map_err(error)
+}
+
+/// Where a model's textures go as it is bound (`ObjDraw_UploadTextures`): the battle's, or the menus' model
+/// viewer's.
+pub(crate) trait ModelSink {
+    fn base_textures(&mut self) -> &mut Vec<RgbaTexture>;
+    fn shade_textures(&mut self) -> &mut Vec<RgbaTexture>;
+    fn face_tables(&self) -> crate::btl_face::FaceTables;
+}
+
+impl ModelSink for BattleAssets {
+    fn base_textures(&mut self) -> &mut Vec<RgbaTexture> {
+        &mut self.base_textures
+    }
+
+    fn shade_textures(&mut self) -> &mut Vec<RgbaTexture> {
+        &mut self.shade_textures
+    }
+
+    fn face_tables(&self) -> crate::btl_face::FaceTables {
+        self.fx_tables.face.clone()
+    }
 }
 
 /// What reads the files of a character change.
@@ -3650,57 +3678,7 @@ impl Battle {
             (obj.flags & 2 != 0).then_some((self.assets.fighters[s].partner.as_deref()?, obj))
         });
         for (model, obj) in fighters.chain(partners) {
-            let Some((light, look)) =
-                model_look(obj, model.model.header.flags, self.light_dir, &view)
-            else {
-                continue;
-            };
-            let parts = model
-                .model
-                .parts
-                .iter()
-                .zip(&model.batch_textures)
-                .zip(&obj.nodes);
-            let obj_flags = obj.flags;
-            // The face: the mouth shape's mesh for the mouth part, the face texture of the frame for the model's.
-            let face = obj.face.as_ref();
-            let mouth = face
-                .and_then(|f| usize::try_from(f.sub_state()).ok())
-                .and_then(|s| model.face_draw.chains[s].as_ref());
-            let swap = face
-                .and_then(crate::btl_face::Face::texture)
-                .and_then(|t| model.face_draw.texture(t))
-                .zip(model.face_draw.material);
-            for ((part, textures), node) in parts {
-                if part.enabled && node_shown(model.model.header.flags, obj_flags, part.node) {
-                    let (batches, textures) = match mouth {
-                        Some((b, t)) if part.node == 0x30 => (b.as_slice(), t.as_slice()),
-                        _ => (part.batches.as_slice(), textures.as_slice()),
-                    };
-                    let swapped: Vec<[usize; 2]>;
-                    let textures = match swap {
-                        Some((to, from)) if textures.iter().any(|t| t[0] == from) => {
-                            swapped = textures
-                                .iter()
-                                .map(|&[b, s]| [if b == from { to } else { b }, s])
-                                .collect();
-                            swapped.as_slice()
-                        }
-                        _ => textures,
-                    };
-                    draw_part(
-                        part,
-                        batches,
-                        textures,
-                        &node.mtx,
-                        &node.parent,
-                        light,
-                        look,
-                        &view,
-                        &mut groups,
-                    );
-                }
-            }
+            draw_model(model, obj, self.light_dir, &view, &mut groups);
         }
         // The effect objects (`EftObj`), drawn as the fighters are: a prop shot's prop.
         for o in self.roster.scene.eft_objs.iter() {
@@ -4021,6 +3999,66 @@ impl Battle {
             models: batches,
             shadows,
             effects,
+        }
+    }
+}
+
+/// `BtlObjDraw_Draw` of one model object: its shown parts, the face's mouth mesh for the mouth part and the face
+/// texture of the frame for the model's, grouped by textures and look.
+pub(crate) fn draw_model(
+    model: &FighterModel,
+    obj: &crate::btl_obj::Obj,
+    light_dir: [f32; 3],
+    view: &View,
+    groups: &mut HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>>,
+) {
+    let Some((light, look)) = model_look(obj, model.model.header.flags, light_dir, view) else {
+        return;
+    };
+    let parts = model
+        .model
+        .parts
+        .iter()
+        .zip(&model.batch_textures)
+        .zip(&obj.nodes);
+    let obj_flags = obj.flags;
+    // The face: the mouth shape's mesh for the mouth part, the face texture of the frame for the model's.
+    let face = obj.face.as_ref();
+    let mouth = face
+        .and_then(|f| usize::try_from(f.sub_state()).ok())
+        .and_then(|s| model.face_draw.chains[s].as_ref());
+    let swap = face
+        .and_then(crate::btl_face::Face::texture)
+        .and_then(|t| model.face_draw.texture(t))
+        .zip(model.face_draw.material);
+    for ((part, textures), node) in parts {
+        if part.enabled && node_shown(model.model.header.flags, obj_flags, part.node) {
+            let (batches, textures) = match mouth {
+                Some((b, t)) if part.node == 0x30 => (b.as_slice(), t.as_slice()),
+                _ => (part.batches.as_slice(), textures.as_slice()),
+            };
+            let swapped: Vec<[usize; 2]>;
+            let textures = match swap {
+                Some((to, from)) if textures.iter().any(|t| t[0] == from) => {
+                    swapped = textures
+                        .iter()
+                        .map(|&[b, s]| [if b == from { to } else { b }, s])
+                        .collect();
+                    swapped.as_slice()
+                }
+                _ => textures,
+            };
+            draw_part(
+                part,
+                batches,
+                textures,
+                &node.mtx,
+                &node.parent,
+                light,
+                look,
+                view,
+                groups,
+            );
         }
     }
 }
@@ -4540,7 +4578,7 @@ fn length(a: [f32; 3]) -> f32 {
     dot(a, a).sqrt()
 }
 
-fn normalize(a: [f32; 3]) -> [f32; 3] {
+pub(crate) fn normalize(a: [f32; 3]) -> [f32; 3] {
     scale3(a, 1.0 / length(a))
 }
 
@@ -8125,7 +8163,8 @@ pub(crate) mod tests {
                     .is_some_and(|st| st.pack11.is_some() && st.stage.weather.is_some_and(|w| w.on))
             })
             .collect();
-        assert_eq!(stages, [1, 5, 8, 14, 19, 21, 25]);
+        // Stage 37 is not a battle stage (none of the menus picks it), but its file has the weather on.
+        assert_eq!(stages, [1, 5, 8, 14, 19, 21, 25, 37]);
         let mut setup = BattleSetup::default();
         setup.stage = stages[0];
         setup.sides[1].pad = 1;
@@ -8189,10 +8228,12 @@ pub(crate) mod tests {
             );
             with.push(s);
         }
-        // (Stage 38's file has one too, but the stage does not load: its camera animations are cut short.)
+        // Stage 38 is the model viewer's backdrop.
         assert_eq!(
             with,
-            [0, 2, 3, 7, 10, 11, 12, 14, 15, 17, 18, 21, 22, 23, 32, 33]
+            [
+                0, 2, 3, 7, 10, 11, 12, 14, 15, 17, 18, 21, 22, 23, 32, 33, 38
+            ]
         );
         let mut setup = BattleSetup::default();
         setup.stage = 10;

@@ -859,6 +859,8 @@ fn stage_alpha_ref(group: usize) -> f32 {
 /// The battle's model textures as uploaded so far, and the materials made of them.
 #[derive(Resource, Default)]
 pub struct ModelTextures {
+    /// `Game::model_rev` the textures were uploaded for.
+    rev: u32,
     base: Vec<Handle<Image>>,
     shade: Vec<Handle<Image>>,
     materials: HashMap<([usize; 2], ModelLook), Handle<GsModelMaterial>>,
@@ -1460,9 +1462,12 @@ pub fn sync_models(
     if !game.is_changed() {
         return;
     }
-    if game.model_textures.0.len() < textures.base.len() {
-        // A new battle: its textures start again from 0.
-        *textures = ModelTextures::default();
+    if game.model_textures.0.len() < textures.base.len() || textures.rev != game.model_rev {
+        // A new battle or a new model in the viewer: its textures start again from 0.
+        *textures = ModelTextures {
+            rev: game.model_rev,
+            ..ModelTextures::default()
+        };
     }
     while textures.base.len() < game.model_textures.0.len() {
         let texture = &game.model_textures.0[textures.base.len()];

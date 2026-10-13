@@ -33,8 +33,10 @@ mod btl_tech_sweep;
 mod btl_tech_volley;
 mod btl_text;
 mod btl_vib;
+mod char_ref;
 mod char_select;
 mod chr_cam;
+mod chr_view;
 mod clip;
 mod dc_list;
 mod dc_menu;
@@ -190,6 +192,8 @@ enum Scene {
     BootCard(Box<boot_card::BootCardScreen>),
     /// `Dc_Main` mode 53: the Data Center's top menu.
     DcMenu(Box<dc_menu::DcMenuScreen>),
+    /// `CharRefMode_Main`, progress mode 60: the character reference.
+    CharRef(Box<char_ref::CharRefScreen>),
     /// `OptMode_Main`, progress mode 62: the options screen.
     Options(Box<options::OptionScreen>),
     /// `Dc_Main` mode 54: the password screen.
@@ -255,6 +259,7 @@ impl Scene {
             | Scene::HistSave(_)
             | Scene::HistOutro(_)
             | Scene::Options(_)
+            | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
             Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
                 2.0 * VBLANK_SECONDS
@@ -305,6 +310,8 @@ struct Game {
     last_loading_type: Option<u16>,
     /// The battle's model textures (material, shading rows) and this frame's model triangles.
     model_textures: (Vec<RgbaTexture>, Vec<RgbaTexture>),
+    /// Bumped whenever `model_textures` starts over (a battle, a model of the viewer).
+    model_rev: u32,
     model_batches: Vec<battle::ModelBatch>,
     /// The stage texture file (a new revision after a stage change) and this frame's stage triangles.
     stage_textures: Vec<RgbaTexture>,
@@ -390,6 +397,13 @@ struct Game {
     /// The Data Center's screens (archive 8, sections 1 and 4) and its fields of `gProgress`.
     dc_menu: Option<dc_menu::DcMenuData>,
     options: Option<options::OptionData>,
+    char_ref: Option<char_ref::CharRefData>,
+    /// The character reference's model viewer (`ChrView`) while the screen runs, and the model texture revision
+    /// of it the renderer has.
+    chr_view: Option<chr_view::ChrView>,
+    chr_view_rev: Option<u32>,
+    /// Pad 0's sticks as `Pad_Update` gives them to the menus (`gPad[0].left`, `.right`).
+    menu_sticks: [[f32; 2]; 2],
     replay_menu: Option<replay_menu::ReplayMenuData>,
     dc_pass: Option<dc_password::DcPassData>,
     dc_list: Option<dc_list::DcListData>,
@@ -695,6 +709,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vu0_random: rng::Vu0Random::default(),
             last_loading_type: None,
             model_textures: (Vec::new(), Vec::new()),
+            model_rev: 0,
             model_batches: Vec::new(),
             stage_textures: Vec::new(),
             stage_rev: 0,
@@ -748,6 +763,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chara_table,
             dc_menu: None,
             options: None,
+            char_ref: None,
+            chr_view: None,
+            chr_view_rev: None,
+            menu_sticks: [[0.0; 2]; 2],
             replay_menu: None,
             dc_pass: None,
             dc_list: None,
@@ -1282,6 +1301,7 @@ fn run_frames(
         }
     }
     let mut battle_stick = [[0.0f32; 2]; 2];
+    let mut menu_sticks = [[0.0f32; 2]; 2];
     for (i, (_, pad)) in sorted.iter().enumerate() {
         let port = port_of(i);
         for (button, bit) in BATTLE_BUTTONS {
@@ -1301,8 +1321,18 @@ fn run_frames(
             if s != [0.0; 2] {
                 battle_stick[port] = s;
             }
+            if port == 0 {
+                menu_sticks[0] = s;
+                let rx = pad.get(GamepadAxis::RightStickX).unwrap_or(0.0);
+                let ry = pad.get(GamepadAxis::RightStickY).unwrap_or(0.0);
+                menu_sticks[1] = [
+                    btl_input::stick_axis(raw(rx)),
+                    btl_input::stick_axis(raw(-ry)),
+                ];
+            }
         }
     }
+    game.menu_sticks = menu_sticks;
     let mut held = 0;
     let mut held2 = 0;
     for (key, button, bit) in BUTTONS {
@@ -1398,6 +1428,75 @@ fn run_frames(
                 play_sounds(game, &mut commands, frame.sounds);
                 if done {
                     game.scene = Scene::Logos(LogoSequence::new());
+                }
+            }
+            Scene::CharRef(screen) => {
+                // CharRef_Draw's Job_Run (the viewer's load job) runs unless the viewer has the screen.
+                let viewer_shown = screen.viewer_shown();
+                if !viewer_shown && let Some(viewer) = &mut game.chr_view {
+                    let iso_path = game.iso_path.clone();
+                    let mut read = |id: u32| {
+                        Iso9660::open(&iso_path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|mut image| {
+                                read_file(&mut image, id).map_err(|e| e.to_string())
+                            })
+                    };
+                    viewer.step_job(&mut read);
+                }
+                let viewer_visible = game.chr_view.as_ref().is_some_and(|v| v.is_visible());
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    viewer_visible,
+                    &mut loader,
+                    &mut game.random,
+                    &mut game.libc_random,
+                    &mut game.font,
+                );
+                let done = screen.is_done();
+                let requests = screen.take_viewer_requests();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                // ChrView_Update while the viewer has the screen: the backdrop and the model, nothing else.
+                game.stage_batches.clear();
+                game.model_batches.clear();
+                if viewer_shown && let Some(viewer) = &mut game.chr_view {
+                    let [left, right] = game.menu_sticks;
+                    let out = viewer.update(left, right[1], &mut game.libc_random);
+                    if game.chr_view_rev != Some(viewer.model_rev) {
+                        game.chr_view_rev = Some(viewer.model_rev);
+                        game.model_textures = viewer.model_textures();
+                        game.model_rev += 1;
+                        game.stage_textures = viewer.stage_textures.clone();
+                        game.stage_rev += 1;
+                    }
+                    game.stage_batches = out.stage;
+                    game.model_batches = out.models;
+                }
+                if let Some(viewer) = &mut game.chr_view {
+                    for request in requests {
+                        match request {
+                            char_ref::ViewerRequest::Show { chara, costume } => {
+                                viewer.show(chara, costume, false)
+                            }
+                            char_ref::ViewerRequest::Hide => viewer.hide(),
+                        }
+                    }
+                }
+                if done {
+                    // CharRefMode_Main: Adx_StopAll, back to the main menu (CharRef_Term ends the viewer).
+                    game.chr_view = None;
+                    game.chr_view_rev = None;
+                    stop_all(game, &mut commands);
+                    start_main_menu(game, &mut commands, &mut audio);
                 }
             }
             Scene::Options(screen) => {
@@ -1632,6 +1731,7 @@ fn run_frames(
                             start_dc_menu(game, &mut commands);
                         }
                         MainMenuResult::Mode(62) => start_options(game, &mut commands),
+                        MainMenuResult::Mode(60) => start_char_ref(game, &mut commands),
                         MainMenuResult::Mode(mode) => {
                             info!("progress mode {mode} is not ported yet");
                             game.scene = Scene::Black;
@@ -2136,6 +2236,7 @@ fn finish_battle_load(game: &mut Game, commands: &mut Commands) {
         }
     };
     game.model_textures = (assets.base_textures.clone(), assets.shade_textures.clone());
+    game.model_rev += 1;
     game.stage_textures = assets.stage_textures.clone();
     game.stage_rev = assets.stage_rev;
     game.effect_textures = assets.effect_textures.clone();
@@ -2531,6 +2632,74 @@ fn start_duel_menu(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the duel menu: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `CharRefMode_Main` mode 60: `Bgm_Play(BGM_CHAR_REF)`, then `CharRef_Run(1)` from `gMenuArc9`.
+fn start_char_ref(game: &mut Game, commands: &mut Commands) {
+    if game.char_ref.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, char_ref::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    char_ref::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| char_ref::CharRefAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = char_ref::CharRefLayout::new(background, |key| firsts[&key]);
+                game.char_ref = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the character reference: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .char_ref
+        .clone()
+        .expect("character reference assets are loaded");
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    match char_ref::CharRefScreen::new(&data, &game.save, &game.chr_table, &mut loader) {
+        Ok(screen) => {
+            // ChrView_Init: the backdrop read at once; the faces' tables come from the executable.
+            let viewer = (|| -> Result<chr_view::ChrView, String> {
+                let mut image = Iso9660::open(&game.iso_path).map_err(|e| e.to_string())?;
+                let cnf = image.read_file("SYSTEM.CNF").map_err(|e| e.to_string())?;
+                let exe = bt3_data::elf::boot_path(&cnf).ok_or("SYSTEM.CNF names no executable")?;
+                let elf = image
+                    .read_file(&exe)
+                    .and_then(bt3_data::elf::Elf::parse)
+                    .map_err(|e| e.to_string())?;
+                let face = btl_face::FaceTables::read(&elf).map_err(|e| e.to_string())?;
+                let mut read = |id: u32| read_file(&mut image, id).map_err(|e| e.to_string());
+                chr_view::ChrView::new(&mut read, face, &game.chr_table)
+            })();
+            match viewer {
+                Ok(viewer) => game.chr_view = Some(viewer),
+                Err(error) => error!("cannot start the model viewer: {error}"),
+            }
+            game.chr_view_rev = None;
+            play_bgm(game, commands, char_ref::BGM_FILE_ID);
+            game.scene = Scene::CharRef(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the character reference: {error}");
             game.scene = Scene::Black;
         }
     }
