@@ -70,6 +70,8 @@
 !/crates/bt3_game/src/pass_win.rs
 !/crates/bt3_game/src/font.rs
 !/crates/bt3_game/src/dialog.rs
+!/crates/bt3_game/src/disc.rs
+!/crates/bt3_game/src/disc_fusion.rs
 !/crates/bt3_game/src/mcflow.rs
 !/crates/bt3_game/src/anim.rs
 !/crates/bt3_game/src/windows.rs

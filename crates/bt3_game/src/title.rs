@@ -256,6 +256,8 @@ pub enum TitleSound {
     },
     /// `Adx_PauseSeVoice` (true) / `Adx_ResumeSeVoice` (false): the streamed SE and voice players.
     PauseSeVoice(bool),
+    /// `Adx_StopAll`.
+    StopAll,
 }
 
 pub struct TitleFrame {

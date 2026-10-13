@@ -44,6 +44,8 @@ mod dc_menu;
 mod dc_password;
 mod dc_save;
 mod dialog;
+mod disc;
+mod disc_fusion;
 mod draw;
 mod duel_menu;
 mod eft;
@@ -238,6 +240,8 @@ enum Scene {
     /// `Ub_Main` mode 17: Survival's course select; mode 19: its result.
     SurvivalSelect(Box<survival_select::SurvivalSelectScreen>),
     SurvivalResult(Box<survival_result::SurvivalResultScreen>),
+    /// `Ub_Main` mode 24: Disc Fusion.
+    DiscFusion(Box<disc_fusion::DiscFusionScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -322,6 +326,7 @@ impl Scene {
             | Scene::MissionResult(_)
             | Scene::SurvivalSelect(_)
             | Scene::SurvivalResult(_)
+            | Scene::DiscFusion(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -362,6 +367,8 @@ struct Game {
     samplers: Vec<Sampling>,
     accumulator: f32,
     pressed_latch: u32,
+    /// The console's DVD drive.
+    drive: disc::DiscDrive,
     /// Port 2's menu buttons pressed since the last frame.
     pressed_latch2: u32,
     /// `PAD_*` bits pressed since the last battle frame, per port.
@@ -492,6 +499,7 @@ struct Game {
     mission_result: Option<mission_result::MissionResultData>,
     survival_select: Option<survival_select::SurvivalSelectData>,
     survival_result: Option<survival_result::SurvivalResultData>,
+    disc_fusion: Option<disc_fusion::DiscFusionData>,
     /// `BattleResult` of the last battle.
     battle_result: battle::BattleResult,
     ub: ub::UbProgress,
@@ -584,6 +592,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut seed = None;
     let mut battle_mode = (0, 0);
     let mut memcard_dir = PathBuf::from("memcard");
+    let mut other_discs = Vec::new();
     let mut battle_split = false;
     let mut log_fps = false;
     let mut shot = None;
@@ -649,6 +658,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("--mode requires a battle mode of 0 or 2 to 7")?;
             skip_to_title = true;
             skip_to_battle = true;
+        } else if argument == "--disc" {
+            // A disc the drive can hold besides this game's (Disc Fusion's swap: F1 opens and closes the tray, F2
+            // puts the next disc in).
+            other_discs.push(PathBuf::from(
+                arguments.next().ok_or("--disc requires a disc image")?,
+            ));
         } else if argument == "--memcard" {
             memcard_dir = PathBuf::from(arguments.next().ok_or("--memcard requires a folder")?);
         } else if argument == "--split" {
@@ -810,7 +825,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pressed_latch2: 0,
             battle_latch: [0; 2],
             quads: Vec::new(),
-            iso_path: image_path,
+            iso_path: image_path.clone(),
             random,
             libc_random,
             vu0_random: rng::Vu0Random::default(),
@@ -865,6 +880,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pictures: HashMap::new(),
             save: new_save,
             card: memcard::McCard::new(memcard::Libmc::new(Some(memcard_dir))),
+            drive: disc::DiscDrive::new(image_path.clone(), other_discs),
             progress: mcflow::Progress::default(),
             card_res,
             chara_table,
@@ -888,6 +904,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mission_result: None,
             survival_select: None,
             survival_result: None,
+            disc_fusion: None,
             battle_result: battle::BattleResult::default(),
             ub: ub::UbProgress::default(),
             tour: tour_menu::TourSession::default(),
@@ -1282,6 +1299,7 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
     for sound in sounds {
         match sound {
             TitleSound::PauseSeVoice(on) => game.se_voice_paused = on,
+            TitleSound::StopAll => stop_all(game, commands),
             TitleSound::Voice(id) => play_voice(game, commands, 0, id, 0x80),
             TitleSound::VoiceEx {
                 player, id, volume, ..
@@ -1466,6 +1484,30 @@ fn run_frames(
         }
     }
     game.menu_sticks = menu_sticks;
+    // The drive's tray and disc are the host's.
+    if keyboard.just_pressed(KeyCode::F1) {
+        game.drive.toggle_tray();
+        info!(
+            "the drive's tray is {} ({})",
+            if game.drive.is_open() {
+                "open"
+            } else {
+                "closed"
+            },
+            game.drive
+                .current()
+                .map_or("no disc".to_owned(), |p| p.display().to_string())
+        );
+    }
+    if keyboard.just_pressed(KeyCode::F2) && game.drive.is_open() {
+        game.drive.next_disc();
+        info!(
+            "the drive holds {}",
+            game.drive
+                .current()
+                .map_or("no disc".to_owned(), |p| p.display().to_string())
+        );
+    }
     let mut held = 0;
     let mut held2 = 0;
     for (key, button, bit) in BUTTONS {
@@ -1532,6 +1574,7 @@ fn run_frames(
         let start = pressed & title::PAD_START != 0;
         // Snd_Update at the top of every frame loop sends what the last frame queued.
         game.se.update();
+        game.drive.tick();
         let game = &mut *game;
         let stat = voice_stat(game, &players);
         let stream_stat = stream_se_stat(game, &players);
@@ -1673,6 +1716,41 @@ fn run_frames(
                     }
                 }
             }
+            Scene::DiscFusion(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.drive,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let result = screen.result();
+                let (cursor, ub_flags) = screen.progress();
+                game.ub.flags = ub_flags;
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after DiscFusion_Run.
+                    stop_all(game, &mut commands);
+                    if result != 0 {
+                        // DiscFusion_Run: the disc chosen to gProgress->cursor; Ub_Main: disc 0 is one fighter with
+                        // no DP limit (mode 25), disc 1 its course select (mode 28).
+                        game.ub.cursor = cursor;
+                        let mode = if cursor == 0 {
+                            game.ub.team_size = 1;
+                            game.ub.dp_rule = 0;
+                            25
+                        } else {
+                            28
+                        };
+                        info!("Ultimate Battle mode {mode} is not ported yet");
+                        start_ub_menu(game, &mut commands);
+                    } else {
+                        start_ub_menu(game, &mut commands);
+                    }
+                }
+            }
             Scene::SurvivalSelect(screen) => {
                 let frame = screen.run_frame(
                     held,
@@ -1784,9 +1862,9 @@ fn run_frames(
                         match result {
                             2 => start_mission_select(game, &mut commands),
                             3 => start_survival_select(game, &mut commands),
+                            4 => start_disc_fusion(game, &mut commands),
                             _ => {
-                                let mode = if result == 1 { 20 } else { 24 };
-                                info!("Ultimate Battle mode {mode} is not ported yet");
+                                info!("Ultimate Battle mode 20 is not ported yet");
                                 start_ub_menu(game, &mut commands);
                             }
                         }
@@ -3723,6 +3801,49 @@ fn start_mission_battle(game: &mut Game) {
     setup.finish();
     game.ub_battle = Some(16);
     start_battle(game, setup);
+}
+
+/// `Ub_Main` mode 24: `Bgm_Play(UB_BGM)`, then `DiscFusion_Run(6)` from `gMenuArc3`.
+fn start_disc_fusion(game: &mut Game, commands: &mut Commands) {
+    if game.disc_fusion.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    disc_fusion::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| disc_fusion::DiscFusionAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout =
+                    disc_fusion::DiscFusionLayout::new(background, dialog, |key| firsts[&key]);
+                game.disc_fusion = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load Disc Fusion: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.disc_fusion.clone().expect("Disc Fusion is loaded");
+    match disc_fusion::DiscFusionScreen::new(&data, game.ub.flags, &mut game.libc_random) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::DiscFusion(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start Disc Fusion: {error}");
+            game.scene = Scene::Black;
+        }
+    }
 }
 
 /// `Ub_Main` mode 17: `Bgm_Play(UB_BGM)`, then `SurvSel_Run(2)` from `gMenuArc3`.
