@@ -116,6 +116,8 @@ mod rng;
 mod save;
 mod scr_warp;
 mod se;
+mod shen;
+mod shen_scene;
 mod sound;
 mod stage_anim;
 mod stage_draw;
@@ -199,6 +201,9 @@ enum Scene {
     Options(Box<options::OptionScreen>),
     /// `TrainMode_Main`, progress mode 44: the training menu.
     Training(Box<training::TrainScreen>),
+    /// `Shen_Main` mode 70: the wish screen; mode 71: its save screen.
+    Shen(Box<shen::ShenScreen>),
+    ShenSave(Box<shen::ShenSaveScreen>),
     /// `Dc_Main` mode 54: the password screen.
     DcPass(Box<dc_password::DcPassScreen>),
     /// `Dc_Main` mode 55: the custom character list.
@@ -263,11 +268,15 @@ impl Scene {
             | Scene::HistOutro(_)
             | Scene::Options(_)
             | Scene::Training(_)
+            | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
-            Scene::Movie(..) | Scene::Loading(_) | Scene::BattleLoad(_) | Scene::Battle(_) => {
-                2.0 * VBLANK_SECONDS
-            }
+            // Shen_Run: Gfx_EndFrame(2).
+            Scene::Shen(_)
+            | Scene::Movie(..)
+            | Scene::Loading(_)
+            | Scene::BattleLoad(_)
+            | Scene::Battle(_) => 2.0 * VBLANK_SECONDS,
         }
     }
 }
@@ -408,6 +417,9 @@ struct Game {
     /// The progress mode (44 the menu, 45 its character select) of the training screen that set up the battle,
     /// or that the character select runs in.
     train_mode: Option<i32>,
+    /// `gMenuArc12`'s wish screen, and whether its backdrop's textures went to the renderer.
+    shen: Option<shen::ShenData>,
+    shen_textures: bool,
     /// The character reference's model viewer (`ChrView`) while the screen runs, and the model texture revision
     /// of it the renderer has.
     chr_view: Option<chr_view::ChrView>,
@@ -777,6 +789,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             train: None,
             train_char_select: None,
             train_mode: None,
+            shen: None,
+            shen_textures: false,
             chr_view: None,
             chr_view_rev: None,
             menu_sticks: [[0.0; 2]; 2],
@@ -1443,6 +1457,64 @@ fn run_frames(
                     game.scene = Scene::Logos(LogoSequence::new());
                 }
             }
+            Scene::Shen(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &game.chr_table,
+                    &mut game.random,
+                    &mut game.libc_random,
+                    &mut game.vu0_random,
+                    &mut game.font,
+                );
+                // The backdrop's stage and models, as the model viewer hands them over.
+                if !game.shen_textures {
+                    game.shen_textures = true;
+                    game.stage_textures = screen.scene().stage_textures.clone();
+                    game.stage_rev += 1;
+                    game.model_textures = screen.scene().model_textures();
+                    game.model_rev += 1;
+                }
+                let done = screen.is_done();
+                game.stage_batches = frame.scene.stage;
+                game.model_batches = frame.scene.models;
+                game.post_ops = frame.scene.post;
+                if frame.scene.capture {
+                    game.xfade_captures += 1;
+                }
+                game.xfade_alpha = frame.scene.xfade_alpha;
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    // Shen_Main: Adx_StopAll, then mode 71 (ShenScene_Term ends the backdrop).
+                    game.shen_textures = false;
+                    game.stage_batches.clear();
+                    game.model_batches.clear();
+                    game.post_ops.clear();
+                    game.xfade_alpha = 0;
+                    stop_all(game, &mut commands);
+                    start_shen_save(game);
+                }
+            }
+            Scene::ShenSave(screen) => {
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
+                let frame = screen.run_frame(held, pressed, &mut game.font, &mut mc);
+                let done = screen.is_done();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    // Shen_Main: Adx_StopAll, mode 4.
+                    stop_all(game, &mut commands);
+                    start_main_menu(game, &mut commands, &mut audio);
+                }
+            }
             Scene::Training(screen) => {
                 let mut loader = Pictures {
                     iso_path: &game.iso_path,
@@ -1786,6 +1858,7 @@ fn run_frames(
                         MainMenuResult::Mode(62) => start_options(game, &mut commands),
                         MainMenuResult::Mode(60) => start_char_ref(game, &mut commands),
                         MainMenuResult::Mode(44) => start_training(game, &mut commands),
+                        MainMenuResult::Mode(70) => start_shen(game, &mut commands),
                         MainMenuResult::Mode(mode) => {
                             info!("progress mode {mode} is not ported yet");
                             game.scene = Scene::Black;
@@ -2774,6 +2847,84 @@ fn start_char_ref(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the character reference: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Shen_Main` mode 70: `Bgm_Play(0x10B18)`, `Pad_SetRepeat(20, 1)` and `Shen_Run(2)` from `gMenuArc12`.
+fn start_shen(game: &mut Game, commands: &mut Commands) {
+    if game.chr_table.costumes.is_empty() {
+        match Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, 4))
+        {
+            Ok(file) => game.chr_table = bt3_data::chara_data::ChrTable::parse(&file, 0xA1),
+            Err(error) => error!("cannot read the character table: {error}"),
+        }
+    }
+    if game.shen.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, shen::ARCHIVE_FILE_ID))
+            .and_then(|archive| Ok(bpe::decode(pack_section(&archive, shen::ARCHIVE_SECTION)?)?))
+            .and_then(|res| shen::ShenAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let firsts = register_files(game, assets.files);
+                let cfm_firsts = register_files(game, assets.cfm_files);
+                data.layout = shen::ShenLayout::new(|key| firsts[&key], |key| cfm_firsts[&key]);
+                game.shen = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the wish screen: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.shen.clone().expect("wish screen assets are loaded");
+    let iso_path = game.iso_path.clone();
+    let mut read = |id: u32| {
+        Iso9660::open(&iso_path)
+            .map_err(|e| e.to_string())
+            .and_then(|mut image| read_file(&mut image, id).map_err(|e| e.to_string()))
+    };
+    match shen::ShenScreen::new(&data, &mut game.save, &mut game.random, &mut read) {
+        Ok(screen) => {
+            play_bgm(game, commands, shen::BGM_FILE_ID);
+            game.shen_textures = false;
+            game.scene = Scene::Shen(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the wish screen: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Shen_Main` mode 71: `ShenSave_Run(2)`, the dialog from section 10 of `gMenuArc12`'s section 2.
+fn start_shen_save(game: &mut Game) {
+    let loaded = Iso9660::open(&game.iso_path)
+        .map_err(Into::into)
+        .and_then(|mut image| read_file(&mut image, shen::ARCHIVE_FILE_ID))
+        .and_then(|file| Ok(bpe::decode(pack_section(&file, shen::ARCHIVE_SECTION)?)?))
+        .and_then(|res| dialog::DialogAssets::parse(pack_section(&res, shen::DIALOG_SECTION)?));
+    let dialog = match loaded {
+        Ok(assets) => {
+            let indices = register_pairs(game, assets.textures);
+            dialog::Dialog::new(&assets.fod, assets.titles, indices, None, 0)
+        }
+        Err(error) => Err(error),
+    };
+    match dialog {
+        Ok(dialog) => {
+            let screen = shen::ShenSaveScreen::new(dialog, game.card_res.as_deref());
+            game.scene = Scene::ShenSave(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot load the wish screen's save: {error}");
             game.scene = Scene::Black;
         }
     }

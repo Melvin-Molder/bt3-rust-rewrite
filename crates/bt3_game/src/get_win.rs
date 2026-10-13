@@ -21,7 +21,7 @@ pub(crate) const KIND_SAGA: i32 = 7;
 pub(crate) const KIND_EPISODE: i32 = 8;
 pub(crate) const KIND_DRAGON_BALL: i32 = 9;
 /// Kind 6: an amount of money.
-const KIND_MONEY: i32 = 6;
+pub(crate) const KIND_MONEY: i32 = 6;
 
 /// `gGetWin->tex[n]` of `GetWin_Init(pack)`, the pack being section `pack` of the screen's resource.
 pub(crate) fn textures(pack: usize) -> [ImageTexture; 13] {
@@ -54,10 +54,15 @@ pub(crate) struct GetWinData {
 
 impl GetWinData {
     pub(crate) fn parse(pack: &[u8]) -> Result<Self, Box<dyn Error>> {
+        Self::parse_lang(pack, 1)
+    }
+
+    /// `GetWin_Init(pack, lang)`: the movie of section 5 for language 1, else of section 6.
+    pub(crate) fn parse_lang(pack: &[u8], lang: i32) -> Result<Self, Box<dyn Error>> {
         let s =
             |n: usize| -> Result<Vec<u8>, Box<dyn Error>> { Ok(pack_section(pack, n)?.to_vec()) };
         Ok(Self {
-            fod: s(5)?,
+            fod: s(if lang == 1 { 5 } else { 6 })?,
             texts: [s(8)?, s(7)?, s(9)?, s(11)?, s(11)?],
             item_types: s(10)?.chunks_exact(0x28).map(|e| e[0]).collect(),
         })

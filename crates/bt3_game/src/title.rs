@@ -163,16 +163,21 @@ pub struct PadRepeat {
 
 impl PadRepeat {
     pub fn update(&mut self, held: u32, pressed: u32) -> u32 {
+        self.update_with(held, pressed, REPEAT_DELAY, REPEAT_INTERVAL)
+    }
+
+    /// `Pad_CalcRepeat` after `Pad_SetRepeat(delay, interval)`.
+    pub fn update_with(&mut self, held: u32, pressed: u32, delay: i32, interval: i32) -> u32 {
         let mut result = 0;
         if held == self.last && held != 0 {
             self.timer -= 1;
             if self.timer < 0 {
-                self.timer = REPEAT_INTERVAL;
+                self.timer = interval;
                 result = held;
             }
         } else {
             self.last = held;
-            self.timer = REPEAT_DELAY;
+            self.timer = delay;
         }
         if pressed != 0 {
             result = pressed;

@@ -69,6 +69,18 @@ impl CamShake {
         }
     }
 
+    /// `CamShake_GetTime`: the time left of the strongest slot.
+    pub(crate) fn time(&self) -> f32 {
+        let (mut strength, mut time) = (0.0f32, 0.0f32);
+        for i in 0..4 {
+            if strength < self.strength[i] {
+                time = self.time[i];
+                strength = self.strength[i];
+            }
+        }
+        time
+    }
+
     /// `CamShake_Tick`.
     pub(crate) fn tick(&mut self) {
         for i in 0..4 {

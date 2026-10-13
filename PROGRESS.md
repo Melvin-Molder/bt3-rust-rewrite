@@ -65,7 +65,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 
 ### Shenron (mode 70)
 
-- [ ] The wish scenes (src/ui/shen_*.c)
+- [x] The wish screen with its 3D summoning, the confirmation and reward windows, and the save after it (modes 70, 71; src/ui/shen_*.c)
 
 ### Battle engine
 
@@ -76,6 +76,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 - [x] Effects, stages and their effects, cameras, the demo camera
 - [x] HUD, pause and result menus, replays
 - [x] Sound: the fighters' sounds and voices, music, announcer
+- [ ] The objects' frame-alpha passes of `BtlObj_BeginDraw` (`GfxAlphaKey`, `ObjOutline`, `ObjGlow`: each material's alpha id in the frame, the glow of `BtlObj_SetAlphaAdd`; src/sys/gfx_post.c, gfx_screen.c)
 
 ## By function
 
@@ -92,4 +93,4 @@ Measured 2026-10-12:
 | src/main.c | 1 | 5 | 0 |
 | Total | 252 | 7126 | 3216 (45 %) |
 
-Menu files with no function cited yet: bracket.c, bracket_clips.c, bracket_guide.c, bracket_logic.c, char_reference.c, disc_fusion.c, entry_select.c, evo_mode.c, evo_top.c, evo_z_1.c, evo_z_2.c, evo_z_3.c, mission_result.c, mission_select.c, shop.c, sim_day.c, sim_event.c, sim_event_1.c, sim_event_card.c, sim_event_rock.c, sim_event_shell.c, sim_result.c, sim_top.c, solo_select.c, survival_result.c, tour_background.c, tour_menu.c, ub_menu.c, ub_rank.c, ub_result.c, ub_score.c, ub_team_select.c, ubz_select.c; and in src/ui: shen_confirm.c, shen_save.c, shen_scene.c, shen_wish.c.
+Menu files with no function cited yet: bracket.c, bracket_clips.c, bracket_guide.c, bracket_logic.c, char_reference.c, disc_fusion.c, entry_select.c, evo_mode.c, evo_top.c, evo_z_1.c, evo_z_2.c, evo_z_3.c, mission_result.c, mission_select.c, shop.c, sim_day.c, sim_event.c, sim_event_1.c, sim_event_card.c, sim_event_rock.c, sim_event_shell.c, sim_result.c, sim_top.c, solo_select.c, survival_result.c, tour_background.c, tour_menu.c, ub_menu.c, ub_rank.c, ub_result.c, ub_score.c, ub_team_select.c, ubz_select.c.

@@ -1537,7 +1537,7 @@ fn batch_texture(
 pub(crate) fn load_effect_model(
     pack: &[u8],
     ramp: &[u8],
-    assets: &mut BattleAssets,
+    assets: &mut dyn ModelSink,
 ) -> Result<crate::eft_obj::EffectModel, String> {
     let error = |e: std::io::Error| e.to_string();
     let model = CharaModel::from_file(pack).map_err(error)?;
@@ -3698,32 +3698,7 @@ impl Battle {
             else {
                 continue;
             };
-            let Some((light, look)) =
-                model_look(&o.obj, m.model.header.flags, self.light_dir, &view)
-            else {
-                continue;
-            };
-            let parts = m
-                .model
-                .parts
-                .iter()
-                .zip(&m.batch_textures)
-                .zip(&o.obj.nodes);
-            for ((part, textures), node) in parts {
-                if part.enabled && node_shown(m.model.header.flags, o.obj.flags, part.node) {
-                    draw_part(
-                        part,
-                        &part.batches,
-                        textures,
-                        &node.mtx,
-                        &node.parent,
-                        light,
-                        look,
-                        &view,
-                        &mut groups,
-                    );
-                }
-            }
+            draw_effect_model(m, &o.obj, self.light_dir, &view, &mut groups);
         }
         let mut batches: Vec<ModelBatch> = groups
             .into_iter()
@@ -4011,6 +3986,36 @@ impl Battle {
 
 /// `BtlObjDraw_Draw` of one model object: its shown parts, the face's mouth mesh for the mouth part and the face
 /// texture of the frame for the model's, grouped by textures and look.
+/// `BtlObjDraw_Draw` of an object that is not a fighter (an effect model's, the dragon scene's): its parts shown by
+/// the model's and the object's flags, posed by its nodes.
+pub(crate) fn draw_effect_model(
+    m: &crate::eft_obj::EffectModel,
+    obj: &crate::btl_obj::Obj,
+    light_dir: [f32; 3],
+    view: &View,
+    groups: &mut HashMap<([usize; 2], ModelLook), Vec<ScreenVertex>>,
+) {
+    let Some((light, look)) = model_look(obj, m.model.header.flags, light_dir, view) else {
+        return;
+    };
+    let parts = m.model.parts.iter().zip(&m.batch_textures).zip(&obj.nodes);
+    for ((part, textures), node) in parts {
+        if part.enabled && node_shown(m.model.header.flags, obj.flags, part.node) {
+            draw_part(
+                part,
+                &part.batches,
+                textures,
+                &node.mtx,
+                &node.parent,
+                light,
+                look,
+                view,
+                groups,
+            );
+        }
+    }
+}
+
 pub(crate) fn draw_model(
     model: &FighterModel,
     obj: &crate::btl_obj::Obj,

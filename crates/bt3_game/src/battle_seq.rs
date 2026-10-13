@@ -198,8 +198,32 @@ impl DemoCam {
         self.time = 0.0;
     }
 
+    /// `DemoCam_SetAnim`, `DemoCam_SetTime(0)` and `DemoCam_StartAuto`: `anim` in world space from its start,
+    /// advancing by itself and holding its last frame.
+    pub(crate) fn start_auto(&mut self, anim: CamAnim) {
+        self.set_anim(anim);
+        self.time = 0.0;
+        self.fixed = false;
+        self.flags = DEMO_PLAYING | DEMO_AUTO;
+    }
+
+    /// `DemoCam_GetTime`.
+    pub(crate) fn time(&self) -> f32 {
+        self.time
+    }
+
+    /// `DemoCam_ClearFixed`.
+    pub(crate) fn clear_fixed(&mut self) {
+        self.fixed = false;
+    }
+
+    /// `DemoCam_GetShakeTime`: the time left of the strongest shake.
+    pub(crate) fn shake_time(&self) -> f32 {
+        self.shake.time()
+    }
+
     /// `DemoCam_GetLength`.
-    fn length(&self) -> f32 {
+    pub(crate) fn length(&self) -> f32 {
         self.anim.as_ref().map_or(0.0, |a| a.length)
     }
 
@@ -362,11 +386,13 @@ pub(crate) struct ScrXfade {
 }
 
 impl ScrXfade {
-    fn request_capture(&mut self) {
+    /// `ScrXfade_RequestCapture`.
+    pub(crate) fn request_capture(&mut self) {
         self.request = true;
     }
 
-    fn start(&mut self, seconds: f32) {
+    /// `ScrXfade_Start(seconds, 1)`.
+    pub(crate) fn start(&mut self, seconds: f32) {
         self.ramp.start(seconds, 0.0, 1.0);
         self.request = true;
     }

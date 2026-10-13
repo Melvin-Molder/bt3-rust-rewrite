@@ -218,6 +218,11 @@ impl ScrWarps {
         self.objs = Default::default();
     }
 
+    /// `count[0] > 0 || count[1] > 0`: a wave is in use.
+    pub(crate) fn any(&self) -> bool {
+        self.objs.iter().any(Option::is_some)
+    }
+
     /// The views of the waves in use (`count[]`).
     #[cfg(test)]
     pub(crate) fn views(&self) -> Vec<usize> {
