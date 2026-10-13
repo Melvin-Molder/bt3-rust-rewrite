@@ -82,6 +82,30 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 - [x] Sound: the fighters' sounds and voices, music, announcer
 - [x] The objects' frame-alpha passes of `BtlObj_BeginDraw` (`GfxAlphaKey`, `ObjOutline`, `ObjGlow`: each material's alpha id in the frame, the glow of `BtlObj_SetAlphaAdd`; src/sys/gfx_post.c, gfx_screen.c)
 
+### Battle details left (from the port's "not ported" notes)
+
+Visuals whose accuracy depends on how the PS2 renders (the shadows' destination-alpha test, a fading debris piece's
+depth, blends in the GS's colour space) are left out.
+
+- [ ] Hit sounds and voices (`btl_hit.rs`), the clash voices
+- [ ] The techniques' fire sounds and the rush sparks' sounds
+- [ ] Streamed sounds: volume, pan and player per owner; voice lines of kinds 5..7 (`btl_snd.rs`)
+- [ ] `BtlAct_QueueComboFinish` and the attack records 0x77 / 0x87 / 0x8D..0x8F (`BtlDecide_QueueAttack`)
+- [ ] A paid evasion's attack (flag 0x7C), guard kind 4 from a guard action
+- [ ] Throws: the motions played from the opponent's table (table flag 0x20000000), a clash win's throw
+- [ ] The battle events fired by hits, clashes and techniques
+- [ ] The technique camera cuts
+- [ ] Technique effects: the rush swarm's models, streaks and flash; the disc's model; the prop shots' models, stage blur and flash
+- [ ] The ki objects' models, fragments and explosions
+- [ ] The stage timer of stages 4 / 27, the body sphere's stage push-out, a stage change's transition effects
+- [ ] The camera's stage trace (`BtlCam_TraceStage`)
+- [ ] The jaw and the look-at rotations of nodes 0x2E / 0x2F
+- [ ] The story mode's AI override (`BtlCharApi_GetStoryAiForce`)
+- [ ] The HUD's technique names above the command row, `Hud_SlideOut`
+- [ ] Story script command 1701 and command 8's stage change
+- [ ] `SndOpt_Apply` for the sound options loaded from the card
+- [ ] `EftZap` (effect kind 12) and the water swirls (`EftWaterMist_*`), if anything reaches them
+
 ## By function
 
 For each decompiled C file of `../BT3-Decompiled/src`, the functions whose names the Rust code cites (the port names the original function in its doc comments). A rough measure: the system layer (heap, DMA, lists, timers) has no counterpart by design, a few files are ported under other names (the script command handlers, `BtlScriptCmd_*`), and the decompilation itself does not cover every module of the executable.
