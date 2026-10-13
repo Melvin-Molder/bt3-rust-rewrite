@@ -7,8 +7,8 @@
 //! distance, each a start and what is added over the cut's time. `ChrCam_CalcCut` evaluates it every frame;
 //! its flags snap the smoothing, slow it, give this camera the screen (flag 0xD3) or hold the last frame.
 //!
-//! Not ported: the camera's stage trace (`BtlCam_TraceStage`; the camera stands at its eye, so the turn towards
-//! the opponent when the stage is in the way never happens) and the distance presets of SELECT.
+//! The camera's stage trace (`BtlCam_TraceStage`, `btl_mgr::trace_camera`) and the distance presets of SELECT
+//! (`btl_chr::cam_update_input`) run with the camera's update.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
