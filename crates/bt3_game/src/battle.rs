@@ -1,11 +1,9 @@
-//! `Battle_Main` (src/battle/battle.c) up to the fight: `Battle_Load` reads the fighters' model and motion files
-//! behind the loading screen, then the battle sequence (battle_seq.rs) runs the stage intro cuts, the entrance
-//! poses with their lines and the ready wait. Each frame the fighters are posed and drawn the way
-//! `BtlObjDraw_DrawModel` and VU1 program 0 draw them, after the stage, seen through the demo camera or side 0's
-//! fighter camera (`ChrCam_CalcLockOn`), then the HUD (hud.rs).
-//!
-//! Not ported yet: the fighters' actions in the fight, the hair / cloth chains, the face animation, animated stage
-//! objects and most of the HUD.
+//! `Battle_Main` (src/battle/battle.c): `Battle_Load` reads the fighters' model and motion files behind the loading
+//! screen, then the battle sequence (battle_seq.rs) runs the stage intro cuts, the entrance poses with their lines,
+//! the ready wait, the fight and its end. Each frame the fighters are posed and drawn the way
+//! `BtlObjDraw_DrawModel` and VU1 program 0 draw them, after the stage, seen through the demo camera or the fighter
+//! cameras (`ChrCam_CalcLockOn`), then the effects and the HUD (hud.rs). What is still missing is listed in
+//! PROGRESS.md.
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -4148,6 +4146,7 @@ impl Battle {
                 // Drawing does not test them.
                 paused: false,
                 in_technique: [false; 2],
+                eft_cam: false,
             };
             let in_view = |chr: usize| sv.in_view(chr);
             // Layer 0's stage effects, then the others.

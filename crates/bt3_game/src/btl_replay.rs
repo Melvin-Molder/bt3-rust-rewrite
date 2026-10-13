@@ -5,7 +5,7 @@
 //! ends the battle with winner bit 0x10, reason 0x40000). A rematch (reason 0x8000) records anew. While a replay
 //! plays, pad 0 left / right chooses the side whose camera is shown, up / down the HUD's replay mode (0 the
 //! caption only, 1 everything with the replay mark, 2 nothing); the pads do not vibrate and the blind overlay is
-//! not drawn. Saving a replay (reason 0x1000) leaves for a screen that is not ported.
+//! not drawn. Saving a replay (reason 0x1000) leaves for the replay list in its save mode.
 
 use crate::char_select::{BattleSetup, MemberStart, SideSetup};
 

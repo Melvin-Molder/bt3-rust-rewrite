@@ -17,8 +17,8 @@
 //! Once connected it darkens the stage (the stage tint's slot 0) and, with definition flag 0x200, blurs it between
 //! the victim's events 0x10 and 0x20.
 //!
-//! Not ported: the swarm's models, the camera cut, the streaks and flash, and the sparks' sounds the victim's events
-//! start.
+//! The camera cut, the streaks, the flash and the sparks' sounds the victim's events start run with the other
+//! technique items. Not ported: the swarm's models.
 
 use bt3_data::eft_pack::{EmitSet, SetHead};
 

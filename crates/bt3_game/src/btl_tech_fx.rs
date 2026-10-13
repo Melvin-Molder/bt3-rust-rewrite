@@ -23,8 +23,7 @@
 //! The skills (slots 0, 1) start the same way from effect bit 0x3C / 0x3D: kind 0, their events from the frame
 //! table when they have one, their records answered by `BtlColl_GuardStrike` / `BtlColl_HitByStrike`.
 //!
-//! Not ported: the skills' fire sounds; the prop shots' models, stage blur, flash and
-//! sound; abilities; the battle events.
+//! Not ported: abilities; the battle events.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 

@@ -87,15 +87,15 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 Visuals whose accuracy depends on how the PS2 renders (the shadows' destination-alpha test, a fading debris piece's
 depth, blends in the GS's colour space) are left out.
 
-- [ ] Hit sounds and voices (`btl_hit.rs`), the clash voices
-- [ ] The techniques' fire sounds and the rush sparks' sounds
+- [x] Hit sounds and voices (`btl_hit.rs`), the clash voices
+- [x] The techniques' fire sounds and the rush sparks' sounds
 - [ ] Streamed sounds: volume, pan and player per owner; voice lines of kinds 5..7 (`btl_snd.rs`)
 - [ ] `BtlAct_QueueComboFinish` and the attack records 0x77 / 0x87 / 0x8D..0x8F (`BtlDecide_QueueAttack`)
 - [ ] A paid evasion's attack (flag 0x7C), guard kind 4 from a guard action
-- [ ] Throws: the motions played from the opponent's table (table flag 0x20000000), a clash win's throw
+- [ ] Throws: the motions played from the opponent's table (table flag 0x20000000), a clash win's throw, the throw break (`BtlHit_CheckThrowBreak`)
 - [ ] The battle events fired by hits, clashes and techniques
-- [ ] The technique camera cuts
-- [ ] Technique effects: the rush swarm's models, streaks and flash; the disc's model; the prop shots' models, stage blur and flash
+- [x] The technique camera cuts
+- [ ] Technique effects: the rush swarm's models; the disc's model
 - [ ] The ki objects' models, fragments and explosions
 - [ ] The stage timer of stages 4 / 27, the body sphere's stage push-out, a stage change's transition effects
 - [ ] The camera's stage trace (`BtlCam_TraceStage`)

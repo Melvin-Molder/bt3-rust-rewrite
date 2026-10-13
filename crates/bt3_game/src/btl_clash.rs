@@ -8,8 +8,8 @@
 //! effects reset (a throw technique's win would throw: not ported). Clash B (states 6..8): both in 0xFA, trading blows for 76 frames; the one who counted more inputs wins
 //! (flags 0xBF / 0xC0). Clash C (states 9..11): both in 0xFB, then 0xFC exchanges placed on the stage paths; each
 //! exchange (both raising 0xC4) scores one for the fighter whose answer is right, and after seven with a leader
-//! the winner gets 0xC7, the loser 0xC8. The clash cameras are one-frame cuts (`ChrCam_SetCut`) and the clash B cut. Not ported: the voices and
-//! the streamed sounds.
+//! the winner gets 0xC7, the loser 0xC8. The clash cameras are one-frame cuts (`ChrCam_SetCut`) and the clash B cut; the voices and streamed
+//! sounds play as the states come.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 

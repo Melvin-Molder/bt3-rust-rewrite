@@ -1503,6 +1503,8 @@ pub(crate) struct FxWorld<'a> {
     pub paused: bool,
     /// `BtlCharApi_IsInTechnique` of each fighter.
     pub in_technique: [bool; 2],
+    /// `EftCam_IsActive`: a technique's camera cut runs.
+    pub eft_cam: bool,
 }
 
 impl FxWorld<'_> {
@@ -2018,13 +2020,13 @@ impl Modules {
             }
         }
         // EftRay_Update: a burst's kind is 2 (BtlScene_IsEffectStopped: the pause); mode 2 (the speed lines) ends
-        // when either fighter is in a technique. The technique camera cuts are not ported.
+        // when either fighter is in a technique, mode 3 while a technique's camera cut runs.
         let mut i = 0;
         while i < self.rays.len() {
             let r = &mut self.rays[i];
             let c = r.chr();
             let tech = w.in_technique[c] || w.in_technique[c ^ 1];
-            if r.update(w.paused, tech, false, libc) {
+            if r.update(w.paused, tech, w.eft_cam, libc) {
                 self.rays.remove(i);
             } else {
                 i += 1;

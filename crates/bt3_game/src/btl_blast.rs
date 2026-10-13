@@ -1616,6 +1616,7 @@ impl Scene {
             ray_texture: None,
             paused: w.paused,
             in_technique: [0, 1].map(|s| crate::btl_act::is_technique_id(w.chars[s].act.current)),
+            eft_cam: self.eft_cam_active,
         };
         self.fx.update(&fxw, w.libc, w.vu0);
         // Layer 3's blinding overlay and full-screen flash.

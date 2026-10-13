@@ -6,7 +6,8 @@
 //! attack table, the strike volumes of the motion's open hit window touching the defender's body boxes, and the
 //! reaction block `BtlHit_ApplyHit` fills on the defender. A rushing technique (flag 0x49) that touches its
 //! opponent starts its sequence (`BtlHit_CheckRush`, `BtlColl_StartThrow`). Hits, guards and trades shake the
-//! cameras and vibrate the pads by the record. Not ported: sounds and voices.
+//! cameras and vibrate the pads by the record, with their sounds and voices. Not ported: the throw break
+//! (`BtlHit_CheckThrowBreak`).
 
 use std::f32::consts::PI;
 
