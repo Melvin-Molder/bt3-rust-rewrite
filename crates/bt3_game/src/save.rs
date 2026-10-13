@@ -199,6 +199,32 @@ impl SaveData {
         }
     }
 
+    /// `shopFlags`: bit 0 the stock has just grown (the shop's greeting says so), bit 1 the last raise of the
+    /// stock level was made.
+    pub fn shop_flags(&self) -> i32 {
+        self.word(OFS_SHOP_FLAGS)
+    }
+
+    pub fn set_shop_flags(&mut self, v: i32) {
+        self.set_word(OFS_SHOP_FLAGS, v);
+    }
+
+    /// `stockLevel`: what the shop sells (items of this level and below).
+    pub fn stock_level(&self) -> i32 {
+        self.word(OFS_STOCK_LEVEL)
+    }
+
+    pub fn set_stock_level(&mut self, v: i32) {
+        self.set_word(OFS_STOCK_LEVEL, v);
+    }
+
+    /// `item[n]` written whole (`SAVE_ITEM_OWNED` 1, `SAVE_ITEM_NEW` 2).
+    pub fn set_item(&mut self, n: usize, v: u8) {
+        if let Some(b) = self.image.get_mut(OFS_ITEM + n) {
+            *b = v;
+        }
+    }
+
     /// `HistOutro_Init`'s count of a saga's first completion: `stockLevel` up by one, `shopFlags` bit 0.
     pub fn raise_stock_level(&mut self) {
         self.set_word(OFS_STOCK_LEVEL, self.word(OFS_STOCK_LEVEL) + 1);

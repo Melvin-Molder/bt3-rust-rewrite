@@ -552,6 +552,8 @@ pub fn item_params(raw: &[u8]) -> Vec<ItemParam> {
                 group: e[1],
                 picture: e[2],
                 slots: e[3],
+                price: i32::from_le_bytes(e[4..8].try_into().unwrap()),
+                stock_level: u32::from_le_bytes(e[8..0xC].try_into().unwrap()),
                 flags: i32::from_le_bytes(e[0x14..0x18].try_into().unwrap()),
             },
             stat: std::array::from_fn(|k| i16::from_le_bytes([e[0xC + k * 2], e[0xD + k * 2]])),

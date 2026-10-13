@@ -120,6 +120,7 @@ mod scr_warp;
 mod se;
 mod shen;
 mod shen_scene;
+mod shop;
 mod sound;
 mod stage_anim;
 mod stage_draw;
@@ -205,6 +206,8 @@ enum Scene {
     Training(Box<training::TrainScreen>),
     /// `EvoMode_Main` mode 48: Evolution Z's top menu.
     EvoTop(Box<evo_top::EvoTopScreen>),
+    /// `EvoMode_Main` mode 50: the item shop.
+    Shop(Box<shop::ShopScreen>),
     /// `Shen_Main` mode 70: the wish screen; mode 71: its save screen.
     Shen(Box<shen::ShenScreen>),
     ShenSave(Box<shen::ShenSaveScreen>),
@@ -273,6 +276,7 @@ impl Scene {
             | Scene::Options(_)
             | Scene::Training(_)
             | Scene::EvoTop(_)
+            | Scene::Shop(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -429,6 +433,7 @@ struct Game {
     evo_top: Option<evo_top::EvoTopData>,
     evo_cursor: i32,
     evo_bgm: bool,
+    shop: Option<shop::ShopData>,
     shen_textures: bool,
     /// The character reference's model viewer (`ChrView`) while the screen runs, and the model texture revision
     /// of it the renderer has.
@@ -803,6 +808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             evo_top: None,
             evo_cursor: -1,
             evo_bgm: false,
+            shop: None,
             shen_textures: false,
             chr_view: None,
             chr_view_rev: None,
@@ -1504,11 +1510,34 @@ fn run_frames(
                             stop_all(game, &mut commands);
                             start_main_menu(game, &mut commands, &mut audio);
                         }
+                        2 => start_shop(game),
                         mode => {
                             info!("Evolution Z mode {} is not ported yet", 48 + mode);
                             start_evo_top(game, &mut commands);
                         }
                     }
+                }
+            }
+            Scene::Shop(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &game.chr_table,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let done = screen.result().is_some();
+                // gProgress->flags |= 1 on a purchase.
+                if screen.dirty() {
+                    game.dc.dirty = true;
+                }
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    // EvoMode_Main: back to mode 48, the music going on.
+                    start_evo_top(game, &mut commands);
                 }
             }
             Scene::Shen(screen) => {
@@ -2906,6 +2935,48 @@ fn start_char_ref(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the character reference: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `EvoMode_Main` mode 50: `Shop_Run(2)` from `gMenuArc7`.
+fn start_shop(game: &mut Game) {
+    if game.chr_table.costumes.is_empty() {
+        match Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, 4))
+        {
+            Ok(file) => game.chr_table = bt3_data::chara_data::ChrTable::parse(&file, 0xA1),
+            Err(error) => error!("cannot read the character table: {error}"),
+        }
+    }
+    if game.shop.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, evo_top::ARCHIVE_FILE_ID))
+            .and_then(|archive| Ok(bpe::decode(pack_section(&archive, shop::ARCHIVE_SECTION)?)?))
+            .and_then(|res| shop::ShopAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = shop::ShopLayout::new(background, |key| firsts[&key]);
+                game.shop = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the shop: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.shop.clone().expect("the shop is loaded");
+    match shop::ShopScreen::new(&data, &game.chr_table, &mut game.save, &mut game.random) {
+        Ok(screen) => game.scene = Scene::Shop(Box::new(screen)),
+        Err(error) => {
+            error!("cannot start the shop: {error}");
             game.scene = Scene::Black;
         }
     }

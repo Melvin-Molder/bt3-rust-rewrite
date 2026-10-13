@@ -1153,6 +1153,9 @@ pub struct ItemInfo {
     pub picture: u8,
     /// How many of a character's item slots it takes.
     pub slots: u8,
+    /// +4: what the shop asks for it; +8: the shop's stock level from which it is on sale.
+    pub price: i32,
+    pub stock_level: u32,
     pub flags: i32,
 }
 
@@ -1231,6 +1234,8 @@ impl ChrTable {
                         group: b(1),
                         picture: b(2),
                         slots: b(3),
+                        price: u32_at(file, e + 4) as i32,
+                        stock_level: u32_at(file, e + 8),
                         flags: u32_at(file, e + 0x14) as i32,
                     }
                 })
