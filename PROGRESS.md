@@ -50,7 +50,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 ### Training (`TrainMode_Main`, modes 44..45)
 
 - [~] Free training and the tutorial battles run (`--mode 6`, `--mode 5`); the training menu does not (src/menu/training.c)
-- [ ] The tutorials' goals
+- [x] The tutorials' goals (the fighters' frame bits, `BtlCtrl_TestTutorialFrameBit` → `HudNotice_Show(8)`)
 
 ### Evolution Z (`EvoMode_Main`, modes 48..50)
 

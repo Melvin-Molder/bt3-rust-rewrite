@@ -12,7 +12,7 @@
 use crate::battle_seq::Ramp;
 use crate::hud_gauge::{GaugePart, HudTextures, SideGauge, TimerPart, draw_gauges};
 use crate::hud_gs::GsLayer;
-use crate::rng::LibcRandom;
+use crate::rng::{GameRandom, LibcRandom};
 use crate::title::TitleSound;
 
 /// `Hud_Init`: the file `6 + gProgress->unk0[0]`; sheet k sits at the byte offset in header word `SHEET_WORDS[k]`.
@@ -25,7 +25,7 @@ const PROMPT_SHEET: usize = 3;
 /// The font's icon sheet, appended after the HUD file's five.
 const ICON_SHEET: usize = 5;
 /// `HudNotice_GetVoiceBase`: the announcer's lines of the voice set of the options.
-fn announcer_base() -> u32 {
+pub(crate) fn announcer_base() -> u32 {
     if crate::sound::options().alt_voice {
         0x10B6C
     } else {
@@ -1366,8 +1366,22 @@ impl Hud {
     }
 
     /// `HudNotice_Show`: announcement `id` and, for 0..5, the announcer's line (on streamed-SE player 0). Id 8
-    /// (the tutorial's, which picks its line by `Rand_Range(2)`) starts without one.
+    /// (the tutorial goal's) plays line 2 or 3, by `Rand_Range(2)` (`goal_line`).
     pub(crate) fn show_notice(&mut self, id: u32, sounds: &mut Vec<TitleSound>) {
+        self.show_notice_with(id, None, sounds);
+    }
+
+    /// `HudNotice_Show(8)` with its `Rand_Range(2)` draw.
+    pub(crate) fn show_goal_notice(
+        &mut self,
+        random: &mut GameRandom,
+        sounds: &mut Vec<TitleSound>,
+    ) {
+        let line = if random.range(2) != 0 { 2 } else { 3 };
+        self.show_notice_with(8, Some(line), sounds);
+    }
+
+    fn show_notice_with(&mut self, id: u32, goal_line: Option<u32>, sounds: &mut Vec<TitleSound>) {
         let kind = match id {
             0 => Notice::Ready,
             1 => Notice::Fight,
@@ -1381,8 +1395,9 @@ impl Hud {
             _ => return,
         };
         self.notice.show(kind);
-        if id <= 5 {
-            let line = announcer_base() + self.announcer.max(0) as u32 * ANNOUNCER_LINES + id;
+        let line = if id <= 5 { Some(id) } else { goal_line };
+        if let Some(line) = line {
+            let line = announcer_base() + self.announcer.max(0) as u32 * ANNOUNCER_LINES + line;
             sounds.push(TitleSound::StreamSe(line));
         }
     }

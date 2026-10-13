@@ -3429,8 +3429,8 @@ impl Ctx<'_, '_> {
     /// Actions 0x20..0x23 (`BtlAct_VanishStepHandler`): the vanishing step, motion 0xF6, then seven frames of fast
     /// movement back (0x20), left (0x21), right (0x22) or along the line to the opponent (0x23), untouchable
     /// (flags 0x42..0x46). Raised by flags 0x74..0x76 (a counter), it starts at once. Sound 0x20; a sideways step
-    /// locked on past the opponent's back gives voice kind 0x1D. Battle event 0x41, frame bit 0x8000 and the stage
-    /// timer of stages 4 / 27 are not ported.
+    /// locked on past the opponent's back gives voice kind 0x1D. Raised by the counter: battle event 0x41 and frame
+    /// bit 0x8000 (the stage timer of stages 4 / 27 is not ported).
     fn vanish_step(&mut self, phase: u32) {
         if phase == ENTER {
             self.play(0xF6, 0.15);
@@ -3443,6 +3443,7 @@ impl Ctx<'_, '_> {
                 self.set(0x12C);
                 let side = self.me.player;
                 self.me.raise(side, 0x41);
+                self.me.frame_bits |= 0x8000;
             }
             self.me.work[2] = 7;
             self.me.set_fx(0xC);

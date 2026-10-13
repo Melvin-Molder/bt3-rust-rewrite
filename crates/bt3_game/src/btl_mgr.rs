@@ -1075,6 +1075,7 @@ fn begin_frame(chr: &mut Chr, data: &SideData, env: &Env) {
     } else if chr.has_ability(2) {
         chr.vanish_limit += 1;
     }
+    chr.frame_bits = 0;
     chr.dir_held = -1;
     chr.input.tech_class = -1;
     let blocked = chr.flags.test(0x11E) || chr.flags.test(0x11F) || chr.flags.test(0xB1);

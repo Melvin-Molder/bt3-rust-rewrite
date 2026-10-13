@@ -3131,6 +3131,12 @@ impl Battle {
             &prompts,
             self.seq.paused,
         );
+        // BtlCtrl_TestTutorialFrameBit: in mode 5, the tutorial's goal reached by fighter 0 last frame.
+        if self.assets.mode == 5
+            && (self.roster.chars[0].frame_bits >> (self.assets.tutorial & 63)) & 1 != 0
+        {
+            self.hud.show_goal_notice(random, input.sounds);
+        }
         self.seq_pre_update(&mut input);
         // BATTLE_FLAG_PAUSE as the sequence left it last frame.
         let paused = self.seq.paused;
@@ -5402,6 +5408,41 @@ pub(crate) mod tests {
             "{}",
             battle.roster.clash.state
         );
+    }
+
+    #[test]
+    fn real_tutorial_goal_shows_its_notice() {
+        // Tutorial 5 is reached by frame bit 0x20 (a dash or vanish technique).
+        let mut setup = BattleSetup::default();
+        setup.mode = 5;
+        setup.tutorial = 5;
+        setup.sides[1].chara = 1;
+        let Some(mut battle) = real_battle(&setup) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        let idle = [PadState::default(); 2];
+        for _ in 0..2000 {
+            if battle.seq.state_id() == 3 {
+                break;
+            }
+            battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        }
+        assert_eq!(battle.seq.state_id(), 3);
+        // Another tutorial's bit shows nothing.
+        battle.roster.chars[0].frame_bits = 0x40;
+        let out = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        let goal = |s: &TitleSound| {
+            matches!(s, TitleSound::StreamSe(n)
+                if [2, 3].contains(&(n - crate::hud::announcer_base())))
+        };
+        assert!(!out.sounds.iter().any(goal));
+        // BtlChar_BeginFrame cleared the bits for this frame.
+        assert_eq!(battle.roster.chars[0].frame_bits, 0);
+        battle.roster.chars[0].frame_bits = 0x20;
+        let out = battle.run_frame(false, idle, 0, &mut libc, &mut random, None, false);
+        assert!(out.sounds.iter().any(goal), "{:?}", out.sounds);
     }
 
     #[test]

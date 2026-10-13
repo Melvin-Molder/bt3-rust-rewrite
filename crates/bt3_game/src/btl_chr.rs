@@ -696,6 +696,9 @@ pub(crate) struct Chr {
     pub dash_limit: i32,
     pub vanish_count: i32,
     pub vanish_limit: i32,
+    /// `frameBits`: this frame's tutorial goals the fighter reached (`BtlChar_SetFrameBits`), cleared by
+    /// `BtlChar_BeginFrame`; mode 5 tests bit `gProgress->tutorial` of fighter 0's.
+    pub frame_bits: u64,
     /// `attackId`: the attack last prepared (read by `BtlAct_QueueComboFinish`, which is not ported).
     pub attack_id: i32,
     /// The member's idle talk count (+0xA0): the neutral state talks (0x43) only while it is 0.
@@ -920,6 +923,7 @@ impl Chr {
             dash_limit: 0,
             vanish_count: 0,
             vanish_limit: 0,
+            frame_bits: 0,
             attack_id: 0,
             idle_talk_count: 0,
             search_angle: 0.0,
@@ -2152,8 +2156,8 @@ impl Chr {
     }
 
     /// `BtlChar_RaiseEvents`: this frame's events of the fighter (damage taken by tenths, full gauges, powered up,
-    /// a technique or skill started, the actions and attacks that have one, and the rest of the fighter's states).
-    /// The frame bits it also sets are not ported.
+    /// a technique or skill started, the actions and attacks that have one, and the rest of the fighter's states),
+    /// and the frame bits of the tutorials' goals.
     pub(crate) fn raise_events(&mut self, data: &SideData, env: &Env, opp_alive: usize) {
         let side = self.player;
         let g = self.gauge;
@@ -2208,14 +2212,31 @@ impl Chr {
             match tech {
                 0x00..=0x0A => self.raise(side, 0x3D),
                 0x67..=0x6B => self.raise(side, 0x34),
-                0x3E..=0x42 => self.raise(side, 0x3E),
-                0x43..=0x46 => self.raise(side, 0x32),
+                0x3E..=0x42 => {
+                    self.raise(side, 0x3E);
+                    self.frame_bits |= 0x20;
+                    if self.vanish_count > 0 {
+                        self.frame_bits |= 0x100000;
+                    }
+                }
+                0x43..=0x46 => {
+                    self.raise(side, 0x32);
+                    self.frame_bits |= 0x20;
+                    if self.dash_count > 0 {
+                        self.frame_bits |= 0x100000;
+                    }
+                }
                 0x55 => self.raise(side, 0x33),
                 0x23 | 0x25 | 0x27 => self.raise(side, 0x40),
                 0x29 | 0x2B | 0x2D => self.raise(side, 0x56),
                 0x8A => self.raise(side, 0x3F),
-                0x53 | 0x10 | 0x52 | 0x58 | 0x60 | 0x65 | 0x6F | 0x72 | 0x74 | 0x7B | 0x7D
-                | 0x90 | 0x92 => self.raise(side, 0x4B),
+                0x53 => {
+                    self.raise(side, 0x4B);
+                    self.frame_bits |= 0x80000;
+                }
+                0x10 | 0x52 | 0x58 | 0x60 | 0x65 | 0x6F | 0x72 | 0x74 | 0x7B | 0x7D | 0x90
+                | 0x92 => self.raise(side, 0x4B),
+                0x75..=0x78 => self.frame_bits |= 0x2000000,
                 _ => {}
             }
             match tech {
@@ -2235,10 +2256,15 @@ impl Chr {
         if self.flags.raised(0xBE) {
             self.raise(side, 0x23);
         }
-        for (flag, ev) in [(0xBF, 0x47), (0xC1, 0x46), (0x6C, 0x57)] {
-            if self.flags.test(flag) {
-                self.raise(side, ev);
-            }
+        if self.flags.test(0xBF) {
+            self.raise(side, 0x47);
+        }
+        if self.flags.test(0xC1) {
+            self.raise(side, 0x46);
+            self.frame_bits |= 0x800000;
+        }
+        if self.flags.test(0x6C) {
+            self.raise(side, 0x57);
         }
         // The last hit that leaves the fighter at 1 health while the opponent's team is down.
         if self.flags.test(3) && g.health == 1 && opp_alive == 0 {
@@ -2249,6 +2275,12 @@ impl Chr {
         }
         if self.flags.test(7) {
             self.raise(side, 0x49);
+        }
+        if self.flags.raised(0x84) {
+            self.frame_bits |= 0x4000000;
+        }
+        if self.flags.raised(0xA4) {
+            self.frame_bits |= 0x1000000;
         }
     }
 
