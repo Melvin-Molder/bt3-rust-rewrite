@@ -383,10 +383,10 @@ pub(crate) struct Scene {
 /// A generator draw made outside the scene update.
 #[derive(Clone, Copy, Debug)]
 enum Deferred {
-    /// libc `rand()`.
-    Libc,
     /// A disc's spin: libc `rand()`.
     DiscSpin(u32),
+    /// A thrown object's spin: two libc `rand()`.
+    KiSpin(usize, u32),
     /// A bomb's throw: three VU0 draws, then two libc ones.
     Bomb(usize, u32),
 }
@@ -917,15 +917,33 @@ impl Scene {
             return;
         }
         self.next_id += 1;
-        objs.push(KiObj::new(self.next_id, me, arg, bomb));
+        let mut o = KiObj::new(self.next_id, me, arg, bomb);
+        // EftObj_Create of the manager's model (none when the pool is full: the object dies at its first step),
+        // placed at the start.
+        let slot = if bomb {
+            crate::eft_obj::KI_BOMB_SLOT
+        } else {
+            crate::eft_obj::KI_OBJ_SLOT
+        };
+        if let Some(m) = data.effect_model(slot) {
+            let handle = self.tech.out.handle();
+            let model = crate::eft_obj::ModelRef {
+                side: me.player,
+                slot,
+            };
+            if self.eft_objs.create(handle, model, m) {
+                let mut mtx = crate::battle::IDENTITY;
+                mtx[3] = [o.pos()[0], o.pos()[1], o.pos()[2], 1.0];
+                self.eft_objs.set_mtx(handle, mtx);
+                o.handle = Some(handle);
+            }
+        }
+        objs.push(o);
         self.deferred.push(if bomb {
             Deferred::Bomb(arg.owner, self.next_id)
         } else {
-            Deferred::Libc
+            Deferred::KiSpin(arg.owner, self.next_id)
         });
-        if !bomb {
-            self.deferred.push(Deferred::Libc);
-        }
     }
 
     /// `EftKiBlast_Fire` and `EftKiBlast_Init`: a task in the owner's kind 1 list (type 0) or kind 2 list, unless the
@@ -1096,9 +1114,7 @@ impl Scene {
                     }
                 }
                 TechReq::ObjCreate { handle, model } => {
-                    if let Some(m) =
-                        w.data[model.side].tech_packs[model.slot].and_then(|p| p.model.as_ref())
-                    {
+                    if let Some(m) = w.data[model.side].effect_model(model.slot) {
                         self.eft_objs.create(handle, model, m);
                     }
                 }
@@ -1107,9 +1123,7 @@ impl Scene {
                 TechReq::ObjDestroy(handle) => self.eft_objs.destroy(handle),
                 TechReq::ObjPlay { handle, anim, mode } => {
                     let model = self.eft_objs.model_of(handle);
-                    if let Some(m) = model.and_then(|r| {
-                        w.data[r.side].tech_packs[r.slot].and_then(|p| p.model.as_ref())
-                    }) {
+                    if let Some(m) = model.and_then(|r| w.data[r.side].effect_model(r.slot)) {
                         self.eft_objs.play_anim(handle, anim, mode, m);
                     }
                 }
@@ -1157,7 +1171,12 @@ impl Scene {
             list.clear();
         }
         for list in &mut self.ki_objs[side] {
-            list.clear();
+            // EftKiObj_Term / EftKiBomb_Term: the model goes.
+            for o in list.drain(..) {
+                if let Some(h) = o.handle {
+                    self.eft_objs.destroy(h);
+                }
+            }
         }
         self.absorbs[side].reset(&mut self.fx);
         self.shocks[side].reset(&mut self.fx);
@@ -1206,19 +1225,23 @@ impl Scene {
         // The generator draws of the discs, objects and bombs the fighters created.
         for d in std::mem::take(&mut self.deferred) {
             match d {
-                Deferred::Libc => {
-                    w.libc.rand();
-                }
                 Deferred::DiscSpin(id) => {
                     let r = w.libc.rand();
                     self.tech.discs.set_spin(id, r);
                 }
                 Deferred::Bomb(side, id) => {
-                    if let Some(o) = self.ki_objs[side][1].iter_mut().find(|o| o.id == id) {
+                    let o = self.ki_objs[side][1].iter_mut().find(|o| o.id == id);
+                    let (a, b) = (w.libc.rand(), w.libc.rand());
+                    if let Some(o) = o {
                         o.jitter(w.vu0);
+                        o.set_spin(a, b);
                     }
-                    w.libc.rand();
-                    w.libc.rand();
+                }
+                Deferred::KiSpin(side, id) => {
+                    let (a, b) = (w.libc.rand(), w.libc.rand());
+                    if let Some(o) = self.ki_objs[side][0].iter_mut().find(|o| o.id == id) {
+                        o.set_spin(a, b);
+                    }
                 }
             }
         }
@@ -1309,7 +1332,10 @@ impl Scene {
                             self.records.push(rec);
                         }
                         if o.dead() {
-                            self.ki_objs[side][list].remove(i);
+                            let o = self.ki_objs[side][list].remove(i);
+                            if let Some(h) = o.handle {
+                                self.eft_objs.destroy(h);
+                            }
                         } else {
                             i += 1;
                         }
@@ -1657,6 +1683,13 @@ impl Scene {
                     task_post_update(task, w, &mut self.fx);
                 }
                 for k in 0..self.ki_objs[side][list].len() {
+                    // The model shown while the object is, unless its fighter's effects hide.
+                    let o = &self.ki_objs[side][list][k];
+                    if let Some(h) = o.handle {
+                        let on =
+                            o.shown() && !crate::btl_tech_fx::effect_hidden_0(w.chars, o.arg.owner);
+                        self.eft_objs.set_visible(h, on);
+                    }
                     if list == 1 {
                         self.ki_objs[side][list][k].post_bomb(w.libc);
                     } else {
@@ -1684,10 +1717,20 @@ impl Scene {
             self.sparks.post_update(&s.set, &mut self.fx, w.paused);
         }
         self.serve_tech_requests(w);
+        // The ki objects' matrices of the last draw (EftKiObj_Draw / EftKiBomb_UpdateModel run after the objects
+        // were updated and drawn: their models follow a frame behind).
+        for o in self.ki_objs.iter().flatten().flatten() {
+            if let (Some(h), Some(m)) = (o.handle, o.draw_mtx) {
+                self.eft_objs.set_mtx(h, m);
+            }
+        }
         // BtlObj_UpdateAll's effect objects.
-        self.eft_objs.update(w.paused, |r| {
-            w.data[r.side].tech_packs[r.slot].and_then(|p| p.model.as_ref())
-        });
+        self.eft_objs
+            .update(w.paused, |r| w.data[r.side].effect_model(r.slot));
+        // BtlScene_Draw's ki object matrices.
+        for o in self.ki_objs.iter_mut().flatten().flatten() {
+            o.pose_model();
+        }
         self.update_records(w);
         self.spawn_impacts(w);
         for (i, chr) in w.chars.iter_mut().enumerate() {

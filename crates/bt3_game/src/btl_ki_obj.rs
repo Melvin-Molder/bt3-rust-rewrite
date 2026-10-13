@@ -6,12 +6,29 @@
 //! it explodes then, after 300 frames, below the stage, within 28 of the opponent or when it hits a fighter: a
 //! 15-frame record of radius 28. Both publish blast records of their ki blast's parameters.
 //!
-//! Not ported: the models, the fragments' and the explosion's drawing (their libc `rand()` draws are kept; the
-//! explosion's draw picks its sound).
+//! Each carries its manager's model (`EftObj_Create`; without a free object it dies at its first step), shown
+//! while it flies unless its fighter's effects hide, spinning about X at its libc `rand()` rate (27..37 degrees a
+//! frame either way; a bomb's halved by each bounce, then lying at one of three angles). The model's matrix is
+//! set by the draw, after the objects were drawn: it follows a frame behind. The thrown object breaks into five
+//! fragments thrown out by libc `rand()`, falling for 15 frames, drawn as turned sprites of the pack's texture.
 
+use std::f32::consts::PI;
+
+use crate::battle::{IDENTITY, Mtx, mul};
 use crate::btl_blast::{Arg, HitRec, Tag};
 use crate::btl_chr::{Chr, add, dot, length, scale3, sub};
+use crate::btl_obj::rot_x;
+use crate::btl_tech_volley::eft_wrap;
+use crate::eft::{DrawCtx, OrderTable};
 use crate::rng::{LibcRandom, Vu0Random};
+
+/// `EFT_KIPROP_FRAGS`.
+const FRAGS: usize = 5;
+
+/// `rand() / 2147483647.0f`.
+fn rand01(r: i32) -> f32 {
+    r as f32 / 2_147_483_647.0
+}
 
 /// `EftKiObjMgr_Init` / `EftKiBombMgr_Init`: tasks per fighter.
 pub(crate) const LIST_MAX: usize = 10;
@@ -21,6 +38,7 @@ const K_MOVED: u32 = 0x2;
 const K_DEFLECTED: u32 = 0x4;
 const K_KILL: u32 = 0x8;
 const K_BROKEN: u32 = 0x10;
+const K_SHOWN: u32 = 0x40;
 const K_HITS: u32 = 0x80;
 const K_EXPLODE: u32 = 0x100;
 const K_REST: u32 = 0x200;
@@ -59,6 +77,17 @@ pub(crate) struct KiObj {
     bomb: bool,
     /// Where the bomb exploded this update (`EftImpact_SpawnBlast`, taken by the scene).
     pub exploded: Option<[f32; 3]>,
+    /// The model object (`handle`), and the matrix the last draw gave it.
+    pub handle: Option<u32>,
+    pub draw_mtx: Option<Mtx>,
+    /// The model's scale (`size`: the ki blast's radius), frames lived, spin rate (degrees a frame) and angle.
+    size: f32,
+    frame: i16,
+    spin_rate: f32,
+    angle: f32,
+    /// The fragments (position, velocity with the size factor in w) while they play.
+    frags: [([f32; 3], [f32; 4]); FRAGS],
+    frags_on: bool,
 }
 
 fn norm(v: [f32; 3]) -> [f32; 3] {
@@ -75,7 +104,7 @@ impl KiObj {
             id,
             tag: Tag::default(),
             arg,
-            flags: K_HITS,
+            flags: K_SHOWN | K_HITS,
             pos,
             prev: me.obj.node_pos(0x11),
             vel: arg.dir,
@@ -90,6 +119,14 @@ impl KiObj {
             frag_timer: 15,
             bomb,
             exploded: None,
+            handle: None,
+            draw_mtx: None,
+            size: arg.radius,
+            frame: 0,
+            spin_rate: 0.0,
+            angle: 0.0,
+            frags: [([0.0; 3], [0.0; 4]); FRAGS],
+            frags_on: false,
         };
         if bomb {
             o.radius = 5.0;
@@ -99,6 +136,12 @@ impl KiObj {
             o.vel = scale3(o.vel, o.speed);
         }
         o
+    }
+
+    /// The launch's spin rate from its two libc `rand()` draws: 27..37 degrees a frame, either way.
+    pub(crate) fn set_spin(&mut self, a: i32, b: i32) {
+        let spin = rand01(a) * 10.0 - 5.0 + 32.0;
+        self.spin_rate = if rand01(b) < 0.5 { spin } else { -spin };
     }
 
     /// The bomb's throw: x and z +-0.2, y up to 0.3 upwards from the VU0 generator, normalised, times the speed.
@@ -148,7 +191,17 @@ impl KiObj {
         rec
     }
 
+    /// The spin angle of frame `frame` at the rate.
+    fn spin_angle(&self) -> f32 {
+        let deg = (i32::from(self.frame).wrapping_mul(self.spin_rate as i32)) % 360;
+        eft_wrap(deg as f32 * PI / 180.0)
+    }
+
     fn step_obj(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        if self.handle.is_none() {
+            self.flags |= K_KILL;
+        }
         if self.flags & K_BROKEN == 0 {
             if self.flags & K_MOVED != 0 {
                 self.prev = self.pos;
@@ -157,14 +210,21 @@ impl KiObj {
             self.pos = add(self.pos, self.vel);
             self.vel[1] += self.gravity;
         }
+        self.angle = self.spin_angle();
         if self.frag_timer <= 0 {
             self.flags |= K_KILL;
         }
-        // EftKiObj_StepFrags: the fragments' timer.
-        if self.flags & K_BROKEN != 0 {
+        // EftKiObj_StepFrags: the fragments fall until their timer is out.
+        if self.frags_on {
             self.frag_timer -= 1;
             if self.frag_timer <= 0 {
                 self.frag_timer = 0;
+                self.frags_on = false;
+            } else {
+                for (pos, vel) in &mut self.frags {
+                    *pos = add(*pos, [vel[0], vel[1], vel[2]]);
+                    vel[1] += self.gravity;
+                }
             }
         }
     }
@@ -176,6 +236,10 @@ impl KiObj {
         libc: &mut LibcRandom,
         snd: &mut crate::btl_snd::CharSound,
     ) {
+        self.frame = self.frame.wrapping_add(1);
+        if self.handle.is_none() {
+            self.flags |= K_KILL;
+        }
         if self.flags & K_MOVED != 0 {
             self.prev = self.pos;
         }
@@ -192,6 +256,9 @@ impl KiObj {
         if length(sub(opp_pos, self.pos)) < 28.0 {
             self.flags |= K_EXPLODE;
         }
+        if self.flags & K_REST == 0 {
+            self.angle = self.spin_angle();
+        }
         if self.flags & K_REST != 0 {
             self.life -= 1.0;
         }
@@ -202,7 +269,7 @@ impl KiObj {
             let id = if libc.rand() & 2 != 0 { 0x1B } else { 0x11 };
             snd.request(self.pos, -1, crate::btl_snd::KIND_COMMON, 200.0, 1500.0, id);
             self.radius = 28.0;
-            self.flags |= K_EXPLODED;
+            self.flags = (self.flags & !K_SHOWN) | K_EXPLODED;
         }
         if self.flags & K_EXPLODED != 0 {
             self.blast -= 1.0;
@@ -217,22 +284,71 @@ impl KiObj {
         self.flags & K_KILL != 0
     }
 
-    /// `EftKiObj_PostUpdate`: an end report breaks the object where it was reported (the fragments draw libc
-    /// rand() 20 times); a deflection or reflection, once, turns it (`deflect_dir` draws the fighters' generator).
+    /// Whether the model is shown (`EFT_KIBOMB_SHOWN`: until it breaks or explodes).
+    pub(crate) fn shown(&self) -> bool {
+        self.flags & K_SHOWN != 0
+    }
+
+    /// `EftKiObj_Draw` / `EftKiBomb_UpdateModel`: the model's matrix, its size (a bomb's 3.5 times, 1.5 lower) turned
+    /// back by the spin about X, at the object.
+    pub(crate) fn pose_model(&mut self) {
+        if self.handle.is_none() {
+            return;
+        }
+        let (s, lift) = if self.bomb {
+            (self.size * 3.5, 1.5)
+        } else {
+            (self.size, 0.0)
+        };
+        let mut m = IDENTITY;
+        for (i, row) in m.iter_mut().enumerate().take(3) {
+            row[i] = s;
+        }
+        let mut m = mul(&m, &rot_x(eft_wrap(-self.angle)));
+        m[3] = [self.pos[0], self.pos[1] + lift, self.pos[2], 1.0];
+        self.draw_mtx = Some(m);
+    }
+
+    /// `EftKiObj_DrawFrags`: the fragments while they play, sprites of half size 0x40 at 0.4 times the size by
+    /// their factor, turned by the spin, on layer 0.
+    pub(crate) fn draw_frags(&self, ot: &mut OrderTable, ctx: &DrawCtx, texture: Option<usize>) {
+        if self.handle.is_none() || !self.frags_on {
+            return;
+        }
+        for (pos, vel) in &self.frags {
+            crate::eft_bolt::draw_rot(
+                ot,
+                ctx,
+                [0x80; 4],
+                *pos,
+                [0.0, 0.0, 1.0, 1.0],
+                self.angle,
+                0x40,
+                (self.size * 0.4 * 4096.0 * vel[3]) as u32,
+                texture,
+                0,
+            );
+        }
+    }
+
+    /// `EftKiObj_PostUpdate` (with its model): an end report breaks the object where it was reported
+    /// (`EftKiObj_Break`); a deflection or reflection, once, turns it (`deflect_dir` draws the fighters'
+    /// generator).
     pub(crate) fn post_obj(
         &mut self,
         libc: &mut LibcRandom,
         deflect_dir: impl FnOnce(usize) -> [f32; 3],
     ) {
+        if self.handle.is_none() {
+            return;
+        }
         if self.tag.flags & 0x3F != 0 {
             self.life = 0.0;
             if self.flags & K_BROKEN == 0 {
                 self.pos = self.tag.pos;
-                for _ in 0..20 {
-                    libc.rand();
-                }
+                self.break_up(libc);
                 self.flags |= K_BROKEN;
-                self.flags &= !K_HITS;
+                self.flags &= !(K_SHOWN | K_HITS);
             }
         } else if self.tag.flags & 0xC0 != 0 && self.flags & K_DEFLECTED == 0 {
             // EftKiObj_Turn (its position, a lerp toward the last one, is overwritten).
@@ -256,6 +372,9 @@ impl KiObj {
     /// edge bounces it (mirrored on the contact normal, or toward the stage's axis at the edge; speed halved) up to
     /// three times, then it lies there (its resting angle drawn from libc rand()).
     pub(crate) fn post_bomb(&mut self, libc: &mut LibcRandom) {
+        if self.handle.is_none() {
+            return;
+        }
         let f = self.tag.flags;
         if f & T_GUARDED != 0 {
             self.pos = self.tag.pos;
@@ -279,6 +398,7 @@ impl KiObj {
                 let d = dot(v, m) * -2.0;
                 let refl = norm(add(v, scale3(m, d)));
                 self.speed *= 0.5;
+                self.spin_rate *= 0.5;
                 let r = self.radius + 1.0;
                 self.pos = add(t, scale3(n, r));
                 self.vel = scale3(refl, self.speed);
@@ -287,14 +407,33 @@ impl KiObj {
             } else {
                 self.vel = [0.0; 3];
                 self.gravity = 0.0;
+                self.spin_rate = 0.0;
                 self.pos = add(t, scale3(self.contact_nrm, self.radius));
                 if self.flags & K_REST == 0 {
-                    libc.rand();
+                    const ANGLES: [f32; 3] = [0.0, 90.0, 270.0];
+                    let a = ANGLES[(libc.rand() % 3) as usize];
+                    self.angle = eft_wrap(a * PI / 180.0);
                     self.tag.flags &= !T_HIT_STAGE;
                 }
                 self.flags |= K_REST;
             }
         }
+    }
+
+    /// `EftKiObj_Break`: five fragments at the object, each thrown out and down at speed 4 (its height 1.3 times)
+    /// with a size factor of 0.5..1, all from libc `rand()`.
+    fn break_up(&mut self, libc: &mut LibcRandom) {
+        let pos = self.pos;
+        for (p, v) in &mut self.frags {
+            *p = pos;
+            let x = rand01(libc.rand()) * 2.0 - 1.0;
+            let y = -rand01(libc.rand());
+            let z = rand01(libc.rand()) * 2.0 - 1.0;
+            let mut d = scale3(norm([x, y, z]), 4.0);
+            d[1] *= 1.3;
+            *v = [d[0], d[1], d[2], rand01(libc.rand()) * 0.5 + 0.5];
+        }
+        self.frags_on = true;
     }
 
     /// `post_obj` with the scene's view of the battle (`BtlCharApi_GetDeflectDir`).
@@ -304,8 +443,7 @@ impl KiObj {
         *w.libc = libc;
     }
 
-    /// The positions of a fighter's objects, for tests.
-    #[cfg(test)]
+    /// Where the object is.
     pub(crate) fn pos(&self) -> [f32; 3] {
         self.pos
     }

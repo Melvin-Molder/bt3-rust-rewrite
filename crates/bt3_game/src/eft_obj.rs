@@ -49,12 +49,17 @@ impl EffectModel {
     }
 }
 
-/// Where an effect model is: fighter `side`'s technique slot `slot` (its pack's model).
+/// Where an effect model is: fighter `side`'s technique slot `slot` (its pack's model), or its thrown object's
+/// (`KI_OBJ_SLOT`) or bomb's (`KI_BOMB_SLOT`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ModelRef {
     pub side: usize,
     pub slot: usize,
 }
+
+/// `EftKiObjMgr_Init`'s model (the effect pack's entry 3, its entry 1) and `EftKiBombMgr_Init`'s (entry 4's).
+pub(crate) const KI_OBJ_SLOT: usize = 5;
+pub(crate) const KI_BOMB_SLOT: usize = 6;
 
 /// One effect object.
 #[derive(Clone, Debug)]

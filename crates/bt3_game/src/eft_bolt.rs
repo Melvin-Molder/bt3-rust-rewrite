@@ -752,6 +752,7 @@ impl Bolts {
                     0x40,
                     (f.size * 4096.0) as u32,
                     tex.flash,
+                    1,
                 );
             }
         }
@@ -949,11 +950,11 @@ fn update_flashes(w: &mut Work, c: &BoltChr) {
     }
 }
 
-/// `EftSpr_DrawRot` (no offset, square, context 1, layer 1): a camera-facing sprite of half size `half` units
+/// `EftSpr_DrawRot` (no offset, square, context 1, on `layer`): a camera-facing sprite of half size `half` units
 /// scaled by `size` / 4096 * the screen distance / the depth, rotated by `rot` in the screen plane (y times 7/6,
 /// the pixel aspect); nothing below two units or with a corner off the GS area.
 #[allow(clippy::too_many_arguments)]
-fn draw_rot(
+pub(crate) fn draw_rot(
     ot: &mut OrderTable,
     ctx: &DrawCtx,
     rgba: [u8; 4],
@@ -963,6 +964,7 @@ fn draw_rot(
     half: u32,
     size: u32,
     texture: Option<usize>,
+    layer: usize,
 ) {
     let v = crate::battle::apply(&ctx.world2screen, [pos[0], pos[1], pos[2], 1.0]);
     let q = 1.0 / v[3];
@@ -1013,10 +1015,10 @@ fn draw_rot(
     for k in 0..2 {
         ot.add(
             depth_slot(z >> 8),
-            1,
+            layer,
             EffectTri {
                 texture,
-                blend: EffectBlend::of(1, false),
+                blend: EffectBlend::of(layer, false),
                 clamp: false,
                 zwrite: false,
                 alpha_ref: 0,

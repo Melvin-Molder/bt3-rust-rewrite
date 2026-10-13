@@ -455,6 +455,8 @@ pub(crate) struct SideData<'a> {
     pub charge_assets: Option<&'a crate::eft::SetAssets>,
     /// The technique slots' effect packs (`BtlCharApi_GetPlayerEffectPack`).
     pub tech_packs: [Option<&'a crate::btl_tech_fx::TechPack>; 5],
+    /// The thrown object's and the bomb's models (`EftKiObjMgr_Init`, `EftKiBombMgr_Init`).
+    pub ki_models: [Option<&'a crate::eft_obj::EffectModel>; 2],
     /// The partner object's files while one is attached (`BtlRes` slot of `FxPartner.res`).
     pub partner: Option<&'a crate::btl_partner::PartnerModel>,
     /// The costume of the side's character (`BtlMember_GetActive()->costume`).
@@ -464,6 +466,20 @@ pub(crate) struct SideData<'a> {
 }
 
 impl<'a> SideData<'a> {
+    /// The effect model at a `ModelRef`'s slot: a technique slot's, or the thrown object's or bomb's.
+    pub(crate) fn effect_model(&self, slot: usize) -> Option<&'a crate::eft_obj::EffectModel> {
+        match slot {
+            crate::eft_obj::KI_OBJ_SLOT => self.ki_models[0],
+            crate::eft_obj::KI_BOMB_SLOT => self.ki_models[1],
+            _ => self
+                .tech_packs
+                .get(slot)
+                .copied()
+                .flatten()
+                .and_then(|p| p.model.as_ref()),
+        }
+    }
+
     /// The assets of the side's emitter sets by `SetRef::list`: the two blast lists, technique slots 2..4, then
     /// the skill slots 0, 1.
     pub(crate) fn fx_sets(&self) -> [Option<&'a crate::eft::SetAssets>; crate::eft::SET_LISTS] {

@@ -337,6 +337,11 @@ pub(crate) struct FighterModel {
     pub(crate) charge_assets: Option<SetAssets>,
     /// The technique slots' effect packs (`effectPacks`, the second animation file's entries 1..5).
     pub(crate) tech_packs: [Option<TechPack>; 5],
+    /// The thrown object's and the bomb's models (`EftKiObjMgr_Init`: the effect pack's entry 3, its entry 1, for
+    /// a character with a ki blast of type 2; `EftKiBombMgr_Init`: entry 4's for type 3), and the thrown object's
+    /// fragment texture (entry 3's entry 2, `EftTexSet_Load4`) among the effect textures.
+    pub(crate) ki_models: [Option<crate::eft_obj::EffectModel>; 2],
+    pub(crate) ki_frag_texture: Option<usize>,
     /// `mdl.unkA4` (object + 0xBC): the pause menu's skill-list script, section 0x2D + language (0 here).
     pub(crate) skill_text: Option<Vec<u16>>,
     /// The attached partner object's files (`BtlPartner_Attach`), dropped once the fighter releases it.
@@ -1064,6 +1069,27 @@ pub(crate) fn load_side(
             ring,
             pack_tex,
         });
+    }
+    // EftChar_CreateKind: kind 1's manager is EftKiObjMgr for a character with a ki blast of type 2
+    // (BtlCharApi_HasKiBlastType2), kind 2's EftKiBombMgr for one of type 3.
+    let fx_pack = bt3_data::pack_entry(&anim_file, 6);
+    for (k, (ty, entry)) in [(2, 3), (3, 4)].into_iter().enumerate() {
+        if !fighter.tables.ki_blasts.iter().any(|r| r.kind_type() == ty) {
+            continue;
+        }
+        let res = fx_pack.and_then(|p| bt3_data::pack_entry(p, entry));
+        fighter.ki_models[k] = res
+            .and_then(|r| bt3_data::pack_entry(r, 1))
+            .and_then(|m| load_effect_model(m, ramp, assets).ok());
+        if k == 0
+            && let Some(t) = res
+                .and_then(|r| bt3_data::pack_entry(r, 2))
+                .and_then(|t| TextureResource::parse(t).ok())
+            && let Some(e) = t.entries.first()
+        {
+            fighter.ki_frag_texture =
+                image_texture(e, e, &mut assets.effect_textures).map_err(error)?;
+        }
     }
     if let Some(pack) = &fighter.effect {
         for (list, set) in pack.blast_sets.iter().enumerate() {
@@ -1807,6 +1833,8 @@ fn load_fighter(
         rush_burst_assets: None,
         charge_assets: None,
         tech_packs: Default::default(),
+        ki_models: [None, None],
+        ki_frag_texture: None,
         skill_text: None,
         partner: None,
     })
@@ -2239,6 +2267,7 @@ pub(crate) fn side_data(f: &FighterModel) -> SideData<'_> {
         rush_burst_assets: f.rush_burst_assets.as_ref(),
         charge_assets: f.charge_assets.as_ref(),
         tech_packs: std::array::from_fn(|i| f.tech_packs[i].as_ref()),
+        ki_models: std::array::from_fn(|i| f.ki_models[i].as_ref()),
         partner: f.partner.as_deref(),
         costume: f.costume,
         chara: f.chara,
@@ -4034,9 +4063,8 @@ impl Battle {
             }
         }
         for o in self.roster.scene.eft_objs.iter() {
-            if let Some(m) = self.assets.fighters[o.model.side].tech_packs[o.model.slot]
-                .as_ref()
-                .and_then(|p| p.model.as_ref())
+            if let Some(m) =
+                side_data(&self.assets.fighters[o.model.side]).effect_model(o.model.slot)
             {
                 o.obj.fill_alpha_row(&mut table, &m.alpha);
             }
@@ -4097,9 +4125,7 @@ impl Battle {
             if o.obj.flags & 2 == 0 {
                 continue;
             }
-            let Some(m) = self.assets.fighters[o.model.side].tech_packs[o.model.slot]
-                .as_ref()
-                .and_then(|p| p.model.as_ref())
+            let Some(m) = side_data(&self.assets.fighters[o.model.side]).effect_model(o.model.slot)
             else {
                 continue;
             };
@@ -4339,15 +4365,23 @@ impl Battle {
                 .scene
                 .shotfx
                 .draw(&mut ot, &ctx, self.assets.spdline_texture);
+            // EftKiObj_Draw (layer 3, the ki blast lists of kind 1): the thrown objects' fragments, unless their
+            // fighter's effects hide.
+            {
+                let chars = &self.roster.chars;
+                for side in 0..2 {
+                    let tex = self.assets.fighters[side].ki_frag_texture;
+                    for o in &self.roster.scene.ki_objs[side][0] {
+                        if !crate::btl_tech_fx::effect_hidden_0(chars, o.arg.src) {
+                            o.draw_frags(&mut ot, &ctx, tex);
+                        }
+                    }
+                }
+            }
             // EftDisc_Draw (layer 3, after the vanish lines): the model on layer 1 in colour (127, 127, 127, alpha),
             // unless its fighter hides it (BtlScene_IsEffectHidden: type 1 for a piece, 0 for a ki blast disc).
             {
                 let chars = &self.roster.chars;
-                let any_frozen = chars.iter().any(|c| c.is_frozen());
-                let hidden0 = chars.iter().any(|c| {
-                    (crate::chr_cam::is_cut_active(c) && c.flags.test(0xD3))
-                        || crate::btl_tech_fx::in_rush_sequence(c)
-                });
                 let discs = &self.roster.scene.tech.discs;
                 let mut textures = Vec::new();
                 for d in discs.draws() {
@@ -4355,9 +4389,7 @@ impl Battle {
                     let hidden = if d.piece {
                         crate::btl_tech_fx::effect_hidden_1(owner)
                     } else {
-                        (owner.obj.flags & 2 == 0 && any_frozen)
-                            || matches!(owner.act.current, 0xEC..=0xF8 | 0x103 | 0x104)
-                            || hidden0
+                        crate::btl_tech_fx::effect_hidden_0(chars, d.owner)
                     };
                     let k = usize::from(d.model_b);
                     let Some(mesh) = &self.assets.disc_meshes[k] else {
@@ -10768,7 +10800,8 @@ pub(crate) mod tests {
         use crate::btl_input::pad::{START, TRIANGLE};
         // Character 55: the tap blast (0xAE) is a thrown object (type 2): it lobs from the hand under gravity
         // (over the idle P2), breaks where it lands and is gone 15 frames later. The charged blast (0xAF) is of
-        // type 3: two bombs, thrown with the VU0 generator's jitter, bounce, come to rest and explode.
+        // type 3: two bombs, thrown with the VU0 generator's jitter, bounce, come to rest and explode. Each carries
+        // its manager's model, shown while it flies and gone with it; the thrown object's fragments are drawn.
         for (hold, bomb) in [(2, false), (60, true)] {
             let mut setup = BattleSetup::default();
             setup.sides[0].chara = 55;
@@ -10788,9 +10821,19 @@ pub(crate) mod tests {
                     PadState::default(),
                 ]
             };
+            let list = usize::from(bomb);
+            assert!(battle.assets.fighters[0].ki_models[list].is_some());
+            let frag = battle.assets.fighters[0].ki_frag_texture;
+            // Character 55 has both kinds: both managers load.
+            assert!(frag.is_some());
             let mut frame = |battle: &mut Battle, held: u32| {
                 let start = held & START != 0 && battle.prev_held[0] & START == 0;
-                battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+                let out =
+                    battle.run_frame(start, pads(held), 0, &mut libc, &mut random, None, false);
+                out.effects
+                    .iter()
+                    .filter(|t| frag.is_some() && t.texture == frag)
+                    .count()
             };
             for i in 0..200 {
                 let skip =
@@ -10800,12 +10843,24 @@ pub(crate) mod tests {
                     break;
                 }
             }
-            let list = usize::from(bomb);
             let (mut most, mut created, mut gone, mut still) = (0, None, None, 0);
+            let (mut models, mut shown, mut frags) = (0, 0, 0);
+            let slot = crate::eft_obj::KI_OBJ_SLOT + list;
             let mut last = Vec::new();
             let mut explosions = 0;
             for i in 0..200 {
-                frame(&mut battle, if i < hold { TRIANGLE } else { 0 });
+                frags = frags.max(frame(&mut battle, if i < hold { TRIANGLE } else { 0 }));
+                let o = battle
+                    .roster
+                    .scene
+                    .eft_objs
+                    .iter()
+                    .filter(|o| o.model.slot == slot);
+                let (n, on) = o.fold((0, 0), |(n, on), o| {
+                    (n + 1, on + usize::from(o.obj.flags & 2 != 0))
+                });
+                models = models.max(n);
+                shown = shown.max(on);
                 let ids = battle.roster.scene.impacts.ids(1);
                 explosions = explosions.max(ids.iter().filter(|&&id| id == 1).count());
                 let objs = &battle.roster.scene.ki_objs[0][list];
@@ -10833,6 +10888,21 @@ pub(crate) mod tests {
                 assert!(gone - created < 40, "{created} {gone}");
             }
             assert_eq!(battle.roster.chars[1].gauge.health, 40000);
+            assert_eq!((models, shown), (most, most));
+            assert!(
+                battle
+                    .roster
+                    .scene
+                    .eft_objs
+                    .iter()
+                    .all(|o| o.model.slot != slot)
+            );
+            if bomb {
+                assert_eq!(frags, 0);
+            } else {
+                // Five fragments, two triangles each.
+                assert_eq!(frags, 10);
+            }
         }
     }
 

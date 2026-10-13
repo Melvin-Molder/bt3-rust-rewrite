@@ -599,6 +599,17 @@ impl Default for TechFx {
     }
 }
 
+/// `BtlScene_IsEffectHidden(chr, 0)`: the fighter hidden while any fighter is frozen, or changing; or a camera cut
+/// with flag 0xD3 running on either fighter (`BtlCharApi_AnyCamPriority`), or either in a rush sequence.
+pub(crate) fn effect_hidden_0(chars: &[Chr; 2], side: usize) -> bool {
+    let c = &chars[side];
+    (c.obj.flags & 2 == 0 && chars.iter().any(|c| c.is_frozen()))
+        || matches!(c.act.current, 0xEC..=0xF8 | 0x103 | 0x104)
+        || chars.iter().any(|c| {
+            (crate::chr_cam::is_cut_active(c) && c.flags.test(0xD3)) || in_rush_sequence(c)
+        })
+}
+
 /// `BtlScene_IsEffectHidden(chr, 1)`: the fighter hidden (object flag 2 off) outside a rush sequence, or changing.
 pub(crate) fn effect_hidden_1(chr: &Chr) -> bool {
     (chr.obj.flags & 2 == 0 && !in_rush_sequence(chr))
