@@ -2,6 +2,7 @@ mod anim;
 mod battle;
 mod battle_seq;
 mod boot_card;
+mod bracket;
 mod btl_act;
 mod btl_ai;
 mod btl_blast;
@@ -211,9 +212,10 @@ enum Scene {
     Training(Box<training::TrainScreen>),
     /// `EvoMode_Main` mode 48: Evolution Z's top menu.
     EvoTop(Box<evo_top::EvoTopScreen>),
-    /// `Tour_Main` mode 33: Dragon World Tour's menu; mode 34: its entrant select.
+    /// `Tour_Main` mode 33: Dragon World Tour's menu; mode 34: its entrant select; mode 35: the bracket.
     TourMenu(Box<tour_menu::TourMenuScreen>),
     EntrySel(Box<entry_select::EntrySelScreen>),
+    Bracket(Box<bracket::BracketScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -290,6 +292,7 @@ impl Scene {
             | Scene::EvoZ(_)
             | Scene::TourMenu(_)
             | Scene::EntrySel(_)
+            | Scene::Bracket(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -454,6 +457,11 @@ struct Game {
     entry_select: Option<entry_select::EntrySelData>,
     /// The tournaments' backdrops (file 0x3C9 + tournament), as registered.
     tour_bgs: HashMap<i32, tour_bg::TourBgData>,
+    /// The tournaments' brackets (file `baseFile + 6 + tournament`), as registered.
+    brackets: HashMap<i32, bracket::BracketData>,
+    /// A battle of the bracket runs, and how the last one ended (`BattleResult`).
+    tour_battle: bool,
+    tour_outcome: bracket::BattleOutcome,
     shen_textures: bool,
     /// The character reference's model viewer (`ChrView`) while the screen runs, and the model texture revision
     /// of it the renderer has.
@@ -834,6 +842,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tour: tour_menu::TourSession::default(),
             entry_select: None,
             tour_bgs: HashMap::new(),
+            brackets: HashMap::new(),
+            tour_battle: false,
+            tour_outcome: bracket::BattleOutcome::default(),
             shen_textures: false,
             chr_view: None,
             chr_view_rev: None,
@@ -1564,6 +1575,56 @@ fn run_frames(
                     }
                 }
             }
+            Scene::Bracket(screen) => {
+                let mut loader = Pictures {
+                    iso_path: &game.iso_path,
+                    textures: &mut game.textures,
+                    samplers: &mut game.samplers,
+                    cache: &mut game.pictures,
+                };
+                let mut mc = mcflow::McEnv {
+                    card: &mut game.card,
+                    save: &mut game.save,
+                    progress: &mut game.progress,
+                    items: &game.chr_table.items,
+                };
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    stream_stat,
+                    &mut loader,
+                    &mut game.random,
+                    &mut game.libc_random,
+                    &mut game.font,
+                    &mut mc,
+                );
+                let result = screen.result().cloned();
+                let session = screen.session();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Tour_Main: Adx_StopAll after Bracket_Run.
+                    stop_all(game, &mut commands);
+                    game.tour = session;
+                    match result {
+                        bracket::BracketResult::Battle(setup) => {
+                            game.tour_battle = true;
+                            start_battle(game, *setup);
+                        }
+                        bracket::BracketResult::Over => {
+                            // Back to the menu without a battle: the mode's clock advances one hour.
+                            let hour = game.save.tour_hour() + 1;
+                            game.save.set_tour_hour(if hour >= tour_menu::TOUR_HOURS {
+                                0
+                            } else {
+                                hour
+                            });
+                            start_tour_menu(game, &mut commands);
+                        }
+                    }
+                }
+            }
             Scene::EntrySel(screen) => {
                 let mut loader = Pictures {
                     iso_path: &game.iso_path,
@@ -1589,8 +1650,7 @@ fn run_frames(
                     stop_all(game, &mut commands);
                     if result != 0 {
                         game.tour = session;
-                        info!("the tournament's bracket (mode 35) is not ported yet");
-                        start_tour_menu(game, &mut commands);
+                        start_bracket(game, &mut commands);
                     } else {
                         start_tour_menu(game, &mut commands);
                     }
@@ -2378,6 +2438,10 @@ fn leave_battle(
     stop_all(game, commands);
     if let Scene::Battle(battle) = &game.scene {
         game.vu0_random = battle.vu0;
+        game.tour_outcome = bracket::BattleOutcome {
+            winner,
+            health: battle.roster.result_health,
+        };
         // gBattleReplay: what the replay list saves.
         if let Some((_, replay)) = &mut game.last_battle {
             *replay = battle.replay().clone();
@@ -2409,6 +2473,16 @@ fn leave_battle(
         } else {
             let ball = game.story_ball;
             start_hist_result(game, winner & 1 != 0, ball);
+        }
+    } else if std::mem::take(&mut game.tour_battle) {
+        // Progress_Main after a battle of the bracket: an abort's reason 8 ends the tournament (the progress flags
+        // 0x10 / 0x20 cleared) and goes to the main menu; else the bracket again (mode 35).
+        if winner & 8 != 0 && reason & 8 != 0 {
+            game.tour.running = false;
+            game.tour.greeted = false;
+            start_main_menu(game, commands, audio);
+        } else {
+            start_bracket(game, commands);
         }
     } else if let Some(mode) = game.train_mode.take() {
         // Progress_Main after a battle of the training: an abort's reason 8 goes to the main menu, 0x10 to the
@@ -3072,6 +3146,83 @@ fn tour_bg(game: &mut Game, tour: i32) -> Option<tour_bg::TourBgData> {
         Err(error) => {
             error!("cannot load the tournament's backdrop: {error}");
             None
+        }
+    }
+}
+
+/// `Tour_Main` mode 35: `Bracket_Run(0)` from the tournament's pack (`baseFile + 6 + tournament`), read and
+/// registered once.
+fn start_bracket(game: &mut Game, commands: &mut Commands) {
+    let tour = game.tour.tour.clamp(0, 4);
+    if game.chr_table.costumes.is_empty() {
+        match Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, 4))
+        {
+            Ok(file) => game.chr_table = bt3_data::chara_data::ChrTable::parse(&file, 0xA1),
+            Err(error) => error!("cannot read the character table: {error}"),
+        }
+    }
+    if !game.brackets.contains_key(&tour) {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, bracket::PACK_FILE_FIRST + tour as u32))
+            .and_then(|pack| Ok(bpe::decode(&pack)?))
+            .and_then(|res| bracket::BracketAssets::parse(&res, tour));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let firsts = register_files(game, assets.files);
+                let dialog = register_pairs(game, assets.dialog.textures);
+                data.layout = bracket::BracketLayout::new(tour, dialog, |key| firsts[&key]);
+                game.brackets.insert(tour, data);
+            }
+            Err(error) => {
+                error!("cannot load the tournament's bracket: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game.brackets[&tour].clone();
+    let Some(bg) = tour_bg(game, tour) else {
+        game.scene = Scene::Black;
+        return;
+    };
+    let bg = match tour_bg::TourBg::new(&bg, tour, Some(data.layout.bg_extra)) {
+        Ok(bg) => bg,
+        Err(error) => {
+            error!("cannot start the tournament's backdrop: {error}");
+            game.scene = Scene::Black;
+            return;
+        }
+    };
+    let mut loader = Pictures {
+        iso_path: &game.iso_path,
+        textures: &mut game.textures,
+        samplers: &mut game.samplers,
+        cache: &mut game.pictures,
+    };
+    let mut sounds = Vec::new();
+    match bracket::BracketScreen::new(
+        &data,
+        bg,
+        &game.tour,
+        game.tour_outcome,
+        &game.chr_table,
+        &game.save,
+        game.card_res.as_deref(),
+        &mut loader,
+        &mut game.random,
+        &mut sounds,
+    ) {
+        Ok(screen) => {
+            game.scene = Scene::Bracket(Box::new(screen));
+            play_sounds(game, commands, sounds);
+        }
+        Err(error) => {
+            error!("cannot start the tournament's bracket: {error}");
+            game.scene = Scene::Black;
         }
     }
 }

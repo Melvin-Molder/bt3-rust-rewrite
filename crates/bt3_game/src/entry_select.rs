@@ -11,9 +11,8 @@ use bt3_data::pack_section;
 
 use crate::anim::{self, LipSync, VOICE_PLAYEND};
 use crate::char_select::{
-    COLS, Cell, ID_CUSTOM, ID_RANDOM, Pick, PictureLoader, chr_grid_build, chr_grid_move_down,
-    chr_grid_move_left, chr_grid_move_right, chr_grid_move_up, chr_grid_next_form,
-    chr_grid_prev_form,
+    COLS, Cell, ID_CUSTOM, ID_RANDOM, Pick, PictureLoader, chr_grid_move_down, chr_grid_move_left,
+    chr_grid_move_right, chr_grid_move_up, chr_grid_next_form, chr_grid_prev_form,
 };
 use crate::draw::ScreenQuad;
 use crate::flash::{FLASH_PAD, Flash, PROP_VISIBLE, Uv, screen_quads};
@@ -363,7 +362,12 @@ impl EntrySelScreen {
             false,
         )?;
         msg.open();
-        let (grid, _, _) = chr_grid_build(&data.master, save);
+        // ChrGrid_Build in mode 34: no custom character cell.
+        let (grid, _, _) = crate::char_select::chr_grid_build_with(
+            &data.master,
+            save,
+            crate::char_select::GRID_NO_CUSTOM,
+        );
         let rows = (grid.len() as i32 + COLS as i32 - 1) / COLS as i32;
         let mut entry = [Pick::default(); ENTRY_MAX];
         entry[0] = *last;

@@ -2360,6 +2360,23 @@ pub(crate) fn bgm_list_apply_unlocks(ids: &mut [i32], save: &SaveData) {
 /// `ChrGrid_Build` in mode 39: locked characters become `LOCKED`, a cell keeps its unlocked forms, the grid is padded
 /// to whole rows; then the list of saved custom characters.
 pub(crate) fn chr_grid_build(master: &[Cell], save: &SaveData) -> (Vec<Cell>, Vec<Cell>, i32) {
+    chr_grid_build_with(master, save, 0)
+}
+
+/// `CHRGRID_NO_CUSTOM`: the custom character cell is empty (and no list of them is made).
+pub(crate) const GRID_NO_CUSTOM: u32 = 1;
+/// `CHRGRID_NO_RANDOM`: the random cell is empty.
+pub(crate) const GRID_NO_RANDOM: u32 = 2;
+/// `CHRGRID_NO_FORMS`: a cell of forms shows its first one only.
+pub(crate) const GRID_NO_FORMS: u32 = 4;
+
+/// `ChrGrid_Build` with the flags its progress mode gives (`GRID_*`): modes 33..35 have no custom cell, 13..30 no
+/// custom nor random cell (21 no forms either), 48..50 none of the three.
+pub(crate) fn chr_grid_build_with(
+    master: &[Cell],
+    save: &SaveData,
+    flags: u32,
+) -> (Vec<Cell>, Vec<Cell>, i32) {
     let mut out = Vec::new();
     for cell in master {
         if cell.form_count != 0 {
@@ -2376,11 +2393,24 @@ pub(crate) fn chr_grid_build(master: &[Cell], save: &SaveData) -> (Vec<Cell>, Ve
                     c.form_count = 0;
                     c.id = c.form[0];
                 }
-                _ => c.id = c.form[0],
+                _ => {
+                    if flags & GRID_NO_FORMS != 0 {
+                        c.form_count = 0;
+                    }
+                    c.id = c.form[0];
+                }
             }
             out.push(c);
         } else {
             match cell.id {
+                ID_CUSTOM if flags & GRID_NO_CUSTOM != 0 => out.push(Cell {
+                    id: ID_EMPTY,
+                    ..Cell::default()
+                }),
+                ID_RANDOM if flags & GRID_NO_RANDOM != 0 => out.push(Cell {
+                    id: ID_EMPTY,
+                    ..Cell::default()
+                }),
                 ID_CUSTOM | ID_RANDOM => out.push(*cell),
                 id if save.chara_unlocked(id) => out.push(*cell),
                 _ => out.push(Cell {
@@ -2404,6 +2434,9 @@ pub(crate) fn chr_grid_build(master: &[Cell], save: &SaveData) -> (Vec<Cell>, Ve
         CUSTOM_MAX
     ];
     let mut count = 0;
+    if flags & GRID_NO_CUSTOM != 0 {
+        return (out, custom, count);
+    }
     for (i, &chara) in save.rec_chara.iter().enumerate() {
         if chara < 0 {
             continue;

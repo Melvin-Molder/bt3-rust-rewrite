@@ -410,6 +410,28 @@ impl Flash {
         self.flags |= FLASH_PLAY;
     }
 
+    /// `Flash_Reset(flash, 1)`: back to the first frame, playing, every other flag cleared; the sprite instances
+    /// are kept.
+    pub fn reset(&mut self) {
+        self.flags = FLASH_PLAY;
+        self.rewind(TlId::Root);
+        self.tl_mut(TlId::Root).state |= TL_PLAY;
+    }
+
+    /// `Flash_SetOffset`: the screen offset added to everything drawn.
+    pub fn set_offset(&mut self, x: i32, y: i32) {
+        self.ofs = [x, y];
+    }
+
+    /// `Flash_SetFlag`: sets or clears bits of the movie's flags (4 hides it).
+    pub fn set_flag(&mut self, mask: u32, on: bool) {
+        if on {
+            self.flags |= mask;
+        } else {
+            self.flags &= !mask;
+        }
+    }
+
     /// `Flash_Advance`: clears the event bits of the last tick and runs `speed` root frames.
     pub fn advance(&mut self) {
         self.trig = 0;

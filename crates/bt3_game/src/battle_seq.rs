@@ -909,8 +909,8 @@ impl Battle {
     /// `BtlSeq_JudgeByHealth`: more health wins; a tie goes to the side that landed the battle's first hit
     /// (event 0x3C), a draw after a mode-0 time up, side 1 in mode 8, else `rand()`.
     fn judge_by_health(&mut self, input: &mut SeqInput) {
-        // BattleResult.health: the team's health ratio in percent (`BtlMember_GetTeamHealthRatio`).
-        let health = [0, 1].map(|i| self.roster.chars[i].team_health_ratio() * 100.0);
+        // BattleResult.health: the team's health ratio in percent, as the last frame of the fight left it.
+        let health = self.roster.result_health;
         self.seq.winner = if health[0] == health[1] {
             if self.roster.chars[0].first_hit {
                 WIN_P1

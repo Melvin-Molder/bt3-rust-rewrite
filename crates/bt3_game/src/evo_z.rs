@@ -12,8 +12,8 @@ use bt3_data::pack_section;
 
 use crate::anim;
 use crate::char_select::{
-    COLS, Cell, PictureLoader, chr_grid_build, chr_grid_move_down, chr_grid_move_left,
-    chr_grid_move_right, chr_grid_move_up,
+    COLS, Cell, PictureLoader, chr_grid_move_down, chr_grid_move_left, chr_grid_move_right,
+    chr_grid_move_up,
 };
 use crate::dialog::{Command, Dialog, DialogAssets, Pad as DialogPad};
 use crate::draw::ScreenQuad;
@@ -422,8 +422,13 @@ impl EvoZScreen {
             0,
         )?;
         dialog.set_layout(0);
-        // ChrGrid_Build without the custom characters.
-        let (grid, _, _) = chr_grid_build(&data.master, save);
+        // ChrGrid_Build in mode 49: no custom character nor random cell, no forms.
+        use crate::char_select::{GRID_NO_CUSTOM, GRID_NO_FORMS, GRID_NO_RANDOM};
+        let (grid, _, _) = crate::char_select::chr_grid_build_with(
+            &data.master,
+            save,
+            GRID_NO_CUSTOM | GRID_NO_RANDOM | GRID_NO_FORMS,
+        );
         let rows = (grid.len() as i32 + COLS as i32 - 1) / COLS as i32;
         let selectable = |c: &Cell| {
             c.id < crate::char_select::ID_LOCKED || c.id == crate::char_select::ID_CUSTOM

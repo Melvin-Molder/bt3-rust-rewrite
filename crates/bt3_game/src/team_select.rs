@@ -15,10 +15,10 @@ use crate::char_select::{
     BGM_FIRST, BGM_LOCKED, BGM_RANDOM, BGM_RANDOM_FIRST, BattleSetup, COLS, Cell, CharSelData,
     CharSelLayout, CharSelProgress, CharSelResult, FACE_FILE, FADE_FRAMES, ID_CUSTOM, ID_EMPTY,
     ID_RANDOM, Pick, PictureLoader, STAGE_BGM_COL, STAGE_COLS, STAGE_FILE, STAGE_LOCKED,
-    STAGE_RANDOM, SideSetup, bgm_list_apply_unlocks, chr_grid_build, chr_grid_fix_cursor,
-    chr_grid_is_selectable, chr_grid_move_down, chr_grid_move_left, chr_grid_move_right,
-    chr_grid_move_up, chr_grid_next_form, chr_grid_prev_form, stage_grid_apply_unlocks,
-    stg_grid_move_down, stg_grid_move_left, stg_grid_move_right, stg_grid_move_up,
+    STAGE_RANDOM, SideSetup, bgm_list_apply_unlocks, chr_grid_fix_cursor, chr_grid_is_selectable,
+    chr_grid_move_down, chr_grid_move_left, chr_grid_move_right, chr_grid_move_up,
+    chr_grid_next_form, chr_grid_prev_form, stage_grid_apply_unlocks, stg_grid_move_down,
+    stg_grid_move_left, stg_grid_move_right, stg_grid_move_up,
 };
 use crate::draw::ScreenQuad;
 use crate::duel_menu::DuelProgress;
@@ -244,7 +244,14 @@ impl TeamSelScreen {
         let bgm_count = bgm_ids.len() as i32 - 4;
         bgm_ids[bgm_count as usize - 1] = BGM_RANDOM;
         bgm_ids.truncate(bgm_count.max(0) as usize);
-        let (grid, custom, custom_count) = chr_grid_build(&data.master, save);
+        // ChrGrid_Build in mode 40: a DP battle has no random cell.
+        let flags = if duel.battle_type == 2 {
+            crate::char_select::GRID_NO_RANDOM
+        } else {
+            0
+        };
+        let (grid, custom, custom_count) =
+            crate::char_select::chr_grid_build_with(&data.master, save, flags);
         let master_count = grid.len() as i32;
         let rows = (master_count + COLS as i32 - 1) / COLS as i32;
         let mut screen = Self {

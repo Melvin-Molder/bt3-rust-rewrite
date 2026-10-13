@@ -38,6 +38,8 @@ pub(crate) struct Roster {
     cpu: [bool; 2],
     /// `gPad[].vibPower` / `vibSmall`: this frame's vibration requests by pad.
     pub pad_vib: [crate::btl_vib::PadVib; 2],
+    /// `BattleResult.health`: each side's team health in percent, taken every frame of the fight.
+    pub result_health: [f32; 2],
 }
 
 impl Roster {
@@ -56,6 +58,7 @@ impl Roster {
             change: Default::default(),
             cpu,
             pad_vib: Default::default(),
+            result_health: [0.0; 2],
         };
         roster.sync_abilities();
         roster
@@ -740,6 +743,10 @@ impl Roster {
                 chr.pose.moved = [0.0; 3];
             }
             chr.raise_events(data[i], env, opp_alive);
+            // BtlChar_RaiseEvents: while the fight runs (flag 3) the result keeps the team's health.
+            if chr.flags.test(3) {
+                self.result_health[chr.player.min(1)] = chr.team_health_ratio() * 100.0;
+            }
             // BtlChar_UpdateVibration to the fighter's pad.
             chr.update_vibration(&mut self.pad_vib[chr.player], replay);
             chr.flags.set_stage(12);

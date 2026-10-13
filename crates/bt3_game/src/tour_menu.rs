@@ -37,6 +37,8 @@ const FADE_FRAMES: i32 = 0x14;
 
 // TOUR_* and the save's tourFlags.
 pub const TOUR_NUM: i32 = 5;
+/// `TOUR_HOURS`: the mode's clock (`tourHour`) runs 0..23.
+pub const TOUR_HOURS: i32 = 24;
 const SAVE_INVITE_MASK: i32 = 0x1F;
 const SAVE_STARTED: i32 = 0x20;
 const SAVE_EXPLAINED: i32 = 0x40;
@@ -122,6 +124,11 @@ pub struct TourEntrant {
 
 /// `TOUR_ENT_PLAYER`, `TOUR_ENT_REC`, `TOUR_ENT_ITEMS`.
 pub const ENT_PLAYER: u16 = 1;
+/// `TOUR_ENT_LOST`, `TOUR_ENT_BOSS` (the seeded seventeenth), `TOUR_ENT_HIDDEN` (its chip hidden while a move
+/// animation shows it).
+pub const ENT_LOST: u16 = 2;
+pub const ENT_BOSS: u16 = 4;
+pub const ENT_HIDDEN: u16 = 8;
 pub const ENT_REC: u16 = 0x10;
 pub const ENT_ITEMS: u16 = 0x20;
 /// `TOUR_ENTRANT_MAX`.
@@ -136,7 +143,15 @@ pub struct TourSession {
     pub level: i32,
     /// Entrants the players choose, 1..8.
     pub entry_num: i32,
+    /// The round and the match being played.
+    pub round: i32,
+    pub match_no: i32,
     pub entrants: [TourEntrant; ENTRANT_MAX],
+    pub matches: [crate::bracket::TourMatch; crate::bracket::MATCH_MAX],
+    /// `gProgress->flags` 0x10 (a tournament is running) and 0x20 (the guide's speech before its battles was
+    /// heard this round).
+    pub running: bool,
+    pub greeted: bool,
 }
 
 /// What `TourMenu_Init` reads from its unpacked section.

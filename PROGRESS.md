@@ -47,7 +47,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 
 - [x] Tournament menu with the clock and the invitations (`TourMenu_Run`, mode 33; src/menu/tour_menu.c)
 - [x] Entrant select (`EntrySel_Run`, mode 34; src/menu/tour_background.c)
-- [ ] Bracket and its battles, prizes (`Bracket_Run`, mode 35; src/menu/bracket*.c)
+- [x] Bracket and its battles, prizes (`Bracket_Run`, mode 35; src/menu/bracket*.c)
 
 ### Training (`TrainMode_Main`, modes 44..45)
 
@@ -90,11 +90,11 @@ Measured 2026-10-12:
 
 | Area | Files | Functions | Cited by the port |
 | --- | ---: | ---: | ---: |
-| src/battle | 124 | 5049 | 2579 (51 %) |
-| src/menu | 65 | 757 | 236 (31 %) |
-| src/ui | 11 | 182 | 63 (35 %) |
-| src/sys | 51 | 1133 | 338 (30 %) |
+| src/battle | 124 | 5049 | 2619 (52 %) |
+| src/menu | 65 | 757 | 404 (53 %) |
+| src/ui | 11 | 182 | 124 (68 %) |
+| src/sys | 51 | 1133 | 347 (31 %) |
 | src/main.c | 1 | 5 | 0 |
-| Total | 252 | 7126 | 3216 (45 %) |
+| Total | 252 | 7126 | 3494 (49 %) |
 
-Menu files with no function cited yet: bracket.c, bracket_clips.c, bracket_guide.c, bracket_logic.c, char_reference.c, disc_fusion.c, mission_result.c, mission_select.c, sim_day.c, sim_event.c, sim_event_1.c, sim_event_card.c, sim_event_rock.c, sim_event_shell.c, sim_result.c, sim_top.c, solo_select.c, survival_result.c, ub_menu.c, ub_rank.c, ub_result.c, ub_score.c, ub_team_select.c, ubz_select.c.
+Menu files with no function cited yet: disc_fusion.c, mission_result.c, mission_select.c, sim_day.c, sim_event.c, sim_event_1.c, sim_event_card.c, sim_event_rock.c, sim_event_shell.c, sim_result.c, sim_top.c, solo_select.c, survival_result.c, ub_menu.c, ub_rank.c, ub_result.c, ub_score.c, ub_team_select.c, ubz_select.c.
