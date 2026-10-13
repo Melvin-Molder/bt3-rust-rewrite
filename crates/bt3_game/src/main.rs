@@ -144,6 +144,8 @@ mod title;
 mod tour_bg;
 mod tour_menu;
 mod training;
+mod ub;
+mod ub_menu;
 mod windows;
 
 use std::collections::HashMap;
@@ -216,6 +218,8 @@ enum Scene {
     TourMenu(Box<tour_menu::TourMenuScreen>),
     EntrySel(Box<entry_select::EntrySelScreen>),
     Bracket(Box<bracket::BracketScreen>),
+    /// `Ub_Main` mode 13: Ultimate Battle's menu.
+    UbMenu(Box<ub_menu::UbMenuScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -293,6 +297,7 @@ impl Scene {
             | Scene::TourMenu(_)
             | Scene::EntrySel(_)
             | Scene::Bracket(_)
+            | Scene::UbMenu(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -453,6 +458,9 @@ struct Game {
     evo_z: Option<evo_z::EvoZData>,
     /// `gMenuArc4`'s tournament menu, and the tournament's block of `gProgress`.
     tour_menu: Option<tour_menu::TourMenuData>,
+    /// `gMenuArc3`'s Ultimate Battle menu, and the group's block of `gProgress`.
+    ub_menu: Option<ub_menu::UbMenuData>,
+    ub: ub::UbProgress,
     tour: tour_menu::TourSession,
     entry_select: Option<entry_select::EntrySelData>,
     /// The tournaments' backdrops (file 0x3C9 + tournament), as registered.
@@ -839,6 +847,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             shop: None,
             evo_z: None,
             tour_menu: None,
+            ub_menu: None,
+            ub: ub::UbProgress::default(),
             tour: tour_menu::TourSession::default(),
             entry_select: None,
             tour_bgs: HashMap::new(),
@@ -1551,6 +1561,29 @@ fn run_frames(
                     }
                 }
             }
+            Scene::UbMenu(screen) => {
+                let frame = screen.run_frame(held, pressed, stat, &mut game.random, &mut game.font);
+                let (result, cursor) = (screen.result(), screen.cursor());
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after UbMenu_Run; a plate chosen keeps the cursor.
+                    stop_all(game, &mut commands);
+                    if result == 0 {
+                        start_main_menu(game, &mut commands, &mut audio);
+                    } else {
+                        game.ub.menu_cursor = cursor;
+                        let mode = match result {
+                            1 => 20,
+                            2 => 14,
+                            3 => 17,
+                            _ => 24,
+                        };
+                        info!("Ultimate Battle mode {mode} is not ported yet");
+                        start_ub_menu(game, &mut commands);
+                    }
+                }
+            }
             Scene::TourMenu(screen) => {
                 let frame = screen.run_frame(
                     held,
@@ -2108,6 +2141,7 @@ fn run_frames(
                         MainMenuResult::Mode(44) => start_training(game, &mut commands),
                         MainMenuResult::Mode(70) => start_shen(game, &mut commands),
                         MainMenuResult::Mode(33) => start_tour_menu(game, &mut commands),
+                        MainMenuResult::Mode(13) => start_ub_menu(game, &mut commands),
                         MainMenuResult::Mode(48) => {
                             // EvoMode_Main: the cursor starts over.
                             game.evo_cursor = -1;
@@ -3301,6 +3335,55 @@ fn start_entry_select(game: &mut Game, commands: &mut Commands) {
         }
         Err(error) => {
             error!("cannot start the entrant select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Ub_Main` mode 13: `Bgm_Play(UB_BGM)`, then `UbMenu_Run(1)` from `gMenuArc3`.
+fn start_ub_menu(game: &mut Game, commands: &mut Commands) {
+    if game.ub_menu.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    ub_menu::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| ub_menu::UbMenuAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout = ub_menu::UbMenuLayout::new(background, |key| firsts[&key]);
+                game.ub_menu = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the Ultimate Battle menu: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .ub_menu
+        .clone()
+        .expect("the Ultimate Battle menu is loaded");
+    match ub_menu::UbMenuScreen::new(
+        &data,
+        game.ub.menu_cursor,
+        game.save.ub_flags(),
+        &mut game.libc_random,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::UbMenu(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the Ultimate Battle menu: {error}");
             game.scene = Scene::Black;
         }
     }

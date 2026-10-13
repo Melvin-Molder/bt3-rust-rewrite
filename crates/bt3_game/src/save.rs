@@ -30,6 +30,7 @@ const REC_COUNT: usize = 14;
 const OFS_UNLOCK: usize = 0x8;
 const OFS_LEVEL: usize = 0xC;
 const OFS_SLOT: usize = 0x10;
+const OFS_UB_FLAGS: usize = 0x208;
 const OFS_MISSION_PAGES: usize = 0x20C;
 const OFS_RANK: usize = 0x77C;
 const OFS_CHARA_BITS: usize = 0xC10;
@@ -164,6 +165,12 @@ impl SaveData {
 
     pub fn set_unlock_flags(&mut self, v: i32) {
         self.set_word(OFS_UNLOCK, v);
+    }
+
+    /// `ubFlags`: Ultimate Battle's unlocks (bit 0: thirty missions cleared open the Survival plate; 4: all 100
+    /// missions cleared; 0x10: the reward for clearing all five courses was given).
+    pub fn ub_flags(&self) -> i32 {
+        self.word(OFS_UB_FLAGS)
     }
 
     /// `level`: the history menu's difficulty, 0..2.

@@ -36,7 +36,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 
 ### Ultimate Battle (`Ub_Main`, modes 13..30)
 
-- [ ] Ultimate Battle menu (`UbMenu_Run`, mode 13)
+- [x] Ultimate Battle menu (`UbMenu_Run`, mode 13)
 - [ ] Mission 100: select, team / solo select, result (modes 14..16)
 - [~] Survival: the battle runs (`--mode 3`); the course select and result screens do not (modes 17..19)
 - [ ] Sim Dragon: top, day, events, result (modes 20..23; src/menu/sim_*.c)
