@@ -6,7 +6,8 @@
 //!
 //! Every random number is a `Rand_Range` of the shared generator, in the original order.
 //!
-//! Not ported: the story-mode override (`BtlCharApi_GetStoryAiForce`).
+//! The story-mode override (`BtlCharApi_GetStoryAiForce`) reads fighter word +0x1290, which no instruction of the
+//! executable writes (only the fighter's zeroed start): it is always 0 and left out.
 
 use bt3_data::ai_data::{AiData, AiRule, AiTables};
 use bt3_data::stage_col::StageNav;

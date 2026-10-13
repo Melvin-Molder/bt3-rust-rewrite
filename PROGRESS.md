@@ -100,7 +100,7 @@ depth, blends in the GS's colour space) are left out.
 - [x] The stage timer of stages 4 / 27 (read only by `BtlCharApi_GetMgrTimerRatio`, which nothing on the disc calls: left out), the body sphere's stage push-out, a stage change's transition effects (`StgFx_Reset`'s blurs, cross-fade and warps); the sight flag 0xBA (`BtlChars_UpdateSightFlag`)
 - [x] The camera's stage trace (`BtlCam_TraceStage`: already ported as `trace_camera`; a stale note)
 - [x] The jaw and the look-at rotations of nodes 0x2E / 0x2F (already ported; a stale note)
-- [ ] The story mode's AI override (`BtlCharApi_GetStoryAiForce`)
+- [x] The story mode's AI override (`BtlCharApi_GetStoryAiForce`): fighter word +0x1290 is never written in the executable, so it is always 0
 - [ ] The HUD's technique names above the command row, `Hud_SlideOut`
 - [ ] Story script command 1701 and command 8's stage change
 - [ ] `SndOpt_Apply` for the sound options loaded from the card
