@@ -229,8 +229,19 @@ mod tests {
         };
         assert!(image.file_size(ENDING_PSS_PATH).unwrap() > 1 << 20);
         let adx = image.read_file(ENDING_ADX_PATH).unwrap();
-        let wav = crate::adx_to_wav(&adx).unwrap();
+        let wav = crate::adx_to_wav(&adx, 0).unwrap();
         assert!(wav.len() > adx.len());
+        // A stereo soundtrack: both channels centred (180 of 255 a side), so the two sides are the same.
+        assert_eq!(adx[7], 2);
+        let pcm: Vec<i16> = wav[44..]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        assert!(pcm.chunks_exact(2).all(|f| f[0] == f[1]));
+        assert!(pcm.iter().any(|&s| s != 0));
+        // Hard right: nothing on the left.
+        let wav = crate::adx_to_wav(&adx, 0x40).unwrap();
+        assert!(wav[44..].chunks_exact(4).all(|f| f[0] == 0 && f[1] == 0));
     }
 
     #[test]

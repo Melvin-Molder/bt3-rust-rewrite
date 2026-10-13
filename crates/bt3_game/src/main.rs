@@ -824,10 +824,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let bytes = Iso9660::open(&path)
                 .and_then(|mut iso| iso.read_file(movie::ADX_PATH))
                 .map_err(|error| error.to_string())?;
-            adx_to_wav(&bytes)
+            adx_to_wav(&bytes, 0)
         })
     });
-    let music = boot.then(|| decode_adx_file(image_path.clone(), title::MUSIC_FILE_ID));
+    let music = boot.then(|| decode_adx_file(image_path.clone(), title::MUSIC_FILE_ID, 0));
     let engine = Arc::new(Mutex::new(se::Engine::default()));
     let mut effects = se::SoundEffects::new(engine.clone());
     // Snd_Init: the common bank (file 0x14B) goes to slot 0 at boot.
@@ -1156,29 +1156,28 @@ fn load_title_assets(iso_path: &Path) -> Result<TitleAssets, Box<dyn std::error:
     TitleAssets::parse(&res)
 }
 
-fn adx_to_wav(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let (header, mut pcm) = adx::decode(bytes).map_err(|error| error.to_string())?;
-    // ADXT_SetOutputMono: a stereo stream played in mono has both channels mixed.
-    if header.channels == 2 && sound::options().mono {
-        for f in pcm.chunks_exact_mut(2) {
-            let m = ((i32::from(f[0]) + i32::from(f[1])) / 2) as i16;
-            f[0] = m;
-            f[1] = m;
-        }
+/// An ADX file decoded to a stereo WAV as its player at pan `pan` (-0x40..0x40) sounds: each channel is a voice of
+/// its own, put to either side by the IOP's pan law (`sound::pan_levels`), the sides summed and saturated. As every
+/// channel has the player's pan, a stereo file comes out with both channels in the same place.
+fn adx_to_wav(bytes: &[u8], pan: i32) -> Result<Vec<u8>, String> {
+    let (header, pcm) = adx::decode(bytes).map_err(|error| error.to_string())?;
+    let levels = sound::pan_levels(pan);
+    let mut out = Vec::new();
+    out.try_reserve_exact(pcm.len() / header.channels.max(1) * 2)
+        .map_err(|error| error.to_string())?;
+    for frame in pcm.chunks_exact(header.channels.max(1)) {
+        let sum: i32 = frame.iter().map(|&s| i32::from(s)).sum();
+        out.extend(levels.map(|l| (sum * l / 255).clamp(-0x8000, 0x7FFF) as i16));
     }
-    Ok(adx::to_wav(
-        header.sample_rate,
-        header.channels as u16,
-        &pcm,
-    ))
+    Ok(adx::to_wav(header.sample_rate, 2, &out))
 }
 
-/// An ADX file of the AFS archives, decoded to a WAV in the background.
-fn decode_adx_file(iso_path: PathBuf, file_id: u32) -> Decoding {
+/// An ADX file of the AFS archives, decoded to a WAV at player pan `pan` in the background.
+fn decode_adx_file(iso_path: PathBuf, file_id: u32, pan: i32) -> Decoding {
     std::thread::spawn(move || {
         let mut image = Iso9660::open(&iso_path).map_err(|error| error.to_string())?;
         let bytes = read_file(&mut image, file_id).map_err(|error| error.to_string())?;
-        adx_to_wav(&bytes)
+        adx_to_wav(&bytes, pan)
     })
 }
 
@@ -1345,10 +1344,13 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
         match sound {
             TitleSound::PauseSeVoice(on) => game.se_voice_paused = on,
             TitleSound::StopAll => stop_all(game, commands),
-            TitleSound::Voice(id) => play_voice(game, commands, 0, id, 0x80),
+            TitleSound::Voice(id) => play_voice(game, commands, 0, id, 0x80, 0),
             TitleSound::VoiceEx {
-                player, id, volume, ..
-            } => play_voice(game, commands, player as usize & 1, id, volume),
+                player,
+                id,
+                volume,
+                pan,
+            } => play_voice(game, commands, player as usize & 1, id, volume, pan),
             TitleSound::VoiceStop => {
                 stop_player(&mut game.voice[0], commands);
                 game.pending_voice[0] = None;
@@ -1400,7 +1402,7 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
             TitleSound::MapBgm(id) => {
                 stop_player(&mut game.map_bgm, commands);
                 game.map_volume = 0x40;
-                game.pending_map = Some(decode_adx_file(game.iso_path.clone(), id));
+                game.pending_map = Some(decode_adx_file(game.iso_path.clone(), id, 0));
             }
             TitleSound::MapBgmVolume(volume) => {
                 game.map_volume = volume;
@@ -1412,7 +1414,7 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 stop_player(&mut game.map_bgm, commands);
                 game.pending_map = None;
             }
-            TitleSound::StreamSe(id) => play_stream_se(game, commands, 0, id, 0x40),
+            TitleSound::StreamSe(id) => play_stream_se(game, commands, 0, id, 0x40, 0),
             TitleSound::StreamSeStop(player) => {
                 stop_player(&mut game.stream_se[player as usize & 1], commands);
             }
@@ -1422,8 +1424,11 @@ fn play_sounds(game: &mut Game, commands: &mut Commands, sounds: Vec<TitleSound>
                 }
             }
             TitleSound::StreamSeEx {
-                player, id, volume, ..
-            } => play_stream_se(game, commands, player as usize & 1, id, volume),
+                player,
+                id,
+                volume,
+                pan,
+            } => play_stream_se(game, commands, player as usize & 1, id, volume, pan),
         }
     }
 }
@@ -1438,20 +1443,34 @@ fn set_obj_alpha(game: &mut Game, alpha: Option<battle::ObjAlpha>) {
     game.obj_alpha = alpha;
 }
 
-/// `Voice_Play(player, id, volume, pan)`: the player restarts with the file once it is decoded. The pan is not
-/// applied (Bevy's players have none).
-fn play_voice(game: &mut Game, commands: &mut Commands, player: usize, id: u32, volume: i32) {
+/// `Voice_Play(player, id, volume, pan)`: the player restarts with the file once it is decoded, the pan baked in.
+fn play_voice(
+    game: &mut Game,
+    commands: &mut Commands,
+    player: usize,
+    id: u32,
+    volume: i32,
+    pan: i32,
+) {
     stop_player(&mut game.voice[player], commands);
     if player == 0 {
         game.voice_ended = false;
     }
-    game.pending_voice[player] = Some((decode_adx_file(game.iso_path.clone(), id), volume));
+    game.pending_voice[player] = Some((decode_adx_file(game.iso_path.clone(), id, pan), volume));
 }
 
 /// `StreamSe_Play(player, id, volume, pan)`, as `play_voice`.
-fn play_stream_se(game: &mut Game, commands: &mut Commands, player: usize, id: u32, volume: i32) {
+fn play_stream_se(
+    game: &mut Game,
+    commands: &mut Commands,
+    player: usize,
+    id: u32,
+    volume: i32,
+    pan: i32,
+) {
     stop_player(&mut game.stream_se[player], commands);
-    game.pending_stream_se[player] = Some((decode_adx_file(game.iso_path.clone(), id), volume));
+    game.pending_stream_se[player] =
+        Some((decode_adx_file(game.iso_path.clone(), id, pan), volume));
 }
 
 /// `Pad_SendActuator` of pad 0 (every connected gamepad, as pad 0 reads them all): the last battle frame's motors,
@@ -3460,7 +3479,7 @@ fn start_ending_movie(
         let bytes = Iso9660::open(&path)
             .and_then(|mut iso| iso.read_file(movie::ENDING_ADX_PATH))
             .map_err(|error| error.to_string())?;
-        adx_to_wav(&bytes)
+        adx_to_wav(&bytes, 0)
     }));
     let mut source = None;
     finish_decoding(&mut decoding, &mut source, audio, movie::ENDING_ADX_PATH);
@@ -5296,7 +5315,7 @@ fn play_bgm(game: &mut Game, commands: &mut Commands, file_id: u32) {
     if let Some(source) = game.bgm_sources.get(&file_id).cloned() {
         spawn_bgm(game, commands, source);
     } else {
-        game.pending_bgm = Some((file_id, decode_adx_file(game.iso_path.clone(), file_id)));
+        game.pending_bgm = Some((file_id, decode_adx_file(game.iso_path.clone(), file_id, 0)));
     }
 }
 

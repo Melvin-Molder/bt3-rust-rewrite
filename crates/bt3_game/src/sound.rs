@@ -92,6 +92,30 @@ pub fn fade_out_step(level: i32) -> i32 {
     }
 }
 
+/// CRI_ADXI.IRX's pan law: an output side's level (of 255) at ADXT pans -15..15, a quarter cosine.
+const PAN_LAW: [i32; 31] = [
+    0xFF, 0xFE, 0xFD, 0xFB, 0xF9, 0xF6, 0xF2, 0xEE, 0xE8, 0xE3, 0xDC, 0xD5, 0xCE, 0xC6, 0xBD, 0xB4,
+    0xAA, 0xA0, 0x95, 0x8A, 0x7F, 0x73, 0x67, 0x5B, 0x4E, 0x41, 0x35, 0x27, 0x1A, 0x0D, 0x00,
+];
+
+/// `Adx_ConvPan`: a player pan (-0x40..0x40) to the ADXT's, (pan - 1) / 4.
+pub fn conv_pan(pan: i32) -> i32 {
+    (pan.clamp(-0x40, 0x40) - 1) / 4
+}
+
+/// The left and right levels (of 255) of each channel of a stream started at player pan `pan`
+/// (`adxt_SetOutPan`, then the IOP's): every channel gets the player's pan, as no file on the disc has the header's
+/// own pans (`AINF`) and the game never asks for the automatic ones; mono output centres it; the IOP clamps it to
+/// -15..15 and reads the law on either side. The balance, never set, stays in the middle (255 of 255).
+pub fn pan_levels(pan: i32) -> [i32; 2] {
+    let p = if options().mono {
+        0
+    } else {
+        conv_pan(pan).clamp(-15, 15)
+    };
+    [PAN_LAW[(15 + p) as usize], PAN_LAW[(15 - p) as usize]]
+}
+
 /// Bevy volume of an ADXT output volume.
 pub fn volume(level: i32) -> bevy::audio::Volume {
     if level <= OUTVOL_MUTE {
@@ -103,7 +127,22 @@ pub fn volume(level: i32) -> bevy::audio::Volume {
 
 #[cfg(test)]
 mod tests {
-    use super::{CH_BGM, CH_SE0, CH_VOICE0, OUTVOL_MUTE, fade_out_step, out_volume};
+    use super::{
+        CH_BGM, CH_SE0, CH_VOICE0, OUTVOL_MUTE, conv_pan, fade_out_step, out_volume, pan_levels,
+    };
+
+    #[test]
+    fn pans_follow_the_iop_law() {
+        assert_eq!(conv_pan(0), 0);
+        assert_eq!(conv_pan(0x40), 15);
+        assert_eq!(conv_pan(-0x40), -16);
+        assert_eq!(conv_pan(-0x100), -16);
+        // The middle 180 of 255 a side; hard left and right.
+        assert_eq!(pan_levels(0), [0xB4, 0xB4]);
+        assert_eq!(pan_levels(-0x40), [0xFF, 0]);
+        assert_eq!(pan_levels(0x40), [0, 0xFF]);
+        assert_eq!(pan_levels(0x20), [0x67, 0xE8]);
+    }
 
     #[test]
     fn music_and_menu_voice_levels() {

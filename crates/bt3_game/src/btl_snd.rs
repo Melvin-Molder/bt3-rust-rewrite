@@ -5,8 +5,7 @@
 //! cut short), looping sounds in another; a looping sound has to be requested every frame, else it is stopped.
 //!
 //! The streamed sounds and voice lines (kinds 4..7) go to the owner's player with the volume and pan worked out
-//! here; the players apply the volume, not the pan (the CRI ADX IOP module's pan and balance handling is not
-//! traced).
+//! here.
 
 use bt3_data::snd::SeBank;
 

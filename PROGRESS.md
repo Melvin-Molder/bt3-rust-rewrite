@@ -89,7 +89,7 @@ depth, blends in the GS's colour space) are left out.
 
 - [x] Hit sounds and voices (`btl_hit.rs`), the clash voices
 - [x] The techniques' fire sounds and the rush sparks' sounds
-- [x] Streamed sounds: volume, pan and player per owner; voice lines of kinds 5..7 (`btl_snd.rs`). The pan is worked out but not applied to the ADX players: CRI_ADXI.IRX's cosine pan law is read (31 steps, 180 / 255 a side at the centre), its stereo / balance handling is not, so it is left out
+- [x] Streamed sounds: volume, pan and player per owner; voice lines of kinds 5..7 (`btl_snd.rs`). The ADX players' pan: `adxt_SetOutPan` gives every channel the player's pan (no file on the disc has `AINF` pans, the game never asks for the automatic ones, mono centres it), CRI_ADXI.IRX puts each channel's voice to either side by its 31-step cosine law (180 / 255 a side at the centre); the balance is never set
 - [x] `BtlAct_QueueComboFinish` and the attack records 0x77 / 0x87 / 0x8D..0x8F (`BtlDecide_QueueAttack`)
 - [x] A paid evasion's attack (flag 0x7C), guard kind 4 from a guard action
 - [x] Throws: the motions played from the opponent's table (table flag 0x20000000), a clash win's throw, the throw break (`BtlHit_CheckThrowBreak`)
@@ -124,7 +124,7 @@ executable (callers and address references) and the ISO, and from the port's own
 - [x] `BtlCharApi_IsCamShown`'s clash test: a fighter in clash A, B or C is not the one on screen (`BtlScene_IsCharInView`)
 - [x] Model seams (`ObjSeam_*`, src/battle/obj_render.c): the CPU-skinned triangles between two nodes of a model with a seam section (header +0x70), drawn with the base texture and the shading ramp (73 of the disc's 767 models have one)
 - [x] The objects' distance fade (`BtlObjDraw_DrawModelFade`): left out, as it depends on how the PS2 renders: a model with flag 1 draws its fade texture into the frame's alpha alone (FRAME_1 masking RGB), alpha-tested against the view's fade (40..120 units), blended through GS context 2's destination alpha
-- [ ] The streamed sounds' pan on the ADX players (CRI_ADXI.IRX's stereo and balance handling still to read)
+- [x] The streamed sounds' pan on the ADX players: every channel at the player's pan, so stereo files play centred
 
 ### Sound driver
 
