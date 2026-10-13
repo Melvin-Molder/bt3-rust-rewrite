@@ -3,8 +3,8 @@
 //! One work area runs the confirmation dialog through one of the state machines, one per kind of card
 //! operation: saving or loading the system data, the boot load, the new game's save, and the replay files' save,
 //! load, scan and question. State 0x23 opens the window, the flow's own states follow, 0x25 closes it, 0x26 waits
-//! for the close, then the flow is idle and reports how it ended. `SndOpt_Apply` (the loaded sound options) is
-//! not ported.
+//! for the close, then the flow is idle and reports how it ended. `SndOpt_Apply` (the loaded sound options: the
+//! music's volume, stereo or mono) is the main loop's, which takes the save's sound options every frame.
 
 use crate::btl_replay::{self, Replay};
 use crate::char_select::BattleSetup;

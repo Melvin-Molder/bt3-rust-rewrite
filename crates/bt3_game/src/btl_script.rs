@@ -16,7 +16,7 @@
 //! The commands place and move the fighters (their scripted actions 4..10), fix and move the demo camera, fade the
 //! screen, play the music, sound effects and voiced lines with their text and mouth movement, change health,
 //! gauges and items, force transformations, fusions, member switches and techniques, and end the battle with a
-//! result. Command 1701 (a button wait) and command 8's stage change (3) are not ported; no story script uses them.
+//! result, wait for a button of pad 0 (command 1701) or change the stage (command 8's 3).
 
 use std::sync::Arc;
 
@@ -1657,6 +1657,8 @@ impl ScriptHost<'_> {
         };
         match what & 0xFFF {
             1 | 2 => b.seq_call_extra(),
+            // BtlFacade_RequestStageChange.
+            3 => b.stage_request_change(),
             4 => {
                 for s in 0..2 {
                     b.force_dash(s, 0);
@@ -1993,6 +1995,30 @@ impl GscCommands for ScriptHost<'_> {
                 _ => false,
             },
             1603 => self.talk(gsc, phase),
+            // Command 1701 "wait button": until pad 0's game button `bit` is pressed, then one more frame.
+            1701 => match phase {
+                PHASE_BEGIN => {
+                    let bit = gsc.int();
+                    let w = gsc.work();
+                    w[0] = bit;
+                    w[1] = 0;
+                    false
+                }
+                PHASE_UPDATE => {
+                    let pressed = self.b.pad0_pressed;
+                    let w = gsc.work();
+                    if w[1] != 0 {
+                        true
+                    } else {
+                        if pressed & 1u32.checked_shl(w[0] as u32).unwrap_or(0) != 0 {
+                            w[1] = 1;
+                        }
+                        false
+                    }
+                }
+                PHASE_BEGIN_ABORT => true,
+                _ => false,
+            },
             // The setup commands (10..12, 16, 701, 702, 1302) only run in action 1000; 3 and 1301 do nothing.
             _ => true,
         }
@@ -2030,5 +2056,46 @@ mod tests {
         // Every script has event actions; the ones with a camera command are scenes.
         assert!(script.events.iter().any(|e| e.present && e.cmd4b1));
         assert_eq!(script.voice_file(3), VOICE_FILE[1] + 3);
+    }
+
+    /// Every story script on the ISO: none waits for a button (command 1701) or changes the stage (command 8's
+    /// sub-command 3), so those two run in no story battle.
+    #[test]
+    fn real_story_scripts_never_wait_for_a_button_nor_change_the_stage() {
+        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = bt3_data::Iso9660::open(&iso) else {
+            return;
+        };
+        let mut scripts = 0;
+        for n in 0..0x200 {
+            let Some(script) = crate::read_file(&mut image, SCRIPT_FILE + n)
+                .ok()
+                .and_then(|f| GscScript::parse(&f).ok())
+            else {
+                continue;
+            };
+            scripts += 1;
+            for (a, action) in script.actions.iter().enumerate() {
+                let mut at = 0;
+                while at < action.words.len() {
+                    let word = script.word(a, at);
+                    if word & 0xF == WORD_COMMAND {
+                        let id = word >> 16;
+                        assert_ne!(id, 1701, "script {n}");
+                        if id == 8 {
+                            let what = script.word(a, at + 1);
+                            let v = script.value(what).map(i32::from_le_bytes).unwrap_or(-1);
+                            assert_ne!(v & 0xFFF, 3, "script {n}");
+                        }
+                        at = script.next_command(a, at);
+                    } else {
+                        at += 1;
+                    }
+                }
+            }
+        }
+        // Files 0x1FF..0x230: the 50 story battles.
+        assert_eq!(scripts, 50);
     }
 }

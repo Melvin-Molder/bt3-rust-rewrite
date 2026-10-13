@@ -103,6 +103,41 @@ pub(crate) mod pad {
     pub(crate) const RSTICK_UP: u32 = 0x80_0000;
 }
 
+/// `Pad_UpdateGameButtons`: the game's button word (`PADG_*`) of the raw `PAD_*` bits: the d-pad (again in bits
+/// 0x200000..0x1000000), the right stick's directions, the face buttons, START / SELECT, the shoulders and L3 / R3.
+pub(crate) fn game_buttons(held: u32) -> u32 {
+    use pad::*;
+    const MAP: [(u32, u32); 24] = [
+        (LEFT, 0x1),
+        (RIGHT, 0x2),
+        (DOWN, 0x4),
+        (UP, 0x8),
+        (RSTICK_LEFT, 0x10),
+        (RSTICK_RIGHT, 0x20),
+        (RSTICK_DOWN, 0x40),
+        (RSTICK_UP, 0x80),
+        (CIRCLE, 0x100),
+        (CROSS, 0x200),
+        (TRIANGLE, 0x400),
+        (SQUARE, 0x800),
+        (START, 0x1000),
+        (SELECT, 0x2000),
+        (L1, 0x4000),
+        (L2, 0x8000),
+        (R1, 0x1_0000),
+        (R2, 0x2_0000),
+        (L3, 0x4_0000),
+        (R3, 0x8_0000),
+        (LEFT, 0x20_0000),
+        (RIGHT, 0x40_0000),
+        (DOWN, 0x80_0000),
+        (UP, 0x100_0000),
+    ];
+    MAP.iter()
+        .filter(|(raw, _)| held & raw != 0)
+        .fold(0, |w, (_, g)| w | g)
+}
+
 /// What `BtlInput_Sample` reads from `gPad[chr->pad]`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PadState {
@@ -999,6 +1034,17 @@ impl Input {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn game_buttons_map_the_raw_bits() {
+        use super::game_buttons;
+        use super::pad::*;
+        // Pad_UpdateGameButtons: the d-pad twice, START, the face buttons and R3.
+        assert_eq!(game_buttons(LEFT), 0x1 | 0x20_0000);
+        assert_eq!(game_buttons(UP | START), 0x8 | 0x100_0000 | 0x1000);
+        assert_eq!(game_buttons(CROSS | CIRCLE | R3), 0x200 | 0x100 | 0x8_0000);
+        assert_eq!(game_buttons(0), 0);
+    }
+
     use super::*;
 
     fn frame(input: &mut Input, held: u32) {

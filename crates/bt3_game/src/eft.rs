@@ -7,7 +7,7 @@
 //! emitters (`eft_quad`), 10 the ring emitters (`eft_part10`), 14 the keyframed sprite animations (`EftAnimPart_*`
 //! of src/battle/eft_char_parts.c playing `EftSprAnim_*` of src/battle/eft_sprite_anim.c, here), 15 the sprite
 //! chains (`eft_link`), 16 the sprites (`eft_bill`), 17 the ribbons (`eft_ribbon`) and 18 the chains (`eft_chain`).
-//! Kind 12 (`EftZap`) is not ported: none of these sets has it.
+//! Kind 12 (`EftZap`) is not ported: no emitter set on the disc has it (`real_no_emitter_set_has_the_zap`).
 //!
 //! The draw pass: every module queues GS triangles into a slot of the ordering table (a depth slot 0..0xFFF from
 //! the projected z, far ones first, or the first / last slot) and one of its two layers; `Ot_Draw` sends them in

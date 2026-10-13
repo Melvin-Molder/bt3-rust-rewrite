@@ -2141,6 +2141,8 @@ pub struct Battle {
     pub(crate) menu: Option<PauseMenu>,
     /// Last frame's buttons per pad, for the menus' pressed words.
     prev_held: [u32; 2],
+    /// Pad 0's `gamePressed` this frame (`Pad_UpdateGameButtons`), for the script's button wait.
+    pub(crate) pad0_pressed: u32,
     /// The VU0 R register: seeded at boot and shared by every battle (the game moves it in and out).
     pub vu0: Vu0Random,
     /// `Pad.gameRepeatTimer` / `gameRepeatLast` of both pads.
@@ -2591,6 +2593,7 @@ impl Battle {
             views_drawn: 1,
             menu,
             prev_held: [0; 2],
+            pad0_pressed: 0,
             vu0: Vu0Random::default(),
             pad_repeat: [(0, 0); 2],
             chara_bits: crate::save::SaveData::default().chara_bits,
@@ -2677,18 +2680,21 @@ impl Battle {
             }
         }
         match found {
-            Some((1, _)) => {
-                // BtlStage_RequestChange: BtlStage_GetChangeTarget.
-                let target = match self.assets.stage.change_kind {
-                    1 => 0xF,
-                    2 => 3,
-                    _ => -1,
-                };
-                self.request_stage_change(target);
-            }
+            Some((1, _)) => self.stage_request_change(),
             Some((_, target)) => self.roster.chars[target].flags.set_held(0xAB),
             None => {}
         }
+    }
+
+    /// `BtlStage_RequestChange`: the change to the stage's target (`BtlStage_GetChangeTarget`: stage 0xF for change
+    /// kind 1, 3 for kind 2, none for the others).
+    pub(crate) fn stage_request_change(&mut self) {
+        let target = match self.assets.stage.change_kind {
+            1 => 0xF,
+            2 => 3,
+            _ => -1,
+        };
+        self.request_stage_change(target);
     }
 
     /// `BtlLoad_RequestStageChange`: not while a character change loads or a stage loads, nor to the same stage;
@@ -3460,6 +3466,8 @@ impl Battle {
                 .filter(|(b, _)| pressed & b != 0)
                 .fold(0, |m, (_, g)| m | g)
         };
+        self.pad0_pressed = crate::btl_input::game_buttons(pads[0].held)
+            & !crate::btl_input::game_buttons(self.prev_held[0]);
         self.prev_held = pads.map(|p| p.held);
         let mut input = SeqInput {
             start,
@@ -8075,6 +8083,60 @@ pub(crate) mod tests {
         assert_eq!(hits, [(5450, 0xF)]);
         assert_eq!(end_at, Some(50));
         assert_eq!(act, 0xB);
+    }
+
+    #[test]
+    fn real_no_emitter_set_has_the_zap() {
+        // Emitter kind 12 (`EftZap`): every character's ki blast, drain, charge and rush-burst sets and its five
+        // technique slots' sets, and the common effect file's sets the scene loads (the impacts', the
+        // transformations', the clash spark's and the body effect's 0x23F): none has an emitter of kind 12.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
+            return;
+        };
+        let Some(battle) = real_battle(&BattleSetup::default()) else {
+            return;
+        };
+        let zap = |set: &bt3_data::eft_pack::EmitSet| set.groups[12].is_some();
+        let a = &battle.assets;
+        let common = a
+            .impact_sets
+            .iter()
+            .chain(&a.transform_sets)
+            .chain(&a.spark_set)
+            .map(|s| &s.set);
+        let mut sets = 0;
+        for set in common {
+            sets += 1;
+            assert!(!zap(set));
+        }
+        let fx = crate::read_file(&mut image, COMMON_EFFECT_FILE).unwrap();
+        let body = bt3_data::eft_pack::EmitSet::parse(&fx, 0x23F).unwrap();
+        assert!(!zap(&body));
+        let mut charas = 0;
+        for c in 0..a.common.charas.len() as u32 {
+            let Ok(file) = crate::read_file(&mut image, MOTION_FILE + 1 + c * 10) else {
+                continue;
+            };
+            charas += 1;
+            if let Some(pack) = EffectPack::parse(&file) {
+                let own = [&pack.absorb_set, &pack.charge_set, &pack.rush_burst_set];
+                for set in pack.blast_sets.iter().chain(own).flatten() {
+                    sets += 1;
+                    assert!(!zap(set), "character {c}");
+                }
+            }
+            for slot in 0..5 {
+                if let Some(set) =
+                    tech_pack(&file, slot).and_then(bt3_data::eft_pack::tech_blast_set)
+                {
+                    sets += 1;
+                    assert!(!zap(&set), "character {c} slot {slot}");
+                }
+            }
+        }
+        assert!(charas > 100 && sets > 500, "{charas} {sets}");
     }
 
     #[test]

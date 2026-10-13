@@ -102,9 +102,10 @@ depth, blends in the GS's colour space) are left out.
 - [x] The jaw and the look-at rotations of nodes 0x2E / 0x2F (already ported; a stale note)
 - [x] The story mode's AI override (`BtlCharApi_GetStoryAiForce`): fighter word +0x1290 is never written in the executable, so it is always 0
 - [x] The HUD's technique names above the command row (never shown on the PS2: pad status 1 never occurs), `Hud_SlideOut` (already ported)
-- [ ] Story script command 1701 and command 8's stage change
-- [ ] `SndOpt_Apply` for the sound options loaded from the card
-- [ ] `EftZap` (effect kind 12) and the water swirls (`EftWaterMist_*`), if anything reaches them
+- [x] Story script command 1701 (a button wait of pad 0) and command 8's stage change (`BtlStage_RequestChange`); none of the 50 story scripts uses them
+- [x] `SndOpt_Apply` for the sound options loaded from the card (the main loop takes the save's options every frame: the music volume, stereo or mono)
+- [x] `EftZap` (effect kind 12) and the water swirls (`EftWaterMist_*`), if anything reaches them: nothing does (no emitter set on the disc has kind 12; nothing calls `EftWater_AddBurst`)
+- [ ] The body effect of request 0x1A (`EftBodyFx`, common effect set 0x23F on the fighter's body)
 
 ## By function
 

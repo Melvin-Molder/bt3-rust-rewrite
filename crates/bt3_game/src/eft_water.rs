@@ -4,7 +4,8 @@
 //! it, all drawn from three particle pools (60 billboard drops, 30 surface rings, 30 sprays) with the stage pack's
 //! textures. Nothing happens in split screen.
 //!
-//! The swirls (`EftWaterMist_*`) are not ported: only `EftWater_AddBurst` makes them, and nothing calls it.
+//! The swirls (`EftWaterMist_*`) are not ported: only `EftWater_AddBurst` makes them, and the executable holds no
+//! call of it nor its address.
 
 use crate::battle::{IDENTITY, Mtx, apply, inverse_rt};
 use crate::btl_tech_volley::{cos_fast, eft_wrap, sin_fast};
