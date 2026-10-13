@@ -218,6 +218,20 @@ impl SaveData {
         self.set_word(OFS_STOCK_LEVEL, v);
     }
 
+    /// `custom[cell].exp`: the experience paid into a customised character.
+    pub fn custom_exp(&self, cell: usize) -> i32 {
+        self.word(OFS_CUSTOM + cell * 0x38 + 0x30)
+    }
+
+    pub fn set_custom_exp(&mut self, cell: usize, v: i32) {
+        self.set_word(OFS_CUSTOM + cell * 0x38 + 0x30, v);
+    }
+
+    /// `money` set as it is (the customising screen pays its points without the clamp of `Save_AddMoney`).
+    pub fn set_money(&mut self, v: i32) {
+        self.set_word(OFS_MONEY, v);
+    }
+
     /// `item[n]` written whole (`SAVE_ITEM_OWNED` 1, `SAVE_ITEM_NEW` 2).
     pub fn set_item(&mut self, n: usize, v: u8) {
         if let Some(b) = self.image.get_mut(OFS_ITEM + n) {

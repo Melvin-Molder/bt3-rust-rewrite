@@ -225,6 +225,54 @@ pub fn num_draw(
     }
 }
 
+/// `Num_DrawChild(flash, parent, fmt, first 0, count, value, w, h, mode, parentFmt)`: as `num_draw`, each digit's
+/// clip found under a parent, `name(n)` giving (parent, clip) for digit `n`; mode 2 shows cell 10 (no digit) on
+/// every clip.
+#[allow(clippy::too_many_arguments)]
+pub fn num_draw_child(
+    flash: &mut Flash,
+    name: impl Fn(i32) -> (String, String),
+    count: i32,
+    value: i32,
+    (w, h): (i32, i32),
+    mode: i32,
+) {
+    let mut value = value.abs();
+    let mut started = false;
+    for i in (0..count).rev() {
+        let (parent, child) = name(i);
+        let clip = flash.find(Some(&parent), &child);
+        let digit = if mode != 2 {
+            let d = value / 10i32.pow(i as u32);
+            if d == 0 && started {
+                0
+            } else if d != 0 {
+                value -= d * 10i32.pow(i as u32);
+                started = true;
+                d
+            } else if mode != 0 || i == 0 {
+                0
+            } else {
+                flash.clip_set_flags(clip, PROP_VISIBLE, false);
+                continue;
+            }
+        } else {
+            10
+        };
+        flash.clip_set_flags(clip, PROP_VISIBLE, true);
+        flash.clip_set_uv(
+            clip,
+            Uv {
+                u0: w * (digit % 4),
+                v0: h * (digit / 4),
+                u1: w * (digit % 4) + w,
+                v1: h * (digit / 4) + h,
+                tex: 0,
+            },
+        );
+    }
+}
+
 /// `gLipSync` with `gLipSyncOpen` / `gLipSyncWaiting`: (start frame, open) keys of a voice line.
 #[derive(Clone, Debug, Default)]
 pub struct LipSync {

@@ -1186,6 +1186,9 @@ pub struct ChrTable {
     /// its other forms (0xFF none).
     pub costs: Vec<i32>,
     pub links: Vec<[u8; 4]>,
+    /// Per character id: `exp[7]` (+0x10), the experience each level needs (0 past the last level), and the word
+    /// after it (+0x2C, the links), which `exp[7]` reads.
+    pub exp: Vec<[i32; 8]>,
     pub items: Vec<ItemInfo>,
 }
 
@@ -1223,6 +1226,11 @@ impl ChrTable {
                     let o = charas + id * 0x3C + 0x2C;
                     file.get(o..o + 4)
                         .map_or([0xFF; 4], |b| [b[0], b[1], b[2], b[3]])
+                })
+                .collect(),
+            exp: (0..count)
+                .map(|id| {
+                    std::array::from_fn(|k| u32_at(file, charas + id * 0x3C + 0x10 + k * 4) as i32)
                 })
                 .collect(),
             items: (0..ITEM_COUNT)
@@ -1280,6 +1288,53 @@ impl ChrTable {
             .ok()
             .and_then(|c| self.base_slots.get(c))
             .map_or(0, |&b| b + level)
+    }
+
+    /// `ChrTbl_GetExp`: the experience level `level` needs (0 past the last; level 7 reads the word after the list).
+    pub fn exp_at(&self, chara: i32, level: i32) -> i32 {
+        usize::try_from(chara)
+            .ok()
+            .and_then(|c| self.exp.get(c))
+            .and_then(|e| usize::try_from(level).ok().and_then(|l| e.get(l)))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// `ChrTbl_GetMaxExp`: the last experience value of the character's list.
+    pub fn max_exp(&self, chara: i32) -> i32 {
+        let e = usize::try_from(chara)
+            .ok()
+            .and_then(|c| self.exp.get(c))
+            .copied()
+            .unwrap_or_default();
+        e[..7]
+            .iter()
+            .take_while(|&&x| x != 0)
+            .last()
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// `ItemTbl_CanEquip`: nobody may equip an item flagged 1 or 4; a character flagged 1 one flagged 8, the
+    /// others one flagged 0x10.
+    pub fn can_equip(&self, item: i32, chara: i32) -> bool {
+        let flags = usize::try_from(item)
+            .ok()
+            .and_then(|i| self.items.get(i))
+            .map_or(0, |e| e.flags);
+        if flags & 5 != 0 {
+            return false;
+        }
+        let chara_flags = usize::try_from(chara)
+            .ok()
+            .and_then(|c| self.flags.get(c))
+            .copied()
+            .unwrap_or(0);
+        if chara_flags & 1 != 0 {
+            flags & 8 != 0
+        } else {
+            flags & 0x10 != 0
+        }
     }
 
     /// `ItemSet_Fit`: the items of the first seven ids that fit in `capacity` slots (the rest of the set from the

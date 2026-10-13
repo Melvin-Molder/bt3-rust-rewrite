@@ -18,7 +18,8 @@ use crate::font::Font;
 use crate::item_panel::{ItemAssets, ItemHelp, help_textures_in};
 use crate::logo::{ColorFade, picture_quads};
 use crate::menu_res::{FileKey, ImageTexture, decode_files, decode_picture, image_indices, tex};
-use crate::password::{ChrPass, ItemParam, item_bonus, item_params, section_bytes};
+use crate::pass_win::PassWin;
+use crate::password::{ItemParam, item_bonus, item_params, section_bytes};
 use crate::rng::{GameRandom, LibcRandom};
 use crate::save::SaveData;
 use crate::title::{
@@ -128,13 +129,8 @@ const FLASH1_TEXTURES: [ImageTexture; 17] = [
 ];
 /// `MsgWin_Init(MPACK_AT(res, 11), …)`.
 const MSG_TEXTURES: [ImageTexture; 3] = [Some(((11, 1), 0)), Some(((11, 1), 1)), None];
-/// `PassWin_Init(MPACK_AT(res, 10))`: `gPassWin->tex[n]`.
-const PASS_TEXTURES: [ImageTexture; 4] = [
-    Some(((10, 2), 0)),
-    Some(((10, 2), 1)),
-    Some(((10, 3), 0)),
-    Some(((10, 2), 2)),
-];
+/// `PassWin_Init(MPACK_AT(res, 10))`.
+const PASS_TEXTURES: [ImageTexture; 4] = crate::pass_win::textures(10);
 /// `ItemHelp_Init(MPACK_AT(res, 16))`.
 const HELP_SECTION: usize = 16;
 
@@ -254,77 +250,6 @@ struct Rec {
     chara: i32,
 }
 
-/// `PassWin`: the window that shows a character's password, one picture a character.
-struct PassWin {
-    flash: Flash,
-    tex: Vec<Option<usize>>,
-    /// `ChrPass_GetText`: the last password made.
-    text: String,
-}
-
-/// `gPassKeys`: the window's sheet, four rows of capitals, symbols and digits (small letters four rows on).
-const PASS_KEYS: [&[u8]; 4] = [
-    b"ABCDEFGHIJKLMN",
-    b"OPQRSTUVWXYZ",
-    b"#$%&@!?-+*()",
-    b"0123456789",
-];
-
-impl PassWin {
-    /// `PassWin_OpenEx`: the password of the record (`ChrPass_Encode`) and the window's way in.
-    fn open(&mut self, rec: &Rec, libc: &mut LibcRandom) {
-        let pass = ChrPass {
-            chara: rec.chara,
-            items: rec.items.map(i32::from),
-            extra_slots: i32::from(rec.level),
-            unk28: 0,
-        };
-        self.text = pass.encode(libc);
-        self.flash.goto_label("fl_password_in", true);
-    }
-
-    /// `PassWin_Close`.
-    fn close(&mut self) {
-        self.flash.goto_label("fl_password_out", true);
-    }
-
-    /// `PassWin_Draw`: the movie advances and each of the 34 cells gets its character's picture.
-    fn draw(&mut self, quads: &mut Vec<ScreenQuad>) {
-        self.flash.advance();
-        let (mut col, mut row) = (0, 0);
-        for (i, c) in self.text.bytes().take(34).enumerate() {
-            // PassWin_FindKey: case is ignored; a character not on the sheet keeps the last cell.
-            let up = c.to_ascii_uppercase();
-            for (j, keys) in PASS_KEYS.iter().enumerate() {
-                if let Some(k) = keys.iter().position(|&k| k == up) {
-                    (col, row) = (k as i32, j as i32);
-                    break;
-                }
-            }
-            let r = if c.is_ascii_lowercase() { row + 4 } else { row };
-            let name = if i <= 0x10 {
-                format!("mc_input_pass_1_{:02}", i + 1)
-            } else {
-                format!("mc_input_pass_2_{:02}", i - 0x10)
-            };
-            let clip = self.flash.find(None, &name);
-            self.flash.clip_set_uv(
-                clip,
-                Uv {
-                    u0: col * 0x20,
-                    v0: r * 0x28,
-                    u1: col * 0x20 + 0x20,
-                    v1: r * 0x28 + 0x28,
-                    tex: 0,
-                },
-            );
-        }
-        let tex = &self.tex;
-        let has_texture = |image: usize| tex.get(image).is_some_and(Option::is_some);
-        quads.extend(screen_quads(&self.flash.draw(&has_texture), tex));
-    }
-}
-
 /// The lines last attached to the text boxes: a box keeps drawing its line until another is attached.
 #[derive(Clone, Copy, Debug)]
 struct Boxes {
@@ -406,11 +331,7 @@ impl DcListScreen {
             tex: data.layout.flash.clone(),
             msg,
             dialog,
-            pass: PassWin {
-                flash: pass_flash,
-                tex: data.layout.pass.clone(),
-                text: String::new(),
-            },
+            pass: PassWin::new(pass_flash, data.layout.pass.clone()),
             help: ItemHelp::new(&data.help, data.layout.help.clone())?,
             fade: ColorFade::start_in(true, FADE_FRAMES),
             pad: PadRepeat::default(),
@@ -1026,7 +947,8 @@ impl DcListScreen {
                 }
                 1 => {
                     let rec = self.rec[self.cursor()];
-                    self.pass.open(&rec, &mut self.libc);
+                    self.pass
+                        .open(rec.chara, rec.items, i32::from(rec.level), &mut self.libc);
                     self.state = ST_PASSWORD;
                 }
                 _ => {
@@ -1275,7 +1197,7 @@ mod tests {
         run.press(&mut s, PAD_DOWN);
         run.press(&mut s, PAD_CROSS);
         assert_eq!(s.state, ST_PASSWORD);
-        let back = ChrPass::decode(&s.pass.text).unwrap();
+        let back = crate::password::ChrPass::decode(s.pass.text()).unwrap();
         assert_eq!(back.chara, 12);
         assert_eq!(back.items[..4], [i32::from(slot_item), 0, 0, 5]);
         assert_eq!(back.extra_slots, 2);
