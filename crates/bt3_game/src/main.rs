@@ -142,6 +142,8 @@ mod stg_pan_blur;
 mod stg_rigid;
 mod stg_scroll;
 mod stg_tint;
+mod survival_result;
+mod survival_select;
 mod team_select;
 mod title;
 mod tour_bg;
@@ -233,6 +235,9 @@ enum Scene {
     UbTeamSelect(Box<ub_team_select::UbTeamSelectScreen>),
     /// `Ub_Main` mode 16: the mission's result.
     MissionResult(Box<mission_result::MissionResultScreen>),
+    /// `Ub_Main` mode 17: Survival's course select; mode 19: its result.
+    SurvivalSelect(Box<survival_select::SurvivalSelectScreen>),
+    SurvivalResult(Box<survival_result::SurvivalResultScreen>),
     /// `EvoMode_Main` mode 49: the customising screen.
     EvoZ(Box<evo_z::EvoZScreen>),
     /// `EvoMode_Main` mode 50: the item shop.
@@ -315,6 +320,8 @@ impl Scene {
             | Scene::SoloSelect(..)
             | Scene::UbTeamSelect(_)
             | Scene::MissionResult(_)
+            | Scene::SurvivalSelect(_)
+            | Scene::SurvivalResult(_)
             | Scene::ShenSave(_)
             | Scene::CharRef(_)
             | Scene::Black => VBLANK_SECONDS,
@@ -483,6 +490,8 @@ struct Game {
     /// The `Ub_Main` mode a battle of the group returns to (16 the mission result).
     ub_battle: Option<i32>,
     mission_result: Option<mission_result::MissionResultData>,
+    survival_select: Option<survival_select::SurvivalSelectData>,
+    survival_result: Option<survival_result::SurvivalResultData>,
     /// `BattleResult` of the last battle.
     battle_result: battle::BattleResult,
     ub: ub::UbProgress,
@@ -877,6 +886,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             solo_select: None,
             ub_battle: None,
             mission_result: None,
+            survival_select: None,
+            survival_result: None,
             battle_result: battle::BattleResult::default(),
             ub: ub::UbProgress::default(),
             tour: tour_menu::TourSession::default(),
@@ -1620,6 +1631,8 @@ fn run_frames(
                     match (mode, result) {
                         (15, 0) => start_mission_select(game, &mut commands),
                         (15, _) => start_mission_battle(game),
+                        (18, 0) => start_survival_select(game, &mut commands),
+                        (18, _) => start_survival_battle(game),
                         _ => {
                             info!("Ultimate Battle mode {mode}'s next screen is not ported yet");
                             start_ub_menu(game, &mut commands);
@@ -1658,6 +1671,54 @@ fn run_frames(
                     } else {
                         start_mission_select(game, &mut commands);
                     }
+                }
+            }
+            Scene::SurvivalSelect(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &game.save,
+                    &mut game.random,
+                    &mut game.libc_random,
+                    &mut game.font,
+                );
+                let result = screen.result().cloned();
+                let cursor = screen.cursor();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if let Some(result) = result {
+                    // Ub_Main: Adx_StopAll after SurvSel_Run.
+                    stop_all(game, &mut commands);
+                    match result {
+                        Some(setup) => {
+                            // SurvSel_Input / SurvSel_SetupBattle: the course, one fighter, no DP limit.
+                            game.ub.cursor = cursor;
+                            game.ub.team_size = 1;
+                            game.ub.dp_rule = 0;
+                            game.ub.survival = Some(setup);
+                            start_solo_select(game, &mut commands, 18);
+                        }
+                        None => start_ub_menu(game, &mut commands),
+                    }
+                }
+            }
+            Scene::SurvivalResult(screen) => {
+                let frame = screen.run_frame(
+                    held,
+                    pressed,
+                    stat,
+                    &mut game.save,
+                    &mut game.random,
+                    &mut game.font,
+                );
+                let done = screen.is_done();
+                game.quads = frame.quads;
+                play_sounds(game, &mut commands, frame.sounds);
+                if done {
+                    // Ub_Main: Adx_StopAll after SurvResult_Run, back to the course select.
+                    stop_all(game, &mut commands);
+                    start_survival_select(game, &mut commands);
                 }
             }
             Scene::MissionResult(screen) => {
@@ -1722,12 +1783,9 @@ fn run_frames(
                         game.ub.menu_cursor = cursor;
                         match result {
                             2 => start_mission_select(game, &mut commands),
+                            3 => start_survival_select(game, &mut commands),
                             _ => {
-                                let mode = match result {
-                                    1 => 20,
-                                    3 => 17,
-                                    _ => 24,
-                                };
+                                let mode = if result == 1 { 20 } else { 24 };
                                 info!("Ultimate Battle mode {mode} is not ported yet");
                                 start_ub_menu(game, &mut commands);
                             }
@@ -2679,6 +2737,7 @@ fn leave_battle(
         } else {
             match mode {
                 16 => start_mission_result(game, commands),
+                19 => start_survival_result(game, commands),
                 _ => {
                     info!("Ultimate Battle mode {mode} (the result) is not ported yet");
                     start_ub_menu(game, commands);
@@ -3664,6 +3723,122 @@ fn start_mission_battle(game: &mut Game) {
     setup.finish();
     game.ub_battle = Some(16);
     start_battle(game, setup);
+}
+
+/// `Ub_Main` mode 17: `Bgm_Play(UB_BGM)`, then `SurvSel_Run(2)` from `gMenuArc3`.
+fn start_survival_select(game: &mut Game, commands: &mut Commands) {
+    if game.survival_select.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    survival_select::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| survival_select::SurvivalSelectAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout =
+                    survival_select::SurvivalSelectLayout::new(background, |key| firsts[&key]);
+                game.survival_select = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the survival course select: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .survival_select
+        .clone()
+        .expect("the survival course select is loaded");
+    match survival_select::SurvivalSelectScreen::new(&data, &mut game.libc_random) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::SurvivalSelect(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the survival course select: {error}");
+            game.scene = Scene::Black;
+        }
+    }
+}
+
+/// `Ub_SetupSolo`: member 0 of side 0 is the fighter chosen (CPU level 0, full health) over the survival course's
+/// setup; then the battle (mode 19 after it).
+fn start_survival_battle(game: &mut Game) {
+    let Some(mut setup) = game.ub.survival.clone() else {
+        error!("no survival course was set up");
+        game.scene = Scene::Black;
+        return;
+    };
+    let pick = game.char_progress.side[0];
+    let side = &mut setup.sides[0];
+    side.chara = pick.picked;
+    side.costume = pick.color_plate;
+    side.cpu_level = 0;
+    side.items = pick.items;
+    setup.finish();
+    game.ub_battle = Some(19);
+    start_battle(game, setup);
+}
+
+/// `Ub_Main` mode 19: `Bgm_Play(UB_BGM)`, then `SurvResult_Run(3)` from `gMenuArc3`.
+fn start_survival_result(game: &mut Game, commands: &mut Commands) {
+    if game.survival_result.is_none() {
+        let loaded = Iso9660::open(&game.iso_path)
+            .map_err(Into::into)
+            .and_then(|mut image| read_file(&mut image, ub::ARCHIVE_FILE_ID))
+            .and_then(|archive| {
+                Ok(bpe::decode(pack_section(
+                    &archive,
+                    survival_result::ARCHIVE_SECTION,
+                )?)?)
+            })
+            .and_then(|res| survival_result::SurvivalResultAssets::parse(&res));
+        match loaded {
+            Ok(assets) => {
+                let mut data = assets.data;
+                let background = register_picture(game, assets.background);
+                let firsts = register_files(game, assets.files);
+                data.layout =
+                    survival_result::SurvivalResultLayout::new(background, |key| firsts[&key]);
+                game.survival_result = Some(data);
+            }
+            Err(error) => {
+                error!("cannot load the survival result: {error}");
+                game.scene = Scene::Black;
+                return;
+            }
+        }
+    }
+    let data = game
+        .survival_result
+        .clone()
+        .expect("the survival result is loaded");
+    match survival_result::SurvivalResultScreen::new(
+        &data,
+        game.ub.cursor.clamp(0, 4) as usize,
+        game.ub.menu_cursor,
+        &game.battle_result,
+        &mut game.save,
+        &mut game.libc_random,
+    ) {
+        Ok(screen) => {
+            play_bgm(game, commands, ub::BGM_FILE_ID);
+            game.scene = Scene::SurvivalResult(Box::new(screen));
+        }
+        Err(error) => {
+            error!("cannot start the survival result: {error}");
+            game.scene = Scene::Black;
+        }
+    }
 }
 
 /// `Ub_Main` mode 16: `Bgm_Play(UB_BGM)`, then `MisResult_Run(3)` from `gMenuArc3`.

@@ -27,6 +27,16 @@ pub struct MissionRec {
     pub score: i32,
 }
 
+/// A survival course's best run (`SSaveSurv`): the opponents beaten, the score (shown * 100), its rank letter and
+/// the time as three two-digit groups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SurvivalRec {
+    pub defeated: i32,
+    pub score: i32,
+    pub rank: u8,
+    pub time: [u8; 3],
+}
+
 /// `SAVE_SIZE`.
 pub const SIZE: usize = 0x4000;
 /// `ITEM_INFO_INITIAL`: an item owned in a new save.
@@ -43,6 +53,7 @@ const OFS_SLOT: usize = 0x10;
 const OFS_UB_FLAGS: usize = 0x208;
 const OFS_MISSION_PAGES: usize = 0x20C;
 const OFS_MISSION: usize = 0x28C;
+const OFS_SURVIVAL: usize = 0x73C;
 const OFS_RANK: usize = 0x77C;
 const OFS_CHARA_BITS: usize = 0xC10;
 const OFS_STAGE_BITS: usize = 0xC28;
@@ -216,6 +227,32 @@ impl SaveData {
             }
         }
         self.set_word(at + 8, rec.score);
+    }
+
+    /// `surv[n]` (12 bytes each, five of them).
+    pub fn survival(&self, n: usize) -> SurvivalRec {
+        let at = OFS_SURVIVAL + n.min(4) * 0xC;
+        let b = |k: usize| self.image.get(at + k).copied().unwrap_or(0);
+        SurvivalRec {
+            defeated: self.word(at),
+            score: self.word(at + 4),
+            rank: b(8),
+            time: [b(9), b(10), b(11)],
+        }
+    }
+
+    pub fn set_survival(&mut self, n: usize, rec: SurvivalRec) {
+        let at = OFS_SURVIVAL + n.min(4) * 0xC;
+        self.set_word(at, rec.defeated);
+        self.set_word(at + 4, rec.score);
+        for (k, v) in [rec.rank, rec.time[0], rec.time[1], rec.time[2]]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(b) = self.image.get_mut(at + 8 + k) {
+                *b = v;
+            }
+        }
     }
 
     /// `level`: the history menu's difficulty, 0..2.

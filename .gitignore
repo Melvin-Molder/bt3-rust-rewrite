@@ -49,6 +49,8 @@
 !/crates/bt3_game/src/draw.rs
 !/crates/bt3_game/src/flash.rs
 !/crates/bt3_game/src/sound.rs
+!/crates/bt3_game/src/survival_result.rs
+!/crates/bt3_game/src/survival_select.rs
 !/crates/bt3_game/src/title.rs
 !/crates/bt3_game/src/training.rs
 !/crates/bt3_game/src/ub.rs
