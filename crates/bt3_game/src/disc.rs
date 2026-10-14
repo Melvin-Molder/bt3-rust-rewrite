@@ -125,8 +125,7 @@ mod tests {
     /// tray reads as no disc.
     #[test]
     fn the_drive_identifies_this_game() {
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         if !iso.exists() {
             return;
         }

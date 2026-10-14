@@ -19,6 +19,7 @@ pub mod gs;
 pub mod gsc;
 pub mod model;
 pub mod motion;
+pub mod rom;
 pub mod snd;
 pub mod stage;
 pub mod stage_anim;

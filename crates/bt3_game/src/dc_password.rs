@@ -1353,8 +1353,7 @@ fn pass_cell(i: i32) -> String {
 pub(crate) fn real_dc_section(section: usize) -> Option<(Vec<u8>, Vec<u8>)> {
     use bt3_data::afs::{AfsArchive, partition_entry_for_id};
     use bt3_data::{Iso9660, bpe, pack_section};
-    let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+    let iso = bt3_data::rom::for_tests();
     let mut image = Iso9660::open(&iso).ok()?;
     let mut read = |id: u32| {
         let location = partition_entry_for_id(id);

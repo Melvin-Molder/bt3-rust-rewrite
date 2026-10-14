@@ -5440,8 +5440,7 @@ pub(crate) mod tests {
 
     #[test]
     fn real_fighters_leave_their_ids_in_the_frames_alpha() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = bt3_data::rom::for_tests();
         let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
             return;
         };
@@ -5510,8 +5509,7 @@ pub(crate) mod tests {
 
     #[test]
     fn real_fighters_load_and_project_onto_the_screen() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = bt3_data::rom::for_tests();
         let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
             return;
         };
@@ -5680,8 +5678,7 @@ pub(crate) mod tests {
 
     /// The battle of a setup read from the ISO, `None` without it.
     pub(crate) fn real_battle(setup: &BattleSetup) -> Option<Battle> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = bt3_data::rom::for_tests();
         let mut image = bt3_data::Iso9660::open(&path).ok()?;
         let cnf = image.read_file("SYSTEM.CNF").unwrap();
         let exe = bt3_data::elf::boot_path(&cnf).unwrap();
@@ -5814,8 +5811,7 @@ pub(crate) mod tests {
             return;
         };
         // The split version of stage 0 is a different file.
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = bt3_data::rom::for_tests();
         let mut image = bt3_data::Iso9660::open(&path).unwrap();
         let mut read = |id: u32| -> Result<Vec<u8>, String> {
             let location = bt3_data::afs::partition_entry_for_id(id);
@@ -6036,8 +6032,7 @@ pub(crate) mod tests {
     fn real_story_battle_runs_its_script() {
         use crate::btl_script::{BtlScript, SCRIPT_FILE, ScriptSetup};
         // Story script 0: Goku and Piccolo against Raditz.
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = bt3_data::rom::for_tests();
         let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
             return;
         };
@@ -8311,8 +8306,7 @@ pub(crate) mod tests {
         // Emitter kind 12 (`EftZap`): every character's ki blast, drain, charge and rush-burst sets and its five
         // technique slots' sets, and the common effect file's sets the scene loads (the impacts', the
         // transformations', the clash spark's and the body effect's 0x23F): none has an emitter of kind 12.
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = bt3_data::rom::for_tests();
         let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
             return;
         };

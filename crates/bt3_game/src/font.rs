@@ -920,8 +920,7 @@ mod tests {
 
     #[test]
     fn real_icon_tables_and_textures() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = bt3_data::rom::for_tests();
         let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
             return;
         };

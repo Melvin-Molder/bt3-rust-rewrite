@@ -1424,8 +1424,7 @@ mod tests {
     /// starts on the AI's level and hands the level under its cursor back; the tutorials' has the controls page.
     #[test]
     fn real_mode_menus_set_the_cpu_level() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = bt3_data::rom::for_tests();
         let Ok(mut image) = bt3_data::Iso9660::open(&path) else {
             return;
         };

@@ -2205,8 +2205,7 @@ mod tests {
         use bt3_data::afs::{AfsArchive, partition_entry_for_id};
         use bt3_data::{Iso9660, bpe};
 
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         let mut image = Iso9660::open(&iso).ok()?;
         let location = partition_entry_for_id(FILE_ID);
         let archive =

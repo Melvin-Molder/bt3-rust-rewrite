@@ -888,12 +888,10 @@ fn scan_texture_candidates(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image_path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from("rom").join("Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso")
-        });
+    let image_path = match std::env::args_os().nth(1) {
+        Some(path) => PathBuf::from(path),
+        None => bt3_data::rom::find_in(std::path::Path::new(bt3_data::rom::DIR))?,
+    };
 
     let mut image = Iso9660::open(&image_path)?;
     let system_config = image.read_file("SYSTEM.CNF")?;

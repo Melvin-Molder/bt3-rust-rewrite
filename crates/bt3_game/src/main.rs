@@ -626,8 +626,8 @@ struct Textures(Vec<Handle<Image>>);
 struct QuadSlot(usize);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut image_path =
-        PathBuf::from("rom").join("Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+    // The disc image: the path given, else the one in rom/ (bt3_data::rom).
+    let mut image_path = None;
     let mut forced_type = None;
     let mut skip_to_title = false;
     let mut skip_to_menu = false;
@@ -750,8 +750,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("--screen requires a value of 0, 1, or 2")?;
             forced_type = Some(value);
         } else {
-            image_path = PathBuf::from(argument);
+            image_path = Some(PathBuf::from(argument));
         }
+    }
+    let image_path = match image_path {
+        Some(path) => path,
+        None => bt3_data::rom::find_in(Path::new(bt3_data::rom::DIR))?,
+    };
+    if !bt3_data::rom::is_supported(&image_path) {
+        warn!(
+            "{} is not {} ({}): its files may not be where this port reads them",
+            image_path.display(),
+            bt3_data::rom::SERIAL,
+            bt3_data::rom::BOOT_FILE
+        );
     }
 
     // Rand_Init seeds from the hardware timer, so the original's picks also differ on every boot.

@@ -27,12 +27,22 @@ test, the objects' distance fade) are left out rather than guessed. The opening 
 `ffmpeg`. [PROGRESS.md](PROGRESS.md) has the full list, and the details are in
 [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
+## Supported disc
+
+| Title | Region | Product code | Executable |
+|---|---|---|---|
+| Dragon Ball Z: Budokai Tenkaichi 3 | USA (English / Japanese) | SLUS-21678 | `SLUS_216.78` |
+
+Only this release is supported: the port reads the game's files by their places on this disc. Other releases
+(PAL, Japanese) are untested and not expected to work. At start the port checks the disc's executable and warns
+when it is not `SLUS_216.78`.
+
 ## Running
 
 You need:
 
-- your disc image, at `rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso` (or pass its path as the
-  first argument);
+- your disc image of the supported release (above), in a `rom/` folder at the top of the repository. Any file
+  name works; to run an image from elsewhere, pass its path as the first argument;
 - a [Rust](https://rustup.rs/) toolchain (edition 2024);
 - `ffmpeg` on your `PATH`, for the movies.
 

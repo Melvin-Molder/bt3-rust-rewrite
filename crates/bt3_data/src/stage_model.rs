@@ -413,8 +413,7 @@ mod tests {
 
     #[test]
     fn every_stage_file_parses_and_its_textures_decode() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let path = crate::rom::for_tests();
         let Ok(mut image) = Iso9660::open(&path) else {
             return;
         };

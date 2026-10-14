@@ -2046,8 +2046,7 @@ mod tests {
     /// event actions.
     #[test]
     fn real_script_sets_up_the_story_battle() {
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         let Ok(mut image) = bt3_data::Iso9660::open(&iso) else {
             return;
         };
@@ -2075,8 +2074,7 @@ mod tests {
     /// sub-command 3), so those two run in no story battle.
     #[test]
     fn real_story_scripts_never_wait_for_a_button_nor_change_the_stage() {
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         let Ok(mut image) = bt3_data::Iso9660::open(&iso) else {
             return;
         };

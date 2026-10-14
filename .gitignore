@@ -30,6 +30,7 @@
 !/crates/bt3_data/src/snd.rs
 !/crates/bt3_data/src/model.rs
 !/crates/bt3_data/src/motion.rs
+!/crates/bt3_data/src/rom.rs
 !/crates/bt3_data/src/stage_model.rs
 !/crates/bt3_data/src/stage_surf.rs
 !/crates/bt3_data/src/survival.rs

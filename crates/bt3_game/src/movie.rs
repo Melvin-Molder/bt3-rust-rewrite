@@ -222,8 +222,7 @@ mod tests {
     /// The ending movie's files from the ISO in `rom/`, when it is there: the video, and the soundtrack decoded.
     #[test]
     fn real_ending_movie_files_are_on_the_disc() {
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         let Ok(mut image) = Iso9660::open(&iso) else {
             return;
         };

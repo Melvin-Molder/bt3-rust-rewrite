@@ -511,8 +511,7 @@ mod tests {
     fn real_replay_members_carry_their_item_values() {
         use bt3_data::Iso9660;
         use bt3_data::afs::{AfsArchive, partition_entry_for_id};
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         let Ok(mut image) = Iso9660::open(&iso) else {
             return;
         };

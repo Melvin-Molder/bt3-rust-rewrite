@@ -1959,8 +1959,7 @@ mod tests {
     fn real_costs_and_forms_relate_members() {
         use bt3_data::Iso9660;
         use bt3_data::afs::{AfsArchive, partition_entry_for_id};
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         let Ok(mut image) = Iso9660::open(&iso) else {
             return;
         };
@@ -1996,8 +1995,7 @@ mod tests {
         use bt3_data::afs::{AfsArchive, partition_entry_for_id};
         use bt3_data::{Iso9660, bpe, pack_section};
 
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         let Ok(mut image) = Iso9660::open(&iso) else {
             eprintln!("skipped: no ISO at {}", iso.display());
             return;
@@ -2048,8 +2046,7 @@ mod tests {
         use bt3_data::afs::{AfsArchive, partition_entry_for_id};
         use bt3_data::{Iso9660, bpe, pack_section};
 
-        let iso = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rom/Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso");
+        let iso = bt3_data::rom::for_tests();
         let Ok(mut image) = Iso9660::open(&iso) else {
             eprintln!("skipped: no ISO at {}", iso.display());
             return;
