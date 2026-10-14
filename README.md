@@ -62,7 +62,7 @@ does the same action here (it presses the PS2 button that does that action in th
 | Battle | Key | PS2 |
 |---|---|---|
 | Move | W A S D | D-pad |
-| Right stick | Arrow keys | Right stick |
+| Swing the camera to a side (hold) / pick the member a switch brings in | Arrow keys | Right stick |
 | Melee (rush) | Left mouse button | Square |
 | Ki blast | Right mouse button | Triangle |
 | Guard | E | Circle |
@@ -76,10 +76,9 @@ does the same action here (it presses the PS2 button that does that action in th
 | Blast 2 (first / second) | 3 / 4 | L2 + Triangle / L2 + Up + Triangle |
 | Ultimate Blast | 5 | L2 + Down + Triangle |
 | Pause | Tab or Enter | Start |
-| Select | Backspace | Select |
+| Camera distance (its "switch camera") | C | Select |
 
-Sparking! ZERO lists no key for ki charge or lock-on, so Left Shift and Q are this port's choices. In the menus,
-including the battle's pause and result menus: W A S D or the arrows move, Space confirms, Escape or Backspace goes
+Sparking! ZERO's PC key list has no lock-on, so Q is this port's choice. In the menus, including the battle's pause and result menus: W A S D or the arrows move, Space confirms, Escape or Backspace goes
 back, Tab or Enter is Start, Q / E are L1 / R1, 1 / 3 are L2 / R2, and C is Circle.
 
 ## Building and testing

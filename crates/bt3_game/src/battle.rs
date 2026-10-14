@@ -10626,6 +10626,36 @@ pub(crate) mod tests {
         );
     }
 
+    /// The right stick held to a side (the keyboard's arrows, a gamepad's stick past half way) swings the locked-on
+    /// camera to that side of the fighter (`ChrCam_UpdateLockOnYaw`).
+    #[test]
+    fn real_right_stick_swings_the_camera_to_a_side() {
+        use crate::btl_input::pad::{RSTICK_LEFT, RSTICK_RIGHT};
+        let Some(mut battle) = transform_battle(1, false) else {
+            return;
+        };
+        let mut libc = LibcRandom::new(1);
+        let mut random = GameRandom::from_key(&[1]);
+        assert!(battle.roster.chars[0].flags.test(5), "locked on");
+        let mut side = |battle: &mut Battle, held: u32| {
+            for _ in 0..10 {
+                let pads = [
+                    PadState {
+                        held,
+                        ..PadState::default()
+                    },
+                    PadState::default(),
+                ];
+                battle.run_frame(false, pads, 0, &mut libc, &mut random, None, false);
+            }
+            battle.roster.chars[0].cam.side
+        };
+        let left = side(&mut battle, RSTICK_LEFT);
+        let right = side(&mut battle, RSTICK_RIGHT);
+        assert!(left < -0.7 && right > 0.7, "{left} {right}");
+        assert_eq!(left, -right);
+    }
+
     #[test]
     fn real_skills() {
         // Character 1's second skill (id 0x56, two stocks, sequence 0: action 0xFE) is applied when its motion

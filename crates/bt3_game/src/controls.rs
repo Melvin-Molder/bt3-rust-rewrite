@@ -3,7 +3,7 @@
 //!
 //! In battle the original's default key config (`DEFAULT_KEYS`) makes Square rush, Triangle ki blast, Circle guard,
 //! Cross dash, L1 lock-on, L2 ki charge, R1 ascend and R2 descend; R3 transforms (held: fuses) and L3 + R3 switches
-//! members. Sparking! ZERO's number keys are single keys for this game's combinations: ki charge with guard (and up)
+//! members, and SELECT steps the camera's distance. Sparking! ZERO's number keys are single keys for this game's combinations: ki charge with guard (and up)
 //! for the skills, with ki blast (and up / down) for the Blast 2s and the Ultimate Blast.
 
 use bevy::input::keyboard::KeyCode;
@@ -38,8 +38,8 @@ pub const BATTLE: [(Input, u32); 26] = [
     (Key(KeyCode::KeyF), pad::CROSS),
     (Key(KeyCode::Space), pad::R1),
     (Key(KeyCode::ControlLeft), pad::R2),
-    // Not in Sparking! ZERO's list: ki charge and lock-on.
     (Key(KeyCode::ShiftLeft), pad::L2),
+    // Not in Sparking! ZERO's list: lock-on.
     (Key(KeyCode::KeyQ), pad::L1),
     // Its transformation and switch panels: R3, and L3 + R3.
     (Key(KeyCode::KeyZ), pad::R3),
@@ -52,7 +52,8 @@ pub const BATTLE: [(Input, u32); 26] = [
     (Key(KeyCode::Digit5), pad::L2 | pad::DOWN | pad::TRIANGLE),
     (Key(KeyCode::Tab), pad::START),
     (Key(KeyCode::Enter), pad::START),
-    (Key(KeyCode::Backspace), pad::SELECT),
+    // Its "switch camera": the camera's distance (SELECT).
+    (Key(KeyCode::KeyC), pad::SELECT),
 ];
 
 /// The battle's pause and result menus on the keyboard: WASD or the arrows move, Space confirms (Cross), Escape or

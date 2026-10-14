@@ -1591,11 +1591,19 @@ fn run_frames(
                 battle_held[port] |= bit;
             }
         }
+        let raw = |v: f32| (v * 127.5 + 127.5).clamp(0.0, 255.0) as u8;
+        // Pad_Update: the right stick's directions are buttons (the side camera, the switch's member).
+        if let (Some(rx), Some(ry)) = (
+            pad.get(GamepadAxis::RightStickX),
+            pad.get(GamepadAxis::RightStickY),
+        ) {
+            battle_held[port] |=
+                btl_input::rstick_bits(btl_input::stick_from_raw(raw(rx), raw(-ry)));
+        }
         if let (Some(x), Some(y)) = (
             pad.get(GamepadAxis::LeftStickX),
             pad.get(GamepadAxis::LeftStickY),
         ) {
-            let raw = |v: f32| (v * 127.5 + 127.5).clamp(0.0, 255.0) as u8;
             let s = btl_input::stick_from_raw(raw(x), raw(-y));
             if s != [0.0; 2] {
                 battle_stick[port] = s;

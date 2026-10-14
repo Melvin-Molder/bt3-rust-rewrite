@@ -172,6 +172,27 @@ pub(crate) fn stick_from_raw(x: u8, y: u8) -> [f32; 2] {
     s
 }
 
+/// `Pad_Update`'s right-stick directions: along the stick's larger axis, past half way (`stick_from_raw`'s value,
+/// y down).
+pub(crate) fn rstick_bits(s: [f32; 2]) -> u32 {
+    if s[0].abs() > s[1].abs() {
+        if 0.5 < s[0] {
+            return pad::RSTICK_RIGHT;
+        }
+        if s[0] < -0.5 {
+            return pad::RSTICK_LEFT;
+        }
+    } else {
+        if 0.5 < s[1] {
+            return pad::RSTICK_DOWN;
+        }
+        if s[1] < -0.5 {
+            return pad::RSTICK_UP;
+        }
+    }
+    0
+}
+
 /// `BtlInputCounters`: per bit, frames held / not held / since pressed / since released, saturating at 100.
 #[derive(Clone, Copy, Debug)]
 struct Counters {
@@ -1060,6 +1081,23 @@ mod tests {
         };
         input.sample(&pad, true, false, None);
         input.update(&InputGate::default(), false);
+    }
+
+    /// `Pad_Update`: a right-stick direction past half way along the larger axis; diagonals pick one.
+    #[test]
+    fn the_right_stick_gives_one_direction_past_half_way() {
+        let at = |x: f32, y: f32| {
+            rstick_bits(stick_from_raw(
+                (x * 127.5 + 127.5) as u8,
+                (y * 127.5 + 127.5) as u8,
+            ))
+        };
+        assert_eq!(at(0.0, 0.0), 0);
+        assert_eq!(at(0.6, 0.0), 0, "inside the dead zone and the half");
+        assert_eq!(at(1.0, 0.0), pad::RSTICK_RIGHT);
+        assert_eq!(at(-1.0, 0.2), pad::RSTICK_LEFT);
+        assert_eq!(at(0.2, -1.0), pad::RSTICK_UP);
+        assert_eq!(at(0.3, 1.0), pad::RSTICK_DOWN);
     }
 
     fn input() -> Input {
