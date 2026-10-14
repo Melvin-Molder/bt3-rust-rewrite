@@ -56,15 +56,31 @@ scaled to the window, at 4:3 as a television shows it.
 
 ### Controls
 
-A gamepad works as the PS2 pad. On the keyboard:
+A gamepad works as the PS2 pad. The keyboard and mouse follow Dragon Ball: Sparking! ZERO's PC defaults: each key
+does the same action here (it presses the PS2 button that does that action in this game).
 
-| PS2 | Menus | Battle |
+| Battle | Key | PS2 |
 |---|---|---|
-| D-pad | Arrow keys | Arrow keys |
-| Cross / Circle | Space / C | X or Space / C |
-| Square / Triangle | Escape for Triangle | Z / V |
-| L1 / R1, L2 / R2 | Q / E, A / D | Q / E, A / D |
-| Start | Enter | Enter |
+| Move | W A S D | D-pad |
+| Right stick | Arrow keys | Right stick |
+| Melee (rush) | Left mouse button | Square |
+| Ki blast | Right mouse button | Triangle |
+| Guard | E | Circle |
+| Dash / step | F | Cross |
+| Ascend / descend | Space / Left Ctrl | R1 / R2 |
+| Ki charge | Left Shift | L2 |
+| Lock-on | Q | L1 |
+| Transform (hold: fuse) | Z | R3 |
+| Switch member | X | L3 + R3 |
+| Skill 1 / 2 | 1 / 2 | L2 + Circle / L2 + Up + Circle |
+| Blast 2 (first / second) | 3 / 4 | L2 + Triangle / L2 + Up + Triangle |
+| Ultimate Blast | 5 | L2 + Down + Triangle |
+| Pause | Tab or Enter | Start |
+| Select | Backspace | Select |
+
+Sparking! ZERO lists no key for ki charge or lock-on, so Left Shift and Q are this port's choices. In the menus,
+including the battle's pause and result menus: W A S D or the arrows move, Space confirms, Escape or Backspace goes
+back, Tab or Enter is Start, Q / E are L1 / R1, 1 / 3 are L2 / R2, and C is Circle.
 
 ## Building and testing
 
@@ -99,6 +115,11 @@ there. `cargo run -p bt3-data --bin bt3-inspect` prints what the reader finds on
 - The rest of the format research is credited in [bt3-format-research.md](bt3-format-research.md).
 
 This project was made with the help of AI.
+
+## Licence
+
+The code in this repository is released under the [MIT Licence](LICENSE). That covers this project's own work only:
+the game, its data and its trademarks belong to their rights holders.
 
 ## Legal
 

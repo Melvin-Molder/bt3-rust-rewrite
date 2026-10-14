@@ -424,6 +424,12 @@ impl Input {
         m[30] = pad::SQUARE;
     }
 
+    /// `remap`, for the keyboard layout's tests.
+    #[cfg(test)]
+    pub(crate) fn remap_for_test(&self, raw: u32) -> u32 {
+        self.remap(raw)
+    }
+
     /// `BtlInput_RemapButtons`: bit i when any bit of mask[i] is down (all of them for L3 + R3).
     fn remap(&self, raw: u32) -> u32 {
         let mut out = 0;

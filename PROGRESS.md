@@ -17,6 +17,7 @@ The game's screens hang off `Progress_Main`'s mode dispatcher (src/menu/progress
 - [x] Options screen (`OptMode_Main`, mode 62; src/menu/option.c)
 - [x] Character reference (`CharRefMode_Main`, mode 60; src/menu/src/ui/char_viewer.c)
 - [x] Display settings (not the original's): the 512 x 448 frame scaled to a resizable or full-screen window at 4:3, square pixels or stretched (`--aspect`, `--filter`, `--scale`, `--fullscreen`, F11)
+- [x] Keyboard and mouse layout (not the original's): Dragon Ball: Sparking! ZERO's PC keys for the same actions, the number keys as the charge combinations (`controls.rs`)
 
 ### Story: Dragon History (`Hist_Main`, modes 3, 6..10)
 

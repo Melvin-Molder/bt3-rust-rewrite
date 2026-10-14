@@ -9064,9 +9064,10 @@ pub(crate) mod tests {
         let health = battle.roster.chars[1].gauge.health;
         let mut log: Vec<(usize, i32, i32)> = Vec::new();
         let mut parts = [0usize; 3];
+        let together = PRESS_TOGETHER.with(|t| t.get());
         for i in 0..frames {
             let p1 = match i {
-                2..4 => L2,
+                2..4 if !together => L2,
                 4..6 => L2 | dir | TRIANGLE,
                 _ => 0,
             };
@@ -10496,6 +10497,12 @@ pub(crate) mod tests {
         assert!(c.gauge.blast < 300_000 - 190_000, "{}", c.gauge.blast);
     }
 
+    thread_local! {
+        /// The technique runs press charge with the button on one frame, as a number key of the keyboard layout
+        /// does (`controls::BATTLE`), instead of holding charge first.
+        static PRESS_TOGETHER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
     /// Holds charge (L2) and presses guard (circle; with up for slot 1) to use a skill, then runs `frames`; the
     /// actions side 0 went through.
     fn run_skill(battle: &mut Battle, up: bool, frames: usize) -> Vec<i32> {
@@ -10503,9 +10510,10 @@ pub(crate) mod tests {
         let mut libc = LibcRandom::new(1);
         let mut random = GameRandom::from_key(&[1]);
         let mut acts = vec![battle.roster.chars[0].act.current];
+        let together = PRESS_TOGETHER.with(|t| t.get());
         for i in 0..frames {
             let mut held = match i {
-                2..4 => L2,
+                2..4 if !together => L2,
                 4..6 => L2 | CIRCLE,
                 _ => 0,
             };
@@ -10595,6 +10603,27 @@ pub(crate) mod tests {
             assert!(cut || demo, "{chara}");
             assert_eq!(demo, want_demo, "{chara}");
         }
+    }
+
+    /// The keyboard's number keys press ki charge and the button on the same frame: the skill and the Blast 2
+    /// still come out, as when charge is held first.
+    #[test]
+    fn real_number_keys_use_skills_and_blasts() {
+        PRESS_TOGETHER.with(|t| t.set(true));
+        let Some(mut battle) = transform_battle(1, false) else {
+            PRESS_TOGETHER.with(|t| t.set(false));
+            return;
+        };
+        battle.roster.chars[0].gauge.blast = 300_000;
+        let acts = run_skill(&mut battle, true, 120);
+        assert!(acts.contains(&0xFE), "{acts:x?}");
+        let log = run_technique(1, 2, 200, false).map(|r| r.0);
+        PRESS_TOGETHER.with(|t| t.set(false));
+        let log = log.unwrap();
+        assert!(
+            log.iter().any(|l| (0x106..=0x108).contains(&l.1)),
+            "{log:x?}"
+        );
     }
 
     #[test]

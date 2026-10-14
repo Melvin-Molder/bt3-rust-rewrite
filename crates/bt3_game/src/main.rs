@@ -39,6 +39,7 @@ mod char_select;
 mod chr_cam;
 mod chr_view;
 mod clip;
+mod controls;
 mod dc_list;
 mod dc_menu;
 mod dc_password;
@@ -1254,63 +1255,45 @@ fn setup(mut commands: Commands, stream: Res<SeStream>, mut outputs: ResMut<Asse
 #[derive(Resource)]
 struct SeStream(Arc<Mutex<se::Engine>>);
 
-/// Pad 0 game buttons: arrows or the d-pad, Space or South (Cross), Escape or North (Triangle), Enter or Start,
-/// C or East (Circle), Q / E or the shoulder buttons (L1 / R1), A / D or the triggers (L2 / R2).
-const BUTTONS: [(KeyCode, GamepadButton, u32); 12] = [
-    (KeyCode::ArrowLeft, GamepadButton::DPadLeft, title::PAD_LEFT),
-    (
-        KeyCode::ArrowRight,
-        GamepadButton::DPadRight,
-        title::PAD_RIGHT,
-    ),
-    (KeyCode::ArrowUp, GamepadButton::DPadUp, title::PAD_UP),
-    (KeyCode::ArrowDown, GamepadButton::DPadDown, title::PAD_DOWN),
-    (KeyCode::Space, GamepadButton::South, title::PAD_CROSS),
-    (KeyCode::Escape, GamepadButton::North, title::PAD_TRIANGLE),
-    (KeyCode::Enter, GamepadButton::Start, title::PAD_START),
-    (KeyCode::KeyC, GamepadButton::East, dc_password::PAD_CIRCLE),
-    (
-        KeyCode::KeyQ,
-        GamepadButton::LeftTrigger,
-        dc_password::PAD_L1,
-    ),
-    (
-        KeyCode::KeyE,
-        GamepadButton::RightTrigger,
-        dc_password::PAD_R1,
-    ),
-    (
-        KeyCode::KeyA,
-        GamepadButton::LeftTrigger2,
-        dc_password::PAD_L2,
-    ),
-    (
-        KeyCode::KeyD,
-        GamepadButton::RightTrigger2,
-        dc_password::PAD_R2,
-    ),
-];
+/// A menu button's `PAD_*` bit (the keyboard's are in `controls::MENU`).
+fn menu_bit(button: controls::MenuButton) -> u32 {
+    use controls::MenuButton::*;
+    match button {
+        Up => title::PAD_UP,
+        Down => title::PAD_DOWN,
+        Left => title::PAD_LEFT,
+        Right => title::PAD_RIGHT,
+        Cross => title::PAD_CROSS,
+        Circle => dc_password::PAD_CIRCLE,
+        Triangle => title::PAD_TRIANGLE,
+        Start => title::PAD_START,
+        L1 => dc_password::PAD_L1,
+        R1 => dc_password::PAD_R1,
+        L2 => dc_password::PAD_L2,
+        R2 => dc_password::PAD_R2,
+    }
+}
 
-/// Pad 0's `PAD_*` bits in battle: the d-pad on the arrows; Z, X, C, V for Square, Cross, Circle, Triangle (Space is
-/// Cross as in the menus); Q / E for L1 / R1, A / D for L2 / R2; Enter for Start.
-const BATTLE_KEYS: [(KeyCode, u32); 14] = [
-    (KeyCode::ArrowUp, btl_input::pad::UP),
-    (KeyCode::ArrowDown, btl_input::pad::DOWN),
-    (KeyCode::ArrowLeft, btl_input::pad::LEFT),
-    (KeyCode::ArrowRight, btl_input::pad::RIGHT),
-    (KeyCode::KeyZ, btl_input::pad::SQUARE),
-    (KeyCode::KeyX, btl_input::pad::CROSS),
-    (KeyCode::Space, btl_input::pad::CROSS),
-    (KeyCode::KeyC, btl_input::pad::CIRCLE),
-    (KeyCode::KeyV, btl_input::pad::TRIANGLE),
-    (KeyCode::KeyQ, btl_input::pad::L1),
-    (KeyCode::KeyE, btl_input::pad::R1),
-    (KeyCode::KeyA, btl_input::pad::L2),
-    (KeyCode::KeyD, btl_input::pad::R2),
-    (KeyCode::Enter, btl_input::pad::START),
-];
+/// The menu buttons on a gamepad, as on the PS2 pad.
+const MENU_BUTTONS: [(GamepadButton, controls::MenuButton); 12] = {
+    use controls::MenuButton::*;
+    [
+        (GamepadButton::DPadLeft, Left),
+        (GamepadButton::DPadRight, Right),
+        (GamepadButton::DPadUp, Up),
+        (GamepadButton::DPadDown, Down),
+        (GamepadButton::South, Cross),
+        (GamepadButton::North, Triangle),
+        (GamepadButton::Start, Start),
+        (GamepadButton::East, Circle),
+        (GamepadButton::LeftTrigger, L1),
+        (GamepadButton::RightTrigger, R1),
+        (GamepadButton::LeftTrigger2, L2),
+        (GamepadButton::RightTrigger2, R2),
+    ]
+};
 
-/// The same from a gamepad.
+/// Pad `PAD_*` bits in battle from a gamepad (the keyboard and mouse's are in `controls::BATTLE`).
 const BATTLE_BUTTONS: [(GamepadButton, u32); 16] = [
     (GamepadButton::DPadUp, btl_input::pad::UP),
     (GamepadButton::DPadDown, btl_input::pad::DOWN),
@@ -1563,6 +1546,7 @@ fn run_frames(
     mut commands: Commands,
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     gamepad_query: Query<(Entity, &Gamepad)>,
     players: Query<(), With<AudioPlayer>>,
     mut audio: ResMut<Assets<AudioSource>>,
@@ -1574,12 +1558,24 @@ fn run_frames(
     let port_of = |i: usize| i.min(1);
     // Each port for the battle: `Pad.held` with a latch that keeps a press shorter than a frame for one frame,
     // and the left stick as `Pad_Update` reads it (y down).
+    // The keyboard and mouse (port 1) in the battle's layout, or the menus' while its pause or result menu is open.
     let mut battle_held = [0u32; 2];
-    for (key, bit) in BATTLE_KEYS {
-        if keyboard.just_pressed(key) {
+    let battle_menu =
+        matches!(&game.scene, Scene::Battle(b) if b.menu.as_ref().is_some_and(|m| m.active));
+    let layout: &[(controls::Input, u32)] = if battle_menu {
+        &controls::BATTLE_MENU
+    } else {
+        &controls::BATTLE
+    };
+    for &(input, bit) in layout {
+        let (just, down) = match input {
+            controls::Input::Key(k) => (keyboard.just_pressed(k), keyboard.pressed(k)),
+            controls::Input::Mouse(m) => (mouse.just_pressed(m), mouse.pressed(m)),
+        };
+        if just {
             game.battle_latch[0] |= bit;
         }
-        if keyboard.pressed(key) {
+        if down {
             battle_held[0] |= bit;
         }
     }
@@ -1642,13 +1638,22 @@ fn run_frames(
     }
     let mut held = 0;
     let mut held2 = 0;
-    for (key, button, bit) in BUTTONS {
+    for (key, button) in controls::MENU {
+        if keyboard.just_pressed(key) {
+            game.pressed_latch |= menu_bit(button);
+        }
+        if keyboard.pressed(key) {
+            held |= menu_bit(button);
+        }
+    }
+    for (button, name) in MENU_BUTTONS {
+        let bit = menu_bit(name);
         let port1 = sorted.iter().take(1);
         let port2 = sorted.iter().skip(1);
-        if keyboard.just_pressed(key) || port1.clone().any(|(_, pad)| pad.just_pressed(button)) {
+        if port1.clone().any(|(_, pad)| pad.just_pressed(button)) {
             game.pressed_latch |= bit;
         }
-        if keyboard.pressed(key) || port1.clone().any(|(_, pad)| pad.pressed(button)) {
+        if port1.clone().any(|(_, pad)| pad.pressed(button)) {
             held |= bit;
         }
         if port2.clone().any(|(_, pad)| pad.just_pressed(button)) {
